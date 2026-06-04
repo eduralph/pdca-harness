@@ -12,7 +12,9 @@
 
 _subdirectory: template
 _templates_suffix: .jinja
-_answers_file: .pdca-harness-answers.yml
+# Keep the default answers filename (.copier-answers.yml) so `copier update`
+# finds it with no extra flag. The answers-file template is shipped at
+# template/{{ _copier_conf.answers_file }}.jinja.
 
 _message_after_copy: |
   PDCA harness rendered into {{ _copier_conf.dst_path }}.

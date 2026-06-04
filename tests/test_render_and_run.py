@@ -58,7 +58,7 @@ class RenderAndRun(unittest.TestCase):
 
             # The answers file must be written with a recorded version, or
             # `copier update` cannot work — the whole reason for using Copier.
-            answers = out / ".pdca-harness-answers.yml"
+            answers = out / ".copier-answers.yml"
             self.assertTrue(answers.exists(), "copier answers file not written")
             self.assertIn("_commit: v0test", answers.read_text(encoding="utf-8"))
 
