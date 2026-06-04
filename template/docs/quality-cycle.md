@@ -86,7 +86,18 @@ not automatable. Build order: **gates → driver → batch queue → Act tooling
 
 ## Full specification
 
-This is the condensed model. The full doc set (the quality cycle, cycle
-artifacts, cycle automation, validation tooling, repository integration,
-per-beat guidelines, a worked case study) is the authoritative source; this
-harness implements it.
+This is the condensed model. The authoritative doc set is vendored under
+[quality-cycle/](quality-cycle/) — this harness implements it:
+
+1. [Overview](quality-cycle/00-overview.md)
+2. [The Quality Cycle](quality-cycle/01-the-quality-cycle.md) — the model (PDCA, the 5/5/1 inside Check)
+3. [Cycle Artifacts](quality-cycle/02-cycle-artifacts.md) — the files each beat produces
+4. [Cycle Automation](quality-cycle/03-cycle-automation.md) — the driver as a state machine
+5. [Validation Tooling](quality-cycle/04-validation-tooling.md) — what implements Check, and where it lives
+6. [Repository Integration](quality-cycle/05-repository-integration.md) — what each repo provides (see [INTEGRATION.md](INTEGRATION.md))
+7. [Quality Cycle Guidelines](quality-cycle/06-quality-cycle-guidelines.md) — the per-beat MUST/SHOULD/MAY rules
+8. [Case Study — CI Hardening](quality-cycle/07-case-study-ci-hardening.md) — a worked example
+
+The vendored docs are a snapshot with worked examples drawn from the Gramps
+testbed (clearly labelled); your repo's specifics live in INTEGRATION.md, not in
+these. Re-vendor when the canonical source changes.
