@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdca_harness import driver, leaves, signoff, state
+from pdca_harness import driver, gates, leaves, signoff, state
 from pdca_harness.config import Config, LeafConfig
 
 TOY_BRIEF = Path(__file__).resolve().parents[1] / "examples" / "toy" / "brief.md"
@@ -87,6 +87,41 @@ class VerticalSlice(unittest.TestCase):
         self.assertEqual(state.state(self.d), state.UNPLANNED)
         self.assertTrue((self.d / "brief.v1.md").exists())
         self.assertFalse((self.d / "brief.md").exists())
+
+
+class ConfiguredGates(unittest.TestCase):
+    """The config-driven, single-sourced gates (docs 04)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _cfg(self, checks: list[dict]) -> Config:
+        cfg = _stub_config(self.tmp)
+        cfg.gates_checks = checks
+        return cfg
+
+    def test_passing_and_failing_repo_gates(self) -> None:
+        cfg = self._cfg([
+            {"id": "ok", "tier": "T1", "label": "ok", "cmd": "true", "gating": True, "scope": "repo"},
+            {"id": "bad", "tier": "T2", "label": "bad", "cmd": "false", "gating": True, "scope": "repo"},
+        ])
+        result = gates.run_working_tree(cfg)
+        self.assertEqual(result["overall"], "fail")  # one gating row failed
+        by_id = {r["rule_id"]: r["result"] for r in result["rows"]}
+        self.assertEqual(by_id["ok"], "pass")
+        self.assertEqual(by_id["bad"], "fail")
+
+    def test_working_tree_skips_bundle_scope(self) -> None:
+        cfg = self._cfg([
+            {"id": "b", "tier": "C4", "label": "bundle-only", "cmd": "false", "gating": True, "scope": "bundle"},
+        ])
+        result = gates.run_working_tree(cfg)
+        # The bundle-scoped failing check is skipped, so the working tree is green.
+        self.assertEqual(result["overall"], "pass")
+        self.assertNotIn("b", {r["rule_id"] for r in result["rows"]})
 
 
 if __name__ == "__main__":

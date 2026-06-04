@@ -13,7 +13,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import driver, signoff, state
+from . import driver, gates, signoff, state
 from .config import Config
 
 # Ordering for the cheap-first sign-off queue (docs 03 §sign-off queue).
@@ -43,6 +43,10 @@ def main(argv: list[str] | None = None) -> int:
     p_status = sub.add_parser("status", help="list bundle states (cheap-first queue)")
     p_status.add_argument("issue_id", nargs="?")
 
+    p_gates = sub.add_parser("gates", help="run the deterministic Check gates (driver + CI share this)")
+    p_gates.add_argument("issue_id", nargs="?")
+    p_gates.add_argument("--working-tree", action="store_true", help="repo-scoped gates only (the CI merge re-gate)")
+
     p_signoff = sub.add_parser("signoff", help="record the human Check sign-off (§9)")
     p_signoff.add_argument("issue_id")
     g = p_signoff.add_mutually_exclusive_group(required=True)
@@ -61,6 +65,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run(cfg, args.issue_id)
     if args.cmd == "status":
         return _status(cfg, args.issue_id)
+    if args.cmd == "gates":
+        return _gates(cfg, args)
     if args.cmd == "signoff":
         return _signoff(cfg, args)
     return 2
@@ -115,6 +121,27 @@ def _status(cfg: Config, issue_id: str | None) -> int:
             flag = "  [cheap: confirm]" if n == 0 else f"  [{n} NEEDS-HUMAN]"
         print(f"{s:18}{d.name}{flag}")
     return 0
+
+
+def _gates(cfg: Config, args: argparse.Namespace) -> int:
+    """Run gates; print the table; exit nonzero iff a gating row failed.
+
+    The single-sourced entry point: the driver runs gates per bundle during Do,
+    CI runs ``pdca gates --working-tree`` on the PR — same impl, same pdca.toml.
+    """
+    if args.working_tree:
+        result = gates.run_working_tree(cfg)
+    else:
+        if not args.issue_id:
+            print("gates needs an issue id (or --working-tree)", file=sys.stderr)
+            return 2
+        d = cfg.bundle(args.issue_id)
+        if not d.exists():
+            print(f"no such bundle: {d}", file=sys.stderr)
+            return 1
+        result = gates.run_gates(d, cfg)
+    print(gates.render_md(result))
+    return 1 if result["overall"] == "fail" else 0
 
 
 def _signoff(cfg: Config, args: argparse.Namespace) -> int:

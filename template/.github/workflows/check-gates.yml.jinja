@@ -1,0 +1,27 @@
+# Merge re-gate (docs 03 §Where it runs). CI re-runs the SAME deterministic gates
+# the local driver runs — single-sourced via `pdca gates` reading pdca.toml. CI is
+# not a second opinion; it is the same check re-run at the merge boundary so
+# nothing merges that the contribution body did not already clear.
+#
+# Repo-scoped gates (conformance T1–T4 + the suite) re-run here against the PR
+# working tree. Bundle-scoped correctness re-runs (repro red / verify green) run
+# locally during Check, where the bundle and patch context exist.
+name: Check gates
+
+on:
+  pull_request:
+    branches: ["{{ default_branch }}"]
+  workflow_dispatch:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install the harness
+        run: pip install -e .
+      - name: Run the single-sourced gates (repo scope)
+        run: pdca gates --working-tree

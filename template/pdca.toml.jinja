@@ -35,3 +35,31 @@ argv = ["codex", "exec", "--config", "AGENTS.md"]
 {% else -%}
 argv = []
 {% endif %}
+# Deterministic Check gates (docs 04). Each check runs a shell command; it PASSES
+# iff the command exits 0. `scope = "repo"` runs against the working tree (and is
+# what CI re-runs via `pdca gates --working-tree`); `scope = "bundle"` needs the
+# bundle/patch context ($PDCA_BUNDLE is exported) and runs only locally. The
+# SAME commands run for the local driver and CI — single-sourced, no drift.
+#
+# While `checks` is empty the driver uses built-in all-PASS stubs so the offline
+# slice runs. Fill these in as your gate tiers get written (gates are the long
+# pole — build them first). Example:
+#
+# [[gates.checks]]
+# id = "T3-suite"
+# tier = "T3"
+# label = "runtime: test suite"
+# cmd = "python -m pytest -q"
+# gating = true
+# scope = "repo"
+#
+# [[gates.checks]]
+# id = "C4-verify"
+# tier = "C4"
+# label = "shipped test fails pre-fix, passes post-fix"
+# cmd = "python -m pytest \"$PDCA_BUNDLE\""
+# gating = true
+# scope = "bundle"
+[gates]
+checks = []
+

@@ -47,6 +47,7 @@ class Config:
     issue_id_example: str
     builder: LeafConfig
     reviewer: LeafConfig
+    gates_checks: list[dict] = field(default_factory=list)
 
     def bundle(self, issue_id: str) -> Path:
         """The per-cycle bundle directory for an issue id."""
@@ -61,6 +62,7 @@ class Config:
         paths = data.get("paths", {})
         tracker = data.get("tracker", {})
         leaves = data.get("leaves", {})
+        gates_checks = list(data.get("gates", {}).get("checks", []))
 
         def leaf(name: str) -> LeafConfig:
             d = leaves.get(name, {})
@@ -81,6 +83,7 @@ class Config:
             issue_id_example=tracker.get("issue_id_example", ""),
             builder=leaf("builder"),
             reviewer=leaf("reviewer"),
+            gates_checks=gates_checks,
         )
 
 
