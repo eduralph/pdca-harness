@@ -21,9 +21,10 @@ never gates.
 from __future__ import annotations
 
 import json
-import subprocess
+import sys
 from pathlib import Path
 
+from . import progress
 from .config import Config
 
 
@@ -58,14 +59,17 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
 def _run_one(chk: dict, *, cwd: Path, bundle: Path | None) -> dict:
     cmd = chk.get("cmd", "")
     gating = bool(chk.get("gating", True))
+    label = f"{chk.get('id', '')}: {chk.get('label', '')}".strip(": ")
     env = {"PDCA_BUNDLE": str(bundle)} if bundle is not None else None
+    print(f"  · gate {label} (a Docker-backed gate can take minutes)…", file=sys.stderr, flush=True)
     try:
-        proc = subprocess.run(
-            cmd, shell=True, cwd=cwd, capture_output=True, text=True,
-            env=_merged_env(env),
+        # Output is captured for the evidence line; the heartbeat ticks meanwhile so
+        # a long, silent gate (e.g. a Docker-backed test suite) doesn't look hung.
+        rc, output = progress.run_with_heartbeat(
+            cmd, cwd=cwd, shell=True, env=_merged_env(env), capture=True, label=label,
         )
-        result = "pass" if proc.returncode == 0 else "fail"
-        evidence = (proc.stdout + proc.stderr).strip().splitlines()[-1:] or [""]
+        result = "pass" if rc == 0 else "fail"
+        evidence = output.strip().splitlines()[-1:] or [""]
     except Exception as exc:  # command not found, etc. — a failing gate, surfaced
         result, evidence = "fail", [str(exc)]
     return _row(

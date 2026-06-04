@@ -9,9 +9,19 @@ read it for tracker, branch targets, fixtures, and the conformance ruleset.
 ## The driver
 
 `pdca` advances a result bundle through the cycle (`pdca status`, `pdca run <id>`,
-`pdca signoff <id> --accept`). State is the files in `{{ bundle_root }}/issue_<id>/`;
-nothing is hidden in a database. The driver is deterministic — no model decides
-control flow. Models are invoked only at the two leaves (Do builder, Check reviewer).
+`pdca signoff <id> --accept`), or runs it as one continuous Claude-driven flow
+(`pdca flow <id> [--from-csv …] [--act]`). State is the files in
+`{{ bundle_root }}/issue_<id>/`; nothing is hidden in a database.
+
+The driver is deterministic — **no model decides control flow**. Models are
+invoked only at the **five leaves**: Plan (planner — interactive, turns the
+human's documents into `brief.md`), Do (builder — headless), Check (reviewer —
+headless, advisory), Check sign-off (signoff — interactive, captures the human's
+OK), and Act (act — interactive, suggests process deltas). The leaves fill
+*artifacts*; the state transitions, the gates, and the C6 accept-guard stay
+deterministic code. Each leaf is configurable in `pdca.toml` (`[leaves.*]`,
+`mode = stub|command`, `interactive`); `PDCA_LEAVES_MODE=stub` forces the offline
+placeholders for CI / `make`.
 
 ## Do beat (builder) — your scope when implementing
 

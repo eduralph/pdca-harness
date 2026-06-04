@@ -12,7 +12,10 @@ hooks:
     - matcher: Bash
       hooks:
         - type: command
-          command: python3 .claude/hooks/builder_guard.py
+          # Rooted at the project dir, NOT relative: the builder's Bash cwd is the
+          # bundle dir (results/issue_<id>/), so a relative path resolved there,
+          # did not exist, and the failing hook blocked ALL Bash (exit 2).
+          command: python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/builder_guard.py"
 ---
 
 # Builder (Do beat)

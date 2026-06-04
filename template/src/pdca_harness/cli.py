@@ -13,7 +13,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import act, driver, gates, queue, signoff, state
+from . import act, driver, flow, gates, queue, signoff, state
 from .config import Config
 
 # Ordering for the cheap-first sign-off queue (docs 03 §sign-off queue).
@@ -39,6 +39,12 @@ def main(argv: list[str] | None = None) -> int:
 
     p_run = sub.add_parser("run", help="advance an issue to a parked state")
     p_run.add_argument("issue_id")
+
+    p_flow = sub.add_parser("flow", help="continuous Claude-driven cycle (Plan→Do→Check→sign-off→Act)")
+    p_flow.add_argument("issue_id", nargs="?", help="one issue; omit + pass --from-csv for a batch Plan session")
+    p_flow.add_argument("--from-csv", help="input documents for interactive Plan (e.g. a tracker CSV)")
+    p_flow.add_argument("--act", action="store_true", help="run the Act leaf after a COMPLETE sign-off")
+    p_flow.add_argument("--by", default="", help="who signed off (recorded in §9)")
 
     p_status = sub.add_parser("status", help="list bundle states (cheap-first queue)")
     p_status.add_argument("issue_id", nargs="?")
@@ -77,6 +83,8 @@ def main(argv: list[str] | None = None) -> int:
         return _init_issue(cfg, args.issue_id, args.from_brief)
     if args.cmd == "run":
         return _run(cfg, args.issue_id)
+    if args.cmd == "flow":
+        return _flow(cfg, args)
     if args.cmd == "status":
         return _status(cfg, args.issue_id)
     if args.cmd == "batch":
@@ -123,6 +131,42 @@ def _run(cfg: Config, issue_id: str) -> int:
             for it in open_items:
                 print(f"    {it}")
     return 0
+
+
+def _flow(cfg: Config, args: argparse.Namespace) -> int:
+    """Run the continuous Claude-driven cycle.
+
+    With an issue id: one issue, Plan → Do + gates + reviewer → interactive
+    sign-off (C6-guarded) → optional Act. Without an id (and with `--from-csv`):
+    a batch Plan session may brief several issues, which are then all built
+    unattended and signed off cheap-first via the queue.
+    """
+    if args.issue_id:
+        d = cfg.bundle(args.issue_id)
+        if d.exists() and state.state(d) == state.COMPLETE:
+            print(f"{state.COMPLETE}\t{d}", file=sys.stderr)
+            print(f"  already complete — nothing to run. To redo it: rm -rf {d}", file=sys.stderr)
+            return 0
+        if not d.exists():
+            d.mkdir(parents=True)
+        final = flow.flow(cfg, args.issue_id, csv=args.from_csv, do_act=args.act, by=args.by)
+        print(f"{final}\t{d}")
+        if final == state.AWAITING_SIGNOFF:
+            for it in signoff.open_needs_human(d / "SUMMARY.md"):
+                print(f"    {it}")
+        return 0 if final in (state.COMPLETE, state.AWAITING_SIGNOFF) else 1
+
+    if not args.from_csv:
+        print("flow needs an issue id, or --from-csv for a batch Plan session", file=sys.stderr)
+        return 2
+    results = flow.flow_batch(cfg, csv=args.from_csv, do_act=args.act, by=args.by)
+    if not results:
+        return 1
+    for iid, st in sorted(results.items()):
+        print(f"{st}\t{iid}")
+    done = sum(1 for s in results.values() if s == state.COMPLETE)
+    print(f"batch: {done}/{len(results)} complete")
+    return 0 if done == len(results) else 1
 
 
 def _status(cfg: Config, issue_id: str | None) -> int:

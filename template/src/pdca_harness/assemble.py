@@ -27,7 +27,7 @@ def assemble_summary(d: Path, cfg: Config) -> None:
             f"# Result — issue {issue} / {fields.get('slug', fields.get('defect', '')[:40])}",
             "",
             "## 1. Spec (from brief.md)              ← Check verifies against THIS",
-            f"- Defect: {fields.get('defect', '')}",
+            f"- Defect / goal: {fields.get('defect', fields.get('goal', ''))}",
             f"- Success criterion: {fields.get('success criterion', '')}",
             f"- Repo + branch target: {fields.get('repo + branch target', fields.get('branch target', ''))}",
             f"- Scope (one logical fix) / out of scope: {fields.get('scope', '')}",

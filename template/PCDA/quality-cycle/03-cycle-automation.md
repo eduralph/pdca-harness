@@ -17,6 +17,19 @@ status: active
 > when the human signs off Check; Act fires later, on a cadence,
 > across batches of completed cycles. Living document.
 
+> **Continuous-flow extension.** Beyond the unattended `pdca run`, the driver can
+> run the whole cycle as one continuous, Claude-driven flow —
+> `pdca flow <id> [--from-csv …] [--act]` (or batch: `pdca flow --from-csv …`,
+> one Plan session → several issues). This lifts the model from **two** leaves to
+> **five**, *without* moving any control flow into a model: the planner (Plan —
+> interactive, turns the human's documents into `brief.md`) and the sign-off and
+> act leaves (interactive) instrument the human steps the principle above keeps
+> human; Do (builder) and Check's reviewer stay **headless**. The state
+> transitions, the gates, and the **C6 accept-guard remain deterministic code** —
+> a leaf only fills an artifact. Leaves are configured in `pdca.toml` (`[leaves.*]`:
+> `mode = stub|command`, `interactive`); set `PDCA_LEAVES_MODE=stub` to force the
+> offline placeholders (CI / `make`).
+
 > **Maturity legend** — every major mechanism in this doc is tagged:
 > **[built]** = ships in this template and runs today; **[partial]** =
 > ships but needs per-project wiring (cells in [04 - Validation Tooling](04-validation-tooling.md)

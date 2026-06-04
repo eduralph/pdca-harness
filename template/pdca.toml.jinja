@@ -4,6 +4,9 @@
 [project]
 name = "{{ project_name }}"
 default_branch = "{{ default_branch }}"
+# Default §9 sign-off attribution, so `flow`/`signoff` never need a --by. Override
+# per-run with --by.
+author = "{{ author_name }}"
 
 [paths]
 bundle_root = "{{ bundle_root }}"
@@ -15,26 +18,57 @@ system = "{{ tracker_system }}"
 url = "{{ tracker_url }}"
 issue_id_example = "{{ issue_id_example }}"
 
-# The two model leaves (docs 03 §Implementation substrate). mode = "stub" runs
-# the offline placeholders so the driver works without a model; switch to
-# "command" and the argv runs as a subprocess in the bundle dir once the leaves
-# are real. The reviewer family MUST differ from the builder (decorrelation).
+# The five model leaves (docs 03 §Implementation substrate). mode = "stub" runs
+# the offline placeholders (no model/TTY) so the driver works without a model;
+# mode = "command" runs `argv` as a subprocess with the leaf's prompt. `interactive
+# = true` hands the terminal to the human (a seeded `claude "<prompt>"` REPL, no
+# -p); a headless leaf runs autonomously (`claude -p …`) and writes its artifact.
+# Set PDCA_LEAVES_MODE=stub to force stubs everywhere (CI / `make` determinism).
+#
+# Headless leaves ----------------------------------------------------------------
+# Do builder — writes patch.diff + test + build-notes.md:
 [leaves.builder]
 mode = "{{ leaves_mode }}"
 family = "{{ builder_family }}"
+interactive = false
 {% if builder_family == "claude" -%}
-argv = ["claude", "-p", "--agent", "builder"]
+argv = ["claude", "-p", "--agent", "builder", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob"]
 {% else -%}
 argv = []
 {% endif %}
+# Check reviewer (advisory; build-notes withheld via a sandbox). Cross-vendor
+# decorrelation is the default and the ideal — a DIFFERENT family from the builder
+# (INTEGRATION §4). `--agent reviewer` (same family as the builder) is the
+# documented FALLBACK only; it weakens the independence Check relies on.
 [leaves.reviewer]
 mode = "{{ leaves_mode }}"
 family = "{{ reviewer_family }}"
+interactive = false
 {% if reviewer_family == "codex" -%}
 argv = ["codex", "exec", "--config", "AGENTS.md"]
 {% else -%}
 argv = []
 {% endif %}
+# Interactive leaves — the human-in-the-loop touch points (Plan, Sign-off, Act)
+# hand the terminal to a seeded Claude REPL. Claude by design (a model+human
+# session), independent of the builder/reviewer family above.
+[leaves.planner]
+mode = "{{ leaves_mode }}"
+family = "claude"
+interactive = true
+argv = ["claude", "--agent", "planner", "--permission-mode", "acceptEdits"]
+
+[leaves.signoff]
+mode = "{{ leaves_mode }}"
+family = "claude"
+interactive = true
+argv = ["claude", "--agent", "signoff", "--permission-mode", "acceptEdits"]
+
+[leaves.act]
+mode = "{{ leaves_mode }}"
+family = "claude"
+interactive = true
+argv = ["claude", "--agent", "act", "--permission-mode", "acceptEdits"]
 # Deterministic Check gates (docs 04). Each check runs a shell command; it PASSES
 # iff the command exits 0. `scope = "repo"` runs against the working tree (and is
 # what CI re-runs via `pdca gates --working-tree`); `scope = "bundle"` needs the
@@ -43,23 +77,31 @@ argv = []
 #
 # While `checks` is empty the driver uses built-in all-PASS stubs so the offline
 # slice runs. Fill these in as your gate tiers get written (gates are the long
-# pole — build them first). Example:
+# pole — build them first). Gate commands live in your project's verification
+# engine under `engine/` (see engine/README.md). Example:
 #
-# [[gates.checks]]
-# id = "T3-suite"
-# tier = "T3"
-# label = "runtime: test suite"
-# cmd = "python -m pytest -q"
-# gating = true
-# scope = "repo"
-#
+# C4 — the per-fix CORRECTNESS gate (bundle-scoped, GATING). Applies the bundle's
+# patch.diff and runs ONLY its test, asserting red-without-fix / green-with-fix.
+# This is what makes a cycle mean something — it validates THIS change.
 # [[gates.checks]]
 # id = "C4-verify"
 # tier = "C4"
-# label = "shipped test fails pre-fix, passes post-fix"
-# cmd = "python -m pytest \"$PDCA_BUNDLE\""
+# label = "fix verified: test red pre-fix, green post-fix"
+# cmd = "./engine/scripts/run-verify.sh"
 # gating = true
 # scope = "bundle"
+#
+# T3 — a whole-suite runtime gate on the UNMODIFIED tree. Ship it ADVISORY
+# (gating = false): a checkout with any pre-existing failure is red as a baseline
+# and never sees the bundle's patch, so it cannot gate a single fix — C4-verify
+# above is the per-fix gate. Re-gate once the suite is green-baseline.
+# [[gates.checks]]
+# id = "T3-suite"
+# tier = "T3"
+# label = "runtime: whole test suite (baseline)"
+# cmd = "./engine/scripts/run-suite.sh"
+# gating = false
+# scope = "repo"
 [gates]
 checks = []
 
