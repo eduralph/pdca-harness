@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdca_harness import driver, gates, leaves, signoff, state
+from pdca_harness import driver, gates, queue, leaves, signoff, state
 from pdca_harness.config import Config, LeafConfig
 
 TOY_BRIEF = Path(__file__).resolve().parents[1] / "examples" / "toy" / "brief.md"
@@ -122,6 +122,38 @@ class ConfiguredGates(unittest.TestCase):
         # The bundle-scoped failing check is skipped, so the working tree is green.
         self.assertEqual(result["overall"], "pass")
         self.assertNotIn("b", {r["rule_id"] for r in result["rows"]})
+
+
+class SignoffQueue(unittest.TestCase):
+    """The cheap-first sign-off burn-down (docs 03 §sign-off queue)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run_issue(self, issue_id: str) -> Path:
+        d = self.cfg.bundle(issue_id)
+        d.mkdir(parents=True)
+        shutil.copyfile(TOY_BRIEF, d / "brief.md")
+        driver.run_issue(d, self.cfg)
+        return d
+
+    def test_cheap_confirms_come_first(self) -> None:
+        needs = self._run_issue("NEEDS")  # stub reviewer leaves §6 non-empty
+        cheap = self._run_issue("CHEAP")
+        # Simulate the human having adjudicated CHEAP's §6 (box checked).
+        summ = cheap / "SUMMARY.md"
+        summ.write_text(summ.read_text().replace("- [ ]", "- [x]"), encoding="utf-8")
+
+        entries = queue.awaiting_signoff(self.cfg)
+        self.assertEqual([e.bundle.name for e in entries], ["issue_CHEAP", "issue_NEEDS"])
+        self.assertTrue(entries[0].cheap)
+        self.assertFalse(entries[1].cheap)
+        self.assertEqual(entries[1].open_needs_human, 1)
+        self.assertEqual(needs.name, "issue_NEEDS")
 
 
 if __name__ == "__main__":

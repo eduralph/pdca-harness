@@ -13,7 +13,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import driver, gates, signoff, state
+from . import driver, gates, queue, signoff, state
 from .config import Config
 
 # Ordering for the cheap-first sign-off queue (docs 03 §sign-off queue).
@@ -43,6 +43,12 @@ def main(argv: list[str] | None = None) -> int:
     p_status = sub.add_parser("status", help="list bundle states (cheap-first queue)")
     p_status.add_argument("issue_id", nargs="?")
 
+    p_batch = sub.add_parser("batch", help="fan the driver over N issues, then show the queue")
+    p_batch.add_argument("issue_ids", nargs="+")
+    p_batch.add_argument("--from-briefs", type=Path, help="init missing bundles from DIR/<id>.md")
+
+    sub.add_parser("queue", help="the cheap-first sign-off burn-down (AWAITING_SIGNOFF)")
+
     p_gates = sub.add_parser("gates", help="run the deterministic Check gates (driver + CI share this)")
     p_gates.add_argument("issue_id", nargs="?")
     p_gates.add_argument("--working-tree", action="store_true", help="repo-scoped gates only (the CI merge re-gate)")
@@ -65,6 +71,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run(cfg, args.issue_id)
     if args.cmd == "status":
         return _status(cfg, args.issue_id)
+    if args.cmd == "batch":
+        return _batch(cfg, args)
+    if args.cmd == "queue":
+        return _queue(cfg)
     if args.cmd == "gates":
         return _gates(cfg, args)
     if args.cmd == "signoff":
@@ -120,6 +130,50 @@ def _status(cfg: Config, issue_id: str | None) -> int:
             n = len(signoff.open_needs_human(d / "SUMMARY.md"))
             flag = "  [cheap: confirm]" if n == 0 else f"  [{n} NEEDS-HUMAN]"
         print(f"{s:18}{d.name}{flag}")
+    return 0
+
+
+def _batch(cfg: Config, args: argparse.Namespace) -> int:
+    """Run each issue's body through to a parked state, then print the queue.
+
+    Resumable: run_issue is idempotent, so re-running a batch only advances
+    bundles that have new work. Plan (authoring briefs) and sign-off stay human.
+    """
+    tally: dict[str, int] = {}
+    for issue_id in args.issue_ids:
+        d = cfg.bundle(issue_id)
+        if not d.exists():
+            if args.from_briefs:
+                src = args.from_briefs / f"{issue_id}.md"
+                if not src.exists():
+                    print(f"  skip {issue_id}: no brief at {src}", file=sys.stderr)
+                    tally["skipped"] = tally.get("skipped", 0) + 1
+                    continue
+                d.mkdir(parents=True)
+                shutil.copyfile(src, d / "brief.md")
+            else:
+                print(f"  skip {issue_id}: no bundle (author brief.md first, or --from-briefs)", file=sys.stderr)
+                tally["skipped"] = tally.get("skipped", 0) + 1
+                continue
+        final = driver.run_issue(d, cfg)
+        tally[final] = tally.get(final, 0) + 1
+        print(f"{final:18}{d.name}")
+    print("\nbatch tally: " + ", ".join(f"{k}={v}" for k, v in sorted(tally.items())))
+    print()
+    return _queue(cfg)
+
+
+def _queue(cfg: Config) -> int:
+    """Render the cheap-first sign-off burn-down."""
+    entries = queue.awaiting_signoff(cfg)
+    if not entries:
+        print("(sign-off queue empty)")
+        return 0
+    cheap = sum(1 for e in entries if e.cheap)
+    print(f"sign-off queue — {len(entries)} awaiting ({cheap} cheap-confirm, {len(entries) - cheap} need adjudication):")
+    for e in entries:
+        flag = "[cheap: confirm]" if e.cheap else f"[{e.open_needs_human} NEEDS-HUMAN]"
+        print(f"  {e.bundle.name:24}{flag}")
     return 0
 
 
