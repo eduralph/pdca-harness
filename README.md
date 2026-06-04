@@ -20,8 +20,10 @@ starts from a prepared harness instead of tribal knowledge.
 ```
 <your project>/
   pdca.toml                 # driver config: bundle paths, the two leaf commands
+  PCDA/
+    quality-cycle.md        # the generic model (Plan/Do/Check/Act, 5/5/1) — reference
+    quality-cycle/          # the full vendored spec (00–07), an Obsidian vault
   docs/
-    quality-cycle.md        # the generic model (Plan/Do/Check/Act, 5/5/1)
     INTEGRATION.md          # YOUR repo's concretizations — fill the TODOs
   src/pdca_harness/         # the deterministic driver (state machine over bundles)
   templates/                # brief / SUMMARY / tracker-comment / pr-description tpls
@@ -32,17 +34,43 @@ starts from a prepared harness instead of tribal knowledge.
 
 ## Use
 
+### 1. Render the harness into a new project
+
 ```bash
-copier copy gh:<you>/pdca-harness ../my-new-project
+copier copy gh:<you>/pdca-harness ../my-new-project   # answer the prompts
 cd ../my-new-project
-pdca init-issue TOY --from-brief examples/toy/brief.md   # or: PYTHONPATH=src python -m pdca_harness.cli ...
-pdca run TOY              # advances Do → gates → reviewer → assembled SUMMARY → AWAITING_SIGNOFF
+```
+
+Re-apply template updates later, from inside the rendered project:
+
+```bash
+copier update
+```
+
+### 2. Drive a contribution cycle
+
+`pdca` is the entry point once the package is installed; otherwise prefix any
+command with `PYTHONPATH=src python -m pdca_harness.cli …`.
+
+```bash
+pdca init-issue TOY --from-brief examples/toy/brief.md   # seed a bundle from a brief
+pdca run TOY              # Do → gates → reviewer → assembled SUMMARY → AWAITING_SIGNOFF
 pdca status              # all bundle states (cheap-first)
 pdca batch A B C         # fan the driver over many issues
 pdca queue               # the cheap-first sign-off burn-down
 pdca gates TOY           # the deterministic gates (CI runs `pdca gates --working-tree`)
 pdca signoff TOY --accept --by you   # refused while §6 NEEDS-HUMAN is open (C6)
 ```
+
+The vertical slice runs **offline** out of the box (stub Do/gates/reviewer
+leaves), so `init-issue` → `run` → `signoff` works before you wire anything real.
+
+### 3. Make it yours
+
+1. Read `PCDA/quality-cycle.md` (the model) and fill `docs/INTEGRATION.md` —
+   tracker, branch targets, fixtures, and the conformance ruleset.
+2. Fill real gate tiers in `pdca.toml` `[[gates.checks]]` (the long pole).
+3. Wire the real model leaves: set `leaves_mode = "command"` in `pdca.toml`.
 
 ## What's built
 
@@ -59,7 +87,8 @@ pdca signoff TOY --accept --by you   # refused while §6 NEEDS-HUMAN is open (C6
   that surfaces §6/§7/§10 and recurring signals; `pdca act-log` scaffolds a dated
   act-log entry with the considered bundles + patterns pre-filled (the deltas stay
   the human's). All four L-rungs of the maturity ladder are now present.
-- **Full spec** vendored under `template/docs/quality-cycle/`.
+- **Full spec** vendored under `template/PCDA/quality-cycle/` (reference docs,
+  kept separate from a rendered project's own `docs/`).
 
 ## Still ahead
 
@@ -68,4 +97,13 @@ real model leaves (swap `leaves_mode = "command"` in `pdca.toml`). The
 scaffolding for every rung exists; what remains is project-specific gate code and
 the model-command wiring.
 
-See `template/docs/quality-cycle.md` for the model and the maturity ladder.
+See `template/PCDA/quality-cycle.md` for the model and the maturity ladder.
+
+## License
+
+Copyright © 2026 Eduard Ralph.
+
+pdca-harness is free software, licensed under the **GNU General Public License,
+version 3** ([LICENSE](LICENSE)) — use, study, modify, and redistribute it under
+the GPLv3; derivative works must also be GPLv3. The driver code and docs this
+template copies into a rendered project carry the GPLv3 into that project.
