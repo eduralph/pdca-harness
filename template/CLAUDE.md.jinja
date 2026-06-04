@@ -1,0 +1,36 @@
+# {{ project_name }} — agent guidance
+
+{{ project_description }}
+
+This project runs the **PDCA quality cycle** ([docs/quality-cycle.md](docs/quality-cycle.md)).
+Repo-specific concretizations are in [docs/INTEGRATION.md](docs/INTEGRATION.md) —
+read it for tracker, branch targets, fixtures, and the conformance ruleset.
+
+## The driver
+
+`pdca` advances a result bundle through the cycle (`pdca status`, `pdca run <id>`,
+`pdca signoff <id> --accept`). State is the files in `{{ bundle_root }}/issue_<id>/`;
+nothing is hidden in a database. The driver is deterministic — no model decides
+control flow. Models are invoked only at the two leaves (Do builder, Check reviewer).
+
+## Do beat (builder) — your scope when implementing
+
+- Read **`brief.md` only**. Produce `patch.diff`, the test the brief names, and
+  `build-notes.md` (your rationale — withheld from the reviewer by the driver).
+- The test must fail pre-fix and pass post-fix. Cite `path:line` on the target
+  branch for every change.
+- **STOP discipline:** you MAY push to a feature/draft branch and open a draft PR
+  (useful for CI). You MUST NOT mark a PR ready — that is the human's sign-off
+  step. In `command` mode this is enforced by tool scope (`.claude/agents/`).
+
+## Check sign-off (human) — not the model's to perform
+
+The driver assembles `SUMMARY.md` and stops at AWAITING_SIGNOFF. The human clears
+§6 NEEDS-HUMAN, weighs the advisory review, and records §9. `pdca signoff
+--accept` refuses while §6 has open items (C6).
+
+## Act (human) — separate, cross-cycle
+
+Process improvement (ruleset/template/gate/skill deltas) runs across frozen
+bundles on a cadence, recorded in `{{ process_dir }}/act-log.md`. It never
+re-decides a contribution's disposition.

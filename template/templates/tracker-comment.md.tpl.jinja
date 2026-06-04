@@ -1,0 +1,18 @@
+{# Rendered by copier to tracker-comment.md.tpl in your project, with the
+   tracker specifics baked in. Filled per disposition and written to
+   tracker-comment.md in each bundle. ALWAYS required (docs 02 §8). #}
+# Tracker comment — {{ tracker_system }} ({{ tracker_url }})
+
+> Voice/format for {{ project_name }}. Issue IDs look like `{{ issue_id_example }}`.
+> One comment per disposition; cite the fix/PR and the evidence.
+
+**Issue:** <id>
+**Disposition:** Fixed | Already-fixed | Can't-repro | Wontfix | By-design | External | Duplicate
+
+<one or two sentences: what was found, and the outcome>
+
+**Evidence:**
+- <repro result / log / screenshot, or pointer to the PR + commit>
+
+**Verified against:**
+- <path>:<lines> — <what was checked there, on the target branch>

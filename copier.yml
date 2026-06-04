@@ -1,0 +1,129 @@
+# copier.yml — questions and settings for the PDCA quality-cycle harness template.
+#
+# Render a new project with:
+#   copier copy gh:<you>/pdca-harness path/to/new-project
+# Re-apply template updates later with:
+#   copier update           (run inside the generated project)
+#
+# The generic PDCA model (Plan/Do/Check/Act, the 5/5/1 inside Check, the bundle
+# state machine) is project-agnostic and ships verbatim. These questions collect
+# only the repo-specific *integration* (docs 05): which tracker, which branches,
+# which models run the two leaves, where bundles live.
+
+_subdirectory: template
+_templates_suffix: .jinja
+_answers_file: .pdca-harness-answers.yml
+
+_message_after_copy: |
+  PDCA harness rendered into {{ _copier_conf.dst_path }}.
+
+  Next steps:
+    1. Read docs/quality-cycle.md (the model) and docs/INTEGRATION.md (your
+       repo's concretizations — fill the [planned] / TODO items).
+    2. Try the vertical slice on the toy issue:
+         cd {{ _copier_conf.dst_path }}
+         PYTHONPATH=src python -m pdca_harness.cli init-issue TOY --from-brief examples/toy/brief.md
+         PYTHONPATH=src python -m pdca_harness.cli run TOY
+         PYTHONPATH=src python -m pdca_harness.cli status
+    3. Replace the stub leaves (builder/reviewer) with real commands in pdca.toml
+       once the deterministic gates exist (build order: gates -> driver -> batch -> Act).
+
+# ----------------------------------------------------------------------------
+# Project identity
+# ----------------------------------------------------------------------------
+project_name:
+  type: str
+  help: Human-readable project name (e.g. "Gramps Testbed")
+
+project_slug:
+  type: str
+  help: Machine slug used in paths and package names
+  default: "{{ project_name | lower | replace(' ', '-') | replace('_', '-') }}"
+
+project_description:
+  type: str
+  help: One-line description of what this project contributes to
+  default: ""
+
+author_name:
+  type: str
+  help: Primary author / maintainer name
+  default: ""
+
+author_email:
+  type: str
+  help: Primary author / maintainer email
+  default: ""
+
+# ----------------------------------------------------------------------------
+# Integration: tracker (docs 05 item 1)
+# ----------------------------------------------------------------------------
+tracker_system:
+  type: str
+  help: Bug/issue tracker this project triages from
+  choices:
+    GitHub Issues: github
+    MantisBT: mantis
+    Jira: jira
+    Other: other
+  default: github
+
+tracker_url:
+  type: str
+  help: Base URL of the tracker (e.g. https://github.com/org/repo/issues)
+  default: ""
+
+issue_id_example:
+  type: str
+  help: How an issue ID appears in briefs/commits/PRs (e.g. "#123", "13418", "MANT-1")
+  default: "#123"
+
+# ----------------------------------------------------------------------------
+# Integration: branches (docs 05 item 2)
+# ----------------------------------------------------------------------------
+default_branch:
+  type: str
+  help: Default branch fixes target unless an area rule overrides
+  default: main
+
+# ----------------------------------------------------------------------------
+# Integration: bundle + process layout (docs 05 item 7)
+# ----------------------------------------------------------------------------
+bundle_root:
+  type: str
+  help: Directory holding per-cycle result bundles (results/issue_<id>/)
+  default: results
+
+process_dir:
+  type: str
+  help: Directory holding cross-cycle process artifacts (act-log, baseline)
+  default: process
+
+# ----------------------------------------------------------------------------
+# Integration: the two model leaves (docs 03 §Implementation substrate)
+# Stored in pdca.toml. The vertical slice ships with both set to "stub" so the
+# driver runs offline; switch to "command" and set the argv once leaves are real.
+# ----------------------------------------------------------------------------
+builder_family:
+  type: str
+  help: Model family for the Do leaf (the builder)
+  choices:
+    Claude (claude -p): claude
+    Other / not yet wired: other
+  default: claude
+
+reviewer_family:
+  type: str
+  help: Cross-vendor model family for the Check reviewer leaf (MUST differ from builder)
+  choices:
+    Codex (codex exec): codex
+    Other / not yet wired: other
+  default: codex
+
+leaves_mode:
+  type: str
+  help: Run the Do/reviewer leaves as real commands, or as offline stubs (start here)
+  choices:
+    Stubs (offline; recommended to start): stub
+    Real commands: command
+  default: stub

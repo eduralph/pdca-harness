@@ -1,0 +1,37 @@
+# pdca.toml — driver configuration for {{ project_name }}.
+# Read by pdca_harness.config; the only project-specific runtime config.
+
+[project]
+name = "{{ project_name }}"
+default_branch = "{{ default_branch }}"
+
+[paths]
+bundle_root = "{{ bundle_root }}"
+process_dir = "{{ process_dir }}"
+templates_dir = "templates"
+
+[tracker]
+system = "{{ tracker_system }}"
+url = "{{ tracker_url }}"
+issue_id_example = "{{ issue_id_example }}"
+
+# The two model leaves (docs 03 §Implementation substrate). mode = "stub" runs
+# the offline placeholders so the driver works without a model; switch to
+# "command" and the argv runs as a subprocess in the bundle dir once the leaves
+# are real. The reviewer family MUST differ from the builder (decorrelation).
+[leaves.builder]
+mode = "{{ leaves_mode }}"
+family = "{{ builder_family }}"
+{% if builder_family == "claude" -%}
+argv = ["claude", "-p", "--agent", "builder"]
+{% else -%}
+argv = []
+{% endif %}
+[leaves.reviewer]
+mode = "{{ leaves_mode }}"
+family = "{{ reviewer_family }}"
+{% if reviewer_family == "codex" -%}
+argv = ["codex", "exec", "--config", "AGENTS.md"]
+{% else -%}
+argv = []
+{% endif %}

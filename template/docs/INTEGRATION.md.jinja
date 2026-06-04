@@ -1,0 +1,92 @@
+# Repository integration — {{ project_name }}
+
+> What {{ project_name }} provides to plug into the generic PDCA cycle (see
+> [quality-cycle.md](quality-cycle.md)). This is the project's answer to the
+> "which / where / how" questions the generic model deliberately leaves open.
+> It does **not** restate the cycle. Conflict rule: generic wins on cycle
+> *shape*; this integration wins on *instantiation*.
+>
+> Copier pre-filled what it could from your answers. Everything marked **TODO**
+> or **[planned]** is yours to complete — an unfilled integration means the
+> cycle is running on tribal knowledge, the exact failure this doc prevents.
+> Maintained by Act (append changes; don't silently rewrite).
+
+## 1. Tracker integration
+- **System / URL:** {{ tracker_system }} — {{ tracker_url or "TODO" }}
+- **Issue-ID format:** `{{ issue_id_example }}`
+- **Cross-link form (commit/PR → tracker):** TODO (e.g. `Fixes #nnnn` for GitHub Issues)
+- **Status → disposition mapping:** TODO
+- **Per-release field updated on a fix:** TODO
+- **Comment voice / template:** `templates/tracker-comment.md.tpl`
+
+## 2. Branch-target rules
+- **Per-area branch map:** default → `{{ default_branch }}`; TODO any per-area overrides
+- **Override convention:** TODO (typically the PR review thread)
+- **Cross-version cherry-pick rules:** TODO / none
+- **Master-vs-maintenance rule:** TODO (cite the project's own statement)
+
+## 3. Reproduction fixtures and runners
+- **Canonical fixture path:** TODO
+- **Reproduction runner(s) + commands:** TODO
+- **Verification runner (test suite):** TODO
+- **Platform variants:** TODO / none
+- **What counts as a successful repro:** TODO (exit code / log marker / screenshot)
+
+## 4. Conformance ruleset (answers the validation-tooling matrix for this repo)
+For each tier: the written ruleset it consumes, its **home**, and the
+**single-sourced command** the driver and CI both run.
+
+| Tier | Written ruleset | Home | Single-sourced command | Status |
+|---|---|---|---|---|
+| T1 structure | TODO | TODO | TODO | [planned] |
+| T2 shape | TODO | TODO | TODO | [planned] |
+| T3 runtime | TODO | TODO | TODO | [planned] |
+| T4 contribution | TODO | fork hooks / PR CI | TODO | [planned] |
+| T5 judgment | reviewer contract below | Check reviewer + sign-off | (model) | [planned] |
+
+- **Reviewer family (cross-vendor, ≠ builder):** {{ reviewer_family }} — config `AGENTS.md`
+- **Builder family:** {{ builder_family }} — config in `.claude/agents/builder.md` [planned]
+- **Project-defined human-only items** (reviewer emits NEEDS-HUMAN by design): TODO
+  enumerate them so the model knows when to defer and the human what to expect.
+
+## 5. Upstream-isn't-ahead routine
+- **What "upstream" is:** TODO (canonical URL, branches, fork relationship)
+- **Search routine + tokenization gotchas:** TODO (search by affected file path)
+- **Merged-history check command:** TODO (`git log` / `gh search` invocation)
+
+## 6. Brief and design-proposal templates
+- **Brief template:** `templates/brief.md.tpl`
+- **Design-proposal template:** [planned] (GEPS/RFC shape if this project uses one)
+- **Required project-specific frontmatter/sections:** TODO / none
+
+## 7. Bundle and act-log paths
+- **Bundle root + ID format:** `{{ bundle_root }}/issue_<id>/`
+- **Act log path:** `{{ process_dir }}/act-log.md`
+- **Versioned briefs on iterate-to-Plan:** `brief.vN.md` in the bundle (default)
+
+## 8. Committing and PR conventions
+- **Commit-message format:** TODO (subject length, wrap column, trailer, refs)
+- **PR description format:** see `templates/pr-description.md.tpl` (Root cause / Fix / Verified against / Test)
+- **Enforcement mechanism:** TODO (commit-msg hook / PR CI / human review)
+
+## 9. Repo-specific scripts and tooling
+List every project-specific script the cycle invokes (role → path + invocation + status).
+
+| Role | Path | Invocation | Status |
+|---|---|---|---|
+| Tracker scrape / handoff generator | TODO | | [planned] |
+| Conformance gate runners | TODO | | [planned] |
+| Repro / verification runners | TODO | | [planned] |
+| Driver | `src/pdca_harness/` | `pdca run <id>` | [built — stub leaves] |
+| Reviewer config | `AGENTS.md` | | [planned] |
+| Builder subagent | `.claude/agents/builder.md` | | [planned] |
+
+## 10. Maintainer and governance
+- **Who reviews:** {{ author_name or "TODO" }}
+- **Ready-mark gate:** TODO (who marks PRs ready, and the convention before the mark)
+- **External-contribution flow differences:** TODO / none
+- **MAINTAINERS file:** TODO / none
+
+## 11. Per-repo P-/D-/C-/A- extensions
+None today. Add repo-prefixed rules (e.g. `{{ project_slug }}-C7`) that *tighten
+or add to* a generic rule — never weaken one — as running cycles surface them.
