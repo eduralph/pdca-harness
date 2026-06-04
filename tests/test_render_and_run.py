@@ -16,6 +16,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
 try:
     from copier import run_copy  # type: ignore
 
@@ -29,9 +33,14 @@ class RenderAndRun(unittest.TestCase):
     def test_render_then_slice(self) -> None:
         tmp = Path(tempfile.mkdtemp())
         try:
-            # Render from a .git-free copy so copier treats it as a plain template.
+            # Render from a tagged git copy so copier records a version (what
+            # `copier update` later needs). Build a throwaway repo from the source.
             src = tmp / "src"
             shutil.copytree(REPO, src, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+            _git(src, "init", "-q")
+            _git(src, "add", "-A")
+            _git(src, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x")
+            _git(src, "tag", "v0test")
             out = tmp / "out"
             run_copy(
                 str(src),
@@ -46,6 +55,12 @@ class RenderAndRun(unittest.TestCase):
             self.assertTrue((out / "pdca.toml").exists())
             self.assertIn("Render Test", (out / "pdca.toml").read_text(encoding="utf-8"))
             self.assertFalse(list(out.rglob("*.jinja")), "unstripped .jinja files remain")
+
+            # The answers file must be written with a recorded version, or
+            # `copier update` cannot work — the whole reason for using Copier.
+            answers = out / ".pdca-harness-answers.yml"
+            self.assertTrue(answers.exists(), "copier answers file not written")
+            self.assertIn("_commit: v0test", answers.read_text(encoding="utf-8"))
 
             # Run the generated project's own shipped slice test.
             env = {"PYTHONPATH": "src", "PATH": "/usr/bin:/bin"}
