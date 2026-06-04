@@ -118,6 +118,10 @@ writable; without it, Act has nowhere to land.
 Reproduce the reported defect against the canonical fixture on the
 target branch before writing the spec. If the report does not
 reproduce, close the cycle here with a confirm-and-close disposition.
+Trust the reproduction over the report's framing: bugs are often
+mislabelled by their title, and a reporter's workaround can mask a
+different root cause than the live defect. Author the spec against what
+reproduces, not against the title.
 
 *Rationale.* A spec authored without a reproduction is unfounded — Do
 will build against a guess and Check has nothing to verify. Plan asking
@@ -151,8 +155,11 @@ sentence; the cost of relitigating scope at Check is the whole cycle.
 ### P4. MUST resolve the branch target in the brief
 
 The repo + branch target MUST be decided at Plan time and named in the
-brief, not deferred to Do. For cross-repo ambiguity (e.g. core vs
-addon), use a reproduction to disambiguate.
+brief, not deferred to Do. The tracker's filed-under location is the
+**symptom** location, not necessarily the **fix** location — a report
+filed against one component whose traceback runs through another is a
+fix in the latter. For this and any cross-repo ambiguity (e.g. core vs
+addon), use a reproduction to disambiguate before naming the target.
 
 *Rationale.* Branch-target resolution is a Plan-side judgment (which
 project policy applies, what the maintenance vs master rule is here)
@@ -176,9 +183,13 @@ the brief shape honest at small scale.
 
 ### P6. SHOULD give a disposition hint; MUST NOT make it binding
 
-The brief SHOULD include the Plan-time triage guess (likely-fix,
-likely-close, POSSIBLY-FIXED → verify first). The hint MUST NOT bind
-Do or Check; either may override it on evidence.
+The brief SHOULD include the Plan-time triage guess — a cheap
+first-pass flag the body confirms or overrides. Generic flags:
+likely-fix, likely-close, POSSIBLY-FIXED → verify first, UPSTREAM (not
+this repo's defect), EXTERNAL (not a defect in scope at all), NO-NOTES
+(low triage signal). A project MAY add its own flags in the per-repo
+specification. The hint MUST NOT bind Do or Check; either may override
+it on evidence.
 
 *Rationale.* Hints save cycle time on the common cases (the cheap
 confirm-and-close burns one keystroke at Check) without short-
@@ -206,15 +217,31 @@ human (or the driver's accept transition) may perform.
 ### P8. SHOULD verify upstream isn't ahead
 
 For triage cycles (bug reports against an upstream project), the brief
-SHOULD include a check that the defect isn't already fixed on the
-target branch or addressed by an open PR. Search by affected file path,
-not just the bug number or keyword substring.
+SHOULD include a check that the defect isn't already resolved or already
+being addressed. Search by affected file path, not just the bug number
+or keyword substring. The check has three parts, all of them signal:
 
-*Rationale.* A third of recent-pool triage items turn out
-already-fixed, by-design, duplicate, or external. The default action
-on POSSIBLY-FIXED is verification, not implementation. See the
-project's bug-tracker conventions ([00 - Overview](00-overview.md) / project
-CLAUDE.md) for the specific verification routine.
+- **Merged history** — is it already fixed on the target branch? Mind
+  the branch split: a fix merged to one maintenance branch may not be
+  present on another, so verify the fixing commit is an ancestor of the
+  *correct* target branch.
+- **Open PRs** — if a PR already addresses this, **assess it; do not
+  write a competing one.** Review it for correctness and branch, record
+  the finding in the brief, and defer the push-forward decision to the
+  human.
+- **Closed / rejected PRs** — a closed PR is signal, not absence of
+  prior art: the maintainer may have declined this fix shape or decided
+  to remove the affected code entirely. Treat it as a reason not to
+  re-attempt the same fix, not as a clean slate.
+
+*Rationale.* A large fraction of recent-pool triage items turn out
+already-fixed, by-design, duplicate, or external — the default action
+on POSSIBLY-FIXED is verification, not implementation. Re-deriving a fix
+a maintainer already merged, or already rejected, is the most expensive
+way to discover the prior art. See the project's bug-tracker conventions
+([00 - Overview](00-overview.md) / project CLAUDE.md) and the per-repo
+specification's upstream-isn't-ahead routine for the specific search
+commands.
 
 ### P9. (Design-shaped Plans) MUST include Non-goals and Open questions
 

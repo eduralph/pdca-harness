@@ -5,3 +5,10 @@ __pycache__/
 .venv/
 /render-test-out/
 *.egg-info/
+
+# Obsidian vault state for the PCDA/ reference docs (also excluded from renders
+# via copier.yml _exclude). Editor-local; not part of the template.
+.obsidian/
+
+# Personal Claude Code permissions overlay; the shared settings.json is tracked.
+.claude/settings.local.json

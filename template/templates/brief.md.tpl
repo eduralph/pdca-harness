@@ -13,7 +13,8 @@
 - **Repro instruction:** <fixture + exact steps on the target branch>
 - **Test file:** <path where the regression test ships — must fail pre-fix, pass post-fix>
 - **Citations expected:** Do must cite path:line on the target branch for every change.
-- **Disposition hint:** <POSSIBLY-FIXED → verify first | likely-fix | likely-close>
+- **Prior-art check (triage cycles):** <searched by file path — merged history / open PRs / closed PRs — result>
+- **Disposition hint:** <likely-fix | likely-close | POSSIBLY-FIXED → verify first | UPSTREAM | EXTERNAL | NO-NOTES>
 
 ## STOP discipline
 

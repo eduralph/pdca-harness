@@ -12,6 +12,20 @@
 
 _subdirectory: template
 _templates_suffix: .jinja
+
+# Files never copied into a rendered project. Setting _exclude REPLACES Copier's
+# built-in list, so the defaults are re-listed here before our additions.
+_exclude:
+  - "copier.yaml"
+  - "copier.yml"
+  - "~*"
+  - "*.py[co]"
+  - "__pycache__"
+  - ".git"
+  - ".DS_Store"
+  - ".svn"
+  # PCDA/ ships as an Obsidian vault of reference docs; don't render its config.
+  - ".obsidian"
 # Keep the default answers filename (.copier-answers.yml) so `copier update`
 # finds it with no extra flag. The answers-file template is shipped at
 # template/{{ _copier_conf.answers_file }}.jinja.
@@ -20,8 +34,8 @@ _message_after_copy: |
   PDCA harness rendered into {{ _copier_conf.dst_path }}.
 
   Next steps:
-    1. Read docs/quality-cycle.md (the model) and docs/INTEGRATION.md (your
-       repo's concretizations — fill the [planned] / TODO items).
+    1. Read PCDA/quality-cycle.md (the reference model) and docs/INTEGRATION.md
+       (your repo's concretizations — fill the [planned] / TODO items).
     2. Try the vertical slice on the toy issue:
          cd {{ _copier_conf.dst_path }}
          PYTHONPATH=src python -m pdca_harness.cli init-issue TOY --from-brief examples/toy/brief.md

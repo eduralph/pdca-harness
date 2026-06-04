@@ -172,9 +172,9 @@ for this cycle. Operationally the ready-mark constraint is enforced by
 tool scope in Do; see [02 - Cycle Artifacts](02-cycle-artifacts.md) §PLAN for the per-field
 detail and Do's subagent-scope mechanism.
 
-### Solution-approach design (when the spec is more than one fix)
+### Solution-approach design (when the spec is more than a fix)
 
-Not every contribution is one fix. Sometimes the right Plan output is
+Not every contribution is a fix. Sometimes the right Plan output is
 a **design proposal** — a multi-part architectural design with phased
 sequencing, scope discipline, anticipated objections, and an explicit
 list of what it does *not* attempt. The `brief.md` shape collapses;
