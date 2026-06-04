@@ -45,7 +45,10 @@ For each tier: the written ruleset it consumes, its **home**, and the
 | T5 judgment | reviewer contract below | Check reviewer + sign-off | (model) | [planned] |
 
 - **Reviewer family (cross-vendor, ≠ builder):** {{ reviewer_family }} — config `AGENTS.md`
-- **Builder family:** {{ builder_family }} — config in `.claude/agents/builder.md` [planned]
+  (decorrelated path); `.claude/agents/reviewer.md` is a same-vendor fallback with
+  execute-only tool scope (no write to the fix).
+- **Builder family:** {{ builder_family }} — `.claude/agents/builder.md` [built], with the
+  ready-mark block enforced by the `.claude/hooks/builder_guard.py` PreToolUse hook.
 - **Project-defined human-only items** (reviewer emits NEEDS-HUMAN by design): TODO
   enumerate them so the model knows when to defer and the human what to expect.
 
@@ -78,8 +81,9 @@ List every project-specific script the cycle invokes (role → path + invocation
 | Conformance gate runners | TODO | | [planned] |
 | Repro / verification runners | TODO | | [planned] |
 | Driver | `src/pdca_harness/` | `pdca run <id>` | [built — stub leaves] |
-| Reviewer config | `AGENTS.md` | | [planned] |
-| Builder subagent | `.claude/agents/builder.md` | | [planned] |
+| Gates (single-sourced) | `pdca.toml` `[[gates.checks]]` | `pdca gates [<id>] [--working-tree]` | [built — stub fallback; fill checks] |
+| Reviewer config | `AGENTS.md` + `.claude/agents/reviewer.md` | (model leaf) | [built — contract; wire command mode] |
+| Builder subagent | `.claude/agents/builder.md` + `.claude/hooks/builder_guard.py` | (model leaf) | [built — ready-mark blocked] |
 
 ## 10. Maintainer and governance
 - **Who reviews:** {{ author_name or "TODO" }}

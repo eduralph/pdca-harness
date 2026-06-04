@@ -20,8 +20,10 @@ control flow. Models are invoked only at the two leaves (Do builder, Check revie
 - The test must fail pre-fix and pass post-fix. Cite `path:line` on the target
   branch for every change.
 - **STOP discipline:** you MAY push to a feature/draft branch and open a draft PR
-  (useful for CI). You MUST NOT mark a PR ready — that is the human's sign-off
-  step. In `command` mode this is enforced by tool scope (`.claude/agents/`).
+  (useful for CI). You MUST NOT mark a PR ready or merge it — that is the human's
+  sign-off step. This is enforced mechanically: the `builder` subagent
+  (`.claude/agents/builder.md`) runs a PreToolUse hook
+  (`.claude/hooks/builder_guard.py`) that blocks `gh pr ready` / `gh pr merge`.
 
 ## Check sign-off (human) — not the model's to perform
 

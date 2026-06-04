@@ -8,7 +8,10 @@ plus the C6 accept-gate, the independence contract, and an iterate transition.
 
 from __future__ import annotations
 
+import json
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -122,6 +125,35 @@ class ConfiguredGates(unittest.TestCase):
         # The bundle-scoped failing check is skipped, so the working tree is green.
         self.assertEqual(result["overall"], "pass")
         self.assertNotIn("b", {r["rule_id"] for r in result["rows"]})
+
+
+class BuilderGuard(unittest.TestCase):
+    """The PreToolUse hook enforcing the builder's STOP discipline."""
+
+    GUARD = Path(__file__).resolve().parents[1] / ".claude" / "hooks" / "builder_guard.py"
+
+    def _exit(self, command: str) -> int:
+        payload = json.dumps({"tool_input": {"command": command}})
+        r = subprocess.run(
+            [sys.executable, str(self.GUARD)],
+            input=payload, capture_output=True, text=True,
+        )
+        return r.returncode
+
+    def test_allows_push_and_draft_pr(self) -> None:
+        self.assertEqual(self._exit("git push origin feat"), 0)
+        self.assertEqual(self._exit("gh pr create --draft --fill"), 0)
+
+    def test_blocks_ready_and_merge(self) -> None:
+        self.assertEqual(self._exit("gh pr ready 123"), 2)
+        self.assertEqual(self._exit("gh pr merge 123 --squash"), 2)
+
+    def test_blocks_ready_when_chained_after_allowed(self) -> None:
+        # Each segment is checked independently; the ready-mark segment is blocked.
+        self.assertEqual(self._exit("git push origin feat && gh pr ready 123"), 2)
+
+    def test_blocks_wrapped_ready(self) -> None:
+        self.assertEqual(self._exit("timeout 30 gh pr merge 123"), 2)
 
 
 class SignoffQueue(unittest.TestCase):
