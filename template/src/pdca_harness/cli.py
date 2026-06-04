@@ -13,7 +13,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import driver, gates, queue, signoff, state
+from . import act, driver, gates, queue, signoff, state
 from .config import Config
 
 # Ordering for the cheap-first sign-off queue (docs 03 §sign-off queue).
@@ -53,6 +53,14 @@ def main(argv: list[str] | None = None) -> int:
     p_gates.add_argument("issue_id", nargs="?")
     p_gates.add_argument("--working-tree", action="store_true", help="repo-scoped gates only (the CI merge re-gate)")
 
+    p_actidx = sub.add_parser("act-index", help="read-only index of frozen cycles + recurring signals")
+    p_actidx.add_argument("--since", help="only cycles signed off on/after this ISO date")
+
+    p_actlog = sub.add_parser("act-log", help="scaffold a dated act-log entry (deltas left to the human)")
+    p_actlog.add_argument("--since", help="only consider cycles signed off on/after this ISO date")
+    p_actlog.add_argument("--date", required=True, help="review date (ISO; Act is out-of-band so pass it)")
+    p_actlog.add_argument("--append", action="store_true", help="append to process/act-log.md (default: print)")
+
     p_signoff = sub.add_parser("signoff", help="record the human Check sign-off (§9)")
     p_signoff.add_argument("issue_id")
     g = p_signoff.add_mutually_exclusive_group(required=True)
@@ -77,6 +85,10 @@ def main(argv: list[str] | None = None) -> int:
         return _queue(cfg)
     if args.cmd == "gates":
         return _gates(cfg, args)
+    if args.cmd == "act-index":
+        return _act_index(cfg, args)
+    if args.cmd == "act-log":
+        return _act_log(cfg, args)
     if args.cmd == "signoff":
         return _signoff(cfg, args)
     return 2
@@ -196,6 +208,33 @@ def _gates(cfg: Config, args: argparse.Namespace) -> int:
         result = gates.run_gates(d, cfg)
     print(gates.render_md(result))
     return 1 if result["overall"] == "fail" else 0
+
+
+def _act_index(cfg: Config, args: argparse.Namespace) -> int:
+    """Print the read-only Act bundle index across frozen cycles."""
+    entries = act.index(cfg, since=args.since)
+    print(act.render_index(entries, act.patterns(entries)))
+    return 0
+
+
+def _act_log(cfg: Config, args: argparse.Namespace) -> int:
+    """Scaffold a dated act-log entry; print it, or append with --append.
+
+    The scaffold pre-fills the considered bundles and recurring signals; the
+    Process-deltas section is left TODO because choosing them is Act's
+    irreducible human work.
+    """
+    entries = act.index(cfg, since=args.since)
+    if not entries:
+        print("no frozen cycles to review (need COMPLETE bundles)", file=sys.stderr)
+        return 1
+    text = act.scaffold_entry(entries, act.patterns(entries), date=args.date)
+    if args.append:
+        log = act.append_entry(cfg, text)
+        print(f"appended entry to {log}")
+    else:
+        print(text)
+    return 0
 
 
 def _signoff(cfg: Config, args: argparse.Namespace) -> int:

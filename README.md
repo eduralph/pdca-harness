@@ -55,13 +55,17 @@ pdca signoff TOY --accept --by you   # refused while §6 NEEDS-HUMAN is open (C6
 - **Mechanical STOP discipline** — `.claude/agents/builder.md` + a PreToolUse hook
   block the builder from marking a PR ready/merging; `reviewer.md` has execute-only
   scope; the decorrelated reviewer path is cross-vendor Codex via `AGENTS.md`.
+- **Act tooling (L4)** — `pdca act-index` is a read-only index of frozen cycles
+  that surfaces §6/§7/§10 and recurring signals; `pdca act-log` scaffolds a dated
+  act-log entry with the considered bundles + patterns pre-filled (the deltas stay
+  the human's). All four L-rungs of the maturity ladder are now present.
 - **Full spec** vendored under `template/docs/quality-cycle/`.
 
 ## Still ahead
 
-Real gate-tier implementations for your project (the long pole), the real model
-leaves (swap `leaves_mode = "command"` in `pdca.toml`), and **Act tooling** (L4:
-a bundle index across frozen cycles + an act-log writer). Build order the model
-prescribes: **gates → driver → batch queue → Act tooling**.
+Real gate-tier implementations for your project (the long pole) and wiring the
+real model leaves (swap `leaves_mode = "command"` in `pdca.toml`). The
+scaffolding for every rung exists; what remains is project-specific gate code and
+the model-command wiring.
 
 See `template/docs/quality-cycle.md` for the model and the maturity ladder.

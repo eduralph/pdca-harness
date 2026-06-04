@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdca_harness import driver, gates, queue, leaves, signoff, state
+from pdca_harness import act, driver, gates, queue, leaves, signoff, state
 from pdca_harness.config import Config, LeafConfig
 
 TOY_BRIEF = Path(__file__).resolve().parents[1] / "examples" / "toy" / "brief.md"
@@ -186,6 +186,59 @@ class SignoffQueue(unittest.TestCase):
         self.assertFalse(entries[1].cheap)
         self.assertEqual(entries[1].open_needs_human, 1)
         self.assertEqual(needs.name, "issue_NEEDS")
+
+
+class ActTooling(unittest.TestCase):
+    """The L4 Act tooling — bundle index, patterns, act-log scaffold (docs 03 §Act)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _complete(self, issue_id: str, candidate: str) -> Path:
+        d = self.cfg.bundle(issue_id)
+        d.mkdir(parents=True)
+        shutil.copyfile(TOY_BRIEF, d / "brief.md")
+        driver.run_issue(d, self.cfg)
+        summ = d / "SUMMARY.md"
+        t = summ.read_text(encoding="utf-8").replace("- [ ]", "- [x]")  # clear §6
+        t = t.replace("- (empty is the common case)", f"- [x] {candidate}")  # add §10 hint
+        summ.write_text(t, encoding="utf-8")
+        signoff.record(summ, action="accept", by="t", date="2026-06-01")
+        return d
+
+    def test_index_only_sees_frozen(self) -> None:
+        self._complete("DONE", "spec field X ambiguous")
+        # An in-flight bundle (no sign-off) must not appear in the Act index.
+        live = self.cfg.bundle("LIVE")
+        live.mkdir(parents=True)
+        shutil.copyfile(TOY_BRIEF, live / "brief.md")
+        driver.run_issue(live, self.cfg)  # parks at AWAITING_SIGNOFF
+        names = [e.bundle.name for e in act.index(self.cfg)]
+        self.assertEqual(names, ["issue_DONE"])
+
+    def test_patterns_and_scaffold(self) -> None:
+        self._complete("A", "spec field X ambiguous")
+        self._complete("B", "spec field X ambiguous")
+        entries = act.index(self.cfg)
+        self.assertEqual(len(entries), 2)
+        self.assertTrue(all(e.outcome == "merged-wider" for e in entries))
+        pats = act.patterns(entries)
+        self.assertTrue(pats["act_candidates"], "recurring §10 hint not detected")
+        scaffold = act.scaffold_entry(entries, pats, date="2026-06-04")
+        self.assertIn("2026-06-04", scaffold)
+        self.assertIn("cycles considered: A, B", scaffold)
+        self.assertIn("TODO", scaffold)  # deltas left to the human
+
+    def test_append_creates_log(self) -> None:
+        self._complete("A", "x")
+        entries = act.index(self.cfg)
+        log = act.append_entry(self.cfg, act.scaffold_entry(entries, act.patterns(entries), "2026-06-04"))
+        self.assertTrue(log.exists())
+        self.assertIn("Act review — 2026-06-04", log.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
