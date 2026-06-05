@@ -10,92 +10,35 @@ status: active
 
 ## Purpose
 
-A working reference for the **PDCA quality cycle** used in this project, and
-portable to any project where one contribution turns one cycle. Written for
-the human who authors specs (Plan) and improves the process (Act), for
-future Claude instances running the contribution work (Do and most of
-Check), and for anyone wanting to adopt the same cycle elsewhere.
+A working reference for the **PDCA quality cycle** used in this project, and portable to any project where one contribution turns one cycle. Written for the human who authors specs (Plan) and improves the process (Act), for future Claude instances running the contribution work (Do and most of Check), and for anyone wanting to adopt the same cycle elsewhere.
 
-**Built vs. planned.** Docs 01–02 describe the *model* and the
-*artifacts*; doc 03 describes the *automation*. Most of the automation
-described in 03 is **planned**, not built — see the maturity legend at
-the top of [03 - Cycle Automation](03-cycle-automation.md) and the status-today column in
-[04 - Validation Tooling](04-validation-tooling.md)'s tier matrix. The pipeline as a whole sits
-at L1 today (scripted handoff: the agent-work scaffolding under
-`agent-work/scripts/` and `agent-work/templates/` produces bundle
-directories and brief drafts; everything beat-side runs by hand). The
-model holds; the orchestration is staged.
+**Built today.** Docs 01–02 describe the *model* and the *artifacts*; doc 03 describes the *automation*. The automation now **ships and runs**: the deterministic driver, the continuous `pdca flow`, the gate runner, the six model leaves, the sign-off queue, and the Act tooling are all `[built]` (see the maturity legend at the top of [03 - Cycle Automation](03-cycle-automation.md)). What each project still supplies is the tracker-specific Plan scaffolding, the real gate check rows (the status-today column in [04 - Validation Tooling](04-validation-tooling.md)'s tier matrix), and the real leaf commands. The model holds; the orchestration is built.
 
 ## The cycle in one paragraph
 
-One contribution turns one PDCA cycle: **Plan** (author the spec) →
-**Do** (implement) → **Check** (verify the built artifact — correctness,
-conformance, *and* validation, all against the spec) → **Act** (process
-improvement: adjust the spec template, ruleset, gates, or agent skills
-so the issues this cycle exposed do not recur) → back to **Plan** with a
-better baseline. Plan + Do + Check operate on the **contribution** (this
-bug, this fix); Act operates on the **process** (the ruleset, the
-template, the workflow). The next Do should not recreate the issues the
-previous Act tried to eliminate — if it does, the Act was not effective.
+One contribution turns one PDCA cycle: **Plan** (author the spec) → **Do** (implement) → **Check** (verify the built artifact — correctness, conformance, *and* validation, all against the spec) → **Act** (process improvement: adjust the spec template, ruleset, gates, or agent skills so the issues this cycle exposed do not recur) → back to **Plan** with a better baseline. Plan + Do + Check operate on the **contribution** (this bug, this fix); Act operates on the **process** (the ruleset, the template, the workflow). The next Do should not recreate the issues the previous Act tried to eliminate — if it does, the Act was not effective.
 
 ## Three layers
 
-The cycle is documented in three layers, increasing in concreteness. Read
-them in order if new, or jump to the layer matching the question you have:
+The cycle is documented in three layers, increasing in concreteness. Read them in order if new, or jump to the layer matching the question you have:
 
-1. [01 - The Quality Cycle](01-the-quality-cycle.md) — **the model**. PDCA, the four beats as
-   the four roles, the seam between contribution work and process work,
-   the 5/5/1 anatomy inside Check (5-step correctness chain, 5-tier
-   conformance stack, 1 indivisible validation act), and Plan's scale
-   range — from a one-fix `brief.md` to a multi-part design proposal
-   (GEPS-shape) that spawns N child cycles. Answers *what shape is
-   this*.
-2. [02 - Cycle Artifacts](02-cycle-artifacts.md) — **the operational layer**. The concrete
-   files each beat produces: `brief.md`, `patch.diff`, `build-notes.md`,
-   `check-gates`, `check-review.md`, the nine-section `SUMMARY.md`
-   ending in a Check sign-off; the separate `act-notes.md` for process
-   deltas. The independence contract. Answers *what gets written, when,
-   by whom*.
-3. [03 - Cycle Automation](03-cycle-automation.md) — **the orchestration layer**. The driver
-   as a state machine over the bundle; deterministic gates as the only
-   blocking path; the two model leaves (builder + advisory reviewer)
-   invoked from inside scripted control flow. Two human-instrumented
-   passes (Plan-author and Check-signoff per cycle; Act across a batch
-   of cycles). Maturity ladder L1/L2/L3. Answers *how the body runs
-   unattended without automating the human work away*.
+1. [01 - The Quality Cycle](01-the-quality-cycle.md) — **the model**. PDCA, the four beats as the four roles, the seam between contribution work and process work, the 5/5/1 anatomy inside Check (5-step correctness chain, 5-tier conformance stack, 1 indivisible validation act), and Plan's scale range — from a one-fix `brief.md` to a multi-part design proposal (GEPS-shape) that spawns N child cycles. Answers *what shape is this*.
+2. [02 - Cycle Artifacts](02-cycle-artifacts.md) — **the operational layer**. The concrete files each beat produces: `brief.md`, `patch.diff`, `build-notes.md`, `check-gates`, `check-review.md`, the nine-section `SUMMARY.md` ending in a Check sign-off; the append-only `process/act-log.md` for process deltas. The independence contract. Answers *what gets written, when, by whom*.
+3. [03 - Cycle Automation](03-cycle-automation.md) — **the orchestration layer**. The driver as a state machine over the bundle; deterministic gates as the only blocking path; the **six model leaves** (planner, builder, reviewer, sign-off, publisher, act — review/sign-off/publish are steps of the Check beat) invoked from inside scripted control flow. The continuous `pdca flow` runs Plan→Do→Check→Act as one pass; the three human touch points (Plan-authoring, Check sign-off, Act) stay human. Maturity ladder L1–L4. Answers *how the body runs unattended without automating the human work away*.
 
 ## Where the validation tooling sits
 
-The Check beat's conformance stack has five tiers, and they do **not**
-all live in one place — each tier has a *home* matched to where the
-check gates the most work. The matrix and the build order are in:
+The Check beat's conformance stack has five tiers, and they do **not** all live in one place — each tier has a *home* matched to where the check gates the most work. The matrix and the build order are in:
 
-- [04 - Validation Tooling](04-validation-tooling.md) — tier × home decomposition, two rule
-  families (project-conformance vs. upstream-defect-analysis), proposed
-  layout. Worked example uses the Gramps testbed's `agent-work/dev-tooling/` but
-  the structure generalizes.
+- [04 - Validation Tooling](04-validation-tooling.md) — tier × home decomposition, two rule families (project-conformance vs. upstream-defect-analysis), layout. The worked example draws on one project (the Gramps testbed) for illustration; the structure generalizes.
 
 ## How a specific repo integrates with the cycle
 
-The generic cycle is project-agnostic. To **run** it against a
-specific repository, the repository MUST provide a small set of
-concretizations — a **repository-integration specification** that
-slots into the generic cycle and supplies the project-specific
-details the cycle's beats need at runtime.
+The generic cycle is project-agnostic. To **run** it against a specific repository, the repository MUST provide a small set of concretizations — a **repository-integration specification** that slots into the generic cycle and supplies the project-specific details the cycle's beats need at runtime.
 
-- [05 - Repository Integration](05-repository-integration.md) — what each repo provides to
-  integrate with the cycle: bug-tracking integration, branch-target
-  rules, canonical reproduction fixtures, conformance ruleset and
-  gate homes, upstream-isn't-ahead routine, brief/design-proposal
-  templates, result-bundle path conventions, committing conventions,
-  repo-specific scripts and tooling, per-repo P-/D-/C-/A- extensions,
-  and maintainer/governance specifics. Includes a worked example
-  mapping these required items to the testbed's `CLAUDE.md` and
-  `agent-work/` tree (the consolidated home for all cycle artifacts).
+- [05 - Repository Integration](05-repository-integration.md) — what each repo provides to integrate with the cycle: bug-tracking integration, branch-target rules, canonical reproduction fixtures, conformance ruleset and gate homes, upstream-isn't-ahead routine, brief/design-proposal templates, result-bundle path conventions, committing conventions, repo-specific scripts and tooling, per-repo P-/D-/C-/A- extensions, and maintainer/governance specifics. Includes a worked example mapping these required items to one project (the Gramps testbed) — illustrative; a different project answers each item its own way.
 
-A repo running the cycle without writing its integration spec is
-running on **tribal knowledge** — the exact failure mode the cycle
-exists to eliminate.
+A repo running the cycle without writing its integration spec is running on **tribal knowledge** — the exact failure mode the cycle exists to eliminate.
 
 ## Operational discipline (per-beat rules)
 
@@ -131,3 +74,6 @@ examples:
 ## Changelog
 
 - 2026-06-02 — initial documentation set built from Folds2 source.
+
+
+<hr class="__chatgpt_plugin">

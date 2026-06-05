@@ -8,62 +8,34 @@ status: active
 <!-- Vendored snapshot of the canonical PDCA spec. Obsidian [[wikilinks]] converted to relative Markdown links. The authoritative living source is the project wiki; re-vendor when it changes. -->
 
 
-> The Check beat ([01 - The Quality Cycle](01-the-quality-cycle.md) §Check) has internal
-> structure — the **5 / 5 / 1** (correctness chain, conformance stack,
-> validation act) — and runs through three **components** (gates,
-> reviewer, sign-off — see [03 - Cycle Automation](03-cycle-automation.md) §Check). This doc
-> documents the code and process that *implements* those components:
-> which tool covers which 5/5/1 element, where that tool lives, and
-> how single-sourcing keeps the driver and CI invoking the same
-> implementation. Worked example uses the Gramps testbed at the end;
-> the structure is project-agnostic. Living document.
+> The Check beat ([01 - The Quality Cycle](01-the-quality-cycle.md) §Check) has internal structure — the **5 / 5 / 1** (correctness chain, conformance stack, validation act) — and runs through three **components** (gates, reviewer, sign-off — see [03 - Cycle Automation](03-cycle-automation.md) §Check). This doc documents the code and process that *implements* those components: which tool covers which 5/5/1 element, where that tool lives, and how single-sourcing keeps the driver and CI invoking the same implementation. Worked example uses the Gramps testbed at the end; the structure is project-agnostic. Living document.
 
 ## What "validation tooling" means here
 
-"Validation tooling" is shorthand for **the implementation of Check's
-deterministic gates and advisory reviewer.** Check has three
-components:
+"Validation tooling" is shorthand for **the implementation of Check's deterministic gates and advisory reviewer.** Check has three components:
 
-- **Gates** (deterministic, full automation) — the validators, rule
-  scanners, suite runners, and hooks that produce `check-gates.json`.
-- **Reviewer** (advisory, full automation) — the cross-vendor model
-  that grounds the gate evidence, re-runs the asserted red/green, and
-  emits per-item `PASS / FAIL / NEEDS-HUMAN` into `check-review.md`.
-- **Sign-off** (instrumented, human) — the human completes Check by
-  reading the assembled `SUMMARY.md` and recording §9.
+- **Gates** (deterministic, full automation) — the validators, rule scanners, suite runners, and hooks that produce `check-gates.json`.
+- **Reviewer** (advisory, full automation) — the cross-vendor model that grounds the gate evidence, re-runs the asserted red/green, and emits per-item `PASS / FAIL / NEEDS-HUMAN` into `check-review.md`.
+- **Sign-off** (instrumented, human) — the human completes Check by reading the assembled `SUMMARY.md` and recording §9.
 
-This doc is about the **gates** and **reviewer**. Sign-off is human
-work whose tooling is the result-document presentation in
-[02 - Cycle Artifacts](02-cycle-artifacts.md) / [03 - Cycle Automation](03-cycle-automation.md) §Check sign-off,
-not the subject here.
+This doc is about the **gates** and **reviewer**. Sign-off is human work whose tooling is the result-document presentation in [02 - Cycle Artifacts](02-cycle-artifacts.md) / [03 - Cycle Automation](03-cycle-automation.md) §Check sign-off, not the subject here.
 
 ## Two axes — what and where
 
 Validation tooling decomposes along two orthogonal axes:
 
-1. **What it evaluates** — which element of Check's 5/5/1 it covers.
-   The 5/5/1 is the *what*:
-   - Correctness chain (5 steps): spec → reproduction → change →
-     verification → causal adequacy.
-   - Conformance stack (5 tiers): structure → shape → runtime →
-     contribution → judgment.
+1. **What it evaluates** — which element of Check's 5/5/1 it covers. The 5/5/1 is the *what*:
+   - Correctness chain (5 steps): spec → reproduction → change → verification → causal adequacy.
+   - Conformance stack (5 tiers): structure → shape → runtime → contribution → judgment.
    - Validation (1 act): fitness-to-purpose.
-2. **Where it lives** — which **home** runs the tool. The home is the
-   *where*:
-   - Upstream project CI (the project that owns the contribution
-     ruleset gates each PR there).
-   - Local driver / dev-tooling (the same gates run pre-merge on the
-     contributor's machine, single-sourced with upstream CI).
+2. **Where it lives** — which **home** runs the tool. The home is the *where*:
+   - Upstream project CI (the project that owns the contribution ruleset gates each PR there).
+   - Local driver / dev-tooling (the same gates run pre-merge on the contributor's machine, single-sourced with upstream CI).
    - Fork-local hooks (`commit-msg`, pre-push) plus fork PR CI.
    - Check's reviewer component (advisory model + tool scope).
    - Check's sign-off step (human at the result-document review).
 
-**What and where are independent.** A given conformance tier may be
-implemented as code (covering "what") and live in upstream CI
-(covering "where") — but the same tier's implementation can *also*
-mirror locally, so "where" can be multiple homes for one "what". The
-two-axis framing makes the locations explicit instead of letting
-tooling drift to "wherever it was first written."
+**What and where are independent.** A given conformance tier may be implemented as code (covering "what") and live in upstream CI (covering "where") — but the same tier's implementation can *also* mirror locally, so "where" can be multiple homes for one "what". The two-axis framing makes the locations explicit instead of letting tooling drift to "wherever it was first written."
 
 ## The 5/5/1 × tooling-shape matrix
 
@@ -86,39 +58,20 @@ lands in one of Check's three components.
 
 Three observations the matrix makes explicit:
 
-1. **Correctness 1 and 3 carry no tooling row** — they are *inputs* to
-   Check (the brief from Plan, the patch from Do), not work Check
-   performs. They appear in the matrix to keep the chain complete.
-2. **Tiers 1–4 of conformance plus correctness steps 2 and 4** are the
-   **gates path** — fully mechanical, fully automated, the only thing
-   that blocks accept.
-3. **Correctness step 5, Conformance Tier 5, and the validation act**
-   are the **judgment path** — the reviewer attempts each advisory,
-   then the human signs off in §9. The reviewer never gates; the human
-   never edits the fix at Check time
-   ([01 - The Quality Cycle](01-the-quality-cycle.md) §Where the stages touch).
+1. **Correctness 1 and 3 carry no tooling row** — they are *inputs* to Check (the brief from Plan, the patch from Do), not work Check performs. They appear in the matrix to keep the chain complete.
+2. **Tiers 1–4 of conformance plus correctness steps 2 and 4** are the **gates path** — fully mechanical, fully automated, the only thing that blocks accept.
+3. **Correctness step 5, Conformance Tier 5, and the validation act** are the **judgment path** — the reviewer attempts each advisory, then the human signs off in §9. The reviewer never gates; the human never edits the fix at Check time ([01 - The Quality Cycle](01-the-quality-cycle.md) §Where the stages touch).
 
 ## Single-sourcing — one implementation, multiple invocations
 
-The connection to [03 - Cycle Automation](03-cycle-automation.md) §Where it runs is
-load-bearing: the gates that run locally during the cycle MUST be the
-same gates that re-run in CI as the merge-gate. This is enforced not
-by policy but by **single-sourcing the implementation**:
+The connection to [03 - Cycle Automation](03-cycle-automation.md) §Where it runs is load-bearing: the gates that run locally during the cycle MUST be the same gates that re-run in CI as the merge-gate. This is enforced not by policy but by **single-sourcing the implementation**:
 
-- One repository / module owns each tool (the structural validator,
-  the shape scanner's rule file, the runtime checker, the
-  contribution hooks, the correctness re-runners).
+- One repository / module owns each tool (the structural validator, the shape scanner's rule file, the runtime checker, the contribution hooks, the correctness re-runners).
 - The local driver invokes it with one command.
 - CI invokes the *same* command (against the actual PR).
-- No regex copy-pasted across YAML files, no parallel implementation
-  in dev-tooling and CI both, no hand-maintained dependency lists in
-  more than one place.
+- No regex copy-pasted across YAML files, no parallel implementation in dev-tooling and CI both, no hand-maintained dependency lists in more than one place.
 
-The anti-pattern this prevents: tooling drift between local and CI,
-where a contribution passes locally and fails in CI (or vice versa)
-because the two invocations are different code. Both invocations must
-read the same single source, so "passes locally" and "passes CI"
-collapse into the same fact.
+The anti-pattern this prevents: tooling drift between local and CI, where a contribution passes locally and fails in CI (or vice versa) because the two invocations are different code. Both invocations must read the same single source, so "passes locally" and "passes CI" collapse into the same fact.
 
 ## Homes — where each gate lives
 
@@ -135,34 +88,26 @@ generic rationale follows a small set of rules:
 | **Check's reviewer component** | Judgment cells that can't be mechanized | C5 causal adequacy, T5 judgment, validation act (advisory) |
 | **Check's sign-off step** | Final human call on judgment + clearing NEEDS-HUMAN | All of the reviewer's path, finalized |
 
-**The home that does NOT exist:** there is no "Act home" for gates.
-Act improves the *rules* that gates enforce ([01 - The Quality Cycle](01-the-quality-cycle.md)
-§Act); the gates themselves run in Check. A new rule lands as an
-addition to one of the homes above, recorded in `process/act-log.md`.
+The home that does NOT exist: there is no "Act home" for gates. Act improves the *rules* that gates enforce ([01 - The Quality Cycle](01-the-quality-cycle.md) §Act); the gates themselves run in Check. A new rule lands as an addition to one of the homes above, recorded in `process/act-log.md`.
 
 ## Two rule families (project-agnostic)
 
-Validation tooling typically splits into two families that share tools
-but must not be merged in the layout:
+Validation tooling typically splits into two families that share tools but must not be merged in the layout:
 
-- **Family A — project-guideline conformance.** The project's own
-  written ruleset for contributions to itself. Subject: contribution
-  artifacts (patches, packages, addons, plugins) against the project's
-  written rules. The 5/5/1 above (especially the conformance stack) is
-  Family A.
-- **Family B — upstream-defect analysis.** Bug-hunting analyzers
-  against the source the *project depends on*. Subject: upstream code;
-  findings become *upstream* PRs, not contributions to this project.
-  Family B uses the same tool families (semgrep, type-checkers, flow
-  analysis) but its rules and rule-targets differ.
+- **Family A — project-guideline conformance.** The project's own written ruleset for contributions to itself. Subject: contribution artifacts (patches, packages, addons, plugins) against the project's written rules. The 5/5/1 above (especially the conformance stack) is Family A.
+- **Family B — upstream-defect analysis.** Bug-hunting analyzers against the source the *project depends on*. Subject: upstream code; findings become *upstream* PRs, not contributions to this project. Family B uses the same tool families (semgrep, type-checkers, flow analysis) but its rules and rule-targets differ.
 
-The split matters because Family B's analyzers ARE NOT conformance
-checks. A semgrep rule that hunts for missing `disconnect()` in
-upstream Gtk code is a bug-hunting rule, not a "Tier 2 shape" rule
-under the project's own conformance stack. Sharing a layout collapses
-the distinction; keeping them in separate directories preserves it.
+The split matters because Family B's analyzers ARE NOT conformance checks. A semgrep rule that hunts for missing `disconnect()` in upstream Gtk code is a bug-hunting rule, not a "Tier 2 shape" rule under the project's own conformance stack. Sharing a layout collapses the distinction; keeping them in separate directories preserves it.
 
-## Worked example — Gramps testbed `agent-work/dev-tooling/`
+## Worked example — Gramps testbed `dev-tooling/`
+
+> **Illustrative, not normative.** This is *one* project's filled matrix at an earlier
+> snapshot; the paths (`agent-work/dev-tooling/...`) are the Gramps testbed's of that
+> time (since reorganized under `engine/` / `dev-tooling/`), and the rules (doc-16,
+> semgrep shape rules, the gramps maintenance branches) are gramps's. The generic
+> harness — the single-sourced **gate runner** that produces `check-gates.json`/`.md`
+> and renders the full 5/5/1 matrix — ships `[built]`; what this table's "Status today"
+> column tracks is the *project's* per-tier rule-writing, which stays the project's work.
 
 The Gramps testbed instantiates this generic structure as follows.
 References:
@@ -211,10 +156,7 @@ agent-work/dev-tooling/
   README.md                  # this matrix; what is NOT here (T1/3 upstream, T4 forks, T5 process)
 ```
 
-Names are a proposal, not the point. The point: Family B stays whole
-and clearly upstream-source-subject; Family A is tiered and explicitly
-labeled a *mirror* of its upstream home; the shared exec-shim library
-has one location so single-sourcing has a place to point.
+Names are a proposal, not the point. The point: Family B stays whole and clearly upstream-source-subject; Family A is tiered and explicitly labeled a *mirror* of its upstream home; the shared exec-shim library has one location so single-sourcing has a place to point.
 
 ## Build order (concrete deliverables, per [03 - Cycle Automation](03-cycle-automation.md))
 

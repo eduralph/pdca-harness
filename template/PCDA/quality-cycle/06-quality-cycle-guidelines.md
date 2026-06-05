@@ -8,26 +8,14 @@ status: active
 <!-- Vendored snapshot of the canonical PDCA spec. Obsidian [[wikilinks]] converted to relative Markdown links. The authoritative living source is the project wiki; re-vendor when it changes. -->
 
 
-> Prescriptive guidelines for executing each PDCA beat. Sits beside the
-> descriptive model in [01 - The Quality Cycle](01-the-quality-cycle.md) and the operational
-> spec in [02 - Cycle Artifacts](02-cycle-artifacts.md): 01 says *what each beat is*, 02
-> says *what each beat produces*, this doc says *how to do each beat
-> well*. Designed for a practitioner to open side-by-side with the beat
-> they are currently running. Living document.
+> Prescriptive guidelines for executing each PDCA beat. Sits beside the descriptive model in [01 - The Quality Cycle](01-the-quality-cycle.md) and the operational spec in [02 - Cycle Artifacts](02-cycle-artifacts.md): 01 says *what each beat is*, 02 says *what each beat produces*, this doc says *how to do each beat well*. Designed for a practitioner to open side-by-side with the beat they are currently running. Living document.
 
 ## Conventions
 
-The keywords **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and
-**MAY** are used in the sense of [RFC
-2119](https://www.rfc-editor.org/rfc/rfc2119):
+The keywords **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** are used in the sense of [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119):
 
-- **MUST / MUST NOT** — an absolute requirement or prohibition. A cycle
-  that violates a MUST is broken; the violation MUST be corrected
-  before the beat can be considered complete.
-- **SHOULD / SHOULD NOT** — strongly recommended; deviations exist but
-  the practitioner must understand the cost. Deviating without
-  recording why in `build-notes.md` / `SUMMARY.md` §7 is itself a
-  violation.
+- **MUST / MUST NOT** — an absolute requirement or prohibition. A cycle that violates a MUST is broken; the violation MUST be corrected before the beat can be considered complete.
+- **SHOULD / SHOULD NOT** — strongly recommended; deviations exist but the practitioner must understand the cost. Deviating without recording why in `build-notes.md` / `SUMMARY.md` §7 is itself a violation.
 - **MAY** — optional; the practitioner chooses based on context.
 
 Guidelines are numbered per beat (**P-**, **D-**, **C-**, **A-**) so
@@ -36,78 +24,28 @@ ambiguity.
 
 ## Precondition — the per-repo specification
 
-The PDCA cycle has four beats; there is no fifth. But the cycle as
-documented here cannot run against a particular repository without
-knowing that repository's specifics: which branch a fix targets, which
-fixture is ground truth, which conformance ruleset applies, where the
-brief template lives. Those specifics are not part of the generic
-cycle — they are a **per-repo specification** that the Plan and Check
-beats *read* when they run in a given repo.
+The PDCA cycle has four beats; there is no fifth. But the cycle as documented here cannot run against a particular repository without knowing that repository's specifics: which branch a fix targets, which fixture is ground truth, which conformance ruleset applies, where the brief template lives. Those specifics are not part of the generic cycle — they are a **per-repo specification** that the Plan and Check beats *read* when they run in a given repo.
 
-**Every repository that adopts this cycle MUST maintain its own
-per-repo specification document** (e.g. `docs/quality-cycle.md`,
-`AGENTS.md`, `CLAUDE.md`, or wherever the project keeps agent
-instructions). [05 - Repository Integration](05-repository-integration.md) is the full
-specification of what the integration must cover and how it slots
-in; the summary below is the minimum view for the per-beat rules
-in this doc. Required items at minimum:
+**Every repository that adopts this cycle MUST maintain its own per-repo specification document** (e.g. `docs/INTEGRATION.md`, `CLAUDE.md`, `AGENTS.md`, or wherever the project keeps agent instructions). [05 - Repository Integration](05-repository-integration.md) is the full specification of what the integration must cover and how it slots in; the summary below is the minimum view for the per-beat rules in this doc. Required items at minimum:
 
-- **Branch-target resolution.** Which logical change targets which
-  branch (e.g. core fixes → `maintenance/gramps61`; addon fixes →
-  `maintenance/gramps60` with forward cherry-pick; testbed changes
-  → `main`). Read by Plan (P4 instantiation).
-- **Canonical reproduction fixtures.** Which fixture is the cycle's
-  ground truth (the file, the dataset, the test command). Read by
-  Plan (P1) and re-run by Check (correctness chain step 2).
-- **Conformance ruleset and gate homes.** The active rules at each
-  Tier (1–4), where they are implemented, and which gate them. The
-  repo's instantiation of [04 - Validation Tooling](04-validation-tooling.md)'s tier × home
-  decomposition. Read by Check (gates path).
-- **Upstream-isn't-ahead verification routine.** The specific
-  search/grep/PR-check the human runs on triage cycles — search-by-
-  affected-file-path conventions, which trackers to consult, which
-  keywords don't tokenize. Read by Plan (P8 instantiation).
-- **Brief and design-proposal template locations.** Paths to the
-  `brief.md` template Plan uses for one-fix cycles, and to the
-  design-proposal template if design-shaped Plans are written here.
-  Read by Plan.
-- **Result-bundle path convention.** Where `results/issue_<id>/`
-  bundles live in this repo, and where `process/act-log.md` lives.
-  Read by Plan (bundle creation) and Check (bundle writes).
-- **Repo-specific cycle conventions.** Anything the cycle's generic
-  shape doesn't determine but the repo needs: commit-message
-  format, PR-review gates, disposition-language conventions,
-  reviewer-permission boundaries layered on the generic Check/Act
-  seam.
+- **Branch-target resolution.** Which logical change targets which branch (e.g. core fixes → `maintenance/gramps61`; addon fixes → `maintenance/gramps60` with forward cherry-pick; testbed changes → `main`). Read by Plan (P4 instantiation).
+- **Canonical reproduction fixtures.** Which fixture is the cycle's ground truth (the file, the dataset, the test command). Read by Plan (P1) and re-run by Check (correctness chain step 2).
+- **Conformance ruleset and gate homes.** The active rules at each Tier (1–4), where they are implemented, and which gate them. The repo's instantiation of [04 - Validation Tooling](04-validation-tooling.md)'s tier × home decomposition. Read by Check (gates path).
+- **Upstream-isn't-ahead verification routine.** The specific search/grep/PR-check the human runs on triage cycles — search-by-affected-file-path conventions, which trackers to consult, which keywords don't tokenize. Read by Plan (P8 instantiation).
+- **Brief and design-proposal template locations.** Paths to the `brief.md` template Plan uses for one-fix cycles, and to the design-proposal template if design-shaped Plans are written here. Read by Plan.
+- **Result-bundle path convention.** Where `results/issue_<id>/` bundles live in this repo, and where `process/act-log.md` lives. Read by Plan (bundle creation) and Check (bundle writes).
+- **Repo-specific cycle conventions.** Anything the cycle's generic shape doesn't determine but the repo needs: commit-message format, PR-review gates, disposition-language conventions, reviewer-permission boundaries layered on the generic Check/Act seam.
 
-The per-repo specification MAY add repo-prefixed P- / D- / C- / A-
-rules of its own (e.g. `gramps-P1`, `testbed-C7`) to tighten or
-specify a generic rule for local needs. It MUST NOT delete or weaken
-a generic rule below.
+The per-repo specification MAY add repo-prefixed P- / D- / C- / A- rules of its own (e.g. `gramps-P1`, `testbed-C7`) to tighten or specify a generic rule for local needs. It MUST NOT delete or weaken a generic rule below.
 
-**Conflict resolution.** When a per-repo rule and a generic rule
-appear to conflict:
+**Conflict resolution.** When a per-repo rule and a generic rule appear to conflict:
 
-- If the conflict is about **cycle shape** (what Plan/Do/Check/Act
-  are, what the artifacts are, what the seam between beats means)
-  — the **generic rule wins**. A per-repo spec MUST NOT redefine
-  the cycle.
-- If the conflict is about **instantiation** (which branch, which
-  fixture, which rule ID, which path, which tracker convention) —
-  the **per-repo rule wins**. The generic doc has no opinion on
-  specifics.
+- If the conflict is about **cycle shape** (what Plan/Do/Check/Act are, what the artifacts are, what the seam between beats means) — the **generic rule wins**. A per-repo spec MUST NOT redefine the cycle.
+- If the conflict is about **instantiation** (which branch, which fixture, which rule ID, which path, which tracker convention) — the **per-repo rule wins**. The generic doc has no opinion on specifics.
 
-A real shape-layer conflict is an A2-shaped Act candidate against
-this generic doc — log it for the next review of this file.
+A real shape-layer conflict is an A2-shaped Act candidate against this generic doc — log it for the next review of this file.
 
-The per-repo specification is itself part of the **process baseline**
-Act maintains ([01 - The Quality Cycle](01-the-quality-cycle.md) §Act); updates land as
-act-log entries per A6 (append-only). A repo that runs the cycle
-without writing its per-repo specification is running on tribal
-knowledge — the failure mode the cycle exists to eliminate
-([01 - The Quality Cycle](01-the-quality-cycle.md) §What Plan inherits from Act). The
-per-repo spec *is* the project's accumulated Act output made
-writable; without it, Act has nowhere to land.
+The per-repo specification is itself part of the **process baseline** Act maintains ([01 - The Quality Cycle](01-the-quality-cycle.md) §Act); updates land as act-log entries per A6 (append-only). A repo that runs the cycle without writing its per-repo specification is running on tribal knowledge — the failure mode the cycle exists to eliminate ([01 - The Quality Cycle](01-the-quality-cycle.md) §What Plan inherits from Act). The per-repo spec *is* the project's accumulated Act output made writable; without it, Act has nowhere to land.
 
 ---
 
@@ -115,177 +53,73 @@ writable; without it, Act has nowhere to land.
 
 ### P1. MUST reproduce before authoring the spec
 
-Reproduce the reported defect against the canonical fixture on the
-target branch before writing the spec. If the report does not
-reproduce, close the cycle here with a confirm-and-close disposition.
-Trust the reproduction over the report's framing: bugs are often
-mislabelled by their title, and a reporter's workaround can mask a
-different root cause than the live defect. Author the spec against what
-reproduces, not against the title.
+Reproduce the reported defect against the canonical fixture on the target branch before writing the spec. If the report does not reproduce, close the cycle here with a confirm-and-close disposition. Trust the reproduction over the report's framing: bugs are often mislabelled by their title, and a reporter's workaround can mask a different root cause than the live defect. Author the spec against what reproduces, not against the title.
 
-*Rationale.* A spec authored without a reproduction is unfounded — Do
-will build against a guess and Check has nothing to verify. Plan asking
-"is there a defect at all" and answering "no" is a successful PDCA
-outcome ([01 - The Quality Cycle](01-the-quality-cycle.md) §Plan), not a failure.
+*Rationale.* A spec authored without a reproduction is unfounded — Do will build against a guess and Check has nothing to verify. Plan asking "is there a defect at all" and answering "no" is a successful PDCA outcome ([01 - The Quality Cycle](01-the-quality-cycle.md) §Plan), not a failure.
 
 ### P2. MUST write a mechanically testable success criterion
 
-The "what 'fixed' means" sentence MUST be specific enough that you
-could draft the test that would pass it before Do starts. If you
-cannot draft that test from the criterion alone, the criterion is too
-vague.
+The "what 'fixed' means" sentence MUST be specific enough that you could draft the test that would pass it before Do starts. If you cannot draft that test from the criterion alone, the criterion is too vague.
 
-*Rationale.* The success criterion is the load-bearing field of the
-spec. Check measures against it; ambiguity here propagates into every
-downstream beat. The mechanical-test reductio is the cheapest test of
-spec specificity available at Plan time.
+*Rationale.* The success criterion is the load-bearing field of the spec. Check measures against it; ambiguity here propagates into every downstream beat. The mechanical-test reductio is the cheapest test of spec specificity available at Plan time.
 
 ### P3. MUST state what is out of scope
 
-The brief MUST explicitly list what the contribution is *not*
-attempting, alongside what it is. Out-of-scope statements are not
-optional; they are how Check flags scope creep against a written
-boundary ([02 - Cycle Artifacts](02-cycle-artifacts.md) §PLAN).
+The brief MUST explicitly list what the contribution is *not* attempting, alongside what it is. Out-of-scope statements are not optional; they are how Check flags scope creep against a written boundary ([02 - Cycle Artifacts](02-cycle-artifacts.md) §PLAN).
 
-*Rationale.* Without an out-of-scope clause, scope creep at Do time
-becomes ambiguous — the builder may legitimately expand because no
-boundary was written. The cost of writing the boundary is one
-sentence; the cost of relitigating scope at Check is the whole cycle.
+*Rationale.* Without an out-of-scope clause, scope creep at Do time becomes ambiguous — the builder may legitimately expand because no boundary was written. The cost of writing the boundary is one sentence; the cost of relitigating scope at Check is the whole cycle.
 
 ### P4. MUST resolve the branch target in the brief
 
-The repo + branch target MUST be decided at Plan time and named in the
-brief, not deferred to Do. The tracker's filed-under location is the
-**symptom** location, not necessarily the **fix** location — a report
-filed against one component whose traceback runs through another is a
-fix in the latter. For this and any cross-repo ambiguity (e.g. core vs
-addon), use a reproduction to disambiguate before naming the target.
+The repo + branch target MUST be decided at Plan time and named in the brief, not deferred to Do. The tracker's filed-under location is the **symptom** location, not necessarily the **fix** location — a report filed against one component whose traceback runs through another is a fix in the latter. For this and any cross-repo ambiguity (e.g. core vs addon), use a reproduction to disambiguate before naming the target.
 
-*Rationale.* Branch-target resolution is a Plan-side judgment (which
-project policy applies, what the maintenance vs master rule is here)
-and decoupling it from Do prevents builders from making it
-mechanically wrong. See [07 - Case Study - CI Hardening](07-case-study-ci-hardening.md) Item 2 for
-the failure mode when the branch-target rule itself is
-self-contradictory and the resolution gets delegated downward.
+*Rationale.* Branch-target resolution is a Plan-side judgment (which project policy applies, what the maintenance vs master rule is here) and decoupling it from Do prevents builders from making it mechanically wrong. See [07 - Case Study - CI Hardening](07-case-study-ci-hardening.md) Item 2 for the failure mode when the branch-target rule itself is self-contradictory and the resolution gets delegated downward.
 
 ### P5. MUST author one logical contribution per brief
 
-A brief MUST cover exactly one logical fix. If the work spans
-coordinated multi-part scope (architectural change, phased migration,
-proposal-shaped piece), the brief MUST be promoted to a design
-proposal ([01 - The Quality Cycle](01-the-quality-cycle.md) §Solution-approach design) that
-spawns N child briefs.
+A brief MUST cover exactly one logical fix. If the work spans coordinated multi-part scope (architectural change, phased migration, proposal-shaped piece), the brief MUST be promoted to a design proposal ([01 - The Quality Cycle](01-the-quality-cycle.md) §Solution-approach design) that spawns N child briefs.
 
-*Rationale.* "One logical fix per PR" enforced at Do/Check is a brief-
-level discipline; bundling at the brief level just pushes the bundling
-problem one beat upstream. The promotion-to-design rule is what keeps
-the brief shape honest at small scale.
+*Rationale.* "One logical fix per PR" enforced at Do/Check is a brief-level discipline; bundling at the brief level just pushes the bundling problem one beat upstream. The promotion-to-design rule is what keeps the brief shape honest at small scale.
 
 ### P6. SHOULD give a disposition hint; MUST NOT make it binding
 
-The brief SHOULD include the Plan-time triage guess — a cheap
-first-pass flag the body confirms or overrides. Generic flags:
-likely-fix, likely-close, POSSIBLY-FIXED → verify first, UPSTREAM (not
-this repo's defect), EXTERNAL (not a defect in scope at all), NO-NOTES
-(low triage signal). A project MAY add its own flags in the per-repo
-specification. The hint MUST NOT bind Do or Check; either may override
-it on evidence.
+The brief SHOULD include the Plan-time triage guess — a cheap first-pass flag the body confirms or overrides. Generic flags: likely-fix, likely-close, POSSIBLY-FIXED → verify first, UPSTREAM (not this repo's defect), EXTERNAL (not a defect in scope at all), NO-NOTES (low triage signal). A project MAY add its own flags in the per-repo specification. The hint MUST NOT bind Do or Check; either may override it on evidence.
 
-*Rationale.* Hints save cycle time on the common cases (the cheap
-confirm-and-close burns one keystroke at Check) without short-
-circuiting evidence on the uncommon ones. A hint that binds becomes a
-verdict-by-Plan, which Plan does not have the information to make.
+*Rationale.* Hints save cycle time on the common cases (the cheap confirm-and-close burns one keystroke at Check) without short-circuiting evidence on the uncommon ones. A hint that binds becomes a verdict-by-Plan, which Plan does not have the information to make.
 
 ### P7. MUST enforce STOP discipline (no ready-mark before sign-off)
 
-The brief MUST instruct Do that pushing to feature/draft branches and
-opening draft PRs are permitted, and that the **ready-mark** (the
-explicit "this is ready to merge" transition) MUST NOT happen before
-Check sign-off accepts. Operationally this is enforced by builder
-subagent tool scope ([03 - Cycle Automation](03-cycle-automation.md) §Independence), but the
-brief MUST also state the constraint so the contract with the human is
-explicit at Plan time.
+The brief MUST instruct Do that pushing to feature/draft branches and opening draft PRs are permitted, and that the **ready-mark** (the explicit "this is ready to merge" transition) MUST NOT happen before Check sign-off accepts. Operationally this is enforced by builder subagent tool scope ([03 - Cycle Automation](03-cycle-automation.md) §Independence), but the brief MUST also state the constraint so the contract with the human is explicit at Plan time.
 
-*Rationale.* Sign-off is the human's, irreducibly. STOP discipline is
-what makes Check sign-off the only path from draft to merged. Pushing
-and draft-PR-open during the cycle are useful — they let CI gates run
-against the actual artifact and surface work-in-progress for review —
-without bypassing the sign-off gate, because neither transitions the
-PR out of draft state. The ready-mark is the one action only the
-human (or the driver's accept transition) may perform.
+*Rationale.* Sign-off is the human's, irreducibly. STOP discipline is what makes Check sign-off the only path from draft to merged. Pushing and draft-PR-open during the cycle are useful — they let CI gates run against the actual artifact and surface work-in-progress for review — without bypassing the sign-off gate, because neither transitions the PR out of draft state. The ready-mark is the one action only the human (or the driver's accept transition) may perform.
 
 ### P8. SHOULD verify upstream isn't ahead
 
-For triage cycles (bug reports against an upstream project), the brief
-SHOULD include a check that the defect isn't already resolved or already
-being addressed. Search by affected file path, not just the bug number
-or keyword substring. The check has three parts, all of them signal:
+For triage cycles (bug reports against an upstream project), the brief SHOULD include a check that the defect isn't already resolved or already being addressed. Search by affected file path, not just the bug number or keyword substring. The check has three parts, all of them signal:
 
-- **Merged history** — is it already fixed on the target branch? Mind
-  the branch split: a fix merged to one maintenance branch may not be
-  present on another, so verify the fixing commit is an ancestor of the
-  *correct* target branch.
-- **Open PRs** — if a PR already addresses this, **assess it; do not
-  write a competing one.** Review it for correctness and branch, record
-  the finding in the brief, and defer the push-forward decision to the
-  human.
-- **Closed / rejected PRs** — a closed PR is signal, not absence of
-  prior art: the maintainer may have declined this fix shape or decided
-  to remove the affected code entirely. Treat it as a reason not to
-  re-attempt the same fix, not as a clean slate.
+- **Merged history** — is it already fixed on the target branch? Mind the branch split: a fix merged to one maintenance branch may not be present on another, so verify the fixing commit is an ancestor of the *correct* target branch.
+- **Open PRs** — if a PR already addresses this, **assess it; do not write a competing one.** Review it for correctness and branch, record the finding in the brief, and defer the push-forward decision to the human.
+- **Closed / rejected PRs** — a closed PR is signal, not absence of prior art: the maintainer may have declined this fix shape or decided to remove the affected code entirely. Treat it as a reason not to re-attempt the same fix, not as a clean slate.
 
-*Rationale.* A large fraction of recent-pool triage items turn out
-already-fixed, by-design, duplicate, or external — the default action
-on POSSIBLY-FIXED is verification, not implementation. Re-deriving a fix
-a maintainer already merged, or already rejected, is the most expensive
-way to discover the prior art. See the project's bug-tracker conventions
-([00 - Overview](00-overview.md) / project CLAUDE.md) and the per-repo
-specification's upstream-isn't-ahead routine for the specific search
-commands.
+*Rationale.* A large fraction of recent-pool triage items turn out already-fixed, by-design, duplicate, or external — the default action on POSSIBLY-FIXED is verification, not implementation. Re-deriving a fix a maintainer already merged, or already rejected, is the most expensive way to discover the prior art. See the project's bug-tracker conventions ([00 - Overview](00-overview.md) / project CLAUDE.md) and the per-repo specification's upstream-isn't-ahead routine for the specific search commands.
 
 ### P9. (Design-shaped Plans) MUST include Non-goals and Open questions
 
-A design-proposal-shaped Plan ([01 - The Quality Cycle](01-the-quality-cycle.md)
-§Solution-approach design) MUST include explicit Non-goals (what the
-design refuses to attempt) and Open questions (items Plan could not
-resolve, flagged for the review cycle on the proposal itself).
+A design-proposal-shaped Plan ([01 - The Quality Cycle](01-the-quality-cycle.md) §Solution-approach design) MUST include explicit Non-goals (what the design refuses to attempt) and Open questions (items Plan could not resolve, flagged for the review cycle on the proposal itself).
 
-*Rationale.* Non-goals do the same boundary-maintenance work for
-designs that P3's out-of-scope clause does for briefs. Open questions
-are Plan's ex-ante analogue of `SUMMARY.md` §6 NEEDS-HUMAN — hidden
-opens become surprise rework at child-brief Check time.
+*Rationale.* Non-goals do the same boundary-maintenance work for designs that P3's out-of-scope clause does for briefs. Open questions are Plan's ex-ante analogue of `SUMMARY.md` §6 NEEDS-HUMAN — hidden opens become surprise rework at child-brief Check time.
 
 ### P10. SHOULD cite Plan-internal grounding investigations like evidence
 
-When Plan runs a scoped Do-shape sub-investigation to ground a
-recommendation (a measurement, an audit, an analysis), the
-investigation's output SHOULD be cited as evidence (path or URL, run
-date, scope of inputs) — not narrated as belief.
+When Plan runs a scoped Do-shape sub-investigation to ground a recommendation (a measurement, an audit, an analysis), the investigation's output SHOULD be cited as evidence (path or URL, run date, scope of inputs) — not narrated as belief.
 
-*Rationale.* Plan honest about its evidence sources keeps Plan-to-Do
-expectations grounded. See GEPS 049's griffe analysis
-([07 - Case Study - CI Hardening](07-case-study-ci-hardening.md) §Parallel example) for the model:
-the empirical breakage table is what makes the maintenance-release
-claim defensible rather than asserted.
+*Rationale.* Plan honest about its evidence sources keeps Plan-to-Do expectations grounded. See GEPS 049's griffe analysis ([07 - Case Study - CI Hardening](07-case-study-ci-hardening.md) §Parallel example) for the model: the empirical breakage table is what makes the maintenance-release claim defensible rather than asserted.
 
 ### P11. MUST consult the per-repo specification for repo-specific inputs
 
-Plan MUST read the active repo's per-repo specification (see
-§Precondition above) for branch-target resolution (concretizes P4),
-canonical reproduction fixtures (P1), brief and design-proposal
-template paths, upstream-isn't-ahead verification routine (P8), and
-the result-bundle path convention. Improvising these values when the
-spec answers them is a P11 violation even if the resulting brief
-happens to be correct.
+Plan MUST read the active repo's per-repo specification (see §Precondition above) for branch-target resolution (concretizes P4), canonical reproduction fixtures (P1), brief and design-proposal template paths, upstream-isn't-ahead verification routine (P8), and the result-bundle path convention. Improvising these values when the spec answers them is a P11 violation even if the resulting brief happens to be correct.
 
-*Rationale.* Plan's per-cycle judgment is "what to fix and what
-'fixed' means"; the repo-specific facts surrounding that judgment
-(which branch, which fixture, which template) are baseline questions
-already answered by the per-repo spec. Re-deriving them per cycle
-invites drift between cycles in the same repo and dissolves the
-spec's role as the project's accumulated Act output. If a per-repo
-spec answer feels wrong, the action is a §10 Act candidate against
-that spec — not an in-brief override.
+*Rationale.* Plan's per-cycle judgment is "what to fix and what 'fixed' means"; the repo-specific facts surrounding that judgment (which branch, which fixture, which template) are baseline questions already answered by the per-repo spec. Re-deriving them per cycle invites drift between cycles in the same repo and dissolves the spec's role as the project's accumulated Act output. If a per-repo spec answer feels wrong, the action is a §10 Act candidate against that spec — not an in-brief override.
 
 ---
 
@@ -293,146 +127,65 @@ that spec — not an in-brief override.
 
 ### D1. MUST read `brief.md` only
 
-The builder MUST read the brief and the cited source files. The
-builder MUST NOT read prior cycles' bundles, the conformance ruleset
-(which Check applies), or unrelated project context not cited by the
-brief.
+The builder MUST read the brief and the cited source files. The builder MUST NOT read prior cycles' bundles, the conformance ruleset (which Check applies), or unrelated project context not cited by the brief.
 
-*Rationale.* Narrow input keeps Do focused on this contribution; Check
-later evaluates whether the build matches *this brief*, not whether it
-matches some broader interpretation Do imported. Wider input ranges
-expand the surface for misalignment without improving the build.
+*Rationale.* Narrow input keeps Do focused on this contribution; Check later evaluates whether the build matches *this brief*, not whether it matches some broader interpretation Do imported. Wider input ranges expand the surface for misalignment without improving the build.
 
 ### D2. MUST produce three outputs in lockstep
 
-Do MUST produce `patch.diff`, the test (at the location the brief
-named), and `build-notes.md` — together, in the same cycle turn.
-Missing any one means the brief's requirements are unmet ([02 - Cycle
-Artifacts](02-cycleartifacts.md) §DO).
+Do MUST produce `patch.diff`, the test (at the location the brief named), and `build-notes.md` — together, in the same cycle turn. Missing any one means the brief's requirements are unmet ([02 - Cycle Artifacts](02-cycle-artifacts.md) §DO).
 
-*Rationale.* The test ships with the patch because Check's
-verification step needs both; build-notes ships with the patch because
-the human signing off Check sees claim and verdict side by side. Each
-file serves a distinct downstream consumer; skipping one breaks that
-consumer.
+*Rationale.* The test ships with the patch because Check's verification step needs both; build-notes ships with the patch because the human signing off Check sees claim and verdict side by side. Each file serves a distinct downstream consumer; skipping one breaks that consumer.
 
 ### D3. MUST verify the test fails pre-fix and passes post-fix
 
-The builder MUST run the shipped test against the pre-fix code (it
-MUST fail) and the post-fix code (it MUST pass), and cite both runs in
-`build-notes.md`. A test that does not fail pre-fix proves nothing
-about the fix.
+The builder MUST run the shipped test against the pre-fix code (it MUST fail) and the post-fix code (it MUST pass), and cite both runs in `build-notes.md`. A test that does not fail pre-fix proves nothing about the fix.
 
-*Rationale.* The most common silent failure of D2 is a green test that
-never exercised the bug. The pre-fix red is the only oracle that the
-test actually covers the defect the brief named.
+*Rationale.* The most common silent failure of D2 is a green test that never exercised the bug. The pre-fix red is the only oracle that the test actually covers the defect the brief named.
 
 ### D4. MUST cite path:line on the target branch for every claim
 
-Every claim in `build-notes.md` and every change-related statement
-MUST cite `path:line` on the target branch. Citations that do not
-resolve at Check time are dropped by the reviewer (a Check-side rule);
-unresolved citations in the build are functionally absent.
+Every claim in `build-notes.md` and every change-related statement MUST cite `path:line` on the target branch. Citations that do not resolve at Check time are dropped by the reviewer (a Check-side rule); unresolved citations in the build are functionally absent.
 
-*Rationale.* Recollection is a hypothesis, not a verification.
-Path:line citations make every claim falsifiable, which is the only
-way Check can verify them at all.
+*Rationale.* Recollection is a hypothesis, not a verification. Path:line citations make every claim falsifiable, which is the only way Check can verify them at all.
 
 ### D5. SHOULD write `build-notes.md` for the human, not the reviewer
 
-`build-notes.md` is for the human signing off Check. It SHOULD record
-the builder's rationale plainly: why this change, what was tried, what
-was ruled out. It SHOULD NOT anticipate or address the reviewer's
-grading (the reviewer never sees the file — file-withholding,
-[03 - Cycle Automation](03-cycle-automation.md) §Independence).
+`build-notes.md` is for the human signing off Check. It SHOULD record the builder's rationale plainly: why this change, what was tried, what was ruled out. It SHOULD NOT anticipate or address the reviewer's grading (the reviewer never sees the file — file-withholding, [03 - Cycle Automation](03-cycle-automation.md) §Independence).
 
-*Rationale.* Build-notes written *as if* the reviewer will read them
-distort toward defense rather than explanation. The independence
-contract works mechanically; the builder writing as if it didn't makes
-the human's sign-off harder, not easier.
+*Rationale.* Build-notes written *as if* the reviewer will read them distort toward defense rather than explanation. The independence contract works mechanically; the builder writing as if it didn't makes the human's sign-off harder, not easier.
 
 ### D6. MUST keep the patch to one logical change
 
-The patch MUST implement exactly the brief's scope. Defects the
-builder discovers mid-build that are *outside* the brief's scope MUST
-be surfaced in `build-notes.md` for a future Plan, not folded into
-this patch.
+The patch MUST implement exactly the brief's scope. Defects the builder discovers mid-build that are *outside* the brief's scope MUST be surfaced in `build-notes.md` for a future Plan, not folded into this patch.
 
-*Rationale.* Bundling hides mistakes ([07 - Case Study - CI
-Hardening](07-case-study-cihardening.md) convention). Drive-by fixes in this patch shift Check's
-unit of evaluation away from the brief and toward whatever the builder
-felt was worth fixing — which is not what Check is set up to
-adjudicate.
+*Rationale.* Bundling hides mistakes ([07 - Case Study - CI Hardening](07-case-study-ci-hardening.md) convention). Drive-by fixes in this patch shift Check's unit of evaluation away from the brief and toward whatever the builder felt was worth fixing — which is not what Check is set up to adjudicate.
 
 ### D7. MUST NOT mark a PR ready before Check sign-off
 
-Do MAY commit, push to feature/draft branches, and open draft PRs —
-all useful for letting CI gates exercise the artifact and surfacing
-work-in-progress. Do MUST NOT mark a PR ready, transition a PR out of
-draft state, or merge.
+Do MAY commit, push to feature/draft branches, and open draft PRs — all useful for letting CI gates exercise the artifact and surfacing work-in-progress. Do MUST NOT mark a PR ready, transition a PR out of draft state, or merge.
 
-**On enforcement.** The intended mechanism is subcommand-level Bash
-allowlists in the builder subagent's config: allow
-`Bash(gh pr create:*)` and `Bash(git push:*)`, deny
-`Bash(gh pr ready:*)` and `Bash(gh pr merge:*)`. Claude Code's
-permission system supports that granularity; the testbed's current
-top-level `settings.json` already uses the same pattern (`gh pr
-create:*` allowed, `gh pr ready:*` absent). The `.claude/agents/`
-files that would apply the pattern to the builder subagent **are
-planned but not yet built** in this project (see
-[03 - Cycle Automation](03-cycle-automation.md) §Do for the maturity-tag context). Until
-those files exist, the builder MUST respect this rule because the
-brief states it — not because the tool scope blocks it. Any action
-that would transition the PR out of draft state is a D7 violation
-regardless of whether enforcement is currently mechanical or
-discipline-based.
+**On enforcement.** This is enforced **mechanically**, not by discipline alone. The builder subagent (`.claude/agents/builder.md`) registers a PreToolUse hook (`.claude/hooks/builder_guard.py`) that blocks `gh pr ready`, `gh pr merge`, and `gh pr review --approve` for the builder while allowing `gh pr create --draft` and `git push` — splitting compound commands and stripping wrappers so the block can't be smuggled past. It is scoped to the subagent, **not** a global `settings.json` deny (a global deny can't be overridden and would block the human's legitimate ready-mark). The same hook guards the publisher leaf. The builder MUST still respect the rule in spirit — but any action that would transition the PR out of draft state is a D7 violation, and the hook is the backstop.
 
-*Rationale.* STOP discipline (P7's downstream half) is the only thing
-that makes Check sign-off load-bearing. A PR that escapes draft state
-before sign-off has bypassed the cycle's only validation point. Push
-and draft-PR-open do *not* bypass that gate — they enable CI feedback
-and visibility without changing the PR's reviewability state. The
-ready-mark is the line because it is the explicit "this is ready to
-merge" signal that downstream consumers (CI required-checks, human
-reviewers, auto-merge bots) act on.
+*Rationale.* STOP discipline (P7's downstream half) is the only thing that makes Check sign-off load-bearing. A PR that escapes draft state before sign-off has bypassed the cycle's only validation point. Push and draft-PR-open do *not* bypass that gate — they enable CI feedback and visibility without changing the PR's reviewability state. The ready-mark is the line because it is the explicit "this is ready to merge" signal that downstream consumers (CI required-checks, human reviewers, auto-merge bots) act on.
 
 ### D8. MUST stop and request iterate-to-Plan if the brief is ambiguous
 
-If a brief field is ambiguous in a way that affects the build, Do MUST
-stop and surface the ambiguity for iterate-to-Plan ([02 - Cycle
-Artifacts](02-cycleartifacts.md) §9) — not guess. Recording the ambiguity in
-`build-notes.md` and proceeding is a violation of D8.
+If a brief field is ambiguous in a way that affects the build, Do MUST stop and surface the ambiguity for iterate-to-Plan ([02 - Cycle Artifacts](02-cycle-artifacts.md) §9) — not guess. Recording the ambiguity in `build-notes.md` and proceeding is a violation of D8.
 
-*Rationale.* Guessing produces a build that might match the brief, or
-might not, with no way for Check to tell which. Iterate-to-Plan is
-cheap (revise the brief, re-run Do); a guess that later fails Check
-costs the full Do+Check turn plus rework.
+*Rationale.* Guessing produces a build that might match the brief, or might not, with no way for Check to tell which. Iterate-to-Plan is cheap (revise the brief, re-run Do); a guess that later fails Check costs the full Do+Check turn plus rework.
 
 ### D9. MUST stop and surface if the brief is wrong
 
-If, during build, Do discovers evidence that the brief itself is
-incorrect (e.g. the assumed root cause is wrong, the cited file no
-longer exists, the proposed mechanism is empirically invalid), Do MUST
-stop and surface — do not implement against a brief you believe is
-broken.
+If, during build, Do discovers evidence that the brief itself is incorrect (e.g. the assumed root cause is wrong, the cited file no longer exists, the proposed mechanism is empirically invalid), Do MUST stop and surface — do not implement against a brief you believe is broken.
 
-*Rationale.* A patch built against a known-wrong brief produces a
-known-wrong fix that Check may nonetheless accept on its narrow
-criteria. The honest move is iterate-to-Plan with the evidence
-attached. See [07 - Case Study - CI Hardening](07-case-study-ci-hardening.md) Item C for the
-canonical case (brief demanded an exec-shim; 14/14 empirical audit
-showed it was unnecessary).
+*Rationale.* A patch built against a known-wrong brief produces a known-wrong fix that Check may nonetheless accept on its narrow criteria. The honest move is iterate-to-Plan with the evidence attached. See [07 - Case Study - CI Hardening](07-case-study-ci-hardening.md) Item C for the canonical case (brief demanded an exec-shim; 14/14 empirical audit showed it was unnecessary).
 
 ### D10. SHOULD NOT consume the conformance ruleset directly
 
-Do SHOULD NOT read or apply the conformance ruleset (Tiers 1–4) during
-the build. The ruleset is Check's input; Do follows the brief.
+Do SHOULD NOT read or apply the conformance ruleset (Tiers 1–4) during the build. The ruleset is Check's input; Do follows the brief.
 
-*Rationale.* Pre-conforming during Do anchors the build toward
-ruleset-conformance over brief-conformance and trains the builder to
-optimize for "passes Check" instead of "matches brief." The
-deterministic gates can correct conformance defects auto-fix-style at
-Check time without Do attempting it.
+*Rationale.* Pre-conforming during Do anchors the build toward ruleset-conformance over brief-conformance and trains the builder to optimize for "passes Check" instead of "matches brief." The deterministic gates can correct conformance defects auto-fix-style at Check time without Do attempting it.
 
 ---
 
@@ -440,147 +193,69 @@ Check time without Do attempting it.
 
 ### C1. MUST run deterministic gates before the advisory reviewer
 
-The gate suite (correctness re-runs + conformance Tiers 1–4) MUST
-complete before the reviewer is invoked. The reviewer reads
-`check-gates.json` as input ([02 - Cycle Artifacts](02-cycle-artifacts.md) §CHECK), so
-gates-first is mechanical, not just preferred.
+The gate suite (correctness re-runs + conformance Tiers 1–4) MUST complete before the reviewer is invoked. The reviewer reads `check-gates.json` as input ([02 - Cycle Artifacts](02-cycle-artifacts.md) §CHECK), so gates-first is mechanical, not just preferred.
 
-*Rationale.* The reviewer's value is decorrelation; reading gate
-output sharpens the reviewer's grounding step (re-run cited evidence,
-re-verify path:lines). Reversing the order would have the reviewer
-opine on un-verified claims.
+*Rationale.* The reviewer's value is decorrelation; reading gate output sharpens the reviewer's grounding step (re-run cited evidence, re-verify path:lines). Reversing the order would have the reviewer opine on un-verified claims.
 
 ### C2. MUST name an oracle and cite path:line for every claim
 
-Every row in `check-gates.{md,json}` and every finding in
-`check-review.md` MUST carry: the oracle that decided it, the rule ID
-(where applicable), and a path:line citation on the target branch.
-Findings without an oracle are dropped.
+Every row in `check-gates.{md,json}` and every finding in `check-review.md` MUST carry: the oracle that decided it, the rule ID (where applicable), and a path:line citation on the target branch. Findings without an oracle are dropped.
 
-*Rationale.* Oracle accounting is what lets the human signing off
-Check weigh evidence honestly ([01 - The Quality Cycle](01-the-quality-cycle.md) §The oracle
-principle). A claim with no oracle is rhetoric.
+*Rationale.* Oracle accounting is what lets the human signing off Check weigh evidence honestly ([01 - The Quality Cycle](01-the-quality-cycle.md) §The oracle principle). A claim with no oracle is rhetoric.
 
 ### C3. MUST state scope of green and what is unproven
 
-`SUMMARY.md` §7 (Proven / not proven) MUST name what specific path the
-green checks exercised and what is left unproven (a platform not run,
-a fixture not exercised, a behavioral edge not tested). An empty §7 is
-a violation of C3 — "everything is proven" is almost never true.
+`SUMMARY.md` §7 (Proven / not proven) MUST name what specific path the green checks exercised and what is left unproven (a platform not run, a fixture not exercised, a behavioral edge not tested). An empty §7 is a violation of C3 — "everything is proven" is almost never true.
 
-*Rationale.* "A green check is evidence of that narrow check, not of
-correctness." Honest oracle limits at §7 prevent over-trusting greens
-at sign-off. The discipline of writing §7 also surfaces gaps that can
-become P10-style grounding investigations in the next Plan.
+*Rationale.* "A green check is evidence of that narrow check, not of correctness." Honest oracle limits at §7 prevent over-trusting greens at sign-off. The discipline of writing §7 also surfaces gaps that can become P10-style grounding investigations in the next Plan.
 
 ### C4. MUST withhold `build-notes.md` from the reviewer
 
-The reviewer's input set MUST be `{patch.diff, test, brief.md,
-check-gates.json}` only. `build-notes.md` is excluded by the driver's
-file-input list ([03 - Cycle Automation](03-cycle-automation.md) §Independence). Any
-configuration that passes build-notes is an independence-contract
-violation.
+The reviewer's input set MUST be `{patch.diff, test, brief.md, check-gates.json}` only. `build-notes.md` is excluded by the driver's file-input list ([03 - Cycle Automation](03-cycle-automation.md) §Independence). Any configuration that passes build-notes is an independence-contract violation.
 
-*Rationale.* Independence is enforced by file access, not prompt
-wording. The reviewer told "ignore the rationale" that still receives
-it is not independent. The driver's input list is the contract.
+*Rationale.* Independence is enforced by file access, not prompt wording. The reviewer told "ignore the rationale" that still receives it is not independent. The driver's input list is the contract.
 
 ### C5. MUST auto-fix only mechanical FAILs; route decisions to NEEDS-HUMAN
 
-A deterministic FAIL with auto-fixable cause (lint, format,
-genuinely-red test that's a known-fixable shape) MAY be auto-fixed and
-re-run. A FAIL that requires a decision (which fixture? which branch?
-is this scope creep?) MUST be routed to `SUMMARY.md` §6 NEEDS-HUMAN.
+A deterministic FAIL with auto-fixable cause (lint, format, genuinely-red test that's a known-fixable shape) MAY be auto-fixed and re-run. A FAIL that requires a decision (which fixture? which branch? is this scope creep?) MUST be routed to `SUMMARY.md` §6 NEEDS-HUMAN.
 
-*Rationale.* Auto-fixing decisions is a model in the gating path,
-which the design works to keep deterministic ([03 - Cycle
-Automation](03-cycleautomation.md) §Implementation substrate). The rule "auto-fix only
-mechanical FAILs" is what preserves the no-LLM-in-gates invariant.
+*Rationale.* Auto-fixing decisions is a model in the gating path, which the design works to keep deterministic ([03 - Cycle Automation](03-cycle-automation.md) §Implementation substrate). The rule "auto-fix only mechanical FAILs" is what preserves the no-LLM-in-gates invariant.
 
 ### C6. §6 NEEDS-HUMAN MUST be empty before sign-off can accept
 
-Check sign-off (§9) MUST NOT record an *accept* outcome while §6
-contains unresolved items. Each NEEDS-HUMAN item is cleared by the
-human or routed to iterate-to-Plan / iterate-to-Do before accept is
-available.
+Check sign-off (§9) MUST NOT record an *accept* outcome while §6 contains unresolved items. Each NEEDS-HUMAN item is cleared by the human or routed to iterate-to-Plan / iterate-to-Do before accept is available.
 
-*Rationale.* §6 is literally the within-Check seam between mechanical
-(gates + reviewer) and human (sign-off) on the page — it lists the
-items the gates and reviewer could not resolve, which the human at
-sign-off must. Accepting with §6 items still open means the human
-signed off something the cycle explicitly flagged as undecidable
-without human input. The accept/iterate fork exists precisely so this
-doesn't happen.
+*Rationale.* §6 is literally the within-Check seam between mechanical (gates + reviewer) and human (sign-off) on the page — it lists the items the gates and reviewer could not resolve, which the human at sign-off must. Accepting with §6 items still open means the human signed off something the cycle explicitly flagged as undecidable without human input. The accept/iterate fork exists precisely so this doesn't happen.
 
 ### C7. MUST distinguish iterate-to-Do from iterate-to-Plan
 
-When sign-off chooses iteration, the §9 outcome MUST be either
-*iterate-to-Do* (the build was wrong; the spec was right) or
-*iterate-to-Plan* (the spec was wrong). The two paths trigger
-different driver actions ([03 - Cycle Automation](03-cycle-automation.md) §Driver skeleton:
-`unlink_build_outputs` vs `unlink_brief_and_build`) and conflating
-them produces wrong control flow.
+When sign-off chooses iteration, the §9 outcome MUST be either *iterate-to-Do* (the build was wrong; the spec was right) or *iterate-to-Plan* (the spec was wrong). The two paths trigger different driver actions ([03 - Cycle Automation](03-cycle-automation.md) §Driver skeleton: `unlink_build_outputs` vs `unlink_brief_and_build`) and conflating them produces wrong control flow.
 
-*Rationale.* Iterate-to-Do re-runs the builder against the same brief.
-Iterate-to-Plan invites the human to revise the brief and *then*
-re-runs Do. Defaulting to one when the other is right wastes a turn
-and may produce the same failed build twice.
+*Rationale.* Iterate-to-Do re-runs the builder against the same brief. Iterate-to-Plan invites the human to revise the brief and *then* re-runs Do. Defaulting to one when the other is right wastes a turn and may produce the same failed build twice.
 
 ### C8. §10 Act candidates MUST NOT gate sign-off
 
-Items recorded in `SUMMARY.md` §10 (process observations for the next
-Act review) MUST NOT block sign-off, regardless of count or severity.
-§10 is a hint feeder, not a gate.
+Items recorded in `SUMMARY.md` §10 (process observations for the next Act review) MUST NOT block sign-off, regardless of count or severity. §10 is a hint feeder, not a gate.
 
-*Rationale.* Act fires across cycles; a single cycle's §10 item is
-data for a future Act review, not a Check requirement. Gating sign-off
-on §10 would conflate per-contribution adjudication (Check) with
-process improvement (Act), the seam [01 - The Quality Cycle](01-the-quality-cycle.md) §The
-seam is built to preserve.
+*Rationale.* Act fires across cycles; a single cycle's §10 item is data for a future Act review, not a Check requirement. Gating sign-off on §10 would conflate per-contribution adjudication (Check) with process improvement (Act), the seam [01 - The Quality Cycle](01-the-quality-cycle.md) §The seam is built to preserve.
 
 ### C9. The advisory reviewer MUST NOT write the fix
 
-The reviewer's tool scope MUST grant execute access (run tests,
-validator, `git stash`/`unstash`) and MUST deny write access to the
-fix or to `SUMMARY.md` §9. The reviewer recommends; the human and the
-deterministic gates decide.
+The reviewer's tool scope MUST grant execute access (run tests, validator, `git stash`/`unstash`) and MUST deny write access to the fix or to `SUMMARY.md` §9. The reviewer recommends; the human and the deterministic gates decide.
 
-*Rationale.* A reviewer that can patch the artifact it is judging
-becomes a builder with extra steps, breaking the role partition
-[01 - The Quality Cycle](01-the-quality-cycle.md) §The four beats names. The tool-scope
-constraint is mechanical, not stylistic.
+*Rationale.* A reviewer that can patch the artifact it is judging becomes a builder with extra steps, breaking the role partition [01 - The Quality Cycle](01-the-quality-cycle.md) §The four beats names. The tool-scope constraint is mechanical, not stylistic.
 
 ### C10. SHOULD apply the collapse rule
 
-For conformance-defect fixes (a missing `tests/__init__.py`, a banned
-import), the conformance check itself SHOULD be treated as the
-correctness oracle — "correct" reduces to "the check now passes." For
-behavioral-defect fixes, correctness needs its own independent
-evidence chain ([01 - The Quality Cycle](01-the-quality-cycle.md) §Where the stages touch
-and collapse).
+For conformance-defect fixes (a missing `tests/__init__.py`, a banned import), the conformance check itself SHOULD be treated as the correctness oracle — "correct" reduces to "the check now passes." For behavioral-defect fixes, correctness needs its own independent evidence chain ([01 - The Quality Cycle](01-the-quality-cycle.md) §Where the stages touch and collapse).
 
-*Rationale.* Forcing a full behavioral-correctness chain for a
-conformance-defect fix wastes a cycle turn on evidence that doesn't
-inform the decision. Forcing only the conformance check for a
-behavioral defect leaves the actual behavior unverified.
+*Rationale.* Forcing a full behavioral-correctness chain for a conformance-defect fix wastes a cycle turn on evidence that doesn't inform the decision. Forcing only the conformance check for a behavioral defect leaves the actual behavior unverified.
 
 ### C11. MUST apply the per-repo conformance ruleset at the homes the spec designates
 
-Check MUST run the active repo's conformance ruleset — Tiers 1–4 at
-the homes the per-repo specification designates ([04 - Validation
-Tooling](04-validationtooling.md) tier × home decomposition, instantiated per-repo in the
-spec). Running a partial or substituted ruleset is a C11 violation
-even if every check that *did* run passes.
+Check MUST run the active repo's conformance ruleset — Tiers 1–4 at the homes the per-repo specification designates ([04 - Validation Tooling](04-validation-tooling.md) tier × home decomposition, instantiated per-repo in the spec). Running a partial or substituted ruleset is a C11 violation even if every check that *did* run passes.
 
-*Rationale.* The per-repo specification is what makes "did Check
-apply the right rules" answerable in any specific repo. The generic
-doc has no opinion on which rules are active; the per-repo spec
-does. Skipping or substituting a rule because the gate was
-inconvenient to run shifts the cycle off the project's actual
-ruleset — which is the failure mode A2 (concrete, located deltas)
-protects against on the Act side, applied here on the Check side. If
-a rule is genuinely wrong or its home is genuinely misplaced, that is
-a §10 Act candidate against the per-repo spec — not a Check-time skip.
+*Rationale.* The per-repo specification is what makes "did Check apply the right rules" answerable in any specific repo. The generic doc has no opinion on which rules are active; the per-repo spec does. Skipping or substituting a rule because the gate was inconvenient to run shifts the cycle off the project's actual ruleset — which is the failure mode A2 (concrete, located deltas) protects against on the Act side, applied here on the Check side. If a rule is genuinely wrong or its home is genuinely misplaced, that is a §10 Act candidate against the per-repo spec — not a Check-time skip.
 
 ---
 
@@ -600,8 +275,8 @@ constraint is what keeps Act's inputs stable enough to reason across.
 ### A2. MUST make every delta concrete and located
 
 Every Act-log entry MUST name a specific delta: a file path edited, a
-rule ID added/retired, a template field changed, a SKILL.md /
-AGENTS.md passage adjusted. "We should be more careful" is not a
+rule ID added/retired, a template field changed, a `.claude/agents/*.md`
+/ `AGENTS.md` passage adjusted. "We should be more careful" is not a
 delta; "rule R-042 added to Tier 2 covering the
 `_("f-string")` shape, with fixture at `path/to/fixture`" is.
 
