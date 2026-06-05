@@ -33,8 +33,18 @@
 - **What counts as a successful repro:** TODO (exit code / log marker / screenshot)
 
 ## 4. Conformance ruleset (answers the validation-tooling matrix for this repo)
-For each tier: the written ruleset it consumes, its **home**, and the
-**single-sourced command** the driver and CI both run.
+For each tier: the **written ruleset** it consumes, its **home**, and the
+**single-sourced command** the driver and CI both run. The "Written ruleset"
+column is load-bearing — name the project's *normative source* for each tier (a
+contributor guide, an addon-dev doc, a PEP/RFC) and, ideally, cite individual
+rules back to it (`<doc>:<line>`). A gate you can trace to a written source is
+auditable; one you can't is folklore.
+
+Gating policy (see `engine/README.md`): ship every tier **advisory**
+(`gating = false`) except the per-fix C4 (red→green). Runtime / conformance /
+interface tiers audit code the current fix didn't introduce, so promote a tier to
+gating only once its targeted artifacts are clean; gate interface/E2E on a smoke
+test, not the full suite.
 
 | Tier | Written ruleset | Home | Single-sourced command | Status |
 |---|---|---|---|---|

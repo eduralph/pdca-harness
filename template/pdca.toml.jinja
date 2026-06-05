@@ -102,6 +102,16 @@ argv = ["claude", "--agent", "act", "--permission-mode", "acceptEdits"]
 # cmd = "./engine/scripts/run-suite.sh"
 # gating = false
 # scope = "repo"
+#
+# GATING POLICY (learned the hard way): default a tier to ADVISORY (gating =
+# false). The per-fix C4 (red→green) is the one gate that ships gating = true —
+# runtime, conformance (T1/T2/T4), and interface/E2E tiers all audit code the
+# *current* fix did not introduce, so gating them on pre-existing/legacy
+# non-conformance is wrong. Promote a tier to gating once its targeted artifacts
+# are clean. For interface/E2E, gate a SMOKE test ("does the app start"), not the
+# full suite — the full suite mixes green tests with known-bug repros, so it is a
+# characterization, not a pass/fail signal. Cite each tier's rules back to the
+# project's normative ruleset (docs/INTEGRATION.md §4) so the gate is auditable.
 [gates]
 checks = []
 
