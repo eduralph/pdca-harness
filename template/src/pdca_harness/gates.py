@@ -61,12 +61,14 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None) -> dict:
     gating = bool(chk.get("gating", True))
     label = f"{chk.get('id', '')}: {chk.get('label', '')}".strip(": ")
     env = {"PDCA_BUNDLE": str(bundle)} if bundle is not None else None
+    watch = bundle or cwd
     print(f"  · gate {label} (a Docker-backed gate can take minutes)…", file=sys.stderr, flush=True)
     try:
         # Output is captured for the evidence line; the heartbeat ticks meanwhile so
         # a long, silent gate (e.g. a Docker-backed test suite) doesn't look hung.
         rc, output = progress.run_with_heartbeat(
             cmd, cwd=cwd, shell=True, env=_merged_env(env), capture=True, label=label,
+            status=lambda: progress.bundle_activity(watch),
         )
         result = "pass" if rc == 0 else "fail"
         evidence = output.strip().splitlines()[-1:] or [""]
@@ -124,6 +126,13 @@ _FIVE_FIVE_ONE = [
     ("T5", "T5 Judgment",                     "judgment", "reviewer + human sign-off"),
     ("V",  "Validation — fitness-to-purpose", "judgment", "human at sign-off"),
 ]
+
+
+def canonical_elements() -> list[tuple[str, str, str, str]]:
+    """The 11 elements of the 5/5/1 matrix — ``(element, label, kind, oracle)`` in
+    canonical order. Public so the Check reviewer leaf can mandate a verdict table
+    that mirrors exactly the matrix the gates assemble (single source of truth)."""
+    return list(_FIVE_FIVE_ONE)
 
 
 def _assemble_matrix(configured: list[dict], *, stub: bool) -> list[dict]:

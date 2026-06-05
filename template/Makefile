@@ -10,6 +10,11 @@
 #                   open Claude in your terminal — use a real terminal. Optional:
 #                   ACT=1 also runs the cross-cycle Act review; BY=<name> overrides
 #                   the §9 attribution (defaults to the project author).
+#   make batch IDS="123 456"
+#                   drive issues that are ALREADY briefed through the full cycle
+#                   (Do → Check → sign-off → publish → Act) — no Plan beat. Skips
+#                   ids with no brief or already complete. NOACT=1 stops after
+#                   sign-off; BY=<name> sets the §9 attribution.
 #   make rehearse ID=123 [CSV=…]
 #                   dry-run the SAME control flow with stub leaves + stub gates —
 #                   no Claude, no live gates (publish dry-runs too), instant.
@@ -34,7 +39,7 @@ export PYTHONPATH := src
 PDCA := $(PYTHON) -m pdca_harness.cli
 
 .DEFAULT_GOAL := test
-.PHONY: test check flow rehearse publish status cli install setup
+.PHONY: test check flow batch rehearse publish status cli install setup
 
 # --- the cycle -------------------------------------------------------------
 # Live, continuous, Claude-driven. Give ID for one issue, or just CSV for a batch
@@ -43,6 +48,12 @@ PDCA := $(PYTHON) -m pdca_harness.cli
 flow:
 	@test -n "$(ID)$(CSV)" || { echo 'usage: make flow ID=<issue-id> [CSV="<path>"] [ACT=1] [NO_PUBLISH=1] [BY=<name>]'; echo '   or: make flow CSV="<path>" [...]   (batch: Plan briefs several)'; exit 2; }
 	$(PDCA) flow $(ID) $(if $(CSV),--from-csv "$(CSV)") $(if $(NO_PUBLISH),--no-publish) $(if $(ACT),--act) $(if $(BY),--by "$(BY)")
+
+# Drive already-briefed issues through the full cycle, no Plan beat (Do → Check →
+# sign-off → publish → Act). NOACT=1 stops after sign-off; BY=<name> sets §9.
+batch:
+	@test -n "$(IDS)" || { echo 'usage: make batch IDS="<id> <id> ..." [NOACT=1] [BY=<name>]'; exit 2; }
+	$(PDCA) batch $(IDS) $(if $(NOACT),--no-act) $(if $(BY),--by "$(BY)")
 
 # Re-publish an accepted bundle as a draft PR (the flow does this on accept).
 publish:

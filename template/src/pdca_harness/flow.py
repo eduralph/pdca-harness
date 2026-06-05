@@ -101,33 +101,28 @@ def flow(
 
 
 # ----------------------------------------------------------------------------
-# Batch flow — one Plan session briefs several issues; build all, then sign off.
+# Shared multi-bundle driver: build all → cheap-first sign-off → publish → Act once.
 # ----------------------------------------------------------------------------
-def flow_batch(
+def _drive_and_act(
     cfg: Config,
+    bundles: list[Path],
     *,
-    csv: str | None = None,
-    do_publish: bool = True,
-    do_act: bool = False,
-    by: str = "",
-    today: str | None = None,
+    do_publish: bool,
+    do_act: bool,
+    by: str,
+    today: str,
     max_passes: int = 10,
 ) -> dict[str, str]:
-    """Plan many → build all (unattended) → cheap-first sign-off queue → Act once.
+    """Drive a fixed set of in-flight bundles through the full cycle to Act.
 
-    Returns ``{issue_id: final_state}`` for every bundle the Plan session created.
+    The shared body of both batch entry points: each pass builds / gates / reviews
+    every bundle unattended, then walks the cheap-first sign-off queue
+    (:func:`queue.awaiting_signoff`) interactively, restricted to this set; iteration
+    re-loops. When all are COMPLETE, publish runs per accepted bundle (Check's closing
+    step; dry-run when the publisher leaf is stubbed) and Act runs **once** across the
+    batch — the endpoint is Act, like any single cycle, just fanned over several bundles.
     """
-    today = today or datetime.date.today().isoformat()
-
-    before = _bundle_dirs(cfg)
-    leaves.do_plan_batch(cfg, csv)
-    new = sorted(_bundle_dirs(cfg) - before)
-    if not new:
-        print("flow: Plan produced no new briefs", file=sys.stderr)
-        return {}
-    bundles = [cfg.bundle_root / name for name in new]
     names = {b.name for b in bundles}
-
     for _ in range(max_passes):
         # Build-all (unattended): advance each bundle to AWAITING_SIGNOFF / COMPLETE.
         for d in bundles:
@@ -152,6 +147,84 @@ def flow_batch(
     if do_act and any(s == state.COMPLETE for s in results.values()):
         leaves.run_act(cfg, today)
     return results
+
+
+# ----------------------------------------------------------------------------
+# Batch flow — one Plan session briefs several issues; build all, then sign off.
+# ----------------------------------------------------------------------------
+def flow_batch(
+    cfg: Config,
+    *,
+    csv: str | None = None,
+    do_publish: bool = True,
+    do_act: bool = False,
+    by: str = "",
+    today: str | None = None,
+    max_passes: int = 10,
+) -> dict[str, str]:
+    """Plan many → drive every in-flight bundle to sign-off → publish → Act once. **Resumable.**
+
+    Runs the batch Plan session, then builds / checks / signs off EVERY bundle that
+    has work left — the ones this session briefed AND any already in flight — so
+    re-running ``flow --from-csv`` picks up where it left off instead of failing on
+    "no new briefs". COMPLETE bundles (done) and UNPLANNED ones (no brief — e.g. an
+    issue the planner chose to skip) are left alone. Returns ``{issue_id: state}``.
+    """
+    today = today or datetime.date.today().isoformat()
+
+    leaves.do_plan_batch(cfg, csv)
+    # Resume set: every bundle with a brief that isn't finished. UNPLANNED (skipped /
+    # un-briefed) and COMPLETE (done) are excluded, so a re-run is idempotent.
+    bundles = sorted(
+        (cfg.bundle_root / name for name in _bundle_dirs(cfg)
+         if state.state(cfg.bundle_root / name) not in (state.COMPLETE, state.UNPLANNED)),
+        key=lambda p: p.name,
+    )
+    if not bundles:
+        print("flow: nothing to do — no in-flight briefs (all COMPLETE or none authored; "
+              "brief new issues to add work).", file=sys.stderr)
+        return {}
+    return _drive_and_act(cfg, bundles, do_publish=do_publish, do_act=do_act, by=by,
+                          today=today, max_passes=max_passes)
+
+
+# ----------------------------------------------------------------------------
+# Id-seeded flow — drive specific already-briefed bundles, no Plan beat.
+# ----------------------------------------------------------------------------
+def flow_ids(
+    cfg: Config,
+    ids: list[str],
+    *,
+    do_publish: bool = True,
+    do_act: bool = False,
+    by: str = "",
+    today: str | None = None,
+    max_passes: int = 10,
+) -> dict[str, str]:
+    """Drive specific already-briefed bundles by id through the FULL cycle to Act.
+
+    Like :func:`flow_batch` but seeded by explicit ids with **no Plan beat** — the
+    bundles must already have a brief. Missing / un-briefed (UNPLANNED) ids are
+    skipped with a note (brief them at Plan first); already-COMPLETE ids are left
+    alone. Returns ``{issue_id: state}``.
+    """
+    today = today or datetime.date.today().isoformat()
+    bundles: list[Path] = []
+    for iid in ids:
+        d = cfg.bundle(iid)
+        s = state.state(d)
+        if not d.exists() or s == state.UNPLANNED:
+            print(f"flow: {d.name} — no brief.md, skipped (brief it at Plan first)", file=sys.stderr)
+            continue
+        if s == state.COMPLETE:
+            print(f"flow: {d.name} — already COMPLETE, skipped", file=sys.stderr)
+            continue
+        bundles.append(d)
+    if not bundles:
+        return {}
+    bundles.sort(key=lambda p: p.name)
+    return _drive_and_act(cfg, bundles, do_publish=do_publish, do_act=do_act, by=by,
+                          today=today, max_passes=max_passes)
 
 
 def _bundle_dirs(cfg: Config) -> set[str]:

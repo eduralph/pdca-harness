@@ -36,6 +36,32 @@ physically cannot patch what you judge.
   findings that do not ground.
 - Emit per item `PASS / FAIL / NEEDS-HUMAN` + one-line rationale + path:line.
 
+## Always emit the complete 5/5/1 verdict table
+
+`check-review.md` **must** contain one verdict row for **every** element of the
+5/5/1 matrix — never a partial list — as a Markdown table `| Item | Verdict |
+Basis |`. This is the canonical order the gates assemble; mirror it exactly:
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | … | … |
+| C2 Reproduction (red pre-fix) | … | … |
+| C3 Change | … | … |
+| C4 Verification (red→green) | … | … |
+| C5 Causal adequacy | … | … |
+| T1 Structure | … | … |
+| T2 Shape | … | … |
+| T3 Runtime | … | … |
+| T4 Contribution | … | … |
+| T5 Judgment | … | … |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | … |
+
+Verdict is `PASS / FAIL / NEEDS-HUMAN / N/A`; Basis is the one line you
+re-derived (cite `path:line` where you can). Use `N/A` with a reason when an
+element does not apply — **do not drop the row.** The harness lifts every
+NEEDS-HUMAN row into `SUMMARY.md` §6, so a row you omit is a verdict the human
+never sees.
+
 ## Emit NEEDS-HUMAN by design on
 
 Validation fitness-to-purpose; contested symptom-vs-root-cause; semantic

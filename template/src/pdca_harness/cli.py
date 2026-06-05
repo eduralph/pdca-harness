@@ -50,9 +50,11 @@ def main(argv: list[str] | None = None) -> int:
     p_status = sub.add_parser("status", help="list bundle states (cheap-first queue)")
     p_status.add_argument("issue_id", nargs="?")
 
-    p_batch = sub.add_parser("batch", help="fan the driver over N issues, then show the queue")
+    p_batch = sub.add_parser("batch", help="drive already-briefed issues through the full cycle (Do→Check→sign-off→Act)")
     p_batch.add_argument("issue_ids", nargs="+")
     p_batch.add_argument("--from-briefs", type=Path, help="init missing bundles from DIR/<id>.md")
+    p_batch.add_argument("--no-act", action="store_true", help="stop after sign-off; skip the end-of-batch Act")
+    p_batch.add_argument("--by", default="", help="who signed off (recorded in §9)")
 
     sub.add_parser("queue", help="the cheap-first sign-off burn-down (AWAITING_SIGNOFF)")
 
@@ -202,33 +204,36 @@ def _status(cfg: Config, issue_id: str | None) -> int:
 
 
 def _batch(cfg: Config, args: argparse.Namespace) -> int:
-    """Run each issue's body through to a parked state, then print the queue.
+    """Drive specific already-briefed issues through the FULL cycle, ending at Act.
 
-    Resumable: run_issue is idempotent, so re-running a batch only advances
-    bundles that have new work. Plan (authoring briefs) and sign-off stay human.
+    Like `flow` but seeded by explicit ids with no Plan beat: each bundle runs
+    Do → Check → interactive sign-off (C6-guarded), walked cheap-first across the
+    set, then Act runs once at the end (skip with --no-act). `--from-briefs` inits
+    any missing bundle from DIR/<id>.md first. Resumable — already-COMPLETE ids are
+    skipped, so re-running picks up whatever is still in flight.
     """
-    tally: dict[str, int] = {}
+    # Seed any missing bundles from --from-briefs; sign-off and Act stay human.
     for issue_id in args.issue_ids:
         d = cfg.bundle(issue_id)
-        if not d.exists():
-            if args.from_briefs:
-                src = args.from_briefs / f"{issue_id}.md"
-                if not src.exists():
-                    print(f"  skip {issue_id}: no brief at {src}", file=sys.stderr)
-                    tally["skipped"] = tally.get("skipped", 0) + 1
-                    continue
-                d.mkdir(parents=True)
-                shutil.copyfile(src, d / "brief.md")
-            else:
-                print(f"  skip {issue_id}: no bundle (author brief.md first, or --from-briefs)", file=sys.stderr)
-                tally["skipped"] = tally.get("skipped", 0) + 1
-                continue
-        final = driver.run_issue(d, cfg)
-        tally[final] = tally.get(final, 0) + 1
-        print(f"{final:18}{d.name}")
-    print("\nbatch tally: " + ", ".join(f"{k}={v}" for k, v in sorted(tally.items())))
-    print()
-    return _queue(cfg)
+        if d.exists() or not args.from_briefs:
+            continue
+        src = args.from_briefs / f"{issue_id}.md"
+        if not src.exists():
+            print(f"  skip {issue_id}: no brief at {src}", file=sys.stderr)
+            continue
+        d.mkdir(parents=True)
+        shutil.copyfile(src, d / "brief.md")
+
+    results = flow.flow_ids(cfg, args.issue_ids, do_act=not args.no_act, by=args.by)
+    if not results:
+        print("batch: nothing to drive — no briefed, non-complete bundles among the ids "
+              "(brief them at Plan first, or pass --from-briefs).", file=sys.stderr)
+        return 0
+    for iid, st in sorted(results.items()):
+        print(f"{st}\t{iid}")
+    done = sum(1 for s in results.values() if s == state.COMPLETE)
+    print(f"batch: {done}/{len(results)} complete")
+    return 0 if done == len(results) else 1
 
 
 def _queue(cfg: Config) -> int:

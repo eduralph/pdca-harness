@@ -41,6 +41,7 @@ from pathlib import Path
 
 from . import act as act_mod
 from . import brief
+from . import gates
 from . import progress
 from .config import Config, LeafConfig
 
@@ -56,7 +57,14 @@ VALID_DECISIONS = frozenset({"accept", "iterate-do", "iterate-plan"})
 # ----------------------------------------------------------------------------
 # Subprocess invocation — the one place a leaf command is run.
 # ----------------------------------------------------------------------------
-def _invoke(leaf: LeafConfig, workdir: Path, prompt: str) -> None:
+def _invoke(
+    leaf: LeafConfig,
+    workdir: Path,
+    prompt: str,
+    *,
+    label: str = "",
+    status=None,
+) -> None:
     """Run the leaf's configured command in ``workdir``, feeding it ``prompt``.
 
     Interactive leaves get the prompt as a *seed positional* (``claude "<prompt>"``)
@@ -64,6 +72,9 @@ def _invoke(leaf: LeafConfig, workdir: Path, prompt: str) -> None:
     the session) is not fatal. Headless leaves get the prompt on **stdin**, not as
     a trailing positional — a variadic option such as ``--allowedTools`` would
     otherwise swallow the prompt arg (claude then errors "Input must be provided…").
+
+    ``label`` / ``status`` decorate the headless heartbeat (which leaf, and a live
+    snapshot of its work — see :func:`progress.bundle_activity`).
     """
     argv = list(leaf.argv)
     if leaf.interactive:
@@ -72,7 +83,8 @@ def _invoke(leaf: LeafConfig, workdir: Path, prompt: str) -> None:
     # Headless: feed the prompt on stdin (a trailing positional would be swallowed
     # by a variadic --allowedTools) and tick a heartbeat, since `claude -p` prints
     # nothing until it finishes (minutes) and would otherwise look hung.
-    rc, _ = progress.run_with_heartbeat(argv, cwd=workdir, input_text=prompt)
+    rc, _ = progress.run_with_heartbeat(
+        argv, cwd=workdir, input_text=prompt, label=label, status=status)
     if rc != 0:
         raise subprocess.CalledProcessError(rc, argv)
 
@@ -191,7 +203,13 @@ def _stub_plan_batch(cfg: Config) -> None:
 # ----------------------------------------------------------------------------
 def do_build(d: Path, cfg: Config) -> None:
     if cfg.builder.mode == "command":
-        _invoke(cfg.builder, cfg.root, _build_prompt(d))
+        # The builder runs from cfg.root but writes into the bundle d — watch d so the
+        # heartbeat shows patch.diff / build-notes.md appearing as it works.
+        _invoke(
+            cfg.builder, cfg.root, _build_prompt(d),
+            label=f"Do {d.name}",
+            status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
+        )
         return
     _stub_build(d, cfg)
 
@@ -202,8 +220,11 @@ def _build_prompt(d: Path) -> str:
         f"{d}: (1) patch.diff — a unified diff against the brief's target branch; "
         "(2) the test file the brief names, red before the fix and green after; "
         "(3) build-notes.md — your rationale (withheld from the reviewer). Cite "
-        "path:line on the target branch for every change. Do NOT push, open, or mark "
-        "any PR ready."
+        "path:line on the target branch for every change. To run the test red→green, "
+        "use the project's own test runner (it provides the environment AND a timeout); "
+        "do NOT hand-roll a `docker run` / raw container command — a containerized test "
+        "with the wrong env (no display / bus / deps) can hang forever and stall the "
+        "cycle. Do NOT push, open, or mark any PR ready."
     )
 
 
@@ -241,9 +262,17 @@ def reviewer_input_paths(d: Path) -> list[Path]:
 _REVIEW_PROMPT = (
     "You are the Check reviewer — advisory, artifact-only, decorrelated from the "
     "builder. You have ONLY patch.diff, brief.md and check-gates.json in this "
-    "directory (build-notes.md is deliberately withheld). Write check-review.md with "
-    "per-item verdicts: PASS / FAIL / NEEDS-HUMAN. Re-derive evidence yourself; emit "
-    "NEEDS-HUMAN for always-human items (fitness-to-purpose, ambiguous scope)."
+    "directory (build-notes.md is deliberately withheld). Write check-review.md. "
+    "It MUST contain a complete verdict table — one row for EVERY element of the "
+    "5/5/1 matrix, in order:\n"
+    + "\n".join(f"  {elem} — {label}" for elem, label, _kind, _oracle in gates.canonical_elements())
+    + "\nFormat it as a Markdown table `| Item | Verdict | Basis |`, the Item column "
+    "carrying the element label above, the Verdict one of PASS / FAIL / NEEDS-HUMAN / "
+    "N/A, the Basis a one-line reason you re-derived yourself (cite path:line where "
+    "you can). Emit NEEDS-HUMAN for the always-human items (validation "
+    "fitness-to-purpose, contested root-cause, ambiguous scope) — each NEEDS-HUMAN "
+    "row becomes a §6 item the human must clear. Do not omit a row; use N/A with a "
+    "reason when an element does not apply."
 )
 
 
@@ -270,25 +299,49 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
             src = d / name
             if src.exists():
                 shutil.copy2(src, sandbox / name)
-        _invoke(cfg.reviewer, sandbox, _REVIEW_PROMPT)
+        _invoke(
+            cfg.reviewer, sandbox, _REVIEW_PROMPT,
+            label=f"Check review {d.name}",
+            status=lambda: progress.bundle_activity(sandbox, ("check-review.md",)),
+        )
         produced = sandbox / "check-review.md"
         if produced.exists():
             shutil.copy2(produced, d / "check-review.md")
 
 
+# Stub bases per 5/5/1 element — what a real reviewer would re-derive; the offline
+# stub asserts the same complete table shape every command-mode reviewer must emit.
+_STUB_BASIS = {
+    "C1": "brief.md present and parsed",
+    "C2": "stub: reproduction red pre-fix",
+    "C3": "patch.diff present — one logical fix",
+    "C4": "stub red→green confirmed",
+    "C5": "stub: fix addresses the cited root cause",
+    "T1": "bundle structure complete",
+    "T2": "no forbidden constructs",
+    "T3": "imports resolve in a clean env",
+    "T4": "commit-msg / branch-target / version conform",
+    "T5": "conformance judgment clear",
+    "V":  "is this the right thing at all? (always-human by design)",
+}
+
+
 def _stub_review(d: Path, cfg: Config) -> None:
-    # Model-decidable items the reviewer attempts (all PASS in the stub) plus the
-    # always-human items it flags NEEDS-HUMAN by design (docs 04 §judgment cell).
+    # Emit the SAME complete 5/5/1 verdict table the command-mode reviewer must
+    # produce: every element a row, all PASS except the always-human validation cell
+    # (NEEDS-HUMAN by design — it becomes the §6 item the human clears).
+    rows = ["| Item | Verdict | Basis |", "|------|---------|-------|"]
+    for elem, label, _kind, _oracle in gates.canonical_elements():
+        verdict = "NEEDS-HUMAN" if elem == "V" else "PASS"
+        rows.append(f"| {label} | {verdict} | {_STUB_BASIS.get(elem, '')} |")
     (d / "check-review.md").write_text(
         "# Cross-vendor reviewer (advisory, artifact-only)\n\n"
         f"Reviewer family: {cfg.reviewer.family or 'stub'}. "
         "Inputs: patch.diff, brief.md, check-gates.json (build-notes.md withheld).\n\n"
-        "## Per-item verdicts\n"
-        "- PASS — re-ran asserted evidence: stub red→green confirmed.\n"
-        "- PASS — every cited path:line grounds on the target branch.\n"
-        "- PASS — diff stays within one logical fix (model-decidable).\n"
-        "- NEEDS-HUMAN — validation fitness-to-purpose: is this the right thing "
-        "at all? (always-human by design)\n",
+        "## Per-item verdicts (5 correctness · 5 conformance · 1 validation)\n"
+        + "\n".join(rows)
+        + "\n\nValidation fitness-to-purpose stays NEEDS-HUMAN by design — the human "
+        "decides at sign-off.\n",
         encoding="utf-8",
     )
 

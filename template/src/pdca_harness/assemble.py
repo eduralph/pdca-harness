@@ -85,11 +85,33 @@ def _gate_lines(gates: dict, *, prefix: str) -> str:
 
 
 def _needs_human(review_text: str) -> list[str]:
-    items = []
+    """Every reviewer NEEDS-HUMAN → a §6 item, order-preserving and deduped.
+
+    The reviewer always emits the 5/5/1 verdict table (see leaves._REVIEW_PROMPT);
+    a table row whose verdict cell is NEEDS-HUMAN becomes a §6 item (Item — Basis).
+    Legacy ``- NEEDS-HUMAN — …`` bullet lines are still honoured.
+    """
+    items: list[str] = []
+    seen: set[str] = set()
+
+    def add(text: str) -> None:
+        text = text.strip()
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            items.append(text)
+
     for line in review_text.splitlines():
         s = line.strip()
         if s.startswith("- NEEDS-HUMAN"):
-            items.append(s[len("- NEEDS-HUMAN"):].lstrip(" —:-").strip())
+            add(s[len("- NEEDS-HUMAN"):].lstrip(" —:-").strip())
+        elif s.startswith("|") and "needs-human" in s.lower():
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            vi = next((i for i, c in enumerate(cells) if "needs-human" in c.lower()), None)
+            if vi is None:
+                continue
+            label = cells[0] if cells else ""
+            basis = cells[vi + 1] if vi + 1 < len(cells) else ""
+            add(f"{label} — {basis}" if basis else label)
     return items
 
 

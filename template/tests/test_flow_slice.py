@@ -140,6 +140,52 @@ class FlowSlice(unittest.TestCase):
         self.assertEqual(set(results), {"BATCH1", "BATCH2"})
         self.assertTrue(all(s == state.COMPLETE for s in results.values()))
 
+    def test_batch_resumes_in_flight_bundle_not_briefed_this_session(self) -> None:
+        # A bundle briefed in a PRIOR session (RESUME) is in flight; this session's
+        # Plan only briefs BATCH1/BATCH2. flow_batch must pick RESUME up too — the
+        # resume set is "every in-flight brief", not just the ones planned just now.
+        leaves.do_plan(self.cfg.bundle("RESUME"), self.cfg)  # pre-existing brief
+        results = flow.flow_batch(self.cfg, today="2026-06-04")
+        self.assertEqual(set(results), {"BATCH1", "BATCH2", "RESUME"})
+        self.assertTrue(all(s == state.COMPLETE for s in results.values()))
+
+    def test_batch_leaves_complete_bundle_alone_on_rerun(self) -> None:
+        # First run completes BATCH1/BATCH2. A second run re-briefs them (stub) but
+        # they are already COMPLETE, so the resume set excludes them → nothing to do.
+        first = flow.flow_batch(self.cfg, today="2026-06-04")
+        self.assertTrue(all(s == state.COMPLETE for s in first.values()))
+        second = flow.flow_batch(self.cfg, today="2026-06-04")
+        self.assertEqual(second, {})  # no in-flight briefs left → nothing to do
+
+    def test_batch_nothing_to_do_returns_empty(self) -> None:
+        # Plan that briefs nothing + no existing bundles → empty, no crash.
+        orig = leaves.do_plan_batch
+        leaves.do_plan_batch = lambda cfg, csv=None: None
+        try:
+            results = flow.flow_batch(self.cfg, today="2026-06-04")
+        finally:
+            leaves.do_plan_batch = orig
+        self.assertEqual(results, {})
+
+    def test_flow_ids_drives_prebriefed_to_complete(self) -> None:
+        # `pdca batch <ids>`: drive already-briefed bundles with NO Plan beat.
+        for iid in ("ID1", "ID2"):
+            leaves.do_plan(self.cfg.bundle(iid), self.cfg)  # pre-brief, no plan in flow
+        results = flow.flow_ids(self.cfg, ["ID1", "ID2"], today="2026-06-04")
+        self.assertEqual(set(results), {"ID1", "ID2"})
+        self.assertTrue(all(s == state.COMPLETE for s in results.values()))
+
+    def test_flow_ids_skips_unbriefed_and_missing(self) -> None:
+        # An id with no brief (UNPLANNED dir) and a non-existent id are both skipped;
+        # only the briefed id is driven.
+        leaves.do_plan(self.cfg.bundle("HASBRIEF"), self.cfg)
+        self.cfg.bundle("NOBRIEF").mkdir(parents=True)  # exists but UNPLANNED
+        results = flow.flow_ids(
+            self.cfg, ["HASBRIEF", "NOBRIEF", "GHOST"], today="2026-06-04"
+        )
+        self.assertEqual(set(results), {"HASBRIEF"})
+        self.assertEqual(results["HASBRIEF"], state.COMPLETE)
+
 
 class DesignProposalBrief(unittest.TestCase):
     """A GEPS-style feature brief is a richer Plan artifact, not a separate track."""

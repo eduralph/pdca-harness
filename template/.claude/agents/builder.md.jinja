@@ -34,6 +34,20 @@ context beyond what the brief cites. Narrow input is deliberate.
 
 Cite `path:line` on the target branch for every claim and change.
 
+## Running the test — use the project's runner, never a hand-rolled `docker run`
+
+To confirm the test goes red→green, run it through **the project's own test
+runner** (the wrapper `pdca.toml` and `docs/INTEGRATION.md` name — e.g. a
+`scripts/run-tests` entry point, `make test`, `tox`, the configured gate `cmd`).
+Do **NOT** assemble your own `docker run … && python -m pytest …` (or any bare
+container/`xvfb`/ad-hoc invocation). The project runner provides the environment
+the test needs (display, session bus, fixtures, dependencies) **and** a
+**timeout** that kills a hung run. A hand-rolled `docker run` gets neither: it
+can miss the environment and silently pass the wrong thing, or **hang forever**
+with no timeout, stalling the whole Do beat. This pre-fix/post-fix check is a
+fast sanity pass — Check's gates re-run the real suite — so a single quick run
+through the wrapper is enough; you needn't run full suites here.
+
 ## STOP discipline — enforced, not asked
 
 You MAY push to a feature/draft branch and open a **draft** PR (`gh pr create
