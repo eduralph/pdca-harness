@@ -140,6 +140,41 @@ class FlowSlice(unittest.TestCase):
         self.assertEqual(set(results), {"BATCH1", "BATCH2"})
         self.assertTrue(all(s == state.COMPLETE for s in results.values()))
 
+    def test_batch_sweep_defers_iteration_to_next_pass(self) -> None:
+        # apply_now=False (the batch sweep) records an iterate-do but does NOT drive
+        # the rebuild on the spot — so the human reviews the rest of the queue first;
+        # the next pass's build-all applies it. Spy on driver.run_issue to prove the
+        # sweep call doesn't trigger a transition.
+        d = self.cfg.bundle("DEFER")
+        leaves.do_plan(d, self.cfg)
+        self.assertEqual(driver.run_issue(d, self.cfg), state.AWAITING_SIGNOFF)
+
+        def signoff_iter(d: Path, cfg: Config) -> None:
+            (d / leaves.SIGNOFF_DECISION).write_text("iterate-do\n", encoding="utf-8")
+
+        calls = {"n": 0}
+        orig_run, orig_signoff = driver.run_issue, leaves.run_signoff
+        leaves.run_signoff = signoff_iter
+        driver.run_issue = lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1)
+                                            or orig_run(*a, **k))
+        try:
+            action = flow._signoff_and_apply(
+                self.cfg, d, by="t", today="2026-06-04", apply_now=False
+            )
+        finally:
+            driver.run_issue, leaves.run_signoff = orig_run, orig_signoff
+        self.assertEqual(action, "iterate-do")
+        self.assertEqual(calls["n"], 0)  # deferred — no rebuild during the sweep
+        # And the default (single-issue flow) DOES apply immediately.
+        leaves.run_signoff = signoff_iter
+        driver.run_issue = lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1)
+                                            or orig_run(*a, **k))
+        try:
+            flow._signoff_and_apply(self.cfg, d, by="t", today="2026-06-04")
+        finally:
+            driver.run_issue, leaves.run_signoff = orig_run, orig_signoff
+        self.assertEqual(calls["n"], 1)  # apply_now default drove the transition
+
     def test_batch_resumes_in_flight_bundle_not_briefed_this_session(self) -> None:
         # A bundle briefed in a PRIOR session (RESUME) is in flight; this session's
         # Plan only briefs BATCH1/BATCH2. flow_batch must pick RESUME up too — the
