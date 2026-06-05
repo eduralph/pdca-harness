@@ -42,18 +42,18 @@ def run_working_tree(cfg: Config) -> dict:
 
 # ----------------------------------------------------------------------------
 def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[str, ...]) -> list[dict]:
+    # No configured gates → the offline stub: the full 5/5/1 with the mechanical
+    # gate elements stub-passed (so the offline slice runs green).
     if not cfg.gates_checks:
-        return _stub_rows(bundle) if bundle is not None else _stub_repo_rows()
+        return _assemble_matrix([], stub=True)
 
-    rows: list[dict] = []
+    configured: list[dict] = []
     for chk in cfg.gates_checks:
-        scope = chk.get("scope", "repo")
-        if scope not in scopes:
+        if chk.get("scope", "repo") not in scopes:
             continue
-        rows.append(_run_one(chk, cwd=cwd, bundle=bundle))
-    # Judgment cells are always recorded for matrix alignment (never gating).
-    rows += _judgment_rows()
-    return rows
+        configured.append(_run_one(chk, cwd=cwd, bundle=bundle))
+    # Overlay the configured gate results onto the complete 5/5/1 matrix.
+    return _assemble_matrix(configured, stub=False)
 
 
 def _run_one(chk: dict, *, cwd: Path, bundle: Path | None) -> dict:
@@ -75,7 +75,7 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None) -> dict:
     return _row(
         f"{chk.get('tier', '?')} {chk.get('label', chk.get('id', ''))}",
         result, oracle=cmd, rule_id=chk.get("id", ""),
-        path_line=evidence[0][:120], gating=gating,
+        path_line=evidence[0][:120], gating=gating, element=chk.get("tier", ""),
     )
 
 
@@ -96,60 +96,88 @@ def _finalize(rows: list[dict], *, name: str, write_to: Path | None) -> dict:
     return result
 
 
-def _row(check, result, oracle, rule_id="", path_line="", gating=False) -> dict:
+def _row(check, result, oracle, rule_id="", path_line="", gating=False, element="") -> dict:
     return {
         "check": check, "result": result, "oracle": oracle,
-        "rule_id": rule_id, "path_line": path_line, "gating": gating,
+        "rule_id": rule_id, "path_line": path_line, "gating": gating, "element": element,
     }
 
 
-def _judgment_rows() -> list[dict]:
-    # C1/C3 inputs + C5/T5/validation judgment cells: recorded, never gating.
-    return [
-        _row("C5 causal adequacy", "none", "reviewer + human sign-off"),
-        _row("T5 judgment", "none", "reviewer + human sign-off"),
-        _row("Validation act", "none", "human at sign-off"),
-    ]
-
-
 # ----------------------------------------------------------------------------
-# Stub rows — used only when no [[gates.checks]] are configured (offline slice).
+# The Check 5/5/1 — 5 correctness + 5 conformance + 1 validation. Every
+# validation output enumerates all eleven so the matrix is always complete:
+# configured gates fill their element (matched by tier); the rest show as input
+# (C1/C3), judgment (C5/T5/validation — reviewer + human), or not-configured.
+# (docs 04 §The 5/5/1 × tooling-shape matrix)
 # ----------------------------------------------------------------------------
-def _stub_rows(bundle: Path) -> list[dict]:
-    return [
-        _row("C1 spec", "none", "brief.md"),
-        _row("C2 repro (red pre-fix)", "pass", "fixture (stub)", path_line="examples/toy", gating=True),
-        _row("C3 change", "none", "patch.diff"),
-        _row("C4 verification (green post-fix)", "pass", "shipped test (stub)", gating=True),
-        _row("C4 regression", "pass", "existing suite (stub)", gating=True),
-        *(_row(f"T{n} {label}", "pass", f"{oracle} (stub)", rule_id=f"T{n}-stub", gating=True)
-          for n, label, oracle in (
-              (1, "structure", "structural validator"),
-              (2, "shape", "semgrep"),
-              (3, "runtime", "find_spec / clean-env suite"),
-              (4, "contribution", "commit-msg / branch-target / version-bump"),
-          )),
-        *_judgment_rows(),
-    ]
+_FIVE_FIVE_ONE = [
+    # (element, label, kind, default-oracle)   kind ∈ input | gate | judgment
+    ("C1", "C1 Spec",                         "input",    "brief.md"),
+    ("C2", "C2 Reproduction (red pre-fix)",   "gate",     "fixture + repro runner"),
+    ("C3", "C3 Change",                       "input",    "patch.diff"),
+    ("C4", "C4 Verification (red→green)",     "gate",     "shipped test + regression suite"),
+    ("C5", "C5 Causal adequacy",              "judgment", "reviewer + human sign-off"),
+    ("T1", "T1 Structure",                    "gate",     "structural validator"),
+    ("T2", "T2 Shape",                        "gate",     "semgrep / AST scanner"),
+    ("T3", "T3 Runtime",                      "gate",     "dependency resolution + clean-env suite"),
+    ("T4", "T4 Contribution",                 "gate",     "commit-msg / branch-target / version-bump"),
+    ("T5", "T5 Judgment",                     "judgment", "reviewer + human sign-off"),
+    ("V",  "Validation — fitness-to-purpose", "judgment", "human at sign-off"),
+]
 
 
-def _stub_repo_rows() -> list[dict]:
-    return [r for r in _stub_rows(Path(".")) if r["gating"]] + _judgment_rows()
+def _assemble_matrix(configured: list[dict], *, stub: bool) -> list[dict]:
+    """Overlay configured gate rows onto the complete 5/5/1, in canonical order.
+
+    A 5/5/1 element with one or more configured gates (matched by tier) shows
+    those gate rows; an uncovered *gate* element shows a stub-pass row (offline
+    slice) or a 'no gate configured' row; input and judgment elements always show
+    their non-gating placeholder.
+    """
+    by_elem: dict[str, list[dict]] = {}
+    for r in configured:
+        by_elem.setdefault(r.get("element", ""), []).append(r)
+
+    rows: list[dict] = []
+    for elem, label, kind, oracle in _FIVE_FIVE_ONE:
+        if elem in by_elem:
+            rows.extend(by_elem[elem])
+        elif kind in ("input", "judgment"):
+            rows.append(_row(label, "none", oracle, element=elem))
+        elif stub:
+            rows.append(_row(f"{label} (stub)", "pass", f"{oracle} (stub)",
+                             rule_id=f"{elem}-stub", gating=True, element=elem))
+        else:
+            rows.append(_row(label, "none", "(no gate configured)", element=elem))
+    return rows
 
 
 def render_md(result: dict) -> str:
+    """Render the validation output as the Check 5/5/1 — Correctness, Conformance,
+    Validation — so every element of the matrix is visible (docs 04)."""
     lines = [
         f"# Check gates — {result['issue_dir']}",
         "",
         f"**Overall (gating): {result['overall']}**",
         "",
-        "| Check | Result | Oracle | Rule | Evidence | Gating |",
-        "|---|---|---|---|---|---|",
+        "The Check 5/5/1: 5 correctness · 5 conformance · 1 validation.",
     ]
-    for r in result["rows"]:
-        lines.append(
-            f"| {r['check']} | {r['result']} | {r['oracle']} | "
-            f"{r['rule_id'] or '—'} | {r['path_line'] or '—'} | "
-            f"{'yes' if r['gating'] else 'no'} |"
-        )
+
+    def section(title: str, keep) -> None:
+        rows = [r for r in result["rows"] if keep(r["check"])]
+        if not rows:
+            return
+        lines.extend(["", f"## {title}", "",
+                      "| Check | Result | Oracle | Rule | Evidence | Gating |",
+                      "|---|---|---|---|---|---|"])
+        for r in rows:
+            lines.append(
+                f"| {r['check']} | {r['result']} | {r['oracle']} | "
+                f"{r['rule_id'] or '—'} | {r['path_line'] or '—'} | "
+                f"{'yes' if r['gating'] else 'no'} |"
+            )
+
+    section("Correctness (5)", lambda c: c.startswith("C"))
+    section("Conformance (5)", lambda c: c.startswith("T"))
+    section("Validation (1)", lambda c: not (c.startswith("C") or c.startswith("T")))
     return "\n".join(lines) + "\n"
