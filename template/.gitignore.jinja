@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Claude — machine-local permissions/paths, never publish (any depth, incl. bundles)
+settings.local.json
+**/.claude/settings.local.json
+
+# Runtime / generated artifacts (regenerable)
+.rehearse/
+results/issue_selftest/
+*.log
