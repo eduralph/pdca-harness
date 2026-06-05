@@ -1,15 +1,21 @@
 """The model leaves — the only points where a model is invoked (docs 03 §leaves).
 
 The rest of the pipeline is deterministic code; models fill *artifacts*, never
-decide control flow. There are five leaves across the cycle:
+decide control flow. The cycle has exactly **four beats** (Plan · Do · Check · Act);
+the leaves are model touchpoints *within* those beats, not beats of their own — in
+particular review, sign-off and publish are all **steps of the Check beat**. The six
+leaves:
 
 * **planner** (Plan, interactive) — the human feeds documents (e.g. a tracker CSV)
   and Claude writes ``brief.md``;
 * **builder** (Do, headless) — reads ``brief.md``, writes ``patch.diff`` + the
   named test + ``build-notes.md``;
-* **reviewer** (Check, headless) — advisory, decorrelated, writes ``check-review.md``;
-* **signoff** (Check sign-off, interactive) — Claude reviews the result *with* the
-  human and records the decision token;
+* **reviewer** (Check — review step, headless) — advisory, decorrelated, writes
+  ``check-review.md``;
+* **signoff** (Check — sign-off step, interactive) — Claude reviews the result
+  *with* the human and records the decision token;
+* **publisher** (Check — publish step, interactive) — on an accepted bundle, writes
+  the contribution artifacts (the ``publish`` module does the git/draft-PR);
 * **act** (Act, interactive) — reviews frozen cycles and proposes process deltas.
 
 Two invariants live here and matter more than any prompt:
@@ -85,16 +91,41 @@ def do_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
 def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
     fix_tpl = cfg.templates_dir / "brief.md.tpl"
     geps_tpl = cfg.templates_dir / "design-proposal.md.tpl"
-    src = f"The human will share input documents (e.g. the tracker CSV at {csv})." if csv \
-        else "The human will share the input documents for this issue."
+    issue_id = d.name.removeprefix("issue_")
+    tracker_csv = csv or cfg.tracker_export_csv
+    notes = d / "notes.json"
+    # Source of truth = the tracker row for THIS issue, not a scan of the harness repo.
+    src_line = (
+        f"The issue is {issue_id} on the {cfg.tracker_system or 'tracker'}"
+        + (f" ({cfg.tracker_url}). " if cfg.tracker_url else ". ")
+    )
+    csv_line = (
+        f"Read the row for {issue_id} in the tracker export at '{tracker_csv}' FIRST — "
+        "that row (summary / description / steps) is the authoritative statement of what "
+        "to brief. " if tracker_csv else
+        "Ask the human for the issue's tracker export or details. "
+    )
+    notes_line = (
+        f"If {notes} exists, read it for the full comment thread; if you need the "
+        "discussion and it is absent, ask the human to produce it with the project's "
+        "tracker-scrape tooling, and stop. "
+    )
+    citation_line = (
+        "Cite the root cause against the target source with `git -C <checkout> log/show "
+        "-- <file>` plus Read/Grep on the checkout — NEVER `cd <checkout> && git ...` "
+        "(it trips a safety prompt; `git -C` is the safe idiom). Do NOT scan THIS harness "
+        "repo for issue information — the tracker is the source. "
+    )
     return (
-        "You are the Plan leaf of a PDCA cycle. " + src + " Together with the human, "
-        f"decide what to brief, then write brief.md in the bundle directory {d}. Default to "
-        f"{fix_tpl} — it fits bug fixes AND ordinary new functionality. Use {geps_tpl} "
-        "(a GEPS-style design proposal) ONLY for the exception: a change significant "
-        "enough to warrant a proposal (major architecture / API / UX). Not every "
-        "feature is a GEPS — when in doubt use the normal brief. Either way keep the "
-        "parsed `- **Label:** value` field shape. One bundle = one brief.md. Plan only."
+        "You are the Plan leaf of a PDCA cycle. " + src_line + csv_line + notes_line
+        + citation_line
+        + f"Together with the human, write brief.md in the bundle directory {d}. Default "
+        f"to {fix_tpl} — it fits bug fixes AND ordinary new functionality. Use {geps_tpl} "
+        "(a design proposal) ONLY for the exception: a change significant enough to "
+        "warrant a proposal (major architecture / API / UX). Not every feature is a "
+        "design proposal — when in doubt use the normal brief. Keep the parsed "
+        "`- **Label:** value` field shape; resolve the repo + branch target per "
+        "INTEGRATION §2. One bundle = one brief.md. Plan only."
     )
 
 
@@ -131,15 +162,19 @@ def do_plan_batch(cfg: Config, csv: str | None = None) -> None:
 def _plan_batch_prompt(cfg: Config, csv: str | None) -> str:
     fix_tpl = cfg.templates_dir / "brief.md.tpl"
     geps_tpl = cfg.templates_dir / "design-proposal.md.tpl"
-    src = f"the tracker CSV at {csv}" if csv else "the input documents the human shares"
+    tracker_csv = csv or cfg.tracker_export_csv
+    src = f"the tracker export at '{tracker_csv}'" if tracker_csv \
+        else "the input documents the human shares"
     return (
         "You are the Plan leaf of a PDCA cycle, in BATCH mode. With the human, read "
-        f"{src} and decide which issues to brief — there may be SEVERAL. For EACH "
-        f"chosen issue create a bundle directory `{cfg.bundle_root}/issue_<id>/` "
-        "containing a brief.md — use the fitting template: a bug fix → "
-        f"{fix_tpl}; a feature / enhancement → {geps_tpl}. Keep the parsed "
-        "`- **Label:** value` field shape; `<id>` is the tracker id. One issue = one "
-        "`issue_<id>/brief.md`. Plan only — do not implement."
+        f"{src} on the {cfg.tracker_system or 'tracker'} and decide which issues to brief "
+        "— there may be SEVERAL. The tracker rows are the source of truth: do NOT scan "
+        "THIS harness repo for issue info, and cite the target source via "
+        "`git -C <checkout> ...` (never `cd <checkout> && ...`). For EACH chosen issue "
+        f"create a bundle directory `{cfg.bundle_root}/issue_<id>/` containing a brief.md "
+        f"— use the fitting template: a bug fix → {fix_tpl}; a feature / enhancement → "
+        f"{geps_tpl}. Keep the parsed `- **Label:** value` field shape; `<id>` is the "
+        "tracker id. One issue = one `issue_<id>/brief.md`. Plan only — do not implement."
     )
 
 
@@ -325,3 +360,62 @@ def _stub_act(cfg: Config, date: str) -> None:
     entries = act_mod.index(cfg)
     text = act_mod.scaffold_entry(entries, act_mod.patterns(entries), date=date)
     act_mod.append_entry(cfg, text)
+
+
+# ----------------------------------------------------------------------------
+# Leaf 5 — Publish (publisher, interactive): the closing STEP of Check.
+# Writes the two contribution artifacts (commit-msg.txt + pr-description.md, the
+# T4 gate's inputs); the deterministic `publish` module does the git/draft-PR.
+# ----------------------------------------------------------------------------
+def run_publish(d: Path, cfg: Config) -> None:
+    if cfg.publisher.mode == "command":
+        _invoke(cfg.publisher, cfg.root, _publish_prompt(d, cfg))
+        return
+    _stub_publish(d, cfg)
+
+
+def _publish_prompt(d: Path, cfg: Config) -> str:
+    issue_id = d.name.removeprefix("issue_")
+    target = brief.field(d / "brief.md", "repo + branch target", "target")
+    pr_tpl = cfg.templates_dir / "pr-description.md.tpl"
+    trailer = cfg.issue_trailer.format(id=issue_id) if cfg.issue_trailer else ""
+    trailer_line = (
+        f"The LAST line of commit-msg.txt is the issue trailer `{trailer}` (the T4 gate "
+        "enforces it); a Co-Authored-By line, if any, goes ABOVE it. " if trailer else ""
+    )
+    return (
+        "You are the Publish leaf — the closing work of Check. The fix for issue "
+        f"{issue_id} is ACCEPTED; with the human, write TWO contribution artifacts in "
+        f"{d}, following the project's contributor rules (docs/INTEGRATION.md §4). "
+        f"Target: {target}. Read {d}/brief.md + {d}/build-notes.md + {d}/patch.diff for "
+        "content; cite the target source with `git -C <checkout>` (never `cd <checkout> "
+        "&& git`).\n"
+        f"1) {d}/commit-msg.txt — a summary ≤70 chars, then a blank line, then the body "
+        f"wrapped ≤80; reference any other commit by its FULL hash. {trailer_line}\n"
+        f"2) {d}/pr-description.md — sections Root cause / Fix / Verified against / Test, "
+        f"citing path:lines on the target branch (see {pr_tpl}).\n"
+        "Write ONLY those two files. Do NOT push, branch, or open a PR — the driver's "
+        "`pdca publish` does the branch/apply/commit/push/draft-PR after you finish."
+    )
+
+
+def _stub_publish(d: Path, cfg: Config) -> None:
+    # Offline placeholders, shaped to pass a contribution (T4) gate: summary ≤70,
+    # blank line, body ≤80, the configured issue trailer last; PR body has the four
+    # sections that pr-description.md.tpl prescribes.
+    issue_id = d.name.removeprefix("issue_")
+    trailer = cfg.issue_trailer.format(id=issue_id) if cfg.issue_trailer else ""
+    body = (
+        f"Fix issue {issue_id} (stub contribution artifact)\n\n"
+        "Stub commit body for the offline publish slice, wrapped under eighty\n"
+        "characters so a contribution gate validates it cleanly.\n"
+    )
+    if trailer:
+        body += f"\n{trailer}\n"
+    (d / "commit-msg.txt").write_text(body, encoding="utf-8")
+    (d / "pr-description.md").write_text(
+        "## Root cause\nstub.\n\n## Fix\nstub.\n\n## Verified against\n"
+        "- path:1 — stub.\n\n## Test\nstub regression test.\n\n"
+        f"References #{issue_id}\n",
+        encoding="utf-8",
+    )

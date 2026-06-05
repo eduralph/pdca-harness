@@ -1,8 +1,9 @@
 """Offline slice for the continuous orchestrator, `flow.flow` (stdlib unittest).
 
-Drives a bundle through Plan → Do → Check → sign-off → Act with **stub** leaves
-and **stub** gates (no Claude, no TTY, no Docker), proving the deterministic
-control flow and the load-bearing C6 guard. Run from the project root:
+Drives a bundle through Plan → Do → Check → sign-off → publish → Act with **stub**
+leaves and **stub** gates (no Claude, no TTY, no Docker), proving the deterministic
+control flow, the load-bearing C6 guard, and that publish-on-accept dry-runs when the
+publisher leaf is stubbed (never pushes offline). Run from the project root:
     PYTHONPATH=src python -m unittest discover -s tests
 """
 
@@ -20,7 +21,7 @@ DESIGN_TPL = Path(__file__).resolve().parents[1] / "templates" / "design-proposa
 
 
 def _stub_config(root: Path) -> Config:
-    """All five leaves stubbed, gates empty (all-PASS stub rows)."""
+    """All six leaves stubbed, gates empty (all-PASS stub rows)."""
     return Config(
         root=root,
         bundle_root=root / "results",
@@ -34,6 +35,7 @@ def _stub_config(root: Path) -> Config:
         reviewer=LeafConfig(mode="stub", family="codex"),
         planner=LeafConfig(mode="stub", family="claude", interactive=True),
         signoff=LeafConfig(mode="stub", family="claude", interactive=True),
+        publisher=LeafConfig(mode="stub", family="claude", interactive=True),
         act=LeafConfig(mode="stub", family="claude", interactive=True),
     )
 
@@ -55,6 +57,10 @@ class FlowSlice(unittest.TestCase):
         self.assertTrue((d / "SUMMARY.md").exists())
         self.assertEqual(signoff.outcome_token(d / "SUMMARY.md"), "merged-wider")
         self.assertFalse((d / leaves.SIGNOFF_DECISION).exists())  # consumed
+        # publish-on-accept ran (publisher stub wrote the artifacts) but DRY-RAN —
+        # stubbed leaf ⇒ no real git push, so no publish.json is recorded.
+        self.assertTrue((d / "commit-msg.txt").exists())
+        self.assertFalse((d / "publish.json").exists())
 
     def test_c6_blocks_accept_with_open_needs_human(self) -> None:
         # A sign-off leaf that accepts WITHOUT clearing §6 must not complete.

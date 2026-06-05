@@ -5,14 +5,17 @@
 #   make flow CSV="path/to/issues.csv"     batch: one Plan session may brief
 #                                          SEVERAL issues, all built unattended
 #                                          then signed off cheap-first via the queue
-#                   Runs Plan → Do → Check → sign-off (Plan/sign-off open Claude in
-#                   your terminal — use a real terminal). Optional: ACT=1 also runs
-#                   the cross-cycle Act review; BY=<name> overrides the §9
-#                   attribution (defaults to the project author). You normally need
-#                   neither.
+#                   Runs Plan → Do → Check → sign-off → publish (on an accept it
+#                   opens a DRAFT PR; NO_PUBLISH=1 skips that). Plan/sign-off/publish
+#                   open Claude in your terminal — use a real terminal. Optional:
+#                   ACT=1 also runs the cross-cycle Act review; BY=<name> overrides
+#                   the §9 attribution (defaults to the project author).
 #   make rehearse ID=123 [CSV=…]
 #                   dry-run the SAME control flow with stub leaves + stub gates —
-#                   no Claude, no live gates, instant. Watch PLANNED→…→COMPLETE first.
+#                   no Claude, no live gates (publish dry-runs too), instant.
+#   make publish ID=123 [DRY=1]
+#                   re-publish an already-accepted bundle as a draft PR (the flow
+#                   does this on accept). DRY=1 prints the git/gh plan without pushing.
 #   make status     list every bundle and its state.
 #   make cli ARGS="signoff 123 --accept"
 #                   run any `pdca` subcommand without the source-path boilerplate.
@@ -31,14 +34,20 @@ export PYTHONPATH := src
 PDCA := $(PYTHON) -m pdca_harness.cli
 
 .DEFAULT_GOAL := test
-.PHONY: test check flow rehearse status cli install setup
+.PHONY: test check flow rehearse publish status cli install setup
 
 # --- the cycle -------------------------------------------------------------
 # Live, continuous, Claude-driven. Give ID for one issue, or just CSV for a batch
 # Plan session that may brief several issues (built all, then signed off cheap-first).
+# On an accept the flow publishes a draft PR; NO_PUBLISH=1 stops at COMPLETE.
 flow:
-	@test -n "$(ID)$(CSV)" || { echo 'usage: make flow ID=<issue-id> [CSV="<path>"] [ACT=1] [BY=<name>]'; echo '   or: make flow CSV="<path>" [ACT=1] [BY=<name>]   (batch: Plan briefs several)'; exit 2; }
-	$(PDCA) flow $(ID) $(if $(CSV),--from-csv "$(CSV)") $(if $(ACT),--act) $(if $(BY),--by "$(BY)")
+	@test -n "$(ID)$(CSV)" || { echo 'usage: make flow ID=<issue-id> [CSV="<path>"] [ACT=1] [NO_PUBLISH=1] [BY=<name>]'; echo '   or: make flow CSV="<path>" [...]   (batch: Plan briefs several)'; exit 2; }
+	$(PDCA) flow $(ID) $(if $(CSV),--from-csv "$(CSV)") $(if $(NO_PUBLISH),--no-publish) $(if $(ACT),--act) $(if $(BY),--by "$(BY)")
+
+# Re-publish an accepted bundle as a draft PR (the flow does this on accept).
+publish:
+	@test -n "$(ID)" || { echo 'usage: make publish ID=<issue-id> [DRY=1] [BY=<name>]'; exit 2; }
+	$(PDCA) publish $(ID) $(if $(DRY),--dry-run) $(if $(BY),--by "$(BY)")
 
 # Same control flow with stub leaves + stub gates (no Claude / TTY / live gates), in
 # an ISOLATED throwaway bundle root so it never touches the real results/ a live run uses.
@@ -63,8 +72,9 @@ setup:
 json.dump({'permissions': {'allow': ['Read(' + ws + '/**)'], \
 'additionalDirectories': [ws, '/tmp']}}, \
 open('.claude/settings.local.json', 'w'), indent=2)"
-	@echo "wrote .claude/settings.local.json — workspace read + /tmp"
-	@echo "(add project-specific sibling repos there; the first interactive session may ask once to TRUST this project — accept it)"
+	@echo "wrote .claude/settings.local.json — workspace read + /tmp (PERMISSIONS only)"
+	@echo "(folder TRUST is separate — it lives in the GLOBAL ~/.claude.json, not here:"
+	@echo " the first interactive 'make flow' asks once to TRUST this project — accept it.)"
 
 # --- optional real install (venv console script) ---------------------------
 install: .venv/bin/pdca

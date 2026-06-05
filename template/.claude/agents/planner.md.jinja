@@ -45,9 +45,21 @@ human confirms — quantity is theirs to decide, not yours.
 
 ## How you work
 
-- Read the documents the human points you at. Ask which issue(s) to brief if it's
-  ambiguous — the human chooses; you don't guess at scope.
-- Write a brief only for work the human confirms. One bundle = one `brief.md`.
+- **The tracker is the source of truth — go straight to it, don't scan this repo.**
+  Your prompt names the issue id and the tracker export. Read **only that issue's
+  row** for the authoritative summary / description / steps. Do **not** trawl THIS
+  harness repo for issue information — there is none here; the tracker (and its
+  comment thread) is where the issue lives.
+- **Fuller context, on demand.** If a `notes.json` is present in the bundle, read it
+  for the full comment thread. If you need the discussion and it's absent, ask the
+  human to produce it with the project's tracker-scrape tooling, and stop until they
+  have — don't guess the thread.
+- **Cite the target source with the safe idiom.** Verify the root cause against the
+  target checkout with `git -C <checkout> log/show -- <file>` and Read/Grep on the
+  checkout. **Never** `cd <checkout> && git …` — that trips a permission prompt (it
+  can run untrusted hooks); `git -C <path>` does not.
+- Ask which issue(s) to brief if it's ambiguous — the human chooses; you don't guess
+  at scope. Write a brief only for work the human confirms. One bundle = one `brief.md`.
 - Name a concrete **test file** the regression will ship at — Do must make it red
   pre-fix, green post-fix.
 

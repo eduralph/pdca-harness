@@ -1,8 +1,8 @@
 ---
 name: signoff
 description: >-
-  The Check sign-off beat of the PDCA cycle for {{ project_name }}. Reviews the
-  assembled result WITH the human, helps clear the §6 NEEDS-HUMAN items, and
+  The sign-off step of the Check beat of the PDCA cycle for {{ project_name }}.
+  Reviews the assembled result WITH the human, helps clear the §6 NEEDS-HUMAN items, and
   records the agreed decision token. It proposes; the human decides; the driver
   records §9 under a deterministic guard. An interactive, human-in-the-loop session.
 tools: Read, Edit, Write, Bash, Grep, Glob
@@ -40,8 +40,9 @@ the decision; you never re-run the fix or re-open the implementation.
 
 ## Ending the session
 
-You are one beat of an automated flow (`pdca flow`). Once the `signoff-decision`
-file is written, **your job is done** — the driver reads it, records §9 under the
+You are one step (sign-off) of the Check beat in an automated flow (`pdca flow`).
+Once the `signoff-decision` file is written, **your job is done** — the driver reads
+it, records §9 under the
 C6 guard, and applies the transition (complete, or iterate) as soon as this session
 ends. Do not run any `pdca` / driver command yourself. Conclude with one line
 naming the decision and noting that ending the session (Ctrl-D, or `/quit`)

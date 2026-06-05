@@ -53,8 +53,16 @@ class Config:
     reviewer: LeafConfig
     planner: LeafConfig = field(default_factory=LeafConfig)
     signoff: LeafConfig = field(default_factory=LeafConfig)
+    publisher: LeafConfig = field(default_factory=LeafConfig)
     act: LeafConfig = field(default_factory=LeafConfig)
     author: str = ""  # default §9 sign-off attribution (the maintainer)
+    tracker_export_csv: str = ""  # default tracker CSV the planner reads the issue row from
+    # Publish mechanics — config-driven so the harness ships project-agnostic.
+    # Branch patterns are .format(id=, slug=) strings; issue_trailer is .format(id=).
+    fix_branch_pattern: str = "fix/{id}-{slug}"
+    feature_branch_pattern: str = "enhancement/{id}-{slug}"
+    issue_trailer: str = "Fixes #{id}"  # commit/PR trailer; "" → none enforced
+    repo_checkouts: dict[str, str] = field(default_factory=dict)  # repo_spec → local path
     gates_checks: list[dict] = field(default_factory=list)
 
     def bundle(self, issue_id: str) -> Path:
@@ -69,6 +77,7 @@ class Config:
 
         paths = data.get("paths", {})
         tracker = data.get("tracker", {})
+        publisher_cfg = data.get("publisher", {})
         leaves = data.get("leaves", {})
         gates_checks = list(data.get("gates", {}).get("checks", []))
         # PDCA_GATES_MODE=stub empties the configured checks → the all-PASS stub
@@ -106,10 +115,16 @@ class Config:
             tracker_system=tracker.get("system", ""),
             tracker_url=tracker.get("url", ""),
             issue_id_example=tracker.get("issue_id_example", ""),
+            tracker_export_csv=tracker.get("export_csv", ""),
+            fix_branch_pattern=publisher_cfg.get("fix_branch_pattern", "fix/{id}-{slug}"),
+            feature_branch_pattern=publisher_cfg.get("feature_branch_pattern", "enhancement/{id}-{slug}"),
+            issue_trailer=tracker.get("issue_trailer", "Fixes #{id}"),
+            repo_checkouts=dict(publisher_cfg.get("checkouts", {})),
             builder=leaf("builder"),
             reviewer=leaf("reviewer"),
             planner=leaf("planner"),
             signoff=leaf("signoff"),
+            publisher=leaf("publisher"),
             act=leaf("act"),
             author=data.get("project", {}).get("author", ""),
             gates_checks=gates_checks,

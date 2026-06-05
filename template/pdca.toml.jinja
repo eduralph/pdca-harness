@@ -17,8 +17,26 @@ templates_dir = "templates"
 system = "{{ tracker_system }}"
 url = "{{ tracker_url }}"
 issue_id_example = "{{ issue_id_example }}"
+# Trailer linking a commit/PR to the issue ({id} = the bug id). Trackers differ
+# (GitHub/Mantis "Fixes #{id}", Jira "Fixes PROJ-{id}"); "" enforces none. The
+# publish step's commit-msg ends with this; the T4 gate (if any) checks it.
+issue_trailer = "Fixes #{id}"
+# Optional default tracker export the Plan leaf reads the issue row from when `flow`
+# runs without --from-csv (it reads ONLY that issue's row, not a repo scan):
+# export_csv = "path/to/export.csv"
 
-# The five model leaves (docs 03 §Implementation substrate). mode = "stub" runs
+# Publish mechanics — `pdca publish` and the flow's publish-on-accept (docs 03 §Check
+# closing step). Branch patterns are `{id}` / `{slug}` format strings; the
+# repo→checkout map falls back to the sibling convention (`<project>/../<repo-last-
+# segment>`) when a repo_spec is unmapped, so most setups need no entries.
+[publisher]
+fix_branch_pattern = "fix/{id}-{slug}"
+feature_branch_pattern = "enhancement/{id}-{slug}"
+
+[publisher.checkouts]
+# "<org/repo>" = "../<checkout-dir>"   # only the exceptions to the sibling default
+
+# The six model leaves (docs 03 §Implementation substrate). mode = "stub" runs
 # the offline placeholders (no model/TTY) so the driver works without a model;
 # mode = "command" runs `argv` as a subprocess with the leaf's prompt. `interactive
 # = true` hands the terminal to the human (a seeded `claude "<prompt>"` REPL, no
@@ -49,8 +67,8 @@ argv = ["codex", "exec", "--config", "AGENTS.md"]
 {% else -%}
 argv = []
 {% endif %}
-# Interactive leaves — the human-in-the-loop touch points (Plan, Sign-off, Act)
-# hand the terminal to a seeded Claude REPL. Claude by design (a model+human
+# Interactive leaves — the human-in-the-loop touch points (Plan, Sign-off, Publish,
+# Act) hand the terminal to a seeded Claude REPL. Claude by design (a model+human
 # session), independent of the builder/reviewer family above.
 [leaves.planner]
 mode = "{{ leaves_mode }}"
@@ -69,6 +87,14 @@ mode = "{{ leaves_mode }}"
 family = "claude"
 interactive = true
 argv = ["claude", "--agent", "act", "--permission-mode", "acceptEdits"]
+
+# Publisher — Check's closing step: writes commit-msg.txt + pr-description.md (the
+# git/draft-PR mechanics are deterministic code in pdca_harness.publish).
+[leaves.publisher]
+mode = "{{ leaves_mode }}"
+family = "claude"
+interactive = true
+argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
 # Deterministic Check gates (docs 04). Each check runs a shell command; it PASSES
 # iff the command exits 0. `scope = "repo"` runs against the working tree (and is
 # what CI re-runs via `pdca gates --working-tree`); `scope = "bundle"` needs the

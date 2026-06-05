@@ -24,33 +24,39 @@ make setup              # ONCE: grant Claude read of the workspace
 make flow ID=123        # run the whole cycle for issue 123 (live)
 ```
 
-Run `make flow` **in a real terminal** — the Plan, sign-off and Act steps open
-Claude interactively. The first interactive session may ask once to *trust* the
-project; accept it.
+Run `make flow` **in a real terminal** — the Plan, sign-off, publish and Act steps
+open Claude interactively. **Trust:** the first interactive session asks once to
+*trust* the project — a one-time **global** setting (`~/.claude.json`), not something
+`make setup` can write (`setup` handles file *permissions*). Accept it.
 
-What happens, step by step:
+What happens, step by step (the cycle has four beats; review/sign-off/publish are
+steps *within* Check):
 
 1. **Plan** (interactive) — Claude reads your input documents (e.g. a tracker CSV
    via `CSV=…`) and, with you, writes `{{ bundle_root }}/issue_<id>/brief.md`.
 2. **Do** (headless) — Claude implements the brief: `patch.diff`, the test, `build-notes.md`.
 3. **Check** — the deterministic gates run (`→ … still working` heartbeats while
    they do), then a headless advisory reviewer.
-4. **Sign-off** (interactive) — Claude reviews the result *with* you; you clear the
-   §6 items and decide `accept` / `iterate-do` / `iterate-plan`. The driver records
-   §9 under the C6 guard.
-5. **Act** (interactive, only with `--act` / `ACT=1`) — Claude reviews the frozen
+4. **Sign-off** (Check step, interactive) — Claude reviews the result *with* you; you
+   clear the §6 items and decide `accept` / `iterate-do` / `iterate-plan`. The driver
+   records §9 under the C6 guard.
+5. **Publish** (Check step, interactive, on accept) — Claude drafts the contribution
+   artifacts (commit-msg + PR description) and the driver opens a **draft PR** — the
+   closing work of Check. `NO_PUBLISH=1` skips it; offline `rehearse` dry-runs it.
+6. **Act** (interactive, only with `--act` / `ACT=1`) — Claude reviews the frozen
    cycle and suggests process improvements if any are warranted.
 
-When a sign-off/plan session ends, exit Claude (**Ctrl-D**) to let the flow continue.
+When a Plan/sign-off/publish session ends, exit Claude (**Ctrl-D**) to let the flow continue.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `make setup` | One-time: write the permission config so the interactive leaves don't prompt. |
-| `make flow ID=<id> [CSV="<path>"] [ACT=1] [BY=<name>]` | Run the full cycle for one issue. `CSV` seeds Plan; `ACT=1` runs Act; `BY` overrides §9 attribution (defaults to the project author). |
+| `make flow ID=<id> [CSV="<path>"] [NO_PUBLISH=1] [ACT=1] [BY=<name>]` | Run the full cycle for one issue. On an accept it opens a draft PR (`NO_PUBLISH=1` stops at COMPLETE); `ACT=1` runs Act; `BY` overrides §9 attribution. |
 | `make flow CSV="<path>"` | **Batch**: one Plan session may brief several issues; they all build unattended, then you sign off the cheap-first queue. |
-| `make rehearse ID=<id> [CSV="<path>"]` | Dry-run the *same* control flow with stub leaves + stub gates — **no Claude, no live gates, instant**. |
+| `make publish ID=<id> [DRY=1]` | Re-publish an accepted bundle as a draft PR (the flow does this on accept). `DRY=1` prints the git/gh plan without pushing. |
+| `make rehearse ID=<id> [CSV="<path>"]` | Dry-run the *same* control flow with stub leaves + stub gates — **no Claude, no live gates, instant** (publish dry-runs too). |
 | `make status` | List every bundle and its state. |
 | `make cli ARGS="<subcommand>"` | Any other `pdca` subcommand (e.g. `signoff 123 --accept`). |
 | `make` / `make check` | Self-test (full / fast offline). |

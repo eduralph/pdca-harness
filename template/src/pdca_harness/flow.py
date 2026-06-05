@@ -1,9 +1,15 @@
-"""The continuous orchestrator — Plan → Do → Check → sign-off → Act as one flow.
+"""The continuous orchestrator — Plan → Do → Check(gates → review → sign-off →
+publish) → Act as one flow.
 
 ``flow`` drives a single issue; ``flow_batch`` handles the case where one Plan
 session briefs several issues from the same documents: it plans them all, builds +
 gates + reviews them all unattended, then walks the **cheap-first sign-off queue**
 (:func:`queue.awaiting_signoff`) interactively, and runs Act once across the batch.
+
+On an **accept** (the bundle reaches ``state.COMPLETE``) the flow runs **publish** —
+the closing step of Check — which contributes the fix as a draft PR (``--no-publish``
+to skip). When the leaves are stubbed (offline ``rehearse`` / CI) publish dry-runs, so
+the continuous flow never pushes without a live model. Act is opt-in and runs last.
 
 Control flow stays deterministic code: :mod:`driver` advances the state machine,
 the gates gate, and the C6 accept-guard (in :func:`_signoff_and_apply`) governs
@@ -17,7 +23,7 @@ import datetime
 import sys
 from pathlib import Path
 
-from . import driver, leaves, queue, signoff, state
+from . import driver, leaves, publish, queue, signoff, state
 from .config import Config
 
 
@@ -63,6 +69,7 @@ def flow(
     issue_id: str,
     *,
     csv: str | None = None,
+    do_publish: bool = True,
     do_act: bool = False,
     by: str = "",
     today: str | None = None,
@@ -83,6 +90,11 @@ def flow(
             break
 
     final = state.state(d)
+    if do_publish and final == state.COMPLETE:
+        # Closing step of Check. Dry-run when the publisher leaf is stubbed (offline
+        # rehearse / CI) so the flow never pushes without a live model.
+        publish.publish(cfg, issue_id, dry_run=cfg.publisher.mode == "stub",
+                        by=by, today=today, skip_if_no_target=True)
     if do_act and final == state.COMPLETE:
         leaves.run_act(cfg, today)
     return final
@@ -95,6 +107,7 @@ def flow_batch(
     cfg: Config,
     *,
     csv: str | None = None,
+    do_publish: bool = True,
     do_act: bool = False,
     by: str = "",
     today: str | None = None,
@@ -130,6 +143,12 @@ def flow_batch(
             break
 
     results = {d.name.replace("issue_", ""): state.state(d) for d in bundles}
+    if do_publish:
+        for d in bundles:
+            if state.state(d) == state.COMPLETE:
+                publish.publish(cfg, d.name.removeprefix("issue_"),
+                                dry_run=cfg.publisher.mode == "stub", by=by, today=today,
+                                skip_if_no_target=True)
     if do_act and any(s == state.COMPLETE for s in results.values()):
         leaves.run_act(cfg, today)
     return results
