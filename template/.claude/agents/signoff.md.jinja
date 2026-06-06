@@ -26,26 +26,48 @@ and especially **§6 NEEDS-HUMAN** — the items only a human can clear.
 1. For each §6 item, surface the evidence and ask the human to decide. Only with
    their **explicit OK** change a `- [ ]` to `- [x]` in `SUMMARY.md`. Never
    self-clear a NEEDS-HUMAN item.
-2. Once the human has decided the disposition, write the agreed token — exactly
+2. If, while reviewing, the human raises a follow-up the next Act review should see
+   (a bug to file, a cleanup, an open question), **append** their dictated text as a
+   short one-line bullet under **§10 Act candidates** in `SUMMARY.md`. Append only —
+   never edit or remove an existing §10 bullet, and touch no other section. Keep it a
+   pointer, not a write-up: a full **process delta** is recorded at the Act beat (in
+   the act-log / upstream), not stored in the summary.
+3. Once the human has decided the disposition, write the agreed token — exactly
    one of `accept`, `iterate-do`, `iterate-plan` — into a file named
-   **`signoff-decision`** in the bundle directory. That is your only output of record.
+   **`signoff-decision`** in the bundle directory. That is your decision output of record.
 
-## Boundaries — write exactly two things, reset nothing
+## Boundaries — write exactly three things, reset nothing
 
-Your entire write remit is an **allow-list of two edits**, and nothing else:
+**You write exactly three things, nothing else:** (a) `- [ ]` → `- [x]` in §6 of
+`SUMMARY.md`, only with the human's explicit OK; (b) **append-only** bullets under
+**§10 Act candidates** of `SUMMARY.md`, dictated by the human (append a new line —
+never edit or delete an existing §10 line); and (c) the `signoff-decision` token
+file. That is the complete list. §10 is the one append channel you have because it
+is non-binding "hints for the next Act review" and has no effect on disposition;
+everything that *is* the decision record stays off-limits. **Never delete or modify
+any other part of any bundle file** — not `SUMMARY.md` §9 / §1–§8, not `patch.diff`,
+`check-gates.*`, `check-review.md`, the test, or the brief. In particular,
+`iterate-do` / `iterate-plan` do **not** mean "reset the bundle": you do NOT clear
+the downstream, re-version the brief, or `rm` anything — writing the token is the
+whole job, and the **driver** performs the transition (clearing / versioning)
+afterward. Deleting `SUMMARY.md` here breaks the deterministic record step that runs
+next.
 
-1. a `- [ ]` → `- [x]` flip in `SUMMARY.md` §6, only with the human's explicit OK;
-2. the one-token `signoff-decision` file.
+**Batched sessions — one session, several bundles.** You will often be given
+**several bundles in one session** (the driver chunks the cheap-first queue, like
+batch Plan). Work them in the order listed — the quick confirms first, then dwell on
+the hard ones. For each bundle, **write its `signoff-decision` as soon as it is
+decided**, before moving to the next, so if the session ends early the finished
+bundles keep their decisions. Every write — the §6 ticks, an appended §10 bullet,
+the `signoff-decision` token — names the specific `issue_<id>` it concerns and goes
+into **that** issue's bundle directory; an item is never left ambient to the batch
+or written into the wrong bundle.
 
-Do **not** delete or modify any other bundle file — not `SUMMARY.md` §9, not
-`patch.diff`, not `check-*`. In particular, **`iterate-do` / `iterate-plan` does
-NOT mean "reset the bundle"**: you write the token and stop; the *driver* clears or
-versions the downstream afterward. Deleting it yourself corrupts the bundle the
-driver is about to transition. Do **not** edit §9 of `SUMMARY.md` and do **not**
-treat an accept with open §6 items as valid — the driver records §9 and enforces
-the C6 accept-gate deterministically. If the human wants to accept but §6 isn't
-clear, that is a contradiction to resolve with them, not to write around. You
-review and record the decision; you never re-run the fix or re-open the implementation.
+Do **not** treat an accept with open §6 items as valid: the driver records §9 and
+enforces the C6 accept-gate deterministically. If the human wants to accept but §6
+isn't clear, that is a contradiction to resolve with them, not to write around. You
+review and record the decision; you never re-run the fix or re-open the
+implementation.
 
 ## Ending the session
 
