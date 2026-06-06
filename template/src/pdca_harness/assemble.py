@@ -18,7 +18,16 @@ from .config import Config
 def assemble_summary(d: Path, cfg: Config) -> None:
     fields = brief.parse_fields(d / "brief.md")
     gates = json.loads((d / "check-gates.json").read_text(encoding="utf-8"))
-    review_text = (d / "check-review.md").read_text(encoding="utf-8")
+    review_path = d / "check-review.md"
+    # The review is advisory; a missing one (e.g. the reviewer's model connection
+    # dropped mid-run) must not crash this deterministic step. Fall back to a
+    # placeholder that routes a blocking item into §6 — so the bundle still assembles
+    # and reaches sign-off, but can't be accepted until a real review exists.
+    review_text = (
+        review_path.read_text(encoding="utf-8")
+        if review_path.exists()
+        else _missing_review_text()
+    )
     needs_human = _needs_human(review_text)
 
     issue = d.name.replace("issue_", "")
@@ -82,6 +91,16 @@ def _gate_lines(gates: dict, *, prefix: str) -> str:
             ev = r["path_line"] or r["oracle"]
             lines.append(f"- {r['check']}: {r['result']} — {ev}")
     return "\n".join(lines)
+
+
+def _missing_review_text() -> str:
+    """Placeholder when ``check-review.md`` is absent — flags a §6 NEEDS-HUMAN so the
+    bundle assembles and reaches sign-off but cannot be accepted without a review."""
+    return (
+        "# Advisory review MISSING\n\n"
+        "- NEEDS-HUMAN — no check-review.md was produced (the reviewer leaf failed or "
+        "its model connection dropped). Re-run the Check reviewer before accepting.\n"
+    )
 
 
 def _needs_human(review_text: str) -> list[str]:

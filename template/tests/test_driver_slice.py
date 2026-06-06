@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdca_harness import act, driver, gates, queue, leaves, signoff, state
+from pdca_harness import act, assemble, driver, gates, queue, leaves, signoff, state
 from pdca_harness.config import Config, LeafConfig
 
 TOY_BRIEF = Path(__file__).resolve().parents[1] / "examples" / "toy" / "brief.md"
@@ -90,6 +90,59 @@ class VerticalSlice(unittest.TestCase):
         self.assertEqual(state.state(self.d), state.UNPLANNED)
         self.assertTrue((self.d / "brief.v1.md").exists())
         self.assertFalse((self.d / "brief.md").exists())
+
+
+class AdvisoryReviewResilience(unittest.TestCase):
+    """A failed/interrupted reviewer must degrade to a §6 NEEDS-HUMAN, never crash
+    the deterministic spine (the review is advisory, not a gating artifact)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+        self.d = self.cfg.bundle("TOY")
+        self.d.mkdir(parents=True)
+        shutil.copyfile(TOY_BRIEF, self.d / "brief.md")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_assemble_survives_missing_review(self) -> None:
+        # A check-review.md that never landed (reviewer connection dropped) must not
+        # crash assemble; the bundle assembles with a §6 NEEDS-HUMAN blocking accept.
+        driver.run_issue(self.d, self.cfg)
+        (self.d / "check-review.md").unlink()
+        assemble.assemble_summary(self.d, self.cfg)  # must not raise
+        summary = self.d / "SUMMARY.md"
+        self.assertIn("no check-review.md was produced",
+                      summary.read_text(encoding="utf-8"))
+        self.assertTrue(signoff.open_needs_human(summary))  # accept stays blocked
+
+    def test_sandboxed_review_failure_writes_placeholder(self) -> None:
+        # Both failure shapes — the reviewer leaf raises, and it returns 0 but writes
+        # no file — leave a re-runnable bundle with a NEEDS-HUMAN placeholder.
+        (self.d / "patch.diff").write_text("x\n", encoding="utf-8")
+        (self.d / "check-gates.json").write_text("{}\n", encoding="utf-8")
+        orig = leaves._invoke
+
+        def boom(*a, **k):
+            raise RuntimeError("dropped connection")
+
+        leaves._invoke = boom
+        try:
+            leaves._run_review_sandboxed(self.d, self.cfg)  # must not raise
+        finally:
+            leaves._invoke = orig
+        self.assertIn("NEEDS-HUMAN",
+                      (self.d / "check-review.md").read_text(encoding="utf-8"))
+
+        (self.d / "check-review.md").unlink()
+        leaves._invoke = lambda *a, **k: None  # returns, writes nothing
+        try:
+            leaves._run_review_sandboxed(self.d, self.cfg)
+        finally:
+            leaves._invoke = orig
+        self.assertIn("NOT COMPLETED",
+                      (self.d / "check-review.md").read_text(encoding="utf-8"))
 
 
 class ConfiguredGates(unittest.TestCase):

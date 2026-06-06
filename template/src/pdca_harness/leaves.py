@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -299,14 +300,34 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
             src = d / name
             if src.exists():
                 shutil.copy2(src, sandbox / name)
-        _invoke(
-            cfg.reviewer, sandbox, _REVIEW_PROMPT,
-            label=f"Check review {d.name}",
-            status=lambda: progress.bundle_activity(sandbox, ("check-review.md",)),
-        )
+        try:
+            _invoke(
+                cfg.reviewer, sandbox, _REVIEW_PROMPT,
+                label=f"Check review {d.name}",
+                status=lambda: progress.bundle_activity(sandbox, ("check-review.md",)),
+            )
+        except Exception as exc:  # a failed reviewer (e.g. dropped connection) must
+            _review_unavailable(d, f"reviewer leaf failed: {exc}")  # not crash the cycle
+            return
         produced = sandbox / "check-review.md"
         if produced.exists():
             shutil.copy2(produced, d / "check-review.md")
+        else:
+            _review_unavailable(d, "reviewer produced no check-review.md")
+
+
+def _review_unavailable(d: Path, reason: str) -> None:
+    """Write a placeholder review flagging the gap as a §6 NEEDS-HUMAN, so a failed or
+    interrupted reviewer leaves a re-runnable bundle — not a half-checked one that
+    crashes assemble. The bundle still reaches sign-off; accept is blocked (C6)."""
+    print(f"leaves: {d.name} — advisory review unavailable ({reason})", file=sys.stderr)
+    (d / "check-review.md").write_text(
+        "# Advisory review — NOT COMPLETED\n\n"
+        f"The reviewer did not produce a verdict table ({reason}).\n\n"
+        "- NEEDS-HUMAN — re-run the Check reviewer; this bundle has no advisory review "
+        "and must not be accepted until one exists.\n",
+        encoding="utf-8",
+    )
 
 
 # Stub bases per 5/5/1 element — what a real reviewer would re-derive; the offline
