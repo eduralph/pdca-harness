@@ -10,8 +10,10 @@ with its own runner probe. Run from the project root:
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import sys
 import tempfile
 import time
 import unittest
@@ -51,6 +53,61 @@ class BundleActivity(unittest.TestCase):
         self.assertEqual(progress._fmt_size(512), "512B")
         self.assertEqual(progress._fmt_size(2048), "2.0KB")
         self.assertEqual(progress._fmt_size(2 * 1024 * 1024), "2.0MB")
+
+
+class StreamToolUse(unittest.TestCase):
+    """Tier 3 — parse Claude's --output-format stream-json for the live tool-use."""
+
+    @staticmethod
+    def _line(name: str, inp: dict) -> str:
+        return json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": name, "input": inp}]},
+        })
+
+    def test_tool_label_per_tool(self) -> None:
+        self.assertEqual(progress._tool_label("Edit", {"file_path": "/a/patch.diff"}),
+                         "Editing patch.diff")
+        self.assertEqual(progress._tool_label("Write", {"file_path": "b/build-notes.md"}),
+                         "Editing build-notes.md")
+        self.assertEqual(progress._tool_label("Read", {"file_path": "/x/glade.py"}),
+                         "Reading glade.py")
+        self.assertEqual(progress._tool_label("Bash", {"command": "./run-tests foo\nbar"}),
+                         "Running ./run-tests foo")
+        self.assertEqual(progress._tool_label("Grep", {"pattern": "navigation_type"}),
+                         "Searching navigation_type")
+        self.assertEqual(progress._tool_label("Task", {"description": "find flaky tests"}),
+                         "Subagent: find flaky tests")
+        self.assertEqual(progress._tool_label("WeirdTool", {}), "WeirdTool")
+
+    def test_stream_line_extracts_tool_use(self) -> None:
+        self.assertEqual(
+            progress._stream_tool_label(self._line("Edit", {"file_path": "p/patch.diff"})),
+            "Editing patch.diff")
+
+    def test_stream_line_last_tool_use_wins(self) -> None:
+        line = json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "a.py"}},
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": "b.py"}},
+        ]}})
+        self.assertEqual(progress._stream_tool_label(line), "Editing b.py")
+
+    def test_non_tool_lines_yield_empty(self) -> None:
+        self.assertEqual(progress._stream_tool_label("not json at all"), "")
+        self.assertEqual(progress._stream_tool_label(
+            json.dumps({"type": "user", "message": {"content": []}})), "")
+        self.assertEqual(progress._stream_tool_label(json.dumps({"type": "assistant",
+                         "message": {"content": [{"type": "text", "text": "hi"}]}})), "")
+        self.assertEqual(progress._stream_tool_label(json.dumps({"type": "result"})), "")
+
+    def test_run_with_heartbeat_consumes_stream_json(self) -> None:
+        # Wiring smoke: a json-emitting child runs cleanly under stream_json (stdout is
+        # consumed for parsing, not captured/echoed) and returns its exit code.
+        prog = "print('{\"type\": \"result\"}')"
+        rc, out = progress.run_with_heartbeat(
+            [sys.executable, "-c", prog], stream_json=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")  # stream_json consumes stdout for parsing, doesn't capture
 
 
 if __name__ == "__main__":

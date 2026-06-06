@@ -11,6 +11,7 @@ yet, how long since the last write), not just that time passed.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
@@ -27,6 +28,7 @@ def run_with_heartbeat(
     env=None,
     input_text: str | None = None,
     capture: bool = False,
+    stream_json: bool = False,
     interval: int = 15,
     label: str = "",
     status: Callable[[], str] | None = None,
@@ -39,24 +41,41 @@ def run_with_heartbeat(
 
     ``status``, if given, is called on every tick to append a live snapshot of the
     child's work (e.g. which artifacts exist yet, time since the last write) — so the
-    heartbeat shows *what* is happening, not just that time passed. It is best-effort:
-    any exception it raises is swallowed so a probe can never break the run.
+    heartbeat shows *what* is happening, not just that time passed (Tier 1+2). It is
+    best-effort: any exception it raises is swallowed so a probe can never break the run.
+
+    ``stream_json`` (Tier 3) parses the child's stdout as Claude's
+    ``--output-format stream-json`` event stream and surfaces the **tool it is using
+    right now** (``▸ Editing patch.diff`` / ``▸ Running run-tests``) on each tick.
+    stdout is consumed for parsing (not echoed); stderr still inherits the terminal so
+    real errors show. Mutually exclusive with ``capture`` (capture wins if both set).
     """
+    capture_out = capture or stream_json
     stdin = subprocess.PIPE if input_text is not None else None
-    stdout = subprocess.PIPE if capture else None
-    stderr = subprocess.STDOUT if capture else None
+    if capture:
+        stdout, stderr = subprocess.PIPE, subprocess.STDOUT
+    elif stream_json:
+        stdout, stderr = subprocess.PIPE, None  # parse stdout; let stderr show
+    else:
+        stdout, stderr = None, None
     proc = subprocess.Popen(
         cmd, cwd=cwd, shell=shell, env=env, text=True,
         stdin=stdin, stdout=stdout, stderr=stderr,
     )
 
     chunks: list[str] = []
+    latest_tool = {"label": ""}  # most recent tool-use, updated by the drain thread
     reader: threading.Thread | None = None
-    if capture:
+    if capture_out:
         def _drain() -> None:
             assert proc.stdout is not None
             for line in proc.stdout:  # drain so the pipe can't fill and stall the child
-                chunks.append(line)
+                if capture:
+                    chunks.append(line)
+                if stream_json:
+                    lbl = _stream_tool_label(line)
+                    if lbl:
+                        latest_tool["label"] = lbl
         reader = threading.Thread(target=_drain, daemon=True)
         reader.start()
 
@@ -76,19 +95,66 @@ def run_with_heartbeat(
             break
         except subprocess.TimeoutExpired:
             mins, secs = divmod(int(time.monotonic() - start), 60)
-            extra = ""
+            bits: list[str] = []
+            if stream_json and latest_tool["label"]:
+                bits.append(f"▸ {latest_tool['label']}")
             if status is not None:
                 try:
                     snap = status()
                     if snap:
-                        extra = f" · {snap}"
+                        bits.append(snap)
                 except Exception:  # a status probe must never break the run
-                    extra = ""
+                    pass
+            extra = (" · " + " · ".join(bits)) if bits else ""
             print(f"   … still working ({mins}m{secs:02d}s elapsed){suffix}{extra}",
                   file=sys.stderr, flush=True)
     if reader is not None:
         reader.join(timeout=5)
     return proc.returncode, "".join(chunks)
+
+
+# ----------------------------------------------------------------------------
+# Tier 3 — parse Claude's --output-format stream-json for the live tool-use.
+# Vendor-specific (Claude's event shape); a leaf opts in only for a claude family,
+# so it is a no-op for a codex/other leaf, which still gets Tiers 1+2.
+# ----------------------------------------------------------------------------
+def _stream_tool_label(line: str) -> str:
+    """A human label for the tool-use in one stream-json line, or "" if none.
+
+    Claude emits newline-delimited events; an ``assistant`` event's message content
+    can hold ``tool_use`` blocks. We surface the **last** one in the line (the tool
+    just invoked). Best-effort: a non-JSON / non-tool line yields ""."""
+    try:
+        ev = json.loads(line)
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(ev, dict) or ev.get("type") != "assistant":
+        return ""
+    content = (ev.get("message") or {}).get("content") or []
+    for block in reversed(content):
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            return _tool_label(block.get("name", ""), block.get("input") or {})
+    return ""
+
+
+def _tool_label(name: str, inp: dict) -> str:
+    """Compact description of a tool call — what the leaf is doing right now."""
+    base = Path(str(inp.get("file_path") or inp.get("path") or "")).name
+    if name in ("Edit", "MultiEdit", "Write", "NotebookEdit"):
+        return f"Editing {base}" if base else name
+    if name == "Read":
+        return f"Reading {base}" if base else "Reading"
+    if name == "Bash":
+        first = (inp.get("command") or "").strip().splitlines()
+        cmd = first[0] if first else ""
+        return f"Running {cmd[:48]}" if cmd else "Running a command"
+    if name in ("Grep", "Glob"):
+        pat = str(inp.get("pattern") or inp.get("query") or "")
+        return f"Searching {pat[:32]}" if pat else "Searching"
+    if name in ("Task", "Agent"):
+        desc = str(inp.get("description") or "").strip()
+        return f"Subagent: {desc[:32]}" if desc else "Subagent"
+    return name or "working"
 
 
 # ----------------------------------------------------------------------------

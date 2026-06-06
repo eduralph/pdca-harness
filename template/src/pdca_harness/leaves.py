@@ -65,6 +65,7 @@ def _invoke(
     *,
     label: str = "",
     status=None,
+    stream_json: bool = False,
 ) -> None:
     """Run the leaf's configured command in ``workdir``, feeding it ``prompt``.
 
@@ -75,7 +76,11 @@ def _invoke(
     otherwise swallow the prompt arg (claude then errors "Input must be provided…").
 
     ``label`` / ``status`` decorate the headless heartbeat (which leaf, and a live
-    snapshot of its work — see :func:`progress.bundle_activity`).
+    snapshot of its work — see :func:`progress.bundle_activity`). ``stream_json``
+    (Tier 3) asks for the live tool-use stream: for a headless **claude** leaf it adds
+    ``--output-format stream-json --verbose`` and the heartbeat shows the tool the
+    leaf is using right now. Ignored for non-claude families (e.g. a codex reviewer),
+    which don't speak that format.
     """
     argv = list(leaf.argv)
     if leaf.interactive:
@@ -84,8 +89,12 @@ def _invoke(
     # Headless: feed the prompt on stdin (a trailing positional would be swallowed
     # by a variadic --allowedTools) and tick a heartbeat, since `claude -p` prints
     # nothing until it finishes (minutes) and would otherwise look hung.
+    use_stream = stream_json and leaf.family == "claude"
+    if use_stream:
+        argv += ["--output-format", "stream-json", "--verbose"]
     rc, _ = progress.run_with_heartbeat(
-        argv, cwd=workdir, input_text=prompt, label=label, status=status)
+        argv, cwd=workdir, input_text=prompt, label=label, status=status,
+        stream_json=use_stream)
     if rc != 0:
         raise subprocess.CalledProcessError(rc, argv)
 
@@ -210,6 +219,7 @@ def do_build(d: Path, cfg: Config) -> None:
             cfg.builder, cfg.root, _build_prompt(d),
             label=f"Do {d.name}",
             status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
+            stream_json=True,  # Tier 3: show the builder's live tool-use
         )
         return
     _stub_build(d, cfg)
@@ -309,6 +319,7 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
                 cfg.reviewer, sandbox, _REVIEW_PROMPT,
                 label=f"Check review {d.name}",
                 status=lambda: progress.bundle_activity(sandbox, ("check-review.md",)),
+                stream_json=True,  # Tier 3 (no-op unless the reviewer family is claude)
             )
         except Exception as exc:  # a failed reviewer (e.g. dropped connection) must
             _review_unavailable(d, f"reviewer leaf failed: {exc}")  # not crash the cycle
