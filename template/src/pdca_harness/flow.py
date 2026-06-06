@@ -49,25 +49,36 @@ def _isolate(d: Path, what: str, fn):
         return None
 
 
+# How many bundles one interactive sign-off session covers — bounds context + blast
+# radius (a dropped session loses at most one chunk's un-applied decisions).
+SIGNOFF_BATCH_SIZE = 5
+
+
+def _chunks(items: list, n: int):
+    for i in range(0, len(items), n):
+        yield items[i:i + n]
+
+
 # ----------------------------------------------------------------------------
-# Shared: the interactive sign-off + deterministic record/transition for one bundle.
+# Shared: the deterministic record/transition for one already-decided bundle, and
+# the single-issue "run the sign-off leaf then apply" convenience.
 # ----------------------------------------------------------------------------
-def _signoff_and_apply(
-    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool = True
+def _apply_decision(
+    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool
 ) -> str | None:
-    """Run the sign-off leaf, then record the decision under the C6 guard.
+    """Record the bundle's written sign-off decision under the C6 guard.
 
-    Returns the action token applied, ``None`` if the leaf gave no decision, or
-    ``"blocked"`` if an accept was refused because §6 NEEDS-HUMAN is still open.
+    Reads the ``signoff-decision`` token a sign-off session (single or batch) left,
+    records §9, and (if ``apply_now``) advances the transition. Returns the action
+    applied, ``None`` if no decision / unrecordable, or ``"blocked"`` if an accept was
+    refused because §6 NEEDS-HUMAN is still open. Pure deterministic code — no leaf.
 
-    ``apply_now`` (default) advances the bundle through the recorded transition
-    immediately — right for the single-issue ``flow``. The batch sweep passes
-    ``apply_now=False`` so an ``iterate-do`` / ``iterate-plan`` does NOT rebuild on
-    the spot; the human first reviews the whole sign-off queue, and the next pass's
-    build-all then applies every iteration together. (``accept`` is final at
+    ``apply_now`` advances the bundle immediately (single-issue ``flow``); the batch
+    sweep passes ``apply_now=False`` so an ``iterate-do`` / ``iterate-plan`` does NOT
+    rebuild on the spot — the human first reviews the whole sign-off queue, and the
+    next pass's build-all applies every iteration together. (``accept`` is final at
     ``record`` regardless — ``state`` becomes COMPLETE without a re-drive.)
     """
-    leaves.run_signoff(d, cfg)
     action = leaves.signoff_decision(d)
     if not action:
         print(f"flow: {d.name} — sign-off recorded no decision", file=sys.stderr)
@@ -90,6 +101,14 @@ def _signoff_and_apply(
     if apply_now:
         driver.run_issue(d, cfg)  # apply the transition: COMPLETE | ITERATE_* → re-loop
     return action
+
+
+def _signoff_and_apply(
+    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool = True
+) -> str | None:
+    """Single-issue: run the interactive sign-off leaf, then apply its decision."""
+    leaves.run_signoff(d, cfg)
+    return _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now)
 
 
 def _plan_if_unplanned(cfg: Config, d: Path, csv: str | None) -> bool:
@@ -174,16 +193,27 @@ def _drive_and_act(
                 _plan_if_unplanned(cfg, d, None)  # iterate-plan may have re-opened it
                 driver.run_issue(d, cfg)
             _isolate(d, "build/check", _build)
-        # Sign-off, cheap-first, restricted to this batch. Record every decision
-        # across the queue FIRST (apply_now=False) — so an iterate-do doesn't rebuild
-        # mid-sweep and interrupt review of the rest. The next pass's build-all above
-        # applies all the iterations together; an accept is already COMPLETE at record.
+        # Sign-off, cheap-first, restricted to this batch. ONE interactive session
+        # per chunk (≤ SIGNOFF_BATCH_SIZE) walks several bundles — like batch Plan —
+        # then every decision is recorded FIRST (apply_now=False) so an iterate-do
+        # doesn't rebuild mid-sweep and interrupt review of the rest; the next pass's
+        # build-all above applies all the iterations together.
         pending = [e.bundle for e in queue.awaiting_signoff(cfg) if e.bundle.name in names]
         if not pending:
             break
-        for d in pending:
-            _isolate(d, "sign-off", lambda d=d: _signoff_and_apply(
-                cfg, d, by=by, today=today, apply_now=False))
+        for chunk in _chunks(pending, SIGNOFF_BATCH_SIZE):
+            # The session writes a decision per bundle as it goes; a dropped session
+            # still leaves the finished ones, applied below. Isolate it so a crashed
+            # session can't take the sweep down — we then apply whatever it wrote.
+            try:
+                leaves.run_signoff_batch(cfg, chunk)
+            except Exception as exc:  # noqa: BLE001 — a dropped session is not fatal
+                print(f"flow: sign-off session over {[b.name for b in chunk]} failed "
+                      f"({type(exc).__name__}: {exc}); applying decisions written so far",
+                      file=sys.stderr)
+            for d in chunk:
+                _isolate(d, "sign-off", lambda d=d: _apply_decision(
+                    cfg, d, by=by, today=today, apply_now=False))
         if all(state.state(d) == state.COMPLETE for d in bundles):
             break
 

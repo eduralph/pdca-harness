@@ -119,25 +119,50 @@ class FlowSlice(unittest.TestCase):
     def test_batch_iterate_then_complete(self) -> None:
         # One batch member iterates-do on its first sign-off; a later pass rebuilds
         # it and both end COMPLETE — exercises the multi-pass build→sign-off loop.
+        # The batch sweep signs off via run_signoff_batch (one session per chunk).
         iterated = {"done": False}
 
-        def signoff_batch(d: Path, cfg: Config) -> None:
-            summ = d / "SUMMARY.md"
-            if d.name == "issue_BATCH1" and not iterated["done"]:
-                iterated["done"] = True
-                (d / leaves.SIGNOFF_DECISION).write_text("iterate-do\n", encoding="utf-8")
-                return
-            summ.write_text(summ.read_text().replace("- [ ]", "- [x]"), encoding="utf-8")
-            (d / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
+        def signoff_batch(cfg: Config, bundles: list[Path]) -> None:
+            for d in bundles:
+                summ = d / "SUMMARY.md"
+                if d.name == "issue_BATCH1" and not iterated["done"]:
+                    iterated["done"] = True
+                    (d / leaves.SIGNOFF_DECISION).write_text("iterate-do\n", encoding="utf-8")
+                    continue
+                summ.write_text(summ.read_text().replace("- [ ]", "- [x]"), encoding="utf-8")
+                (d / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
 
-        orig = leaves.run_signoff
-        leaves.run_signoff = signoff_batch
+        orig = leaves.run_signoff_batch
+        leaves.run_signoff_batch = signoff_batch
         try:
             results = flow.flow_batch(self.cfg, today="2026-06-04", max_passes=4)
         finally:
-            leaves.run_signoff = orig
+            leaves.run_signoff_batch = orig
         self.assertTrue(iterated["done"])
         self.assertEqual(set(results), {"BATCH1", "BATCH2"})
+        self.assertTrue(all(s == state.COMPLETE for s in results.values()))
+
+    def test_batch_signoff_chunks_into_sessions(self) -> None:
+        # The cheap-first queue is signed off in ONE session per chunk of
+        # SIGNOFF_BATCH_SIZE (=5): six parked bundles → sessions of 5 then 1, all
+        # reaching COMPLETE (testbed issue #2 — batch the interactive sign-off).
+        ids = [f"C{i}" for i in range(6)]
+        for iid in ids:
+            leaves.do_plan(self.cfg.bundle(iid), self.cfg)
+
+        sizes: list[int] = []
+        real = leaves.run_signoff_batch
+
+        def counting(cfg: Config, bundles: list[Path]) -> None:
+            sizes.append(len(bundles))
+            real(cfg, bundles)  # stub loops _stub_signoff → accept + clears §6
+
+        leaves.run_signoff_batch = counting
+        try:
+            results = flow.flow_ids(self.cfg, ids, today="2026-06-06")
+        finally:
+            leaves.run_signoff_batch = real
+        self.assertEqual(sizes, [flow.SIGNOFF_BATCH_SIZE, 1])   # 6 → 5 + 1, one pass
         self.assertTrue(all(s == state.COMPLETE for s in results.values()))
 
     def test_batch_sweep_defers_iteration_to_next_pass(self) -> None:

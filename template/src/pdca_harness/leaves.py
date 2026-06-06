@@ -413,6 +413,42 @@ def _stub_signoff(d: Path, cfg: Config) -> None:
     (d / SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
 
 
+def run_signoff_batch(cfg: Config, bundles: list[Path]) -> None:
+    """Batch sign-off: ONE interactive session walks several parked bundles.
+
+    Mirrors :func:`do_plan_batch` — command mode runs a single seeded session over
+    the whole (cheap-first) chunk, so the human signs off N bundles without N session
+    startups + re-orientations; stub mode loops the per-bundle stub. Each bundle's
+    decision is written as soon as it is decided, so a session that ends early keeps
+    the bundles already done. The flow chunks the queue so one session is bounded
+    (``flow.SIGNOFF_BATCH_SIZE``). The headless reviewer is deliberately NOT batched
+    (kept per-bundle/sandboxed for independence + drop-isolation)."""
+    if not bundles:
+        return
+    if cfg.signoff.mode == "command":
+        _invoke(cfg.signoff, cfg.root, _signoff_batch_prompt(bundles))
+        return
+    for d in bundles:
+        _stub_signoff(d, cfg)
+
+
+def _signoff_batch_prompt(bundles: list[Path]) -> str:
+    listing = "\n".join(f"  - {d}" for d in bundles)
+    return (
+        "You are the Check sign-off leaf, in BATCH mode: this ONE session covers "
+        f"several bundles (cheap-first):\n{listing}\n"
+        "Work them in order. For EACH bundle, review its SUMMARY.md / patch.diff / "
+        "check-gates.md / check-review.md with the human, help clear that bundle's §6 "
+        "NEEDS-HUMAN items (`- [ ]` → `- [x]` only with their explicit OK), then write "
+        f"the agreed decision token — one of: {', '.join(sorted(VALID_DECISIONS))} — into "
+        f"THAT bundle's {SIGNOFF_DECISION} file **as soon as it is decided** (so if the "
+        "session ends early the finished bundles keep their decisions). Every write names "
+        "its own `issue_<id>` bundle — never leave an item ambient to the batch or write "
+        "it into the wrong bundle. Do not edit §9 yourself; the driver records it under a "
+        "deterministic guard."
+    )
+
+
 def signoff_decision(d: Path) -> str:
     """The token the sign-off leaf wrote, or "" if absent/invalid."""
     p = d / SIGNOFF_DECISION
