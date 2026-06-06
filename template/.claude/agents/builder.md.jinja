@@ -40,13 +40,18 @@ To confirm the test goes red→green, run it through **the project's own test
 runner** (the wrapper `pdca.toml` and `docs/INTEGRATION.md` name — e.g. a
 `scripts/run-tests` entry point, `make test`, `tox`, the configured gate `cmd`).
 Do **NOT** assemble your own `docker run … && python -m pytest …` (or any bare
-container/`xvfb`/ad-hoc invocation). The project runner provides the environment
-the test needs (display, session bus, fixtures, dependencies) **and** a
-**timeout** that kills a hung run. A hand-rolled `docker run` gets neither: it
-can miss the environment and silently pass the wrong thing, or **hang forever**
-with no timeout, stalling the whole Do beat. This pre-fix/post-fix check is a
-fast sanity pass — Check's gates re-run the real suite — so a single quick run
-through the wrapper is enough; you needn't run full suites here.
+container/`xvfb`/ad-hoc invocation): it has **no timeout**, so a hung test blocks
+the whole Do beat forever.
+
+Do **not** assume the runner gives you a display, GUI, or system bus — many are
+**headless**. If your test imports a GUI toolkit or other heavy module **at load
+time**, a headless runner crashes on import — and it recurs on every iterate-do
+until the test stops importing it. Keep the unit under test import-light: extract
+the logic into a module free of GUI/heavy imports and test *that*. Check what the
+runner actually provides (`pdca.toml`, `docs/INTEGRATION.md`) rather than assuming
+— an inaccurate belief about the environment is what makes a test crash silently.
+This pre-fix/post-fix check is a fast sanity pass (Check's gates re-run the real
+suite), so a single quick run through the wrapper is enough.
 
 ## STOP discipline — enforced, not asked
 

@@ -222,10 +222,14 @@ def _build_prompt(d: Path) -> str:
         "(2) the test file the brief names, red before the fix and green after; "
         "(3) build-notes.md — your rationale (withheld from the reviewer). Cite "
         "path:line on the target branch for every change. To run the test red→green, "
-        "use the project's own test runner (it provides the environment AND a timeout); "
-        "do NOT hand-roll a `docker run` / raw container command — a containerized test "
-        "with the wrong env (no display / bus / deps) can hang forever and stall the "
-        "cycle. Do NOT push, open, or mark any PR ready."
+        "use the project's own test runner (it provides a timeout and whatever "
+        "environment it is configured for); do NOT hand-roll a `docker run` / raw "
+        "container command — it has no timeout and can hang forever, stalling the cycle. "
+        "Do NOT assume the runner gives you a display / GUI / system bus: if it is "
+        "headless, a test that imports a GUI or other heavy module AT LOAD will crash it "
+        "(and recur every iterate-do) — keep the unit under test import-light by "
+        "extracting the logic into an import-free module and testing that. Do NOT push, "
+        "open, or mark any PR ready."
     )
 
 
