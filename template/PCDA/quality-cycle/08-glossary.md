@@ -207,6 +207,16 @@ status: active
 - **Env overrides** — `PDCA_LEAVES_MODE=stub` (force all leaves offline) · `PDCA_GATES_MODE=stub`
   (stub the gates) · `PDCA_BUNDLE_ROOT` (redirect bundles, so a rehearsal can't collide
   with the real `results/`).
+- **Lane** — an isolated execution context running cycles concurrently with other lanes
+  (an independent copy / `git worktree` of the workspace, own `results/` + own checkout).
+  Several lanes give throughput; the bundle is still the unit of isolation ([09](09-parallel-lanes.md)).
+- **Lane planning** — assigning issues to lanes by **code locality**: same-area fixes to
+  one lane (serial), parallel only across disjoint areas. Partition by *what changes*, not
+  by id; a Plan-beat judgment that prevents integration conflicts up front ([09](09-parallel-lanes.md)).
+- **Integration re-gate** — validating the *combination* of independently-accepted lane
+  patches at the **merge boundary**: the repo-scoped working-tree gate (`gates.run_working_tree`,
+  single-sourced with CI) over the merged tree + draft-PR conflict surfacing. Catches what
+  a per-fix gate (clean base, blind to other lanes) cannot ([09](09-parallel-lanes.md)).
 
 ## Discipline and guardrails
 
