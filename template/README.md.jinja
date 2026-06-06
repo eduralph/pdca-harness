@@ -55,6 +55,7 @@ When a Plan/sign-off/publish session ends, exit Claude (**Ctrl-D**) to let the f
 | `make setup` | One-time: write the permission config so the interactive leaves don't prompt. |
 | `make flow ID=<id> [CSV="<path>"] [NO_PUBLISH=1] [ACT=1] [BY=<name>]` | Run the full cycle for one issue. On an accept it opens a draft PR (`NO_PUBLISH=1` stops at COMPLETE); `ACT=1` runs Act; `BY` overrides §9 attribution. |
 | `make flow CSV="<path>"` | **Batch**: one Plan session may brief several issues; they all build unattended, then you sign off the cheap-first queue. |
+| `make batch IDS="<id> …" [NOACT=1] [BY=<name>]` | Drive **already-briefed** bundles by id through the full cycle, no Plan beat (Do → Check → sign-off → publish → Act). `NOACT=1` stops after sign-off; `BY` overrides §9 attribution. Resumable. |
 | `make publish ID=<id> [DRY=1]` | Re-publish an accepted bundle as a draft PR (the flow does this on accept). `DRY=1` prints the git/gh plan without pushing. |
 | `make rehearse ID=<id> [CSV="<path>"]` | Dry-run the *same* control flow with stub leaves + stub gates — **no Claude, no live gates, instant** (publish dry-runs too). |
 | `make status` | List every bundle and its state. |
