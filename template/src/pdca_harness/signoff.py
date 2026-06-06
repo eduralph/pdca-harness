@@ -27,7 +27,14 @@ _OUTCOME_RE = re.compile(r"^- Outcome:\s*(.*?)\s*$", re.MULTILINE)
 
 
 def outcome_token(summary_path: Path) -> str:
-    """The §9 Outcome value, or "" if unset. Scoped to the §9 section."""
+    """The §9 Outcome value, or "" if unset or the summary is absent. Scoped to §9.
+
+    An absent ``SUMMARY.md`` (a leaf deleted it, or it never assembled) is "no
+    outcome", not a crash — :func:`state.state` and the batch sweep treat every
+    bundle file as possibly-absent (testbed issue #3).
+    """
+    if not summary_path.exists():
+        return ""
     text = summary_path.read_text(encoding="utf-8")
     # Restrict to the §9 section so a stray "Outcome:" elsewhere can't match.
     section = _section(text, "9. Check sign-off")

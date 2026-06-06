@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdca_harness import brief, driver, flow, leaves, signoff, state
+from pdca_harness import brief, driver, flow, leaves, queue, signoff, state
 from pdca_harness.config import Config, LeafConfig
 
 DESIGN_TPL = Path(__file__).resolve().parents[1] / "templates" / "design-proposal.md.tpl"
@@ -242,6 +242,51 @@ class FlowSlice(unittest.TestCase):
         )
         self.assertEqual(set(results), {"HASBRIEF"})
         self.assertEqual(results["HASBRIEF"], state.COMPLETE)
+
+    def test_batch_isolates_a_failing_bundle(self) -> None:
+        # One bundle's build always raises (a leaf left it half-written). The sweep
+        # must isolate it and still drive the others to COMPLETE — never crash the
+        # batch and lose the rest's progress (testbed issue #3).
+        for iid in ("GOOD", "BAD"):
+            leaves.do_plan(self.cfg.bundle(iid), self.cfg)
+
+        real_run = driver.run_issue
+
+        def flaky(d: Path, cfg: Config) -> str:
+            if d.name == "issue_BAD":
+                raise RuntimeError("boom: leaf left the bundle half-written")
+            return real_run(d, cfg)
+
+        flow.driver.run_issue = flaky
+        try:
+            results = flow.flow_ids(self.cfg, ["GOOD", "BAD"], today="2026-06-06")
+        finally:
+            flow.driver.run_issue = real_run
+        self.assertEqual(results["GOOD"], state.COMPLETE)    # other bundle proceeded
+        self.assertNotEqual(results["BAD"], state.COMPLETE)  # failing one isolated
+
+    def test_queue_skips_a_bundle_whose_read_raises(self) -> None:
+        # A bundle parked at AWAITING_SIGNOFF whose §6 read raises must be skipped by
+        # the queue, not take the whole queue computation (and the sweep) down (#3).
+        for iid in ("OKAY", "GARBLED"):
+            d = self.cfg.bundle(iid)
+            leaves.do_plan(d, self.cfg)
+            self.assertEqual(driver.run_issue(d, self.cfg), state.AWAITING_SIGNOFF)
+
+        real = signoff.open_needs_human
+
+        def boom(p: Path) -> list[str]:
+            if "GARBLED" in str(p):
+                raise RuntimeError("garbled summary")
+            return real(p)
+
+        signoff.open_needs_human = boom
+        try:
+            names = {e.bundle.name for e in queue.awaiting_signoff(self.cfg)}
+        finally:
+            signoff.open_needs_human = real
+        self.assertIn("issue_OKAY", names)        # healthy bundle still queued
+        self.assertNotIn("issue_GARBLED", names)  # broken one skipped, no crash
 
 
 class DesignProposalBrief(unittest.TestCase):
