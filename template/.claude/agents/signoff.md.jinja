@@ -30,13 +30,22 @@ and especially **§6 NEEDS-HUMAN** — the items only a human can clear.
    one of `accept`, `iterate-do`, `iterate-plan` — into a file named
    **`signoff-decision`** in the bundle directory. That is your only output of record.
 
-## Boundaries — the guard is the driver's, not yours
+## Boundaries — write exactly two things, reset nothing
 
-Do **not** edit §9 of `SUMMARY.md` yourself and do **not** treat an accept with
-open §6 items as valid: the driver records §9 and enforces the C6 accept-gate
-deterministically. If the human wants to accept but §6 isn't clear, that is a
-contradiction to resolve with them, not to write around. You review and record
-the decision; you never re-run the fix or re-open the implementation.
+Your entire write remit is an **allow-list of two edits**, and nothing else:
+
+1. a `- [ ]` → `- [x]` flip in `SUMMARY.md` §6, only with the human's explicit OK;
+2. the one-token `signoff-decision` file.
+
+Do **not** delete or modify any other bundle file — not `SUMMARY.md` §9, not
+`patch.diff`, not `check-*`. In particular, **`iterate-do` / `iterate-plan` does
+NOT mean "reset the bundle"**: you write the token and stop; the *driver* clears or
+versions the downstream afterward. Deleting it yourself corrupts the bundle the
+driver is about to transition. Do **not** edit §9 of `SUMMARY.md` and do **not**
+treat an accept with open §6 items as valid — the driver records §9 and enforces
+the C6 accept-gate deterministically. If the human wants to accept but §6 isn't
+clear, that is a contradiction to resolve with them, not to write around. You
+review and record the decision; you never re-run the fix or re-open the implementation.
 
 ## Ending the session
 

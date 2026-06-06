@@ -175,6 +175,28 @@ class FlowSlice(unittest.TestCase):
             driver.run_issue, leaves.run_signoff = orig_run, orig_signoff
         self.assertEqual(calls["n"], 1)  # apply_now default drove the transition
 
+    def test_signoff_survives_a_leaf_that_reset_the_bundle(self) -> None:
+        # An over-reaching sign-off leaf deletes the downstream (the iterate-plan bug)
+        # so there's no SUMMARY.md to record into. _signoff_and_apply must drop the
+        # stale decision and return None — not crash the sweep on a missing file.
+        d = self.cfg.bundle("OVERREACH")
+        leaves.do_plan(d, self.cfg)
+        self.assertEqual(driver.run_issue(d, self.cfg), state.AWAITING_SIGNOFF)
+
+        def overreaching_signoff(d: Path, cfg: Config) -> None:
+            (d / leaves.SIGNOFF_DECISION).write_text("iterate-plan\n", encoding="utf-8")
+            for name in ("SUMMARY.md", "patch.diff", "check-gates.json", "check-review.md"):
+                (d / name).unlink(missing_ok=True)
+
+        orig = leaves.run_signoff
+        leaves.run_signoff = overreaching_signoff
+        try:
+            action = flow._signoff_and_apply(self.cfg, d, by="t", today="2026-06-04")
+        finally:
+            leaves.run_signoff = orig
+        self.assertIsNone(action)                              # dropped, not crashed
+        self.assertFalse((d / leaves.SIGNOFF_DECISION).exists())  # stale token consumed
+
     def test_batch_resumes_in_flight_bundle_not_briefed_this_session(self) -> None:
         # A bundle briefed in a PRIOR session (RESUME) is in flight; this session's
         # Plan only briefs BATCH1/BATCH2. flow_batch must pick RESUME up too — the

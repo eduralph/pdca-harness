@@ -50,6 +50,16 @@ def _signoff_and_apply(
     if not action:
         print(f"flow: {d.name} — sign-off recorded no decision", file=sys.stderr)
         return None
+    # The session must only write the decision + clear §6 — the driver owns the
+    # transition. But an over-reaching leaf can clear the bundle's downstream
+    # (deleting SUMMARY.md); don't let that crash the whole sweep. If there's no
+    # SUMMARY.md to record into, the bundle isn't in a recordable state — drop the
+    # stale decision and let the next build-all pass re-drive it.
+    if not (d / "SUMMARY.md").exists():
+        print(f"flow: {d.name} — decision '{action}' but no SUMMARY.md (bundle left "
+              f"{state.state(d)}); skipping record, will re-drive", file=sys.stderr)
+        (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
+        return None
     if action == "accept" and signoff.open_needs_human(d / "SUMMARY.md"):
         print(f"flow: {d.name} — cannot accept, §6 NEEDS-HUMAN still open (C6)", file=sys.stderr)
         return "blocked"
