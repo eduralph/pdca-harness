@@ -13,8 +13,9 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
-from pdca_harness import brief, driver, flow, leaves, queue, signoff, state
+from pdca_harness import brief, cli, driver, flow, leaves, queue, signoff, state
 from pdca_harness.config import Config, LeafConfig
 
 DESIGN_TPL = Path(__file__).resolve().parents[1] / "templates" / "design-proposal.md.tpl"
@@ -248,6 +249,20 @@ class FlowSlice(unittest.TestCase):
         finally:
             leaves.do_plan_batch = orig
         self.assertEqual(results, {})
+
+    def test_cli_flow_empty_batch_exits_zero(self) -> None:
+        # A resumable batch with nothing in flight is success (exit 0), not an error,
+        # so re-running `flow --from-csv` resumes cleanly instead of looking failed.
+        # Regression guard for cli._flow (the bug returned 1 here).
+        args = SimpleNamespace(issue_id=None, from_csv="anything.csv",
+                               no_publish=True, act=False, by="")
+        orig = flow.flow_batch
+        flow.flow_batch = lambda cfg, **kw: {}
+        try:
+            rc = cli._flow(self.cfg, args)
+        finally:
+            flow.flow_batch = orig
+        self.assertEqual(rc, 0)
 
     def test_flow_ids_drives_prebriefed_to_complete(self) -> None:
         # `pdca batch <ids>`: drive already-briefed bundles with NO Plan beat.
