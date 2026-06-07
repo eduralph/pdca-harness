@@ -24,6 +24,9 @@ ACTION_TO_OUTCOME = {
 }
 
 _OUTCOME_RE = re.compile(r"^- Outcome:\s*(.*?)\s*$", re.MULTILINE)
+# Anchored with [ \t] (NOT \s) so an empty field stops at the line end instead of
+# running past the newline into the next line.
+_DELTA_RE = re.compile(r"^- Iteration delta \(if iterating\):[ \t]*(.*?)[ \t]*$", re.MULTILINE)
 
 
 def outcome_token(summary_path: Path) -> str:
@@ -45,6 +48,18 @@ def outcome_token(summary_path: Path) -> str:
 def is_set(summary_path: Path) -> bool:
     """True once §9 Outcome holds a recognized token (placeholders don't count)."""
     return outcome_token(summary_path) in VALID_OUTCOMES
+
+
+def iteration_delta(summary_path: Path) -> str:
+    """The §9 'Iteration delta (if iterating)' value, or "" if unset/absent.
+
+    The human's rationale for an iterate ("why rejected / what to change"), which the
+    driver folds into the brief's carry-forward so the next iteration isn't blind."""
+    if not summary_path.exists():
+        return ""
+    section = _section(summary_path.read_text(encoding="utf-8"), "9. Check sign-off")
+    m = _DELTA_RE.search(section)
+    return (m.group(1).strip() if m else "")
 
 
 def open_needs_human(summary_path: Path) -> list[str]:

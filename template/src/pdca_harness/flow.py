@@ -96,7 +96,12 @@ def _apply_decision(
     if action == "accept" and signoff.open_needs_human(d / "SUMMARY.md"):
         print(f"flow: {d.name} — cannot accept, §6 NEEDS-HUMAN still open (C6)", file=sys.stderr)
         return "blocked"
-    signoff.record(d / "SUMMARY.md", action=action, by=by or cfg.author or "unknown", date=today)
+    # The iterate rationale ("why rejected / what to change") rides §9 → the driver
+    # folds it into the brief's carry-forward so the next iteration isn't blind.
+    # §9's "Iteration delta" is a single line, so flatten a multi-line rationale.
+    rationale = " ".join(leaves.signoff_rationale(d).split())
+    signoff.record(d / "SUMMARY.md", action=action, by=by or cfg.author or "unknown",
+                   date=today, delta=rationale)
     (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
     if apply_now:
         driver.run_issue(d, cfg)  # apply the transition: COMPLETE | ITERATE_* → re-loop

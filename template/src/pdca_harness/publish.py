@@ -47,12 +47,20 @@ def publish(
     by: str = "",
     today: str | None = None,
     skip_if_no_target: bool = False,
+    pending_id: bool = False,
 ) -> int:
     """Contribute an accepted bundle's fix as a draft PR. Return a process code.
 
     ``skip_if_no_target`` (set by the flow): a bundle whose brief names no upstream
     ``Repo + branch target`` is a non-contributing cycle (e.g. an internal fix) —
     warn and return 0 rather than erroring, so it doesn't fail the continuous flow.
+
+    ``pending_id`` (``--no-issue``): the first-class "no tracker id yet" path. A
+    project may need to contribute before a tracker number is assigned; rather than a
+    magic ``Fixes #0000`` placeholder, declare it here. The T4 contribution gate is
+    then **relaxed to a flag** instead of a hard block, and the bundle is recorded
+    ``id_pending`` so the human adds the real id and re-gates T4 before marking the PR
+    ready. The publisher leaf omits the trailer (no invented id) in this case.
     """
     d = cfg.bundle(issue_id)
     today = today or datetime.date.today().isoformat()
@@ -84,11 +92,20 @@ def publish(
         print(f"publish: {COMMIT_MSG} / {PR_BODY} still missing — aborting", file=sys.stderr)
         return 1
 
-    # T4 contribution gate — the artifacts MUST pass before anything is pushed.
+    # T4 contribution gate — the artifacts MUST pass before anything is pushed,
+    # UNLESS pending_id (--no-issue): then a T4 failure is relaxed to a flag, since the
+    # one thing legitimately missing is the not-yet-assigned tracker id. The bundle is
+    # recorded id_pending so the human adds the id and re-gates T4 before ready.
     if not _t4_passes(cfg, d):
-        print(f"publish: T4 contribution gate FAILED on {COMMIT_MSG} / {PR_BODY} — "
-              "fix them and retry", file=sys.stderr)
-        return 1
+        if pending_id:
+            print(f"publish: T4 contribution gate not satisfied on {COMMIT_MSG} / "
+                  f"{PR_BODY} — proceeding in --no-issue (pending-id) mode; the "
+                  "contribution is FLAGGED. Add the tracker id and re-run T4 before "
+                  "marking the PR ready.", file=sys.stderr)
+        else:
+            print(f"publish: T4 contribution gate FAILED on {COMMIT_MSG} / {PR_BODY} — "
+                  "fix them and retry", file=sys.stderr)
+            return 1
 
     branch = _branch_name(cfg, d, slug)
     summary_line = (d / COMMIT_MSG).read_text(encoding="utf-8").splitlines()[0]
@@ -155,6 +172,7 @@ def publish(
     (d / "publish.json").write_text(json.dumps({
         "branch": branch, "pr_url": pr_url, "base": base, "repo": repo_spec,
         "by": by or _signoff_by(d) or cfg.author or "unknown", "date": today,
+        "id_pending": pending_id,
     }, indent=2) + "\n", encoding="utf-8")
 
     # A requested-but-failed PR is a partial run, not a success — the branch is
@@ -166,6 +184,9 @@ def publish(
     print(f"\nDraft PR prepared on {repo_spec} ({branch} → {base}).")
     if pr_url:
         print(f"  {pr_url}\n  watch CI:  gh pr checks {pr_url} --watch")
+    if pending_id:
+        print("  ⚠ id_pending: contributed without a tracker id — add the trailer "
+              "(Fixes #N) and re-run T4 before marking the PR ready.")
     print("  STOP: review CI, then mark it ready / merge yourself — the human's step.")
     return 0
 

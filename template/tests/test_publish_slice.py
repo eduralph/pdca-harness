@@ -14,7 +14,7 @@ import json
 import shutil
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -175,6 +175,21 @@ class PublishSlice(unittest.TestCase):
         pj = json.loads((d / "publish.json").read_text(encoding="utf-8"))
         self.assertEqual(pj["pr_url"], "")                       # recorded, but empty
         self.assertEqual(pj["branch"], "fix/PUBFAIL-my-fix")     # branch was pushed
+
+    def test_no_issue_relaxes_failing_t4_to_a_flag(self) -> None:
+        """Issue #7 item3: `--no-issue` (pending_id) relaxes a failing T4 to a flag
+        instead of aborting — publish proceeds and flags it; without it a failing T4
+        still aborts. The first-class 'no tracker id yet' path (vs a magic #0000)."""
+        self.cfg.gates_checks = [{"id": "T4-x", "tier": "T4", "cmd": "exit 1", "scope": "bundle"}]
+        _bundle(self.cfg, "PEND", brief_body=_FIX_BRIEF, accepted=True)
+        # default: a failing T4 aborts the publish
+        self.assertEqual(publish.publish(self.cfg, "PEND", dry_run=True), 1)
+        # --no-issue: the failing T4 is relaxed to a flag; publish proceeds
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(io.StringIO()):
+            rc = publish.publish(self.cfg, "PEND", dry_run=True, pending_id=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("pending-id", err.getvalue().lower())
 
     def test_checkout_path_map_and_sibling_fallback(self) -> None:
         # sibling fallback: <root>/../<repo-last-segment>
