@@ -12,7 +12,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_FIELD_RE = re.compile(r"^\s*-\s*\*{0,2}([^:*]+?)\*{0,2}:\s*(.*?)\s*$")
+# The colon may sit INSIDE the bold (`**Label:**`, as `brief.md.tpl` and every real
+# brief write it) or outside (`**Label**:`), or there may be no bold (`Label:`). The
+# trailing `\*{0,2}` after the colon absorbs the closing markers in the first shape
+# so they never leak into the value; the label group excludes `*`/`:` so no marker
+# leaks into the key either.
+_FIELD_RE = re.compile(r"^\s*-\s*\*{0,2}([^:*]+?)\*{0,2}:\*{0,2}\s*(.*?)\s*$")
 
 
 def parse_fields(brief_path: Path) -> dict[str, str]:

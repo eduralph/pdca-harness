@@ -99,11 +99,21 @@ def publish(
         git("fetch", "upstream"),
         git("checkout", "-B", branch, f"upstream/{base}"),
         git("apply", str((d / "patch.diff").resolve())),
-        git("commit", "-aF", str((d / COMMIT_MSG).resolve())),
+        # `commit -a` stages only modified-tracked files and would silently drop the
+        # patch's NEW files (the regression test — the most important file in a fix
+        # PR). Stage everything the patch did, then commit — the checkout is clean
+        # (checkout -B off upstream + the _check_repo guard), so `add --all` picks up
+        # exactly the patch's files (modified and added), nothing stray.
+        git("add", "--all"),
+        git("commit", "-F", str((d / COMMIT_MSG).resolve())),
         git("push", "-u", "origin", branch),
     ]
+    # A fork-based PR's --head must be OWNER:BRANCH — `gh` resolves a bare branch name
+    # against the *base* repo (where the fork branch doesn't exist) and fails with
+    # "Head ref must be a branch". The branch lives on origin (the fork).
+    head = f"{_fork_owner(repo) or repo_spec.split('/')[0]}:{branch}"
     pr_cmd = ["gh", "pr", "create", "--draft", "--repo", repo_spec, "--base", base,
-              "--head", branch, "--title", summary_line,
+              "--head", head, "--title", summary_line,
               "--body-file", str((d / PR_BODY).resolve())]
 
     if dry_run:
@@ -126,14 +136,18 @@ def publish(
             return 1
 
     pr_url = ""
+    pr_failed = False
     if open_pr:
         print("→ gh pr create --draft …")
         r = subprocess.run(pr_cmd, capture_output=True, text=True)
         out = (r.stdout or "").strip()
         if r.returncode != 0:
+            pr_failed = True
             print(r.stderr, file=sys.stderr)
-            print("publish: branch pushed, but `gh pr create` failed — "
-                  "open the draft PR by hand", file=sys.stderr)
+            print("\n!!! publish: branch pushed, but `gh pr create` FAILED — "
+                  "no draft PR was opened.\n"
+                  "    Open it by hand, then re-run if needed. This is NOT done.\n",
+                  file=sys.stderr)
         else:
             print(out)
             pr_url = out.splitlines()[-1] if out else ""
@@ -142,6 +156,12 @@ def publish(
         "branch": branch, "pr_url": pr_url, "base": base, "repo": repo_spec,
         "by": by or _signoff_by(d) or cfg.author or "unknown", "date": today,
     }, indent=2) + "\n", encoding="utf-8")
+
+    # A requested-but-failed PR is a partial run, not a success — the branch is
+    # pushed but the cycle isn't done. Exit non-zero so `flow` doesn't read the
+    # empty pr_url as "published".
+    if pr_failed:
+        return 1
 
     print(f"\nDraft PR prepared on {repo_spec} ({branch} → {base}).")
     if pr_url:
@@ -156,9 +176,6 @@ def _resolve_target(d: Path) -> tuple[str, str, str]:
     ``("example-org/example-repo", "main", "fix-the-thing")``."""
     bp = d / "brief.md"
     target = brief.field(bp, "repo + branch target", "repo + branch", "target")
-    # The brief parser can leak a leading bold marker from a `**Label:**` bullet
-    # (e.g. "** org/repo @ main"); strip stray markdown before splitting on "@".
-    target = target.strip().lstrip("*").strip()
     repo_spec, _, base = target.partition("@")
     slug = brief.field(bp, "slug") or d.name.removeprefix("issue_")
     return repo_spec.strip(), base.strip(), _slugify(slug)
@@ -188,6 +205,16 @@ def _checkout_path(cfg: Config, repo_spec: str) -> Path:
         p = Path(mapped)
         return (p if p.is_absolute() else cfg.root / p).resolve()
     return (cfg.root.parent / repo_spec.split("/")[-1]).resolve()
+
+
+def _fork_owner(repo: Path) -> str:
+    """The GitHub owner of the fork the branch is pushed to (``origin``), e.g.
+    ``"example-user"`` from ``git@github.com:example-user/repo.git`` or the https form.
+    Used to form the cross-repo PR ``--head OWNER:BRANCH``. ``""`` if undetectable."""
+    url = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "origin"],
+                         capture_output=True, text=True).stdout.strip()
+    m = re.search(r"[:/]([^/]+)/[^/]+?(?:\.git)?$", url)
+    return m.group(1) if m else ""
 
 
 def _t4_passes(cfg: Config, d: Path) -> bool:

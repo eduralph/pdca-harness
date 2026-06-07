@@ -53,6 +53,17 @@ runner actually provides (`pdca.toml`, `docs/INTEGRATION.md`) rather than assumi
 This pre-fix/post-fix check is a fast sanity pass (Check's gates re-run the real
 suite), so a single quick run through the wrapper is enough.
 
+## Commit-ready for the target repo
+
+The patch must be **committable to the target repo**, not just gate-green. When the
+fix is published, the commit runs the *target's own* pre-commit hooks
+(formatter/linters — e.g. the project's configured formatter), which no PDCA gate
+models — so "all gates green" does **not** mean "committable". Run the project's
+formatter / `pre-commit` (the one its repo configures; check `pdca.toml` /
+`docs/INTEGRATION.md`) over every file you touch before declaring done. A patch the
+target's commit hook would reject is not done — it would otherwise fail mid-publish,
+after the branch is already pushed.
+
 ## STOP discipline — enforced, not asked
 
 You MAY push to a feature/draft branch and open a **draft** PR (`gh pr create

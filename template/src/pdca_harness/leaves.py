@@ -238,7 +238,11 @@ def _build_prompt(d: Path) -> str:
         "Do NOT assume the runner gives you a display / GUI / system bus: if it is "
         "headless, a test that imports a GUI or other heavy module AT LOAD will crash it "
         "(and recur every iterate-do) — keep the unit under test import-light by "
-        "extracting the logic into an import-free module and testing that. Do NOT push, "
+        "extracting the logic into an import-free module and testing that. Make the "
+        "patch commit-ready for the TARGET repo: run the project's formatter / "
+        "pre-commit before declaring done — the publish commit runs the target's own "
+        "hooks (formatter/linters), which no PDCA gate models, so a patch the target's "
+        "commit hook would reject is not done even if every gate is green. Do NOT push, "
         "open, or mark any PR ready."
     )
 

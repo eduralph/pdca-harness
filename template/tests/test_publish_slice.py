@@ -10,11 +10,14 @@ pushing. No Claude, no git, no network.
 from __future__ import annotations
 
 import io
+import json
 import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from pdca_harness import publish, signoff, state
 from pdca_harness.config import Config, LeafConfig
@@ -111,6 +114,67 @@ class PublishSlice(unittest.TestCase):
             publish.publish(self.cfg, "NOTGT", dry_run=True, skip_if_no_target=True), 0)
         # …but a standalone publish (no skip) treats the missing target as an error.
         self.assertEqual(publish.publish(self.cfg, "NOTGT", dry_run=True), 1)
+
+    def test_commit_stages_patch_added_files(self) -> None:
+        """Regression (#23a): the commit must stage patch-ADDED files (the new
+        regression test), not only modified-tracked ones — `git apply` + `add --all`
+        + `commit -F`, never `commit -aF`."""
+        _bundle(self.cfg, "ADD", brief_body=_FIX_BRIEF, accepted=True)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            publish.publish(self.cfg, "ADD", dry_run=True)
+        out = buf.getvalue()
+        self.assertIn("add --all", out)        # stages new files (the regression test)
+        self.assertNotIn("commit -aF", out)    # never the modified-only commit
+
+    def test_pr_head_is_fork_owner_qualified(self) -> None:
+        """Regression (#23b): a fork-based PR's --head must be OWNER:BRANCH, else gh
+        resolves the branch against the base repo and fails 'Head ref must be a
+        branch'. (No real checkout here, so the owner falls back to the base owner —
+        the assertion is on the OWNER:BRANCH *shape*, not the value.)"""
+        _bundle(self.cfg, "HEAD", brief_body=_FIX_BRIEF, accepted=True)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            publish.publish(self.cfg, "HEAD", dry_run=True)
+        out = buf.getvalue()
+        self.assertRegex(out, r"--head \S+:fix/HEAD-my-fix\b")   # owner-qualified
+        self.assertNotIn("--head fix/HEAD-my-fix", out)          # never a bare branch
+
+    def test_fork_owner_parses_origin_url(self) -> None:
+        """`_fork_owner` extracts the GitHub owner from origin (ssh + https forms),
+        and is empty when the URL is undetectable."""
+        for url, owner in (
+            ("git@github.com:example-user/repo.git", "example-user"),
+            ("https://github.com/example-user/repo.git", "example-user"),
+            ("https://github.com/example-user/repo", "example-user"),
+        ):
+            with mock.patch.object(publish.subprocess, "run",
+                                   return_value=SimpleNamespace(stdout=url + "\n", returncode=0)):
+                self.assertEqual(publish._fork_owner(Path("/x")), owner)
+        with mock.patch.object(publish.subprocess, "run",
+                               return_value=SimpleNamespace(stdout="", returncode=0)):
+            self.assertEqual(publish._fork_owner(Path("/x")), "")
+
+    def test_open_pr_failure_exits_nonzero(self) -> None:
+        """Regression (#23 note): when `gh pr create` fails after the branch is
+        pushed, publish must NOT exit 0 with an empty pr_url — it returns non-zero
+        (a partial run) and records the pushed branch with an empty pr_url."""
+        d = _bundle(self.cfg, "PUBFAIL", brief_body=_FIX_BRIEF, accepted=True)
+
+        def fake_run(cmd, *a, **k):  # every git step succeeds; `gh pr create` fails
+            if cmd[:3] == ["gh", "pr", "create"]:
+                return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        buf = io.StringIO()
+        with mock.patch.object(publish, "_check_repo", return_value=0), \
+             mock.patch.object(publish.subprocess, "run", side_effect=fake_run), \
+             redirect_stdout(buf):
+            rc = publish.publish(self.cfg, "PUBFAIL", by="Tester", today="2026-06-05")
+        self.assertEqual(rc, 1)                                   # partial run, not "done"
+        pj = json.loads((d / "publish.json").read_text(encoding="utf-8"))
+        self.assertEqual(pj["pr_url"], "")                       # recorded, but empty
+        self.assertEqual(pj["branch"], "fix/PUBFAIL-my-fix")     # branch was pushed
 
     def test_checkout_path_map_and_sibling_fallback(self) -> None:
         # sibling fallback: <root>/../<repo-last-segment>
