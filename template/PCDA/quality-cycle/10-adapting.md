@@ -24,7 +24,7 @@ An adapted project is the template's **machinery** (a Python package + determini
 **The rule that makes it work, both directions:**
 
 - *Adapting (template → instance):* you only ever touch the **render-time** answers, the **`[[gates.checks]]`** rows, and the **`engine/`**. You do **not** edit `src/pdca_harness/*` — if you feel the urge to, that is a signal the *template* needs a change (see the feedback discipline below), not the instance.
-- *Improving (instance → template):* a fix you make to the machinery while running a real cycle is a **template** change wearing an instance's clothes. It must flow back, or the next `copier update` overwrites it. gramps-testbed-v2 keeps a propagation log (`docs/template-feedback.md`) for exactly this — see [§ Feeding improvements back](#feeding-improvements-back-the-non-optional-part).
+- *Improving (instance → template):* a fix you make to the machinery while running a real cycle is a **template** change wearing an instance's clothes. It must flow back, or the next `copier update` overwrites it. File it as an `enhancement` issue on the template repo for exactly this — see [§ Feeding improvements back](#feeding-improvements-back-the-non-optional-part).
 
 Everything below is organised by that boundary.
 
@@ -175,15 +175,15 @@ Everything else in the agents — the STOP discipline, the write allow-lists, th
 
 ## Feeding improvements back — the non-optional part
 
-Running a real cycle *will* surface defects in the machinery, not just your integration. When it does, the fix is a **template** change — apply it in the template, not just the instance, or the next `copier update` clobbers it. gramps-testbed-v2 makes this mechanical with an instance-local propagation log, `docs/template-feedback.md`: every machinery change, its upstream target, the rendering class, and an apply note.
+Running a real cycle *will* surface defects in the machinery, not just your integration. When it does, the fix is a **template** change — apply it in the template, not just the instance, or the next `copier update` clobbers it. **File it as an `enhancement` issue on the template repo**, one per generic machinery change. Put in the issue body what makes the hand-off mechanical: the **upstream target** (the `template/…` path), the **rendering class** (verbatim / jinja / instance-only), and an **apply note**. The issue is the shared queue the template maintainer works from; the change lands via a normal PR that closes it.
 
-The apply rule follows the boundary table:
+The apply rule (state it in the issue, follow it in the PR):
 
 - **Verbatim machinery** (`src/**`, `tests/**`): copy the instance file over its `template/…` counterpart; re-run the template's tests.
 - **Genericized (jinja)**: port the change by hand into the `.jinja`, swapping project literals (`Gramps Testbed v2`) back to copier vars (`{{ project_name }}`); render a throwaway project and `make check` it.
 - **Instance-only** (`engine/**`, gate rows, scraper, ruleset, branch convention): **do not** feed back. The *generic lesson* often is worth a template note (e.g. "a patch-and-revert gate must clean added files"); the gramps script is not.
 
-Why this matters as an instruction and not a nicety: the harness only stays improvable-without-forking if instance discoveries return to the source. An instance that hoards its fixes diverges until `copier update` is unusable — at which point you have a fork, not an adaptation. The log is the seam that prevents that. (Feeding the log's deltas into the template repo is a deliberate **human** step across repos — the discipline is to record every delta so that step is mechanical, never to auto-push machinery edits from inside an instance.)
+Why this matters as an instruction and not a nicety: the harness only stays improvable-without-forking if instance discoveries return to the source. An instance that hoards its fixes diverges until `copier update` is unusable — at which point you have a fork, not an adaptation. A shared **issue tracker on the template repo** is the seam that prevents that: one linkable, status-tracked queue both the maintainer and every instance can see. (An earlier version of this harness used an instance-local propagation-log *file*; issues replaced it because the file duplicated the template's own git history and had to be hand-synced. Feeding a fix upstream is still a deliberate step across repos — the issue makes the work explicit and reviewable, and the PR that closes it lands the change.)
 
 ## Gramps Testbed v2 at a glance
 
@@ -201,7 +201,7 @@ The full adaptation, every knob → its instance value, as a fill-in-the-blanks 
 | Ruleset | instance-only | gramps wiki doc 16, cited by section heading, selected by core-vs-addon target |
 | Engine | instance-only | `engine/**` — Docker runners, dogtail/AT-SPI interface suite, addon×core worktree matrix |
 | Publish layout | project-provided | gramps fork as a sibling with `upstream`+`origin`; target runs `black` as a pre-commit hook |
-| Feedback log | instance-only (process) | `docs/template-feedback.md` |
+| Feedback mechanism | process | `enhancement` issues on the template repo (one per machinery change) |
 
 ## What never changes
 
