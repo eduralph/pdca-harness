@@ -69,6 +69,12 @@ upstream-isn't-ahead; scope-creep / Plan re-entry; visual / manual-repro
 outcomes; and the project's enumerated human-only items (INTEGRATION.md §4).
 Each becomes a `- [ ]` row in `SUMMARY.md` §6 the human must clear.
 
+Judge the contribution against `docs/fork-discipline.md`: a cross-version
+cherry-pick that *applies cleanly* is not necessarily *correct* on the target (§3);
+validation must be against the **clean upstream** target, not the fork's branches
+(§4); and confirm the prior-art check ran by file path (§5). Where these can't be
+mechanically settled, raise them NEEDS-HUMAN.
+
 ### C5 symptom-guard smell-test
 
 The "contested symptom-vs-root-cause" trigger above has a concrete detection rule —
