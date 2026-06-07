@@ -101,6 +101,9 @@ This is the condensed model. The authoritative doc set is vendored under
 6. [Repository Integration](quality-cycle/05-repository-integration.md) — what each repo provides (see [INTEGRATION.md](INTEGRATION.md))
 7. [Quality Cycle Guidelines](quality-cycle/06-quality-cycle-guidelines.md) — the per-beat MUST/SHOULD/MAY rules
 8. [Case Study — CI Hardening](quality-cycle/07-case-study-ci-hardening.md) — a worked example
+9. [Glossary](quality-cycle/08-glossary.md) — terms
+10. [Parallel Lanes](quality-cycle/09-parallel-lanes.md) — running cycles concurrently
+11. [Adapting the Harness](quality-cycle/10-adapting.md) — render-to-running playbook (worked example: Gramps Testbed v2)
 
 The vendored docs are a snapshot with worked examples drawn from the Gramps
 testbed (clearly labelled); your repo's specifics live in INTEGRATION.md, not in
