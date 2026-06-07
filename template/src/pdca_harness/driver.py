@@ -4,8 +4,9 @@ No model in the control path: ``state`` / ``advance`` / ``run_issue`` are pure
 code, and the two model leaves are reached only inside :mod:`pdca_harness.leaves`.
 The driver advances an issue beat by beat, writing each artifact, and STOPS at
 AWAITING_SIGNOFF (the human touch point). The iterate transitions deliberately
-clear downstream artifacts so a rebuild starts clean; brief versions are
-preserved on iterate-to-Plan.
+**archive** the previous attempt into ``iteration-v<N>/`` (never delete it) so a
+rebuild starts clean while the rejected attempt is preserved; on iterate-to-Plan
+the ``brief.md`` is archived with it (state → UNPLANNED) for the re-authoring human.
 """
 
 from __future__ import annotations
@@ -52,13 +53,15 @@ def advance(d: Path, cfg: Config) -> None:
         _say(f"→ {d.name}: assembling SUMMARY…")
         assemble.assemble_summary(d, cfg)  # pure code → SUMMARY.md §1–8
     elif s == state.ITERATE_DO:
-        _say(f"→ {d.name}: iterate-to-Do — clearing downstream, rebuilding…")
-        _carry_forward_into_brief(d)  # persist the WHY before the clear wipes it
-        _clear_downstream_of_brief(d)  # re-run Do against the (now annotated) brief
+        n = _next_iteration_no(d)
+        _say(f"→ {d.name}: iterate-to-Do — archiving the attempt to iteration-v{n}/, rebuilding…")
+        _carry_forward_into_brief(d, n)  # fold prior insight into the surviving brief
+        _archive_iteration(d, n, include_brief=False)  # rebuild against the annotated brief
     elif s == state.ITERATE_PLAN:
-        _say(f"→ {d.name}: iterate-to-Plan — versioning brief…")
-        _carry_forward_into_brief(d)  # annotate the brief before it is versioned
-        _version_brief_and_clear(d)  # preserve brief.vN.md; human re-authors
+        n = _next_iteration_no(d)
+        _say(f"→ {d.name}: iterate-to-Plan — archiving the attempt to iteration-v{n}/, re-planning…")
+        _carry_forward_into_brief(d, n)  # appended to the brief, archived with it
+        _archive_iteration(d, n, include_brief=True)  # brief archived too → UNPLANNED
     # UNPLANNED / AWAITING_SIGNOFF / COMPLETE: nothing for the driver to do.
 
 
@@ -70,46 +73,22 @@ def run_issue(d: Path, cfg: Config) -> str:
 
 
 # ----------------------------------------------------------------------------
-# Iterate transitions — a deliberate clear, not an idempotency violation.
+# Iterate transitions — a deliberate ARCHIVE, not a delete: the previous attempt is
+# moved into iteration-v<N>/ so a rejected attempt is preserved, never lost.
 # ----------------------------------------------------------------------------
-def _clear_downstream_of_brief(d: Path) -> None:
-    """Iterate-to-Do: unlink every Do+Check artifact so state() → PLANNED.
-
-    The shipped test's path is read from brief.md, so this must run while
-    brief.md is still in place (see _version_brief_and_clear's ordering).
-    """
-    for name in DOWNSTREAM_OF_BRIEF:
-        (d / name).unlink(missing_ok=True)
-    if (d / "brief.md").exists():
-        for tf in brief.test_files(d / "brief.md"):
-            (d / tf).unlink(missing_ok=True)
-
-
-def _version_brief_and_clear(d: Path) -> None:
-    """Iterate-to-Plan: clear downstream, then brief.md → brief.vN.md (preserved).
-
-    Clear first — while brief.md still names the test file — then version, so
-    state() returns UNPLANNED (no brief.md) and the human re-authors.
-    """
-    n = _next_brief_version(d)
-    _clear_downstream_of_brief(d)
-    (d / "brief.md").rename(d / f"brief.v{n}.md")
-
-
-def _next_brief_version(d: Path) -> int:
-    existing = [p.stem for p in d.glob("brief.v*.md")]
-    nums = [int(s.split("brief.v")[1]) for s in existing if s.split("brief.v")[1].isdigit()]
-    return (max(nums) + 1) if nums else 1
+def _next_iteration_no(d: Path) -> int:
+    """Next iteration number = (count of existing iteration-v* archives) + 1."""
+    return len(list(d.glob("iteration-v*"))) + 1
 
 
 # ----------------------------------------------------------------------------
 # Iterate carry-forward — persist the WHY into the one input the next beat reads.
 # ----------------------------------------------------------------------------
-def _carry_forward_into_brief(d: Path) -> None:
-    """Fold the previous iteration's insight into ``brief.md`` BEFORE the clear wipes
-    SUMMARY/check-*, so the next attempt isn't blind. On iterate-do the annotated
-    brief stays in place (the rebuild reads it); on iterate-plan it is versioned to
-    ``brief.vN.md`` with the re-authoring context attached.
+def _carry_forward_into_brief(d: Path, n: int) -> None:
+    """Fold the previous iteration's insight into ``brief.md`` BEFORE the attempt is
+    archived — so the next Do/Plan isn't blind. On iterate-do the brief stays at the
+    top level (the rebuild reads it); on iterate-plan the annotated brief is archived
+    with the attempt for the re-authoring human.
 
     Captures whatever is available — the §9 sign-off rationale AND the failing gates
     (gating *and* advisory, since an iterate is often driven by an advisory red), so
@@ -124,12 +103,13 @@ def _carry_forward_into_brief(d: Path) -> None:
         fails = _failing_gate_lines(d / "check-gates.json")
         if not delta and not fails:
             return
-        n = brief_path.read_text(encoding="utf-8").count("## Iteration ") + 1
         out = [f"\n## Iteration {n} — carry-forward (from the previous attempt)\n"]
         if delta:
             out.append(f"- Sign-off rationale: {delta}\n")
         for f in fails:
             out.append(f"- Failing gate: {f}\n")
+        out.append(f"- Full previous attempt preserved in `iteration-v{n}/` "
+                   "(patch.diff, build-notes.md, SUMMARY.md, check-*).\n")
         out.append("- Address the above; do NOT re-attempt the rejected approach "
                    "unchanged. Satisfy the brief's Success criterion (the end result).\n")
         with brief_path.open("a", encoding="utf-8") as fh:
@@ -154,3 +134,34 @@ def _failing_gate_lines(gates_json: Path) -> list[str]:
             tag = "" if r.get("gating") else " (advisory)"
             out.append(f"{r.get('check', '?')}{tag} — {ev}".strip(" —"))
     return out
+
+
+def _within(p: Path, parent: Path) -> bool:
+    try:
+        p.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _archive_iteration(d: Path, n: int, *, include_brief: bool) -> None:
+    """Move the previous attempt's artifacts into ``d/iteration-v<N>/`` rather than
+    deleting them: the Do+Check downstream always, plus ``brief.md`` on iterate-plan
+    (so state() → UNPLANNED and the human re-authors a fresh brief). Most tests ride
+    in patch.diff; a test file written *into the bundle* is archived too. External
+    paths (e.g. a sibling repo's test) are left untouched, never deleted.
+    """
+    arch = d / f"iteration-v{n}"
+    names = list(DOWNSTREAM_OF_BRIEF)
+    if include_brief:
+        names.append("brief.md")
+    if (d / "brief.md").exists():
+        for tf in brief.test_files(d / "brief.md"):
+            p = d / tf
+            if p.is_file() and _within(p, d):
+                names.append(str(tf))
+    for name in names:
+        src = d / name
+        if src.is_file():
+            arch.mkdir(parents=True, exist_ok=True)
+            src.rename(arch / Path(name).name)
