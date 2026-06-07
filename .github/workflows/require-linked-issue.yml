@@ -1,0 +1,48 @@
+name: PR hygiene
+
+# Enforce that every PR is tied to an issue. This is the ONLY required status
+# check on `main` (no CI/test gates) — it pairs with branch protection's
+# `enforce_admins` so the PR+issue process binds everyone, admins included.
+#
+# A PR satisfies the check when it has a linked/closing issue: a closing keyword
+# in the description ("Closes #123", "Fixes #123", "Resolves #123") or an issue
+# linked via the PR's Development sidebar. Editing the PR body re-runs the check.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  require-linked-issue:
+    name: require-linked-issue
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify the PR links an issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const number = context.payload.pull_request.number;
+            const query = `
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $number) {
+                    closingIssuesReferences(first: 1) { totalCount }
+                  }
+                }
+              }`;
+            const res = await github.graphql(query, { owner, repo, number });
+            const linked = res.repository.pullRequest.closingIssuesReferences.totalCount;
+            if (linked === 0) {
+              core.setFailed(
+                'This PR is not linked to an issue. Add a closing reference to the ' +
+                'PR description (e.g. "Closes #123") or link an issue via the ' +
+                'Development sidebar, then the check re-runs automatically.'
+              );
+            } else {
+              core.info(`PR is linked to ${linked} issue(s) — OK.`);
+            }
