@@ -30,6 +30,19 @@ The reason isolation cannot help with the second: Check's per-fix gate (the red�
 
 > **A bundle accepted in a lane is "correct on its own", not "mergeable with the others."** Lane sign-off establishes per-fix correctness; it says nothing about the combination.
 
+## Lane mechanics — cheap, safe isolation
+
+The mechanical isolation that fixes runtime tangling is **[project-provided]** (the harness doesn't own the project's checkout or runner), but the *techniques* for making it cheap and safe are generic — every project building lanes hits the same handful of git/runner traps:
+
+- **Reference-clone the target checkouts so a lane costs a working tree, not a full clone.** `git clone --reference <primary>/<repo> <source> <lane>/<repo>` borrows the primary's object store via `alternates`; the lane materializes only a working tree. Keep the primary around and don't aggressively `gc` / delete it — the alternates point into it.
+- **A reference-clone inherits objects but *not* remote config.** Re-add the `upstream` / contribution remote in each lane clone, or an upstream-anchored, fetch-based setup (per-version checkouts based on `upstream/<base>`) silently fails.
+- **Never `cp` a `git worktree` between lanes.** A worktree's `.git` is a *file* holding an **absolute `gitdir:` pointer** back at the repo that created it — copying it cross-links the new lane to the source (the one trap that re-tangles silently). Create each lane's worktrees *in that lane*, from its own clone. (Same reason a worktree bind-mounted into a container needs its primary gitdir mounted at its own absolute path, or in-container git breaks.)
+- **Share read-only / immutable resources across lanes; isolate only *mutable* state.** A built runner image, a vendored ruleset, fixtures — read-only: build/fetch once and share. Only what a cycle *writes* — the target checkout it patches, runner containers / artifacts, scratch dirs — must be lane-private.
+- **Name runner artifacts uniquely per run** (a PID/uuid in the container name, ports, scratch paths) so two lanes' runners can't collide, and make the runner **refuse to operate on a dirty checkout** — a loud-failure backstop if isolation is ever breached.
+- **Disjoint issue ids per lane.** Beyond preventing run-tangling, it is the single rule that stops two lanes producing duplicate contribution branches / PRs on the shared fork remote.
+
+These are the concrete content of "give each lane its own working tree and uniquely-named runner artifacts" from the runtime-tangling row above; *what exactly* must be isolated still depends on what the project's gates and builder touch.
+
 ## Lane planning — partition by what changes, not by id
 
 The first defense against integration tangling is to not create it. Assign work to lanes by **code locality**:
@@ -55,6 +68,15 @@ The lanes parallelize the **unattended** band only. The three human touch points
 - **Act** runs once, across the completed cycles of all lanes — serial by nature.
 
 So the shape is: **Plan (serial) → Do + Check fan out across lanes → sign-off (serial join) → publish → integration re-gate at the merge boundary → Act once.** Parallelism lives entirely in the unattended middle; planning and the merge re-gate carry correctness across the results.
+
+## Two realizations — separate workspaces vs an in-driver pool
+
+The fan-out can be realized two ways, and they trade off cleanly:
+
+- **N separate workspaces** (the [project-provided] model above) — each lane is an independent, *serial* driver run in its own `$WORKSPACE`. This needs **no harness change**: the driver is serial and keeps no state outside its workspace, so N concurrent runs can't tangle at the harness level — all isolation is the filesystem boundary. The cost is full copies (disk) and a per-lane sign-off queue (the human attends each in turn).
+- **An in-driver worker pool** (one workspace, the driver running bundles concurrently) — lighter on disk and allows a single batched sign-off, but it is a **future enhancement**, not built: it requires the driver to run the unattended band concurrently *and* the harness to become lane-aware — making the **target checkout** (gates apply/revert in place) and the **runner artifacts** lane-scoped, which today are addressed by fixed derivation. That lane-awareness is the hard, non-local part.
+
+Start with separate workspaces (it works today with the generic mechanics above); reach for the in-driver pool only when per-lane disk or sign-off ergonomics actually bite.
 
 ## The one rule
 
