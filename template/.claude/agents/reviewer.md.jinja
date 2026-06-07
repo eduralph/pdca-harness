@@ -68,3 +68,17 @@ Validation fitness-to-purpose; contested symptom-vs-root-cause; semantic
 upstream-isn't-ahead; scope-creep / Plan re-entry; visual / manual-repro
 outcomes; and the project's enumerated human-only items (INTEGRATION.md §4).
 Each becomes a `- [ ]` row in `SUMMARY.md` §6 the human must clear.
+
+### C5 symptom-guard smell-test
+
+The "contested symptom-vs-root-cause" trigger above has a concrete detection rule —
+apply it to `patch.diff` every cycle. If the fix adds a **capability probe** (a
+capability check, `hasattr`, `try: import …`) or a **runtime guard** *inside code that
+is meant to run with that capability present* — the guard protects a path that, by
+design, only executes when the capability exists — flag C5 **NEEDS-HUMAN** and ask in
+the basis: can the eager / load-time cause be removed instead (e.g. compute lazily on
+first real use) so the probe is unnecessary? A probe papering over a load-time side
+effect is the canonical case. This is the downstream backstop for the planner's
+Plan-exit gate (`process/principles.md` §3) — it catches a guard Do introduces even
+when the brief was clean. It does **not** fire on a fix that *removes / transforms* the
+cause rather than guarding a present capability.

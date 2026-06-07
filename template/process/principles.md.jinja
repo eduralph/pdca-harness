@@ -1,0 +1,142 @@
+# Planning Principles — solution-design discipline for briefs
+
+> **Status:** living document. **Owner:** {{ author_name or "the maintainer" }}.
+> **Why this exists.** A brief that names a *solution mechanism* (a probe, a guard, a
+> helper) instead of the *property the fix must restore* seats the fix shape before Do
+> reasons about it — and no downstream gate can recover the right shape from a wrong
+> success criterion. This document gives Plan the rules and a sourced invariant
+> catalogue so it states the right success property before Do ever runs. It was born
+> from a real cycle where a symptom-guard shipped where cause-removal was the correct,
+> comparably small fix — caught only at human review, one rework round-trip too late.
+>
+> **Two layers.** This reference layer is the *library*: document a principle here
+> freely (near-zero cost). The *active layer* — the brief-template `Invariant to
+> restore` field, the planner's minimalism qualifier, and the Plan-exit gate — is the
+> small set the brief actually asks about, on the matching defect category (§6). The
+> reference layer holds knowledge; the active layer is the few questions worth
+> interrupting planning to ask every relevant time. Graduate a principle from reference
+> to active only on evidence it is being missed (§8).
+
+---
+
+## 1. Process principle — minimalism is scoped to behavioural bug fixes
+
+- **1.1** In bug-fixing, the target is the smallest reviewable, low-risk delta against
+  code you do not own.
+- **1.2** The maxim does **not** apply when a fix touches *structure* — what runs at
+  load/import, object lifetime, where work happens. There the target is the smallest
+  change that **restores the invariant** (§5), not the smallest diff. A named invariant
+  takes precedence over diff size.
+- **1.3** New-feature work is not governed by minimalism at all.
+
+> Why: when "minimal" is the only *named* currency in the room, it wins by default —
+> even on a structural fix where it is out of scope per 1.2. Name the invariant so it
+> has something to lose to.
+
+## 2. Process principle — a cost used to reject an alternative must be checkable
+
+- **2.1** Rejecting an alternative on cost requires a **verifiable basis** — a diff
+  sketch or a concrete line count someone can check — never an adjective ("heavier",
+  "larger", "touches every reader").
+- **2.2** A precise estimate of the *wrong* comparison is still wrong. If a named
+  invariant is in play, cost-vs-minimalism is not the deciding axis (1.2 governs).
+  Estimation is the **backstop**, not the decision.
+
+> Why: an unquantified "heavier" is exactly how a cheaper, better fix gets discarded.
+> Make the cost claim checkable and the false ones fall away.
+
+## 3. Process principle — a brief states the invariant, not a solution
+
+- **3.1** Scope names the **defect to remove**. It must **not** name a probe, guard, or
+  helper (a capability check, a `hasattr`, a `try/except import`). Naming a mechanism
+  seats the fix shape before Do reasons about it.
+- **3.2** The invariant is **quantified over the defect category**, not the repro file.
+  **Self-test:** *could Do satisfy this by guarding a single module?* If yes, it is the
+  narrow symptom-sentence — widen it until a one-module patch visibly fails it.
+- **3.3** Mechanism is left to Do; Do prefers removing the cause over guarding the
+  symptom.
+
+> The self-test is the load-bearing rule: a success criterion narrow enough to be met
+> by guarding one module is narrow enough to let the wrong fix pass. Widen it until only
+> the real requirement satisfies it.
+
+## 4. Sourcing principle — invariants come from named, citable sources
+
+- **4.1** Domain invariants live in the catalogue (§5), each with a source and a
+  provenance tier.
+- **4.2** When Plan classifies a brief into a defect category (§6 mapping), it pulls the
+  matching invariant **and its citation** into the brief's `Invariant to restore` field.
+- **4.3** A sourced invariant can override "minimal" in a Do/Check argument; an
+  unsourced intuition cannot. This is the content Principles 1–3 operate on — without
+  it, "state the invariant" (3) just produces a plausible-sounding guess, which lands
+  back on the narrow sentence.
+
+---
+
+## 5. The invariant catalogue (sourced) — **project-provided**
+
+> **Scaffold — the template ships the structure; your project fills the content.** Each
+> entry is one invariant: a one-line property the fix must make true, a **citable
+> source**, and a **provenance tier**. A planner reading this must be able to see *which
+> family* an invariant draws its authority from, so keep the tiers separate. Mark an
+> entry `[ACTIVE]` when it also appears in the §6 mapping. Tag each citation
+> authoritative / corroborating / illustrative per §7.
+
+Fill each tier with your project's domain invariants:
+
+- **Tier A — language / platform canon.** Rules that hold for any code in your language
+  or runtime, with a standards-level source (the language spec, a standards proposal,
+  the runtime's own documentation). *(empty — add your project's)*
+- **Tier B — framework / library canon.** Rules backed by the authoritative upstream
+  documentation of the frameworks and libraries you build on. Pin the version you
+  actually target, and note where a newer major version differs so a future migration
+  does not silently invalidate a citation. *(empty — add your project's)*
+- **Tier C — internal project invariants.** Documented project rules with no external
+  canon. State the rationale; do **not** borrow language/framework authority for them —
+  the firmest backing is your own written rule (e.g. a lint/static-analysis rule).
+  *(empty — add your project's)*
+
+## 6. Category → invariant mapping (the active layer) — **project-provided**
+
+> **Scaffold.** When Plan classifies a brief into one of these categories, it MUST pull
+> the invariant **and its citation** into the brief's `Invariant to restore` field
+> (Principle 4.2). Fill this with the categories that have a **real shipped failure**
+> behind them (§8) — keep it short; enforcement is rationed, not exhaustive.
+
+| Defect category | Invariant Plan must state | Cite |
+|---|---|---|
+| *(a category with a shipped failure behind it)* | *(its sourced invariant)* | *(the source)* |
+
+Everything not in this table stays reference-layer (§5); promote a category here only on
+evidence (§8).
+
+---
+
+## 7. Provenance honesty rules (keep the catalogue citable)
+
+- **Cite for what the source says, not an inflated ruling.** If a source documents a
+  hazard while adding a feature, it does not necessarily *forbid* the thing — cite the
+  standing rule for the prohibition and the newer source as corroboration.
+- **Check a standard's status and target version.** Draft/Rejected ranks below
+  Final/Accepted; a rule accepted for a runtime version you do not yet ship is
+  corroborating, not yet enforceable. Note status and version beside each citation.
+- **Authoritative vs illustrative.** Official specs and vendor docs are authoritative;
+  blog posts and war-stories are illustrative — tag them so, and cite the rule from the
+  page that actually *states* it, not a tutorial that only demonstrates it.
+- **Pin the version you target; note where a newer major differs.**
+- **Internal invariants don't borrow external authority** — state the rationale.
+
+## 8. Evidence basis & promotion rule
+
+Promote a principle from reference to active (or to a hard gate) only on evidence — the
+same bar the act-log applies to process deltas:
+
+- **Active / template-asked:** the symptom-vs-cause fork **recurs** in a category (a
+  real failure plus repeated decision-points across cycles). One war-story is enough to
+  document a principle in §5; a recurring miss is what graduates it to §6.
+- **Hard gate:** reserve for a category with a **real shipped failure**. Everything else
+  stays reference until a cycle shows it was missed.
+
+Resist a growing checklist. The discipline that keeps minimalism valuable is the same
+one that keeps this set small: knowledge is documented freely (§5); enforcement is
+rationed (§6).

@@ -34,6 +34,15 @@ context beyond what the brief cites. Narrow input is deliberate.
 
 Cite `path:line` on the target branch for every claim and change.
 
+**When you reject an alternative on cost, show the cost** — a diff sketch or a concrete
+line count someone can check, never an adjective ("heavier", "larger", "touches every
+reader"). This matters most when your chosen fix *guards a symptom* (adds a probe/guard)
+and the rejected alternative *removes the cause*: an unquantified "heavier" is exactly
+how a cheaper, better fix gets discarded. And if the brief names an **Invariant to
+restore**, cost-vs-minimalism is not even the deciding axis — the target is the smallest
+change that restores the invariant, not the smallest diff (`process/principles.md` §1.2,
+§2).
+
 ## Running the test — use the project's runner, never a hand-rolled invocation
 
 To confirm the test goes red→green, run it through **the project's own test

@@ -8,8 +8,16 @@
 - **Slug:** <short-kebab-slug>
 - **Defect:** <what is wrong — the observable problem>
 - **Success criterion:** <the observable condition that means it is fixed>
+- **Invariant to restore:** <the property the fix must make true, stated over the
+  defect CATEGORY, not the repro file. NOT a mechanism. Cite its source (language spec /
+  framework docs / internal rule) per `process/principles.md` §3–§6. SELF-TEST: could Do
+  satisfy this by guarding a single module? If yes, it's the narrow symptom-sentence —
+  widen it. Omit only for non-structural behavioural bug fixes (principles.md §1.1).>
 - **Repo + branch target:** <repo @ branch — resolved here, not left to Do>
-- **Scope:** <the one logical fix> / out of scope: <what is explicitly excluded>
+- **Scope:** <the defect to remove — one logical fix. MUST NOT name a probe/guard/helper
+  (a capability check, `hasattr`, `try/except import`): naming a mechanism seats the fix
+  shape for Do. Leave mechanism to Do; Do prefers removing the cause over guarding it
+  (principles.md §3.1, §3.3).> / out of scope: <what is explicitly excluded>
 - **Repro instruction:** <fixture + exact steps on the target branch>
 - **Test file:** <path where the regression test ships — must fail pre-fix, pass post-fix>
 - **Citations expected:** Do must cite path:line on the target branch for every change.

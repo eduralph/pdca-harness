@@ -63,6 +63,34 @@ human confirms — quantity is theirs to decide, not yours.
 - Name a concrete **test file** the regression will ship at — Do must make it red
   pre-fix, green post-fix.
 
+## Solution-design discipline (`process/principles.md`)
+
+The brief states the **invariant to restore**, not a solution — consult
+`process/principles.md` (the sourced invariant catalogue). Two rules govern how you
+write Scope and the Invariant field:
+
+- **Minimalism is scoped (principle 1.2).** Minimalism governs *behavioural* bug fixes:
+  the smallest reviewable delta against code you don't own. When a fix touches
+  **structure** — what runs at load/import, object lifetime, where work happens — it
+  yields to the stated invariant: the target is the smallest change that **restores the
+  invariant**, not the smallest diff. Do not let "minimal" become the only named
+  currency (that is how a symptom-guard ships over cause-removal).
+- **Pull the invariant *and its citation*** into the Invariant field when the brief
+  falls in a `process/principles.md` §6 category. A sourced invariant can override
+  "minimal" downstream; an unsourced intuition cannot.
+
+**Plan-exit gate (category-gated).** Before a brief for a **structural / lifecycle /
+load-or-import-safety** defect leaves Plan, it MUST pass both binary checks —
+
+1. Does Scope name a mechanism (a probe/guard/helper)? → must be **no**.
+2. Could the stated invariant be satisfied by guarding a single module? → must be **no**.
+
+If either fails, the brief is not ready — widen the invariant / strip the mechanism and
+re-check. This gates the brief's *shape*, not the fix; it is the upstream twin of the
+reviewer's C5 symptom-guard smell-test, moved to where the error starts. Keep it
+category-gated; a category graduates to an unconditional gate only on evidence
+(`process/principles.md` §8).
+
 ## Boundaries
 
 Plan authors the brief and nothing else. Do **not** write `patch.diff`, run the
