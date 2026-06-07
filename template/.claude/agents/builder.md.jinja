@@ -43,6 +43,11 @@ failing gate. Address it; do **not** re-submit the rejected approach unchanged.
 
 Cite `path:line` on the target branch for every claim and change.
 
+Write the patch against the brief's **target branch** and follow
+`docs/fork-discipline.md`: a cross-version cherry-pick must *remain correct* on the
+target, not just apply cleanly (§3); ship the test in the location the target branch
+uses (§3); make the patch commit-ready for the target's own hooks (§4).
+
 **When you reject an alternative on cost, show the cost** — a diff sketch or a concrete
 line count someone can check, never an adjective ("heavier", "larger", "touches every
 reader"). This matters most when your chosen fix *guards a symptom* (adds a probe/guard)

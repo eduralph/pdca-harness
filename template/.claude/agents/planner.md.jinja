@@ -33,7 +33,9 @@ Either way the output file is `brief.md`, and you must keep the parsed
 `- **Label:** value` lines (the driver reads the spec from them). The load-bearing
 field is the **success criterion** — the sentence Check later tests "did this work"
 against. Resolve the **repo + branch target** here, and state **scope / out of
-scope** so Do can't sprawl.
+scope** so Do can't sprawl. Follow `docs/fork-discipline.md` for the targeting and
+prior-art rules — fixes ride the current maintenance line (§3); run the prior-art
+check by **affected file path**, across merged history *and* closed/rejected PRs (§5).
 
 **One issue or several (batch).** You run from the project root; your prompt names
 where to write. For a single issue it gives one bundle directory — write the one
