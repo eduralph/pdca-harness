@@ -44,8 +44,8 @@ patch.diff         →  CHECK  →  check-gates + check-review + SUMMARY.md pres
 SUMMARY.md         →  (AWAITING_SIGNOFF)  ← pipeline STOPS here
 SUMMARY.md §9 set  →  sign-off applied:
                        accept           → cycle COMPLETE  (frozen bundle)
-                       iterate-to-Do    → driver clears every Do+Check artifact; state ← PLANNED (re-run Do against same brief)
-                       iterate-to-Plan  → driver versions brief.md → brief.vN.md and clears every downstream artifact; state ← UNPLANNED (human authors a new brief.md, then Do re-runs)
+                       iterate-to-Do    → driver archives every Do+Check artifact into iteration-v<N>/; state ← PLANNED (re-run Do against same brief)
+                       iterate-to-Plan  → driver archives the attempt (incl. brief.md) into iteration-v<N>/; state ← UNPLANNED (human authors a new brief.md, then Do re-runs)
 ```
 
 The driver stops the issue at AWAITING_SIGNOFF every time — including on iteration. After sign-off, an accepted bundle is **frozen**: it becomes input for the *next* Act review (a separate, cross-cycle pass — see below).
@@ -53,7 +53,7 @@ The driver stops the issue at AWAITING_SIGNOFF every time — including on itera
 Properties this buys, cheaply:
 
 - **Resumable.** A crash mid-batch resumes from file state; nothing re-runs that already produced its artifact.
-- **No-clobber, with a named exception.** Idempotent `advance` never destroys an artifact it already produced or a verdict already filled. The iterate transitions are a **deliberate clear**, not an idempotency violation: they unlink everything downstream of the re-entry point so a rebuild starts from clean state. Brief versions are *preserved* on iterate-to-Plan (renamed to `brief.vN.md`); see the case study's CLAUDE_CODE_BRIEF v1/v2/v3 sequence for the precedent the skeleton matches.
+- **No-clobber, with a named exception.** Idempotent `advance` never destroys an artifact it already produced or a verdict already filled. The iterate transitions are a **deliberate archive**, not an idempotency violation: they *move* everything downstream of the re-entry point into `iteration-v<N>/` so a rebuild starts from clean state while the rejected attempt is preserved, not lost. On iterate-to-Plan the `brief.md` is archived with it (state ← UNPLANNED); the rejected attempts accumulate as `iteration-v1/`, `iteration-v2/`, … — see the case study's CLAUDE_CODE_BRIEF v1/v2/v3 sequence for the precedent the skeleton matches.
 - **Inspectable.** "What state is issue N in" is a directory listing, not a database.
 
 The driver is a thin loop: for each issue, look at which files exist, run the next beat's command, write its artifact, advance. Stop the issue when it reaches AWAITING_SIGNOFF.
@@ -81,8 +81,8 @@ Check is one beat with three components, each automating at a different level. C
 **3. Human sign-off (instrumented — the second human touch point).** The driver assembles `SUMMARY.md` (the ten sections from [02 - Cycle Artifacts](02-cycle-artifacts.md)) from `brief.md` + `check-gates.json` + `check-review.md`, routes unresolved items into §6, leaves §9 (sign-off) and §10 (Act candidates) empty for the human, and marks the issue AWAITING_SIGNOFF. Then the driver presents a **sign-off queue**: an index of all AWAITING_SIGNOFF bundles, sorted so the cheap ones come first — empty §6 + disposition ∈ {already-fixed, wontfix, by-design, external} are near-instant confirms (typically the most common outcome); non-empty §6 (real adjudication) flagged and ordered last. The human opens each `SUMMARY.md`, clears §6, fills §9 via a one-command capture, completing Check:
 
 - **accept** → driver performs the sign-off-gated transitions: marks the draft PR ready, posts the §8 tracker comment, and (where the project's per-repo spec allows it) merges. The push and draft-PR-open may already have happened during Do or Check assembly — accept only performs the steps that *required* sign-off. Cycle closes; bundle frozen.
-- **iterate-to-Do** → driver removes `patch.diff` and the test from the bundle (preserving the brief), state returns to PLANNED, driver re-invokes the builder. Same cycle.
-- **iterate-to-Plan** → driver opens `brief.md` for human edit; on save, state returns to PLANNED, driver re-invokes the builder. Same cycle.
+- **iterate-to-Do** → driver archives `patch.diff`, the test, and the rest of the Do+Check downstream into `iteration-v<N>/` (preserving `brief.md`), state returns to PLANNED, driver re-invokes the builder. Same cycle.
+- **iterate-to-Plan** → driver archives the whole attempt — incl. `brief.md` — into `iteration-v<N>/`, state returns to UNPLANNED; the human authors a new `brief.md`, then Do re-runs. Same cycle.
 
 Optionally, the human jots §10 Act candidates while at the bundle — these are hints for the next Act review, not gates for this sign-off.
 
@@ -229,12 +229,13 @@ def advance(d):
     elif s == "CHECKED":
         assemble_summary(d)         # pure code: brief+gates+review -> SUMMARY.md §1-8
     elif s == "ITERATE_DO":
-        clear_downstream_of_brief(d)   # clear EVERY Do+Check artifact —
+        archive_iteration(d, include_brief=False)  # MOVE every Do+Check
+                                       # artifact into iteration-v<N>/ —
                                        # see implementation below
         # state now == "PLANNED" on next call; do_build re-runs
     elif s == "ITERATE_PLAN":
-        version_brief_and_clear(d)     # rename brief.md → brief.vN.md,
-                                       # then clear everything downstream
+        archive_iteration(d, include_brief=True)    # archive the attempt
+                                       # incl. brief.md into iteration-v<N>/
         # state now == "UNPLANNED"; human authors a new brief.md, then
         # do_build re-runs
     # AWAITING_SIGNOFF and COMPLETE: driver does nothing (human work or done)
@@ -242,10 +243,10 @@ def advance(d):
 def run_issue(d):
     while state(d) not in ("UNPLANNED", "AWAITING_SIGNOFF", "COMPLETE"):
         advance(d)                  # idempotent; resumable; no-clobber
-                                    # (iterate transitions clear deliberately —
-                                    # see clear_downstream_of_brief below)
+                                    # (iterate transitions archive deliberately —
+                                    # see archive_iteration below)
 
-# ---- iterate transitions: clear EVERY downstream artifact, by explicit name ----
+# ---- iterate transitions: ARCHIVE every downstream artifact (move, don't delete) ----
 # Files downstream of brief.md (everything Do and Check write):
 DOWNSTREAM_OF_BRIEF = [
     "patch.diff",
@@ -255,24 +256,25 @@ DOWNSTREAM_OF_BRIEF = [
     "SUMMARY.md",
 ]
 
-def clear_downstream_of_brief(d):
-    """Iterate-to-Do: clear every artifact produced after brief.md so
-    state() returns PLANNED (not the stale CHECKED it would otherwise
-    return because check-gates.json was left on disk)."""
-    for name in DOWNSTREAM_OF_BRIEF:
-        (d/name).unlink(missing_ok=True)
-    # the shipped test file's path was named in brief.md — unlink it too
-    for tf in test_files_from_brief(d/"brief.md"):
-        tf.unlink(missing_ok=True)
+def archive_iteration(d, include_brief):
+    """Iterate: MOVE the previous attempt into d/iteration-v<N>/ rather than
+    deleting it — so a rejected attempt is preserved, not lost — and state()
+    returns to the re-entry point.
 
-def version_brief_and_clear(d):
-    """Iterate-to-Plan: version the current brief (brief.md →
-    brief.vN.md, preserving history per case-study practice — see
-    [07 - Case Study - CI Hardening](07-case-study-ci-hardening.md) CLAUDE_CODE_BRIEF v1/v2/v3), then clear every
-    downstream artifact so state() returns UNPLANNED."""
-    n = next_brief_version(d)        # 1 for first iterate; counts existing brief.vN.md files
-    (d/"brief.md").rename(d/f"brief.v{n}.md")
-    clear_downstream_of_brief(d)
+    iterate-to-Do (include_brief=False) archives the Do+Check downstream + the
+    bundle-local test, leaving brief.md → state PLANNED. iterate-to-Plan
+    (include_brief=True) archives brief.md too → state UNPLANNED, the human
+    re-authors. Preserving history matches the case study's CLAUDE_CODE_BRIEF
+    v1/v2/v3 sequence ([07 - Case Study - CI Hardening](07-case-study-ci-hardening.md))."""
+    n = next_iteration_no(d)         # 1 for first iterate; counts existing iteration-v*/
+    arch = d/f"iteration-v{n}"
+    names = list(DOWNSTREAM_OF_BRIEF) + (["brief.md"] if include_brief else [])
+    # the shipped test file named in brief.md, if it lives inside the bundle
+    names += [str(tf) for tf in test_files_from_brief(d/"brief.md") if within(tf, d)]
+    for name in names:
+        if (d/name).is_file():
+            arch.mkdir(exist_ok=True)
+            (d/name).rename(arch/Path(name).name)
 
 # ---- leaf 1: Do (builder) — full write + push + draft-PR (no ready-mark) ----
 def do_build(d):

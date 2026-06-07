@@ -271,10 +271,12 @@ Per-cycle (`results/issue_<id>/`):
 ```
 results/issue_<id>/
   brief.md               # PLAN  — current contribution spec         (you)
-  brief.v1.md            # PLAN  — prior brief version, preserved on
-  brief.v2.md            #         iterate-to-Plan (see [03 - Cycle
-  ...                    #         Automation](03-cycle-automation.md) §Driver skeleton; only
-                         #         present when iterate-to-Plan fired)
+  iteration-v1/          # a prior REJECTED attempt, archived intact on
+  iteration-v2/          #         iterate (patch.diff, build-notes.md,
+  ...                    #         SUMMARY.md, check-*, the test — plus
+                         #         brief.md on iterate-to-Plan); only
+                         #         present once an iterate fired (see [03 -
+                         #         Cycle Automation](03-cycle-automation.md) §Driver skeleton)
   patch.diff             # DO    — the change                        (builder)
   <test file>            # DO    — ships with the patch              (builder)
   build-notes.md         # DO    — rationale, withheld from reviewer (builder)
@@ -288,7 +290,7 @@ results/issue_<id>/
   publish.json           # CHECK/publish — record of the opened draft PR (driver)
 ```
 
-Versioned-brief discipline: iterate-to-Plan renames the current `brief.md` to `brief.vN.md` (where N is the next available integer), then clears every downstream artifact so the next Do re-runs against a new brief. iterate-to-Do does *not* version the brief — it clears only the downstream artifacts. The pattern matches the case study's CLAUDE_CODE_BRIEF v1/v2/v3 sequence ([07 - Case Study - CI Hardening](07-case-study-ci-hardening.md) §Turn 2).
+Iterate-archive discipline: an iterate **moves** the previous attempt into `iteration-v<N>/` (N = next available integer) rather than deleting it — a rejected attempt is preserved, not lost. iterate-to-Do archives the Do+Check downstream and the bundle-local test, leaving `brief.md` for the rebuild (state → PLANNED); iterate-to-Plan archives `brief.md` too (state → UNPLANNED, the human re-authors). Both first fold the prior attempt's sign-off rationale + failing gates into the brief's `## Iteration N — carry-forward` block, so the next beat (which reads `brief.md`) isn't blind. The accumulating `iteration-v1/`, `iteration-v2/`, … match the case study's CLAUDE_CODE_BRIEF v1/v2/v3 sequence ([07 - Case Study - CI Hardening](07-case-study-ci-hardening.md) §Turn 2).
 
 Project-level (one location for all cycles' process-level work):
 
