@@ -103,6 +103,18 @@ argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
 # bundle/patch context ($PDCA_BUNDLE is exported) and runs only locally. The
 # SAME commands run for the local driver and CI — single-sourced, no drift.
 #
+# TARGET-AWARE SELECTION (optional). A check may carry `target = "<label>"`; it then
+# runs only when the bundle's target matches. Classify the bundle below: a label →
+# substring matched (case-insensitively) against the brief's "Repo + branch target",
+# with a default when nothing matches. Unset ⇒ no filtering (every gate runs). E.g. to
+# skip core suites on an addon-only fix (and the addon matrix on a core fix):
+#   [gates]
+#   target_default = "core"
+#   [gates.target_match]
+#   addon = "addons-source"
+# then tag the runtime gates `target = "core"` / `target = "addon"`. `pdca gates
+# --working-tree` (no bundle) is never filtered, so the CI re-gate is unaffected.
+#
 # While `checks` is empty the driver uses built-in all-PASS stubs so the offline
 # slice runs. Fill these in as your gate tiers get written (gates are the long
 # pole — build them first). Gate commands live in your project's verification

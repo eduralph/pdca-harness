@@ -6,10 +6,13 @@ gate *commands* live once in ``pdca.toml`` ``[[gates.checks]]``, and the same
 ``pdca gates`` entry point runs them for the local driver (over a bundle) and for
 CI (over the PR working tree). There is no second implementation to drift.
 
-Each configured check: ``{id, tier, label, cmd, gating, scope}`` where ``scope``
-is ``"repo"`` (runs against the working tree — what CI re-runs) or ``"bundle"``
-(needs the bundle/patch context — local only). A check passes iff its ``cmd``
-exits 0. When ``[[gates.checks]]`` is empty the driver falls back to all-PASS
+Each configured check: ``{id, tier, label, cmd, gating, scope, target?}`` where
+``scope`` is ``"repo"`` (runs against the working tree — what CI re-runs) or
+``"bundle"`` (needs the bundle/patch context — local only), and the optional
+``target`` (a project label such as ``"core"``/``"addon"``) skips the check when it
+doesn't match the bundle's target (``[gates] target_default`` + ``[gates.target_match]``
+classify the bundle from its brief; unset ⇒ no filtering). A check passes iff its
+``cmd`` exits 0. When ``[[gates.checks]]`` is empty the driver falls back to all-PASS
 stub rows, so the offline vertical slice still runs.
 
 A row: {check, result, oracle, rule_id, path_line, gating}. ``result`` ∈
@@ -24,7 +27,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import progress
+from . import brief, progress
 from .config import Config
 
 
@@ -41,15 +44,49 @@ def run_working_tree(cfg: Config) -> dict:
 
 
 # ----------------------------------------------------------------------------
+def _bundle_target(bundle: Path | None, match: dict[str, str], default: str) -> str | None:
+    """The bundle's gate-target label, or ``None`` when target filtering doesn't apply.
+
+    Generic + config-driven: ``match`` maps a label → a substring matched
+    case-insensitively against the brief's "Repo + branch target" field (the signal
+    target-specific gates already key on); no label matches → ``default``. Returns
+    ``None`` when there is no bundle (the CI working-tree re-gate), no ``match`` config,
+    or no ``default`` — so an unconfigured project keeps running every gate (no
+    behaviour change). Filtering only ever *removes* an inapplicable gate, never adds one.
+    """
+    if bundle is None or not match:
+        return None
+    target_field = brief.field(bundle / "brief.md", "repo + branch target", "repo + branch").lower()
+    for label, needle in match.items():
+        if needle and needle.lower() in target_field:
+            return label
+    return default or None
+
+
+def _applies(chk: dict, scopes: tuple[str, ...], bundle_target: str | None) -> bool:
+    """True iff ``chk`` should run for this scope set and bundle target. A check with no
+    ``target`` always applies; one with a ``target`` is skipped when the bundle's target
+    is known and differs (``bundle_target is None`` ⇒ unknown ⇒ run, never over-skip)."""
+    if chk.get("scope", "repo") not in scopes:
+        return False
+    tgt = chk.get("target")
+    return not (bundle_target is not None and tgt and tgt != bundle_target)
+
+
 def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[str, ...]) -> list[dict]:
     # No configured gates → the offline stub: the full 5/5/1 with the mechanical
     # gate elements stub-passed (so the offline slice runs green).
     if not cfg.gates_checks:
         return _assemble_matrix([], stub=True)
 
+    bt = _bundle_target(bundle, cfg.gate_target_match, cfg.gate_target_default)
     configured: list[dict] = []
     for chk in cfg.gates_checks:
-        if chk.get("scope", "repo") not in scopes:
+        if not _applies(chk, scopes, bt):
+            if chk.get("scope", "repo") in scopes and chk.get("target") and bt is not None:
+                print(f"  · gate {chk.get('id', '')} skipped "
+                      f"(target={chk.get('target')}, bundle target is {bt})",
+                      file=sys.stderr, flush=True)
             continue
         configured.append(_run_one(chk, cwd=cwd, bundle=bundle))
     # Overlay the configured gate results onto the complete 5/5/1 matrix.
