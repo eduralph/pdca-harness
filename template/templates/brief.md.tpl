@@ -10,7 +10,7 @@
 - **Success criterion:** <the observable condition that means it is fixed>
 - **Invariant to restore:** <the property the fix must make true, stated over the
   defect CATEGORY, not the repro file. NOT a mechanism. Cite its source (language spec /
-  framework docs / internal rule) per `process/principles.md` §3–§6. SELF-TEST: could Do
+  framework docs / internal rule) per `docs/principles.md` §3–§6. SELF-TEST: could Do
   satisfy this by guarding a single module? If yes, it's the narrow symptom-sentence —
   widen it. Omit only for non-structural behavioural bug fixes (principles.md §1.1).>
 - **Repo + branch target:** <repo @ branch — resolved here, not left to Do>
