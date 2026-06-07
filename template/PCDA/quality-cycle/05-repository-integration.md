@@ -103,7 +103,7 @@ Instantiates [02 - Cycle Artifacts](02-cycle-artifacts.md) §Bundle layout. Inte
 
 - **Bundle root and ID format** (e.g. `agent-work/results/<batch>/issue_<mantis-id>/` in the testbed).
 - **The Act log path** (e.g. `process/act-log.md`) — or "[planned]" with a recommended path if not yet established.
-- **Where versioned briefs live on iterate-to-Plan** (default: `brief.vN.md` in the bundle root; the integration can override).
+- **Iterate archive** — the harness preserves a rejected attempt in `iteration-v<N>/` in the bundle (the brief is archived with it on iterate-to-Plan). This is fixed harness behavior, not an integration choice.
 
 ### 8. Committing and PR conventions
 
@@ -207,7 +207,7 @@ The testbed's integration lived across `CLAUDE.md`, `agent-work/`, and
 | **4. Conformance ruleset** | The tier × home matrix is filled in [04 - Validation Tooling](04-validation-tooling.md) §"Worked example — Gramps testbed `agent-work/dev-tooling/`". Project ruleset cited: doc-16 (addon-dev guidelines) for Family A; gramps core has no equivalent written ruleset yet ([01 - The Quality Cycle](01-the-quality-cycle.md) §Per repo notes this). |
 | **5. Upstream-isn't-ahead routine** | `CLAUDE.md` §"Pre-flight: check upstream isn't ahead" — search-by-affected-file-path rule, GitHub tokenization caveat ("`latex in:title` does NOT match 'Latexdoc'"), `git log upstream/maintenance/gramps60 -- <Addon>/` for addons. |
 | **6. Brief / design-proposal templates** | `agent-work/templates/SUMMARY.md.tpl`; `agent-work/templates/exit-brief.md.tpl`; `agent-work/templates/increment-brief.md.tpl`. Design-proposal template: **[planned]** (GEPS 049 was authored upstream, not via this cycle — see [07 - Case Study - CI Hardening](07-case-study-ci-hardening.md) §Parallel example). |
-| **7. Bundle and act-log paths** | Triage bundles: `agent-work/results/<batch>/issue_<mantis-id>/` (current convention; some historical batches under `agent-work/batches/<batch>/results/`). CI-hardening bundles (testbed self-improvement cycle): `agent-work/results/ci-hardening/ci-<slug>/` (consolidated from former root `/results/`). Act log: **[planned]** as `agent-work/act-log.md` or `process/act-log.md`; current practice is to log Act outcomes in batch exit briefs. Versioned briefs: `brief.vN.md` per [03 - Cycle Automation](03-cycle-automation.md) §Driver skeleton. |
+| **7. Bundle and act-log paths** | Triage bundles: `agent-work/results/<batch>/issue_<mantis-id>/` (current convention; some historical batches under `agent-work/batches/<batch>/results/`). CI-hardening bundles (testbed self-improvement cycle): `agent-work/results/ci-hardening/ci-<slug>/` (consolidated from former root `/results/`). Act log: **[planned]** as `agent-work/act-log.md` or `process/act-log.md`; current practice is to log Act outcomes in batch exit briefs. Iterate archive: rejected attempts preserved in `iteration-v<N>/` per [03 - Cycle Automation](03-cycle-automation.md) §Driver skeleton. |
 | **8. Committing and PR conventions** | `CLAUDE.md` §"PR description format" — Root cause / Fix / Verified against / Test. Enforcement: human review today; commit-msg hook **[planned]** (Tier 4 greenfield per [04 - Validation Tooling](04-validation-tooling.md)). |
 | **9. Repo-specific scripts and tooling** | See expanded table below. |
 | **10. Maintainer and governance** | `CLAUDE.md` §"Eduard's review gate" — Eduard opens fork PRs as draft and re-reads with fresh eyes before marking ready; Claude commits and stops there. Solo author; no team review. |

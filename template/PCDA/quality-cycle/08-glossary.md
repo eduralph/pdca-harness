@@ -71,7 +71,7 @@ status: active
 - **Design proposal** (a.k.a. **GEPS**-shaped) — a richer Plan artifact for a change big
   enough to warrant a design (architecture / API / UX). Still a brief, not a separate
   track; reserved for the exception ([01](01-the-quality-cycle.md), [07](07-case-study-ci-hardening.md)).
-- **brief.vN.md** — a prior brief, versioned and preserved on iterate-to-Plan.
+- **iteration-v\<N>/** — a prior rejected attempt, archived intact on iterate (`brief.md` included on iterate-to-Plan); moved here, not deleted.
 - **patch.diff** — the Do change. May be pushed to a draft branch; never merged by the
   builder.
 - **the shipped test** — the regression test that fails pre-fix and passes post-fix,
@@ -106,9 +106,9 @@ status: active
 - **AWAITING_SIGNOFF** — `SUMMARY.md` assembled, §9 empty; the pipeline **STOPS** here.
 - **COMPLETE** — §9 accepted; the bundle is frozen.
 - **ITERATE_DO** — §9 = iterate-to-Do; driver clears Do+Check artifacts → PLANNED.
-- **ITERATE_PLAN** — §9 = iterate-to-Plan; driver versions the brief → UNPLANNED.
+- **ITERATE_PLAN** — §9 = iterate-to-Plan; driver archives the attempt (incl. brief) → UNPLANNED.
 - **iterate-to-Do** — the fix was wrong, the spec right: rebuild against the same brief.
-- **iterate-to-Plan** — the spec was wrong: re-author the brief (old one → `brief.vN.md`).
+- **iterate-to-Plan** — the spec was wrong: re-author the brief (old attempt archived to `iteration-v<N>/`).
 
 ## Check — the 5/5/1, gates and judgment
 

@@ -63,8 +63,8 @@ brief.md                PLANNED            → Do: patch.diff + test + build-not
 + check-gates.json      CHECKED            → assemble SUMMARY.md
 + SUMMARY.md (§9 empty) AWAITING_SIGNOFF   → STOP. human signs off
 §9 set → accept         COMPLETE (frozen)  → Act material, later
-         iterate-to-Do  clear Do+Check artifacts, rebuild
-         iterate-to-Plan version brief.md → brief.vN.md, re-author
+         iterate-to-Do  archive Do+Check artifacts → iteration-vN/, rebuild
+         iterate-to-Plan archive attempt (incl. brief) → iteration-vN/, re-author
 ```
 
 Properties: **resumable** (crash resumes from file state), **inspectable**
