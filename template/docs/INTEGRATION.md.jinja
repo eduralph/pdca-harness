@@ -79,7 +79,8 @@ test, not the full suite.
 ## 7. Bundle and act-log paths
 - **Bundle root + ID format:** `{{ bundle_root }}/issue_<id>/`
 - **Act log path:** `{{ process_dir }}/act-log.md`
-- **Versioned briefs on iterate-to-Plan:** `brief.vN.md` in the bundle (default)
+- **Iterate archive:** a rejected attempt is preserved in `iteration-v<N>/` in the
+  bundle (the brief is archived with it on iterate-to-Plan) — fixed by the harness
 
 ## 8. Committing and PR conventions
 - **Commit-message format:** TODO (subject length, wrap column, trailer, refs)
