@@ -227,7 +227,12 @@ def do_build(d: Path, cfg: Config) -> None:
 
 def _build_prompt(d: Path) -> str:
     return (
-        f"You are the Do builder. Read {d}/brief.md. Produce, in the bundle directory "
+        f"You are the Do builder. Read {d}/brief.md. Build to satisfy its **Success "
+        "criterion** (the real end result), not a narrower proxy — an item is done only "
+        "when that end result holds, proven red→green; a green mechanical check on "
+        "something adjacent is not done. If brief.md carries an '## Iteration N — "
+        "carry-forward' block, address it (the previous attempt's rationale + failing "
+        "gate) and do NOT repeat the rejected approach. Produce, in the bundle directory "
         f"{d}: (1) patch.diff — a unified diff against the brief's target branch; "
         "(2) the test file the brief names, red before the fix and green after; "
         "(3) build-notes.md — your rationale (withheld from the reviewer). Cite "
@@ -455,12 +460,29 @@ def _signoff_batch_prompt(bundles: list[Path]) -> str:
 
 
 def signoff_decision(d: Path) -> str:
-    """The token the sign-off leaf wrote, or "" if absent/invalid."""
+    """The decision token (first line of ``signoff-decision``), or "" if absent/invalid.
+
+    The file is ``<token>`` optionally followed by a free-text **rationale** on the
+    remaining lines (read by :func:`signoff_rationale`) — the human's "why iterate /
+    what to change" the driver carries forward into the brief on an iterate."""
     p = d / SIGNOFF_DECISION
     if not p.exists():
         return ""
-    token = p.read_text(encoding="utf-8").strip()
+    lines = p.read_text(encoding="utf-8").splitlines()
+    token = lines[0].strip() if lines else ""
     return token if token in VALID_DECISIONS else ""
+
+
+def signoff_rationale(d: Path) -> str:
+    """The iterate rationale the sign-off leaf wrote below the token, or "" if none.
+
+    Lines after the first of ``signoff-decision`` — the actionable insight ("why this
+    Do attempt was rejected / what to change next") that the flow records into §9 and
+    the driver folds into the brief's carry-forward so the next iteration isn't blind."""
+    p = d / SIGNOFF_DECISION
+    if not p.exists():
+        return ""
+    return "\n".join(p.read_text(encoding="utf-8").splitlines()[1:]).strip()
 
 
 # ----------------------------------------------------------------------------
@@ -511,7 +533,11 @@ def _publish_prompt(d: Path, cfg: Config) -> str:
     trailer = cfg.issue_trailer.format(id=issue_id) if cfg.issue_trailer else ""
     trailer_line = (
         f"The LAST line of commit-msg.txt is the issue trailer `{trailer}` (the T4 gate "
-        "enforces it); a Co-Authored-By line, if any, goes ABOVE it. " if trailer else ""
+        "enforces it); a Co-Authored-By line, if any, goes ABOVE it. If no tracker id is "
+        "assigned yet (the bundle id is not a real tracker number), OMIT the trailer "
+        "entirely rather than invent a placeholder — `pdca publish --no-issue` records "
+        "the contribution as id_pending for the human to fill the id in later. "
+        if trailer else ""
     )
     return (
         "You are the Publish leaf — the closing work of Check. The fix for issue "

@@ -83,6 +83,8 @@ def main(argv: list[str] | None = None) -> int:
     p_publish.add_argument("issue_id")
     p_publish.add_argument("--dry-run", action="store_true", help="print the git/gh commands without running them")
     p_publish.add_argument("--no-pr", action="store_true", help="push the branch but don't open the draft PR")
+    p_publish.add_argument("--no-issue", action="store_true",
+                           help="no tracker id yet: relax T4 to a flag, record id_pending (vs a magic #0000)")
     p_publish.add_argument("--by", default="", help="who published (recorded in publish.json)")
 
     args = parser.parse_args(argv)
@@ -110,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         return _signoff(cfg, args)
     if args.cmd == "publish":
         return publish.publish(cfg, args.issue_id, dry_run=args.dry_run,
-                               open_pr=not args.no_pr, by=args.by)
+                               open_pr=not args.no_pr, by=args.by, pending_id=args.no_issue)
     return 2
 
 

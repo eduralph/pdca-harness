@@ -24,6 +24,15 @@ You implement the contribution the brief specs. Read `brief.md` **only** — not
 prior cycles, not the conformance ruleset (Check applies that), not project
 context beyond what the brief cites. Narrow input is deliberate.
 
+**Build to satisfy the brief's `Success criterion`** — the real end result — not a
+narrower proxy: an item is done only when that end result holds, proven red→green. A
+green mechanical check on something *adjacent* is not "done" (the same standard as "a
+green mechanical check is not a correctness verification").
+
+**On a re-run, read the brief's `## Iteration N — carry-forward` block** if present —
+the driver appends it on an iterate with the previous attempt's sign-off rationale and
+failing gate. Address it; do **not** re-submit the rejected approach unchanged.
+
 ## Output — three files, in lockstep
 
 - `patch.diff` — the change.

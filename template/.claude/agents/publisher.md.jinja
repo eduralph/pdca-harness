@@ -37,7 +37,10 @@ not push, branch, or open a PR yourself.**
    - reference any other commit by its **full hash**;
    - the **last line** is the issue trailer the project configures
      (`[tracker].issue_trailer`, e.g. `Fixes #<id>`) — the T4 gate enforces it. If you
-     add a `Co-Authored-By:` line, place it **above** the trailer.
+     add a `Co-Authored-By:` line, place it **above** the trailer. **If no tracker id is
+     assigned yet** (the bundle id is not a real tracker number), OMIT the trailer rather
+     than invent a placeholder like `#0000` — `pdca publish --no-issue` relaxes T4 to a
+     flag and records the contribution `id_pending` for the human to fill the id in.
 
 2. **`pr-description.md`** — the PR body (see `templates/pr-description.md.tpl`): the
    sections **Root cause / Fix / Verified against / Test**, citing `path:lines` on the
