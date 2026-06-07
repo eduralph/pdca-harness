@@ -107,3 +107,5 @@ pdca-harness is free software, licensed under the **GNU General Public License,
 version 3** ([LICENSE](LICENSE)) — use, study, modify, and redistribute it under
 the GPLv3; derivative works must also be GPLv3. The driver code and docs this
 template copies into a rendered project carry the GPLv3 into that project.
+
+<!-- enforcement probe; this branch is discarded -->
