@@ -64,6 +64,12 @@ class Config:
     issue_trailer: str = "Fixes #{id}"  # commit/PR trailer; "" → none enforced
     repo_checkouts: dict[str, str] = field(default_factory=dict)  # repo_spec → local path
     gates_checks: list[dict] = field(default_factory=list)
+    # Target-aware gate selection (docs 04). A check may carry ``target = "<label>"``;
+    # ``gate_target_match`` maps a label → a substring matched (case-insensitively)
+    # against the bundle brief's "Repo + branch target" field, ``gate_target_default``
+    # is the label when nothing matches. Both empty ⇒ no filtering (every gate runs).
+    gate_target_default: str = ""
+    gate_target_match: dict[str, str] = field(default_factory=dict)
 
     def bundle(self, issue_id: str) -> Path:
         """The per-cycle bundle directory for an issue id."""
@@ -79,7 +85,8 @@ class Config:
         tracker = data.get("tracker", {})
         publisher_cfg = data.get("publisher", {})
         leaves = data.get("leaves", {})
-        gates_checks = list(data.get("gates", {}).get("checks", []))
+        gates = data.get("gates", {})
+        gates_checks = list(gates.get("checks", []))
         # PDCA_GATES_MODE=stub empties the configured checks → the all-PASS stub
         # rows, so an offline "rehearse" runs the control flow without Docker.
         if os.environ.get("PDCA_GATES_MODE") == "stub":
@@ -120,6 +127,8 @@ class Config:
             feature_branch_pattern=publisher_cfg.get("feature_branch_pattern", "enhancement/{id}-{slug}"),
             issue_trailer=tracker.get("issue_trailer", "Fixes #{id}"),
             repo_checkouts=dict(publisher_cfg.get("checkouts", {})),
+            gate_target_default=gates.get("target_default", ""),
+            gate_target_match=dict(gates.get("target_match", {})),
             builder=leaf("builder"),
             reviewer=leaf("reviewer"),
             planner=leaf("planner"),
