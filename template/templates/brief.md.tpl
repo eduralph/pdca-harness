@@ -14,6 +14,9 @@
   satisfy this by guarding a single module? If yes, it's the narrow symptom-sentence —
   widen it. Omit only for non-structural behavioural bug fixes (principles.md §1.1).>
 - **Repo + branch target:** <repo @ branch — resolved here, not left to Do>
+- **Surfaces:** <where the change is observable — `gui` (touches the frontend / an E2E
+  through the app is needed), `data` (backend/logic only), or `both`. Drives which
+  runtime gates apply (e.g. an E2E gate runs only when this is `gui`). Optional.>
 - **Scope:** <the defect to remove — one logical fix. MUST NOT name a probe/guard/helper
   (a capability check, `hasattr`, `try/except import`): naming a mechanism seats the fix
   shape for Do. Leave mechanism to Do; Do prefers removing the cause over guarding it

@@ -9,11 +9,13 @@ CI (over the PR working tree). There is no second implementation to drift.
 Each configured check: ``{id, tier, label, cmd, gating, scope, target?}`` where
 ``scope`` is ``"repo"`` (runs against the working tree — what CI re-runs) or
 ``"bundle"`` (needs the bundle/patch context — local only), and the optional
-``target`` (a project label such as ``"core"``/``"addon"``) skips the check when it
-doesn't match the bundle's target (``[gates] target_default`` + ``[gates.target_match]``
-classify the bundle from its brief; unset ⇒ no filtering). A check passes iff its
-``cmd`` exits 0. When ``[[gates.checks]]`` is empty the driver falls back to all-PASS
-stub rows, so the offline vertical slice still runs.
+``target`` (a project label or list of labels, e.g. ``"core"`` / ``["addon",
+"frontend"]``) runs the check only when those labels are a SUBSET of the bundle's
+label set (subset = AND). The bundle is classified from its brief: a primary axis
+(``[gates] target_default`` + ``[gates.target_match]``) plus additive flags
+(``[gates.target_flags]``); unset ⇒ no filtering. A check passes iff its ``cmd``
+exits 0. When ``[[gates.checks]]`` is empty the driver falls back to all-PASS stub
+rows, so the offline vertical slice still runs.
 
 A row: {check, result, oracle, rule_id, path_line, gating}. ``result`` ∈
 ``pass`` / ``fail`` / ``none``. A ``none`` row is a judgment cell decided by the
@@ -44,33 +46,64 @@ def run_working_tree(cfg: Config) -> dict:
 
 
 # ----------------------------------------------------------------------------
-def _bundle_target(bundle: Path | None, match: dict[str, str], default: str) -> str | None:
-    """The bundle's gate-target label, or ``None`` when target filtering doesn't apply.
+def _bundle_target(
+    bundle: Path | None,
+    match: dict[str, str],
+    default: str,
+    flags: dict[str, dict[str, str]] | None = None,
+) -> frozenset[str] | None:
+    """The bundle's gate-target label SET, or ``None`` when filtering doesn't apply.
 
-    Generic + config-driven: ``match`` maps a label → a substring matched
-    case-insensitively against the brief's "Repo + branch target" field (the signal
-    target-specific gates already key on); no label matches → ``default``. Returns
-    ``None`` when there is no bundle (the CI working-tree re-gate), no ``match`` config,
-    or no ``default`` — so an unconfigured project keeps running every gate (no
-    behaviour change). Filtering only ever *removes* an inapplicable gate, never adds one.
+    Two config-driven axes, both keyed off the bundle's brief:
+      * **primary** — ``match`` maps a label → substring matched case-insensitively
+        against the "Repo + branch target" field; first hit wins, else ``default``.
+        Mutually-exclusive (e.g. core vs addon).
+      * **flags** — additive labels: ``flags`` maps a label → ``{field, substring}``
+        matched against any brief field (e.g. ``frontend`` ← a "Surfaces" field). Each
+        match adds its label.
+
+    Returns ``None`` when there's no bundle (CI working-tree re-gate) or no config at all
+    — so an unconfigured project keeps running every gate. Filtering only ever *removes*
+    an inapplicable gate, never adds one.
     """
-    if bundle is None or not match:
+    flags = flags or {}
+    if bundle is None or (not match and not flags):
         return None
-    target_field = brief.field(bundle / "brief.md", "repo + branch target", "repo + branch").lower()
-    for label, needle in match.items():
-        if needle and needle.lower() in target_field:
-            return label
-    return default or None
+    brief_path = bundle / "brief.md"
+    labels: set[str] = set()
+
+    primary = None
+    if match:
+        target_field = brief.field(brief_path, "repo + branch target", "repo + branch").lower()
+        for label, needle in match.items():
+            if needle and needle.lower() in target_field:
+                primary = label
+                break
+        primary = primary or default
+    if primary:
+        labels.add(primary)
+
+    for label, rule in flags.items():
+        field_name = rule.get("field", "repo + branch target")
+        needle = rule.get("substring", "")
+        if needle and needle.lower() in brief.field(brief_path, field_name).lower():
+            labels.add(label)
+
+    return frozenset(labels) or None
 
 
-def _applies(chk: dict, scopes: tuple[str, ...], bundle_target: str | None) -> bool:
-    """True iff ``chk`` should run for this scope set and bundle target. A check with no
-    ``target`` always applies; one with a ``target`` is skipped when the bundle's target
-    is known and differs (``bundle_target is None`` ⇒ unknown ⇒ run, never over-skip)."""
+def _applies(chk: dict, scopes: tuple[str, ...], labels: frozenset[str] | None) -> bool:
+    """True iff ``chk`` should run for this scope set and bundle label set. A check with
+    no ``target`` always applies; a ``target`` (a label or list of labels) runs iff its
+    labels are a SUBSET of ``labels`` (subset = AND). ``labels is None`` ⇒ unknown ⇒ run,
+    never over-skip."""
     if chk.get("scope", "repo") not in scopes:
         return False
     tgt = chk.get("target")
-    return not (bundle_target is not None and tgt and tgt != bundle_target)
+    if not tgt or labels is None:
+        return True
+    want = {tgt} if isinstance(tgt, str) else set(tgt)
+    return want <= labels
 
 
 def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[str, ...]) -> list[dict]:
@@ -79,13 +112,13 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
     if not cfg.gates_checks:
         return _assemble_matrix([], stub=True)
 
-    bt = _bundle_target(bundle, cfg.gate_target_match, cfg.gate_target_default)
+    labels = _bundle_target(bundle, cfg.gate_target_match, cfg.gate_target_default, cfg.gate_target_flags)
     configured: list[dict] = []
     for chk in cfg.gates_checks:
-        if not _applies(chk, scopes, bt):
-            if chk.get("scope", "repo") in scopes and chk.get("target") and bt is not None:
+        if not _applies(chk, scopes, labels):
+            if chk.get("scope", "repo") in scopes and chk.get("target") and labels is not None:
                 print(f"  · gate {chk.get('id', '')} skipped "
-                      f"(target={chk.get('target')}, bundle target is {bt})",
+                      f"(target={chk.get('target')}, bundle labels {set(labels)})",
                       file=sys.stderr, flush=True)
             continue
         configured.append(_run_one(chk, cwd=cwd, bundle=bundle))

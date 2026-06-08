@@ -1,8 +1,9 @@
 """Unit tests for target-aware gate selection (stdlib unittest, offline).
 
-Covers the two pure helpers that decide *which* gates run:
-``gates._bundle_target`` (classify a bundle from its brief) and ``gates._applies``
-(does a check run for this scope set + bundle target). No subprocess, no Docker.
+Covers the two pure helpers that decide *which* gates run: ``gates._bundle_target``
+(classify a bundle into a label SET — a primary axis plus additive flags) and
+``gates._applies`` (a gate runs iff its target labels are a SUBSET of that set, i.e.
+AND). No subprocess, no Docker.
 """
 
 from __future__ import annotations
@@ -14,67 +15,94 @@ from pathlib import Path
 from pdca_harness import gates
 
 
-def _bundle_with_target(line: str) -> Path:
+def _bundle(target_line: str, surfaces: str | None = None) -> Path:
     d = Path(tempfile.mkdtemp())
-    (d / "brief.md").write_text(
-        f"- **Slug:** x\n- **Repo + branch target:** {line}\n", encoding="utf-8"
-    )
+    body = f"- **Slug:** x\n- **Repo + branch target:** {target_line}\n"
+    if surfaces is not None:
+        body += f"- **Surfaces:** {surfaces}\n"
+    (d / "brief.md").write_text(body, encoding="utf-8")
     return d
 
 
-MATCH = {"addon": "addons-source"}
+MATCH = {"addon": "addons-source"}        # primary axis (else default)
 DEFAULT = "core"
+FLAGS = {"frontend": {"field": "surfaces", "substring": "gui"}}   # additive flag
 
 
 class BundleTarget(unittest.TestCase):
-    def test_match_hits_label(self) -> None:
-        b = _bundle_with_target("org/addons-source @ maintenance/gramps60")
-        self.assertEqual(gates._bundle_target(b, MATCH, DEFAULT), "addon")
+    def test_primary_match(self) -> None:
+        self.assertEqual(
+            gates._bundle_target(_bundle("org/addons-source @ g60"), MATCH, DEFAULT),
+            frozenset({"addon"}),
+        )
 
-    def test_no_match_falls_to_default(self) -> None:
-        b = _bundle_with_target("org/gramps @ maintenance/gramps61")
-        self.assertEqual(gates._bundle_target(b, MATCH, DEFAULT), "core")
+    def test_primary_default(self) -> None:
+        self.assertEqual(
+            gates._bundle_target(_bundle("org/gramps @ g61"), MATCH, DEFAULT),
+            frozenset({"core"}),
+        )
 
-    def test_case_insensitive(self) -> None:
-        b = _bundle_with_target("org/Addons-Source @ branch")
-        self.assertEqual(gates._bundle_target(b, MATCH, DEFAULT), "addon")
+    def test_flag_adds_to_primary(self) -> None:  # frontend addon = {addon, frontend}
+        b = _bundle("org/addons-source @ g60", surfaces="gui")
+        self.assertEqual(
+            gates._bundle_target(b, MATCH, DEFAULT, FLAGS), frozenset({"addon", "frontend"})
+        )
 
-    def test_no_bundle_is_none(self) -> None:  # CI working-tree re-gate
-        self.assertIsNone(gates._bundle_target(None, MATCH, DEFAULT))
+    def test_flag_on_core(self) -> None:  # core GUI fix = {core, frontend}
+        b = _bundle("org/gramps @ g61", surfaces="gui")
+        self.assertEqual(
+            gates._bundle_target(b, MATCH, DEFAULT, FLAGS), frozenset({"core", "frontend"})
+        )
 
-    def test_no_match_config_is_none(self) -> None:  # unconfigured project
-        b = _bundle_with_target("org/gramps @ main")
-        self.assertIsNone(gates._bundle_target(b, {}, ""))
+    def test_flag_absent(self) -> None:  # backend addon = {addon}
+        b = _bundle("org/addons-source @ g60", surfaces="data")
+        self.assertEqual(
+            gates._bundle_target(b, MATCH, DEFAULT, FLAGS), frozenset({"addon"})
+        )
 
-    def test_no_default_returns_none(self) -> None:  # match config but no default
-        b = _bundle_with_target("org/gramps @ main")
-        self.assertIsNone(gates._bundle_target(b, MATCH, ""))
+    def test_no_bundle_is_none(self) -> None:
+        self.assertIsNone(gates._bundle_target(None, MATCH, DEFAULT, FLAGS))
+
+    def test_no_config_is_none(self) -> None:
+        self.assertIsNone(gates._bundle_target(_bundle("org/gramps @ g61"), {}, "", {}))
+
+    def test_flags_only_no_primary(self) -> None:  # only flags configured
+        b = _bundle("org/gramps @ g61", surfaces="gui")
+        self.assertEqual(gates._bundle_target(b, {}, "", FLAGS), frozenset({"frontend"}))
 
 
 class Applies(unittest.TestCase):
     SCOPES = ("repo", "bundle")
+    ADDON_FE = frozenset({"addon", "frontend"})
+    ADDON = frozenset({"addon"})
+    CORE = frozenset({"core"})
 
-    def test_untargeted_check_always_runs(self) -> None:
-        chk = {"id": "c", "scope": "repo"}
-        self.assertTrue(gates._applies(chk, self.SCOPES, "addon"))
-        self.assertTrue(gates._applies(chk, self.SCOPES, "core"))
+    def test_untargeted_always_runs(self) -> None:
+        chk = {"scope": "repo"}
+        self.assertTrue(gates._applies(chk, self.SCOPES, self.ADDON))
         self.assertTrue(gates._applies(chk, self.SCOPES, None))
 
-    def test_matching_target_runs(self) -> None:
-        chk = {"id": "c", "scope": "repo", "target": "addon"}
-        self.assertTrue(gates._applies(chk, self.SCOPES, "addon"))
+    def test_single_label_subset(self) -> None:
+        self.assertTrue(gates._applies({"scope": "repo", "target": "addon"}, self.SCOPES, self.ADDON_FE))
+        self.assertFalse(gates._applies({"scope": "repo", "target": "core"}, self.SCOPES, self.ADDON_FE))
 
-    def test_mismatched_target_skips(self) -> None:
-        chk = {"id": "c", "scope": "repo", "target": "core"}
-        self.assertFalse(gates._applies(chk, self.SCOPES, "addon"))
+    def test_list_target_is_AND(self) -> None:  # ["addon","frontend"] needs BOTH
+        chk = {"scope": "repo", "target": ["addon", "frontend"]}
+        self.assertTrue(gates._applies(chk, self.SCOPES, self.ADDON_FE))   # both present
+        self.assertFalse(gates._applies(chk, self.SCOPES, self.ADDON))     # frontend missing
+        self.assertFalse(gates._applies(chk, self.SCOPES, self.CORE))
 
-    def test_unknown_bundle_target_never_over_skips(self) -> None:
-        chk = {"id": "c", "scope": "repo", "target": "core"}
-        self.assertTrue(gates._applies(chk, self.SCOPES, None))
+    def test_frontend_runs_for_core_gui_and_frontend_addon(self) -> None:
+        chk = {"scope": "repo", "target": "frontend"}
+        self.assertTrue(gates._applies(chk, self.SCOPES, self.ADDON_FE))
+        self.assertTrue(gates._applies(chk, self.SCOPES, frozenset({"core", "frontend"})))
+        self.assertFalse(gates._applies(chk, self.SCOPES, self.ADDON))  # backend addon skips
+
+    def test_unknown_labels_never_over_skip(self) -> None:
+        self.assertTrue(gates._applies({"scope": "repo", "target": ["addon", "frontend"]}, self.SCOPES, None))
 
     def test_scope_filter_still_applies(self) -> None:
-        chk = {"id": "c", "scope": "bundle", "target": "addon"}
-        self.assertFalse(gates._applies(chk, ("repo",), "addon"))  # wrong scope
+        self.assertFalse(gates._applies({"scope": "bundle", "target": "addon"}, ("repo",), self.ADDON))
 
 
 if __name__ == "__main__":
