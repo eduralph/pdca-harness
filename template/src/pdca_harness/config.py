@@ -64,12 +64,16 @@ class Config:
     issue_trailer: str = "Fixes #{id}"  # commit/PR trailer; "" → none enforced
     repo_checkouts: dict[str, str] = field(default_factory=dict)  # repo_spec → local path
     gates_checks: list[dict] = field(default_factory=list)
-    # Target-aware gate selection (docs 04). A check may carry ``target = "<label>"``;
-    # ``gate_target_match`` maps a label → a substring matched (case-insensitively)
-    # against the bundle brief's "Repo + branch target" field, ``gate_target_default``
-    # is the label when nothing matches. Both empty ⇒ no filtering (every gate runs).
+    # Target-aware gate selection (docs 04). A check may carry ``target`` (a label or
+    # list); it runs iff its labels are a SUBSET of the bundle's label set. The bundle is
+    # classified from its brief on two axes: a PRIMARY one (``gate_target_match``: label →
+    # substring vs the "Repo + branch target" field; ``gate_target_default`` when none
+    # match — mutually exclusive, e.g. core vs addon) plus additive FLAGS
+    # (``gate_target_flags``: label → {field, substring} vs any brief field, e.g.
+    # ``frontend`` ← a "Surfaces" field). All empty ⇒ no filtering (every gate runs).
     gate_target_default: str = ""
     gate_target_match: dict[str, str] = field(default_factory=dict)
+    gate_target_flags: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def bundle(self, issue_id: str) -> Path:
         """The per-cycle bundle directory for an issue id."""
@@ -87,6 +91,13 @@ class Config:
         leaves = data.get("leaves", {})
         gates = data.get("gates", {})
         gates_checks = list(gates.get("checks", []))
+        # Additive target flags: label → {field, substring}. A bare string is shorthand
+        # for the "Repo + branch target" field (so flags and the primary axis can share it).
+        gate_target_flags = {
+            label: (rule if isinstance(rule, dict)
+                    else {"field": "repo + branch target", "substring": rule})
+            for label, rule in gates.get("target_flags", {}).items()
+        }
         # PDCA_GATES_MODE=stub empties the configured checks → the all-PASS stub
         # rows, so an offline "rehearse" runs the control flow without Docker.
         if os.environ.get("PDCA_GATES_MODE") == "stub":
@@ -129,6 +140,7 @@ class Config:
             repo_checkouts=dict(publisher_cfg.get("checkouts", {})),
             gate_target_default=gates.get("target_default", ""),
             gate_target_match=dict(gates.get("target_match", {})),
+            gate_target_flags=gate_target_flags,
             builder=leaf("builder"),
             reviewer=leaf("reviewer"),
             planner=leaf("planner"),

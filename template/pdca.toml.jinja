@@ -103,17 +103,26 @@ argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
 # bundle/patch context ($PDCA_BUNDLE is exported) and runs only locally. The
 # SAME commands run for the local driver and CI — single-sourced, no drift.
 #
-# TARGET-AWARE SELECTION (optional). A check may carry `target = "<label>"`; it then
-# runs only when the bundle's target matches. Classify the bundle below: a label →
-# substring matched (case-insensitively) against the brief's "Repo + branch target",
-# with a default when nothing matches. Unset ⇒ no filtering (every gate runs). E.g. to
-# skip core suites on an addon-only fix (and the addon matrix on a core fix):
+# TARGET-AWARE SELECTION (optional). A check may carry `target` — a label or a LIST;
+# it runs iff its labels are a SUBSET of the bundle's label set (subset = AND). The
+# bundle is classified from its brief on two axes:
+#   * PRIMARY (mutually exclusive, e.g. core vs addon): `[gates.target_match]` maps a
+#     label → substring matched (case-insensitively) against "Repo + branch target",
+#     `target_default` is used when none match.
+#   * FLAGS (additive, e.g. frontend): `[gates.target_flags]` maps a label →
+#     {field, substring} matched against ANY brief field (a bare string ⇒ the
+#     "Repo + branch target" field).
+# Unset ⇒ no filtering (every gate runs). E.g. skip core suites on an addon-only fix,
+# and run a GUI/E2E gate only for a *frontend* change (core OR addon):
 #   [gates]
 #   target_default = "core"
 #   [gates.target_match]
 #   addon = "addons-source"
-# then tag the runtime gates `target = "core"` / `target = "addon"`. `pdca gates
-# --working-tree` (no bundle) is never filtered, so the CI re-gate is unaffected.
+#   [gates.target_flags]
+#   frontend = { field = "surfaces", substring = "gui" }
+# then tag gates: core suite `target = "core"`, addon suite `target = "addon"`, GUI
+# smoke `target = "frontend"`, an addon-in-GUI E2E `target = ["addon", "frontend"]`.
+# `pdca gates --working-tree` (no bundle) is never filtered, so the CI re-gate is unaffected.
 #
 # While `checks` is empty the driver uses built-in all-PASS stubs so the offline
 # slice runs. Fill these in as your gate tiers get written (gates are the long
