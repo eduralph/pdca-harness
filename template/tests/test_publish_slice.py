@@ -191,6 +191,27 @@ class PublishSlice(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("pending-id", err.getvalue().lower())
 
+    def test_resolve_target_tolerates_backticks_and_prose(self) -> None:
+        """Regression (#25): the brief target field is commonly written with markdown
+        backticks and/or trailing prose; _resolve_target must isolate owner/repo and a
+        clean base ref, not leak backticks or sentence text into the checkout/base."""
+        d = self.cfg.bundle("TGT")
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(
+            "- **Slug:** my-fix\n"
+            "- **Repo + branch target:** `example-org/example-repo` @ `main`. "
+            "Forward-merged later.\n", encoding="utf-8")
+        self.assertEqual(publish._resolve_target(d),
+                         ("example-org/example-repo", "main", "my-fix"))
+
+        # a base ref legitimately containing a slash survives backtick stripping
+        (d / "brief.md").write_text(
+            "- **Slug:** my-fix\n"
+            "- **Repo + branch target:** `addons-source` @ `maintenance/gramps60`\n",
+            encoding="utf-8")
+        self.assertEqual(publish._resolve_target(d),
+                         ("addons-source", "maintenance/gramps60", "my-fix"))
+
     def test_checkout_path_map_and_sibling_fallback(self) -> None:
         # sibling fallback: <root>/../<repo-last-segment>
         self.assertEqual(publish._checkout_path(self.cfg, "org/foo"),

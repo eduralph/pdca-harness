@@ -13,7 +13,7 @@
   framework docs / internal rule) per `docs/principles.md` §3–§6. SELF-TEST: could Do
   satisfy this by guarding a single module? If yes, it's the narrow symptom-sentence —
   widen it. Omit only for non-structural behavioural bug fixes (principles.md §1.1).>
-- **Repo + branch target:** <repo @ branch — resolved here, not left to Do>
+- **Repo + branch target:** <owner/repo> @ <branch>   (resolve here at Plan — do not leave to Do)
 - **Surfaces:** <where the change is observable — `gui` (touches the frontend / an E2E
   through the app is needed), `data` (backend/logic only), or `both`. Drives which
   runtime gates apply (e.g. an E2E gate runs only when this is `gui`). Optional.>

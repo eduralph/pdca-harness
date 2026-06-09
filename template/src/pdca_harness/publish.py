@@ -192,14 +192,29 @@ def publish(
 
 
 # ----------------------------------------------------------------------------
+def _clean_ref(raw: str) -> str:
+    """Isolate a git ref / repo spec from a brief field side, tolerating markdown
+    backticks and trailing prose. A ref / ``owner/repo`` has no spaces, so prefer a
+    backtick-quoted span, else the first whitespace token; strip stray backticks and
+    trailing sentence punctuation."""
+    raw = raw.strip()
+    m = re.search(r"`([^`]+)`", raw)              # markdown code span wins
+    token = m.group(1) if m else (raw.split()[0] if raw.split() else "")
+    return token.strip("`").rstrip(",.;:")
+
+
 def _resolve_target(d: Path) -> tuple[str, str, str]:
     """``(repo_spec, base_branch, slug)`` from the brief, e.g.
-    ``("example-org/example-repo", "main", "fix-the-thing")``."""
+    ``("example-org/example-repo", "main", "fix-the-thing")``.
+
+    The target field is commonly written with markdown backticks and/or trailing
+    prose after the branch; ``_clean_ref`` isolates the ref on each side of ``@`` so
+    that style doesn't corrupt the resolved checkout/base (see #25)."""
     bp = d / "brief.md"
     target = brief.field(bp, "repo + branch target", "repo + branch", "target")
     repo_spec, _, base = target.partition("@")
     slug = brief.field(bp, "slug") or d.name.removeprefix("issue_")
-    return repo_spec.strip(), base.strip(), _slugify(slug)
+    return _clean_ref(repo_spec), _clean_ref(base), _slugify(slug)
 
 
 def _slugify(s: str) -> str:

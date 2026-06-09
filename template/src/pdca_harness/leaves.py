@@ -533,7 +533,9 @@ def _publish_prompt(d: Path, cfg: Config) -> str:
     trailer = cfg.issue_trailer.format(id=issue_id) if cfg.issue_trailer else ""
     trailer_line = (
         f"The LAST line of commit-msg.txt is the issue trailer `{trailer}` (the T4 gate "
-        "enforces it); a Co-Authored-By line, if any, goes ABOVE it. If no tracker id is "
+        "enforces it), preceded by a blank line with NOTHING appended after it — do not "
+        "add a Co-Authored-By or any other trailer below it (a project may require the "
+        "trailer to stand alone as a blank-separated last line). If no tracker id is "
         "assigned yet (the bundle id is not a real tracker number), OMIT the trailer "
         "entirely rather than invent a placeholder — `pdca publish --no-issue` records "
         "the contribution as id_pending for the human to fill the id in later. "
