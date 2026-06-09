@@ -29,7 +29,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import brief, progress
+from . import brief, lane, progress
 from .config import Config
 
 
@@ -131,6 +131,12 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None) -> dict:
     gating = bool(chk.get("gating", True))
     label = f"{chk.get('id', '')}: {chk.get('label', '')}".strip(": ")
     env = {"PDCA_BUNDLE": str(bundle)} if bundle is not None else None
+    # Under in-driver lane concurrency, expose the worker-slot id so a gate command can
+    # scope its checkout / container name / port / scratch per lane (docs 09). Absent
+    # (serial driver) → no PDCA_LANE, so gates run exactly as before.
+    lane_id = lane.current()
+    if lane_id is not None:
+        env = {**(env or {}), "PDCA_LANE": str(lane_id)}
     watch = bundle or cwd
     print(f"  · gate {label} (a Docker-backed gate can take minutes)…", file=sys.stderr, flush=True)
     try:
