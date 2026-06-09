@@ -3,6 +3,4 @@
 <body wrapped at ≤ 80 chars. Explain WHY, not just what — the diff shows the what.
 Reference any other commit by its FULL hash (most hosts auto-link full hashes).>
 
-<optional: Co-Authored-By: Name <email>  — place it ABOVE the trailer, never after>
-
 Fixes #<id>
