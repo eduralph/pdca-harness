@@ -13,6 +13,22 @@ bundle_root = "{{ bundle_root }}"
 process_dir = "{{ process_dir }}"
 templates_dir = "templates"
 
+# In-driver lane concurrency (docs 09 §parallel lanes). `lanes` is the worker-pool
+# size for the UNATTENDED Do+Check band only — Plan, sign-off, publish, and Act stay
+# serial. 1 (the default) is the strictly-serial driver. Override for a single run
+# with `PDCA_LANES=N` or `--lanes N` on `pdca flow` / `pdca batch`.
+#
+# A pool > 1 runs N bundles concurrently in ONE workspace. Each worker is pinned to a
+# fixed lane slot 0..N-1 and exposes it to every gate command as `$PDCA_LANE`. A gate
+# that backs onto a shared mutable resource (a target checkout it applies/reverts, a
+# container, a port, a scratch dir) MUST name that resource by `$PDCA_LANE` so two
+# lanes can't collide — e.g. `--name app-l$PDCA_LANE`, a `repo-lane$PDCA_LANE`
+# checkout. Bundles in the same lane reuse that lane's resources serially, so you need
+# only N copies, not one per bundle. Leave at 1 unless per-lane disk / sign-off
+# ergonomics actually bite (then prefer this over N separate workspaces).
+[driver]
+lanes = 1
+
 [tracker]
 system = "{{ tracker_system }}"
 url = "{{ tracker_url }}"

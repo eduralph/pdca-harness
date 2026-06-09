@@ -74,6 +74,10 @@ class Config:
     gate_target_default: str = ""
     gate_target_match: dict[str, str] = field(default_factory=dict)
     gate_target_flags: dict[str, dict[str, str]] = field(default_factory=dict)
+    # In-driver lane concurrency (docs 09): the worker-pool size for the unattended
+    # Do+Check band. ``1`` (the default) keeps the driver strictly serial. ``[driver].lanes``
+    # in pdca.toml; ``PDCA_LANES`` overrides for a single run (like ``PDCA_BUNDLE_ROOT``).
+    lanes: int = 1
 
     def bundle(self, issue_id: str) -> Path:
         """The per-cycle bundle directory for an issue id."""
@@ -124,6 +128,13 @@ class Config:
             env_root = Path(os.environ["PDCA_BUNDLE_ROOT"])
             bundle_root = env_root if env_root.is_absolute() else root / env_root
 
+        # In-driver lane pool size. PDCA_LANES overrides [driver].lanes for one run
+        # (e.g. to rehearse parallelism without editing pdca.toml). Floor of 1 = serial.
+        lanes = int(data.get("driver", {}).get("lanes", 1))
+        if os.environ.get("PDCA_LANES"):
+            lanes = int(os.environ["PDCA_LANES"])
+        lanes = max(1, lanes)
+
         return cls(
             root=root,
             bundle_root=bundle_root,
@@ -149,6 +160,7 @@ class Config:
             act=leaf("act"),
             author=data.get("project", {}).get("author", ""),
             gates_checks=gates_checks,
+            lanes=lanes,
         )
 
 

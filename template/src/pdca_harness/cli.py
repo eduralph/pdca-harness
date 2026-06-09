@@ -46,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     p_flow.add_argument("--no-publish", action="store_true", help="don't open the draft PR after an accept")
     p_flow.add_argument("--act", action="store_true", help="run the Act leaf after a COMPLETE sign-off")
     p_flow.add_argument("--by", default="", help="who signed off (recorded in §9)")
+    p_flow.add_argument("--lanes", type=int, help="unattended Do+Check worker-pool size (docs 09; overrides [driver].lanes / PDCA_LANES)")
 
     p_status = sub.add_parser("status", help="list bundle states (cheap-first queue)")
     p_status.add_argument("issue_id", nargs="?")
@@ -55,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     p_batch.add_argument("--from-briefs", type=Path, help="init missing bundles from DIR/<id>.md")
     p_batch.add_argument("--no-act", action="store_true", help="stop after sign-off; skip the end-of-batch Act")
     p_batch.add_argument("--by", default="", help="who signed off (recorded in §9)")
+    p_batch.add_argument("--lanes", type=int, help="unattended Do+Check worker-pool size (docs 09; overrides [driver].lanes / PDCA_LANES)")
 
     sub.add_parser("queue", help="the cheap-first sign-off burn-down (AWAITING_SIGNOFF)")
 
@@ -155,6 +157,8 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
     a batch Plan session may brief several issues, which are then all built
     unattended and signed off cheap-first via the queue.
     """
+    if getattr(args, "lanes", None) is not None:
+        cfg.lanes = max(1, args.lanes)
     if args.issue_id:
         d = cfg.bundle(args.issue_id)
         if d.exists() and state.state(d) == state.COMPLETE:
@@ -214,6 +218,8 @@ def _batch(cfg: Config, args: argparse.Namespace) -> int:
     any missing bundle from DIR/<id>.md first. Resumable — already-COMPLETE ids are
     skipped, so re-running picks up whatever is still in flight.
     """
+    if getattr(args, "lanes", None) is not None:
+        cfg.lanes = max(1, args.lanes)
     # Seed any missing bundles from --from-briefs; sign-off and Act stay human.
     for issue_id in args.issue_ids:
         d = cfg.bundle(issue_id)

@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import datetime
 import sys
+import threading
+from collections import deque
 from pathlib import Path
 
-from . import driver, leaves, publish, queue, signoff, state
+from . import driver, lane, leaves, publish, queue, signoff, state
 from .config import Config
 
 
@@ -167,6 +169,53 @@ def flow(
 
 
 # ----------------------------------------------------------------------------
+# The unattended band: advance every bundle through Do + Check (docs 09). Serial by
+# default; a worker pool of cfg.lanes lanes when configured (PDCA_LANES / [driver].lanes).
+# ----------------------------------------------------------------------------
+def _build_all(cfg: Config, bundles: list[Path]) -> None:
+    """Drive each bundle through the unattended Do+Check band to AWAITING_SIGNOFF / COMPLETE.
+
+    ``cfg.lanes <= 1`` keeps the original strictly-serial loop (Plan-if-unplanned then
+    drive, per bundle). With ``cfg.lanes > 1`` the *drive* fans out across a worker pool:
+    a serial Plan pre-pass runs first (an ``iterate-plan`` may have re-opened a bundle to
+    UNPLANNED, and the Plan leaf is **interactive** — it must never enter the pool), then
+    ``min(lanes, len(bundles))`` worker threads, each pinned to a fixed lane slot for its
+    lifetime (so only ``lanes`` lane-scoped checkouts/runners are ever needed), pull
+    bundles off a shared queue and run the unattended ``driver.run_issue``.
+    """
+    if cfg.lanes <= 1 or len(bundles) <= 1:
+        for d in bundles:
+            def _build(d=d):
+                _plan_if_unplanned(cfg, d, None)  # iterate-plan may have re-opened it
+                driver.run_issue(d, cfg)
+            _isolate(d, "build/check", _build)
+        return
+
+    # Serial Plan pre-pass — the interactive Plan beat stays out of the pool.
+    for d in bundles:
+        _isolate(d, "plan", lambda d=d: _plan_if_unplanned(cfg, d, None))
+    # Pooled drive — fixed lane slot per worker; gates read it via lane.current().
+    work = deque(bundles)
+    lock = threading.Lock()
+
+    def worker(slot: int) -> None:
+        lane.set_current(slot)
+        while True:
+            with lock:
+                if not work:
+                    return
+                d = work.popleft()
+            _isolate(d, "build/check", lambda d=d: driver.run_issue(d, cfg))
+
+    threads = [threading.Thread(target=worker, args=(k,), name=f"pdca-lane{k}")
+               for k in range(min(cfg.lanes, len(bundles)))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
+# ----------------------------------------------------------------------------
 # Shared multi-bundle driver: build all → cheap-first sign-off → publish → Act once.
 # ----------------------------------------------------------------------------
 def _drive_and_act(
@@ -193,11 +242,8 @@ def _drive_and_act(
         # Build-all (unattended): advance each bundle to AWAITING_SIGNOFF / COMPLETE.
         # Each bundle is isolated — one that raises (a leaf left it half-written) is
         # skipped this pass, never crashing the sweep and losing the others' progress.
-        for d in bundles:
-            def _build(d=d):
-                _plan_if_unplanned(cfg, d, None)  # iterate-plan may have re-opened it
-                driver.run_issue(d, cfg)
-            _isolate(d, "build/check", _build)
+        # Serial by default; fans out across cfg.lanes lanes when configured (docs 09).
+        _build_all(cfg, bundles)
         # Sign-off, cheap-first, restricted to this batch. ONE interactive session
         # per chunk (≤ SIGNOFF_BATCH_SIZE) walks several bundles — like batch Plan —
         # then every decision is recorded FIRST (apply_now=False) so an iterate-do

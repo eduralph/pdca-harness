@@ -355,5 +355,77 @@ class DesignProposalBrief(unittest.TestCase):
         self.assertIn("the capability this adds", summary)     # the Goal value, not blank
 
 
+_TOY_BRIEF = (
+    "- **Slug:** {slug}\n"
+    "- **Defect:** the count is off by one.\n"
+    "- **Success criterion:** a test asserts the right count.\n"
+    "- **Repo + branch target:** example-org/example-repo @ main\n"
+)
+
+# A real bundle-scoped gate that records the worker's $PDCA_LANE into the bundle.
+_LANE_GATE = {
+    "id": "LANE", "tier": "C4", "label": "record lane",
+    "cmd": "printf '%s' \"${PDCA_LANE:-none}\" > \"$PDCA_BUNDLE/lane.txt\"",
+    "scope": "bundle", "gating": True,
+}
+
+
+class LaneParallelism(unittest.TestCase):
+    """In-driver lane concurrency (docs 09 / issue #19): the unattended Do+Check band
+    fans out across `cfg.lanes` workers, each pinned to a fixed lane slot exposed to
+    gate commands as `$PDCA_LANE`; Plan / sign-off / publish / Act stay serial."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _brief(self, iid: str) -> Path:
+        d = self.cfg.bundle(iid)
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(_TOY_BRIEF.format(slug=iid.lower()), encoding="utf-8")
+        return d
+
+    def test_pooled_drive_completes_all_like_serial(self) -> None:
+        # Parity: a 3-lane pool drives every briefed bundle to COMPLETE, same as serial.
+        ids = ["L1", "L2", "L3", "L4", "L5"]
+        for iid in ids:
+            self._brief(iid)
+        self.cfg.lanes = 3
+        results = flow.flow_ids(self.cfg, ids, do_publish=False, do_act=False,
+                                today="2026-06-04")
+        self.assertEqual(set(results), set(ids))
+        self.assertTrue(all(s == state.COMPLETE for s in results.values()),
+                        f"not all COMPLETE under a 3-lane pool: {results}")
+
+    def test_pdca_lane_exposed_to_gates_per_worker_slot(self) -> None:
+        # A 2-lane pool over 4 bundles: every gate sees a $PDCA_LANE in {0,1} — the
+        # worker-slot id — and writes it into its bundle. Proves the lane contract
+        # without timing-flakiness (no assertion on which slot got which bundle).
+        self.cfg.gates_checks = [_LANE_GATE]
+        ids = ["P1", "P2", "P3", "P4"]
+        for iid in ids:
+            self._brief(iid)
+        self.cfg.lanes = 2
+        flow.flow_ids(self.cfg, ids, do_publish=False, do_act=False, today="2026-06-04")
+        for iid in ids:
+            f = self.cfg.bundle(iid) / "lane.txt"
+            self.assertTrue(f.exists(), f"gate did not run for {iid}")
+            val = f.read_text(encoding="utf-8").strip()
+            self.assertIn(val, {"0", "1"}, f"{iid} got PDCA_LANE={val!r}, not a slot in 0..1")
+
+    def test_serial_path_sets_no_pdca_lane(self) -> None:
+        # Backward-compat: lanes=1 takes the serial path → no worker pool → gates see
+        # no $PDCA_LANE (the shell default `none`), exactly as before this feature.
+        self.cfg.gates_checks = [_LANE_GATE]
+        self._brief("S1")
+        self.cfg.lanes = 1
+        flow.flow_ids(self.cfg, ["S1"], do_publish=False, do_act=False, today="2026-06-04")
+        val = (self.cfg.bundle("S1") / "lane.txt").read_text(encoding="utf-8").strip()
+        self.assertEqual(val, "none")
+
+
 if __name__ == "__main__":
     unittest.main()

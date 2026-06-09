@@ -80,6 +80,10 @@ leaves), so `init-issue` → `run` → `signoff` works before you wire anything 
   both the driver and CI via one `pdca gates` command (stub fallback until filled).
 - **Batch fan-out + sign-off queue** — `pdca batch` over N issues, `pdca queue`
   cheap-first burn-down.
+- **In-driver lane concurrency** — `[driver].lanes = N` (`PDCA_LANES` /
+  `pdca flow|batch --lanes N`) fans the unattended Do + Check band across N workers in
+  one workspace; each gate sees its worker slot as `$PDCA_LANE` to keep checkouts /
+  runners lane-private (doc 09).
 - **Mechanical STOP discipline** — `.claude/agents/builder.md` + a PreToolUse hook
   block the builder from marking a PR ready/merging; `reviewer.md` has execute-only
   scope; the decorrelated reviewer path is cross-vendor Codex via `AGENTS.md`.
