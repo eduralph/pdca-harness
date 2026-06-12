@@ -37,5 +37,33 @@ class ParseFields(unittest.TestCase):
             self.assertFalse(val.startswith("*"), val)
 
 
+class OrderingFields(unittest.TestCase):
+    """The optional Depends on / Conflicts with fields (docs 09, issue #36)."""
+
+    def _brief(self, body: str) -> Path:
+        f = Path(tempfile.mkdtemp()) / "brief.md"
+        f.write_text(body, encoding="utf-8")
+        return f
+
+    def test_depends_on_parses_comma_and_space_separated_ids(self) -> None:
+        f = self._brief("- **Depends on:** #36, 11 issue_42\n")
+        # leading '#' and the issue_ prefix are both normalised to bare ids
+        self.assertEqual(brief.depends_on(f), ["36", "11", "42"])
+
+    def test_conflicts_with_parses_list(self) -> None:
+        f = self._brief("- **Conflicts with:** C1, T1\n")
+        self.assertEqual(brief.conflicts_with(f), ["C1", "T1"])
+
+    def test_absent_field_is_empty_list(self) -> None:
+        f = self._brief("- **Slug:** no-ordering\n")
+        self.assertEqual(brief.depends_on(f), [])
+        self.assertEqual(brief.conflicts_with(f), [])
+
+    def test_empty_value_is_empty_list(self) -> None:
+        f = self._brief("- **Depends on:**\n- **Conflicts with:** \n")
+        self.assertEqual(brief.depends_on(f), [])
+        self.assertEqual(brief.conflicts_with(f), [])
+
+
 if __name__ == "__main__":
     unittest.main()

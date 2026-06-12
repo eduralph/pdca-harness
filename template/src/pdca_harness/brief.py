@@ -53,3 +53,33 @@ def test_files(brief_path: Path) -> list[Path]:
     # Pull anything that looks like a path token out of the field value.
     tokens = re.findall(r"[\w./-]+\.\w+", raw)
     return [Path(t) for t in tokens]
+
+
+def depends_on(brief_path: Path) -> list[str]:
+    """Issue ids this bundle must wait for — each must be COMPLETE before it runs.
+
+    The optional ``- **Depends on:** <id>[, <id>…]`` field (docs 09). Absent ⇒
+    ``[]`` ⇒ today's sort-by-name scheduling, unaffected.
+    """
+    return _id_list(field(brief_path, "depends on", "depends_on"))
+
+
+def conflicts_with(brief_path: Path) -> list[str]:
+    """Issue ids that must never run in the same concurrent wave as this bundle.
+
+    The optional ``- **Conflicts with:** <id>[, <id>…]`` field (docs 09): a pair
+    that edits a shared resource and so cannot be co-scheduled across lanes.
+    """
+    return _id_list(field(brief_path, "conflicts with", "conflicts_with"))
+
+
+def _id_list(raw: str) -> list[str]:
+    """Issue ids out of a comma/space-separated field value, normalised to bare ids.
+
+    Tolerates a leading ``#`` and the ``issue_`` bundle prefix so a brief may write
+    ``#36`` / ``36`` / ``issue_36`` interchangeably; matches how ``cfg.bundle(id)``
+    keys bundles. Mirrors :func:`test_files`' tokenise-the-value approach.
+    """
+    if not raw:
+        return []
+    return [t.lstrip("#").removeprefix("issue_") for t in re.findall(r"#?[\w./-]+", raw)]

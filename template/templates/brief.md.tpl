@@ -14,6 +14,8 @@
   satisfy this by guarding a single module? If yes, it's the narrow symptom-sentence —
   widen it. Omit only for non-structural behavioural bug fixes (principles.md §1.1).>
 - **Repo + branch target:** <owner/repo> @ <branch>   (resolve here at Plan — do not leave to Do)
+- **Depends on:** <id>[, <id>…]   (optional — batch/lane scheduling waits until these bundles are COMPLETE before this one runs; docs 09)
+- **Conflicts with:** <id>[, <id>…]   (optional — never co-schedule these in the same concurrent wave, e.g. they edit a shared file; docs 09)
 - **Surfaces:** <where the change is observable — `gui` (touches the frontend / an E2E
   through the app is needed), `data` (backend/logic only), or `both`. Drives which
   runtime gates apply (e.g. an E2E gate runs only when this is `gui`). Optional.>
