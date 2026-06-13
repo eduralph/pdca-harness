@@ -1,6 +1,9 @@
 # Planning Principles — solution-design discipline for briefs
 
 > **Status:** living document. **Owner:** {{ author_name or "the maintainer" }}.
+> **Counterpart:** [`fork-discipline.md`](fork-discipline.md) — the **Check**-closing /
+> contribution discipline; this file governs **Plan**-time solution design. The two are
+> a deliberate pair, one per PDCA beat (doc map below).
 > **Why this exists.** A brief that names a *solution mechanism* (a probe, a guard, a
 > helper) instead of the *property the fix must restore* seats the fix shape before Do
 > reasons about it — and no downstream gate can recover the right shape from a wrong
@@ -16,6 +19,14 @@
 > reference layer holds knowledge; the active layer is the few questions worth
 > interrupting planning to ask every relevant time. Graduate a principle from reference
 > to active only on evidence it is being missed (§8).
+
+**Doc map — the generic-doctrine pair and its instance answers:**
+
+| Doc | PDCA beat | Layer |
+|---|---|---|
+| [`principles.md`](principles.md) (this file) | **Plan** — solution-design discipline | generic doctrine (templated) |
+| [`fork-discipline.md`](fork-discipline.md) | **Check** — closing / contribution discipline | generic doctrine (templated) |
+| [`INTEGRATION.md`](INTEGRATION.md) | all — the concrete per-project answers | instance |
 
 ---
 
