@@ -13,7 +13,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import act, driver, flow, gates, publish, queue, signoff, state
+from . import act, brief, driver, flow, gates, publish, queue, signoff, state
 from .config import Config
 
 # Ordering for the cheap-first sign-off queue (docs 03 §sign-off queue).
@@ -205,8 +205,20 @@ def _status(cfg: Config, issue_id: str | None) -> int:
         if s == state.AWAITING_SIGNOFF:
             n = len(signoff.open_needs_human(d / "SUMMARY.md"))
             flag = "  [cheap: confirm]" if n == 0 else f"  [{n} NEEDS-HUMAN]"
+        blocked = _blocked_by(cfg, d) if s != state.COMPLETE else []
+        if blocked:
+            flag += f"  [blocked-by: {', '.join(blocked)}]"
         print(f"{s:18}{d.name}{flag}")
     return 0
+
+
+def _blocked_by(cfg: Config, d: Path) -> list[str]:
+    """Declared `Depends on` ids of bundle ``d`` that are not yet COMPLETE (issue #36)."""
+    bp = d / "brief.md"
+    if not bp.exists():
+        return []
+    return [dep for dep in brief.depends_on(bp)
+            if state.state(cfg.bundle(dep)) != state.COMPLETE]
 
 
 def _batch(cfg: Config, args: argparse.Namespace) -> int:

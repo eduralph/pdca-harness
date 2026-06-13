@@ -22,10 +22,9 @@ from __future__ import annotations
 import datetime
 import sys
 import threading
-from collections import deque
 from pathlib import Path
 
-from . import driver, lane, leaves, publish, queue, signoff, state
+from . import brief, driver, lane, leaves, publish, queue, signoff, state
 from .config import Config
 
 
@@ -169,6 +168,88 @@ def flow(
 
 
 # ----------------------------------------------------------------------------
+# Declared inter-bundle ordering (docs 09, issue #36). Bundles may declare
+# `Depends on:` / `Conflicts with:` in their brief; the scheduler gates dispatch on
+# them. With NO fields declared every bundle is always eligible, so dispatch is
+# byte-for-byte today's sort-by-name pool.
+# ----------------------------------------------------------------------------
+def _deps_met(cfg: Config, d: Path) -> bool:
+    """True iff every bundle ``d`` declares ``Depends on`` is COMPLETE.
+
+    An unplanned/reopened bundle (no brief yet) declares nothing, so it is eligible;
+    its deps, if any, are honoured once it is re-planned on a later pass.
+    """
+    bp = d / "brief.md"
+    if not bp.exists():
+        return True
+    return all(state.state(cfg.bundle(dep)) == state.COMPLETE
+               for dep in brief.depends_on(bp))
+
+
+def _conflict_map(cfg: Config, bundles: list[Path]) -> dict[str, set[str]]:
+    """Symmetric bundle-name → conflicting-bundle-names map, restricted to this wave.
+
+    A declared conflict naming a bundle outside the wave is moot (it cannot be
+    co-scheduled with something that is not running) and is dropped.
+    """
+    names = {b.name for b in bundles}
+    conflicts: dict[str, set[str]] = {b.name: set() for b in bundles}
+    for b in bundles:
+        bp = b / "brief.md"
+        if not bp.exists():
+            continue
+        for cid in brief.conflicts_with(bp):
+            other = cfg.bundle(cid).name
+            if other in names and other != b.name:
+                conflicts[b.name].add(other)
+                conflicts[other].add(b.name)
+    return conflicts
+
+
+def _check_dep_graph(cfg: Config, bundles: list[Path]) -> None:
+    """Validate the declared `Depends on` DAG before any build (issue #36).
+
+    A dependency that is neither in this wave nor an already-COMPLETE bundle on
+    disk is a misconfigured brief; a cycle is unschedulable. Both raise ``ValueError``
+    so the run aborts before touching any bundle. No deps declared ⇒ no-op.
+    """
+    names = {b.name for b in bundles}
+    graph: dict[str, list[str]] = {}
+    for b in bundles:
+        bp = b / "brief.md"
+        edges: list[str] = []
+        for dep in (brief.depends_on(bp) if bp.exists() else []):
+            dn = cfg.bundle(dep).name
+            if dn in names:
+                edges.append(dn)
+            elif state.state(cfg.bundle(dep)) != state.COMPLETE:
+                raise ValueError(
+                    f"{b.name}: declared dependency '{dep}' is neither in this batch "
+                    f"nor an existing COMPLETE bundle")
+        graph[b.name] = edges
+
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = dict.fromkeys(graph, WHITE)
+    path: list[str] = []
+
+    def visit(n: str) -> None:
+        color[n] = GRAY
+        path.append(n)
+        for m in graph[n]:
+            if color[m] == GRAY:
+                cyc = path[path.index(m):] + [m]
+                raise ValueError("dependency cycle: " + " → ".join(cyc))
+            if color[m] == WHITE:
+                visit(m)
+        path.pop()
+        color[n] = BLACK
+
+    for n in graph:
+        if color[n] == WHITE:
+            visit(n)
+
+
+# ----------------------------------------------------------------------------
 # The unattended band: advance every bundle through Do + Check (docs 09). Serial by
 # default; a worker pool of cfg.lanes lanes when configured (PDCA_LANES / [driver].lanes).
 # ----------------------------------------------------------------------------
@@ -185,27 +266,57 @@ def _build_all(cfg: Config, bundles: list[Path]) -> None:
     """
     if cfg.lanes <= 1 or len(bundles) <= 1:
         for d in bundles:
+            if not _deps_met(cfg, d):
+                continue  # a declared prereq isn't COMPLETE yet — a later pass picks it up
             def _build(d=d):
                 _plan_if_unplanned(cfg, d, None)  # iterate-plan may have re-opened it
                 driver.run_issue(d, cfg)
             _isolate(d, "build/check", _build)
         return
 
-    # Serial Plan pre-pass — the interactive Plan beat stays out of the pool.
+    # Serial Plan pre-pass — the interactive Plan beat stays out of the pool. After it
+    # every bundle has a brief, so the declared-conflict map is complete.
     for d in bundles:
         _isolate(d, "plan", lambda d=d: _plan_if_unplanned(cfg, d, None))
+    conflicts = _conflict_map(cfg, bundles)
     # Pooled drive — fixed lane slot per worker; gates read it via lane.current().
-    work = deque(bundles)
-    lock = threading.Lock()
+    # A worker claims the first queued bundle whose declared deps are COMPLETE and which
+    # conflicts with nothing currently in flight; with no fields declared the first
+    # queued bundle is always eligible, so this is the same FIFO pool as before.
+    remaining = list(bundles)  # preserves the caller's sort-by-name order
+    inflight: set[str] = set()
+    cond = threading.Condition()
+
+    def _next_eligible() -> Path | None:
+        # caller holds `cond`. Pop+return the first eligible bundle, else None.
+        for i, d in enumerate(remaining):
+            if _deps_met(cfg, d) and conflicts[d.name].isdisjoint(inflight):
+                inflight.add(d.name)
+                return remaining.pop(i)
+        return None
 
     def worker(slot: int) -> None:
         lane.set_current(slot)
         while True:
-            with lock:
-                if not work:
-                    return
-                d = work.popleft()
+            with cond:
+                while True:
+                    if not remaining:
+                        return
+                    d = _next_eligible()
+                    if d is not None:
+                        break
+                    # Nothing eligible right now. If nothing is in flight to unblock the
+                    # rest, they are dep-blocked on prereqs that only go COMPLETE after a
+                    # later sign-off pass — leave them and exit. Otherwise wait for an
+                    # in-flight bundle to finish and re-check.
+                    if not inflight:
+                        cond.notify_all()
+                        return
+                    cond.wait()
             _isolate(d, "build/check", lambda d=d: driver.run_issue(d, cfg))
+            with cond:
+                inflight.discard(d.name)
+                cond.notify_all()
 
     threads = [threading.Thread(target=worker, args=(k,), name=f"pdca-lane{k}")
                for k in range(min(cfg.lanes, len(bundles)))]
@@ -238,6 +349,9 @@ def _drive_and_act(
     batch — the endpoint is Act, like any single cycle, just fanned over several bundles.
     """
     names = {b.name for b in bundles}
+    # Reject an unschedulable declared-ordering graph (cycle / unresolved dep) before any
+    # build touches a bundle (issue #36). No `Depends on` fields ⇒ no-op.
+    _check_dep_graph(cfg, bundles)
     for _ in range(max_passes):
         # Build-all (unattended): advance each bundle to AWAITING_SIGNOFF / COMPLETE.
         # Each bundle is isolated — one that raises (a leaf left it half-written) is

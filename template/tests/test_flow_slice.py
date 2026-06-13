@@ -427,5 +427,141 @@ class LaneParallelism(unittest.TestCase):
         self.assertEqual(val, "none")
 
 
+class DeclaredOrdering(unittest.TestCase):
+    """Declared inter-bundle ordering (docs 09 / issue #36): a brief may declare
+    `Depends on:` (topological gate — a dependent isn't driven until its prereq is
+    COMPLETE) and `Conflicts with:` (never co-scheduled in one concurrent wave). With
+    no fields declared, dispatch is exactly today's sort-by-name pool."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _brief(self, iid: str, *, depends_on: str = "", conflicts_with: str = "") -> Path:
+        d = self.cfg.bundle(iid)
+        d.mkdir(parents=True)
+        body = _TOY_BRIEF.format(slug=iid.lower())
+        if depends_on:
+            body += f"- **Depends on:** {depends_on}\n"
+        if conflicts_with:
+            body += f"- **Conflicts with:** {conflicts_with}\n"
+        (d / "brief.md").write_text(body, encoding="utf-8")
+        return d
+
+    def test_dependent_not_driven_until_prereq_complete(self) -> None:
+        # AA depends on ZZ. Sort-by-name would build AA first; the gate must hold AA
+        # until ZZ is COMPLETE (a later pass), proving ordering is by deps, not name.
+        self._brief("AA", depends_on="ZZ")
+        self._brief("ZZ")
+        seen = {}
+        real = driver.run_issue
+
+        def spy(d: Path, cfg: Config):
+            if d.name == "issue_AA" and "zz_state" not in seen:
+                seen["zz_state"] = state.state(cfg.bundle("ZZ"))
+            return real(d, cfg)
+
+        driver.run_issue = spy
+        try:
+            results = flow.flow_ids(self.cfg, ["AA", "ZZ"], do_publish=False,
+                                    do_act=False, today="2026-06-04")
+        finally:
+            driver.run_issue = real
+        self.assertEqual(seen.get("zz_state"), state.COMPLETE)  # ZZ done before AA built
+        self.assertTrue(all(s == state.COMPLETE for s in results.values()))
+
+    def test_no_deps_keeps_sort_by_name_dispatch(self) -> None:
+        # No Depends-on fields → the serial build order is exactly sort-by-name, byte
+        # for byte today's behaviour.
+        ids = ["N3", "N1", "N2"]
+        for iid in ids:
+            self._brief(iid)
+        order: list[str] = []
+        real = driver.run_issue
+
+        def spy(d: Path, cfg: Config):
+            if d.name not in order:
+                order.append(d.name)
+            return real(d, cfg)
+
+        driver.run_issue = spy
+        try:
+            flow.flow_ids(self.cfg, ids, do_publish=False, do_act=False,
+                          today="2026-06-04")
+        finally:
+            driver.run_issue = real
+        self.assertEqual(order, ["issue_N1", "issue_N2", "issue_N3"])
+
+    def test_conflict_pair_never_co_scheduled(self) -> None:
+        # C conflicts with D; E/F are free. Under a 2-lane pool, C and D must never be
+        # in flight together, while the free bundles still prove the pool parallelises.
+        import threading
+        import time
+
+        self._brief("C", conflicts_with="D")
+        self._brief("D")
+        self._brief("E")
+        self._brief("F")
+        self.cfg.lanes = 2
+
+        active: set[str] = set()
+        together: set[tuple[str, str]] = set()
+        max_conc = [0]
+        lk = threading.Lock()
+        real = driver.run_issue
+
+        def spy(d: Path, cfg: Config):
+            with lk:
+                active.add(d.name)
+                max_conc[0] = max(max_conc[0], len(active))
+                for a in active:
+                    for b in active:
+                        if a < b:
+                            together.add((a, b))
+            time.sleep(0.05)
+            try:
+                return real(d, cfg)
+            finally:
+                with lk:
+                    active.discard(d.name)
+
+        driver.run_issue = spy
+        try:
+            results = flow.flow_ids(self.cfg, ["C", "D", "E", "F"], do_publish=False,
+                                    do_act=False, today="2026-06-04")
+        finally:
+            driver.run_issue = real
+        self.assertNotIn(("issue_C", "issue_D"), together)  # conflict respected
+        self.assertEqual(max_conc[0], 2)                     # pool genuinely concurrent
+        self.assertTrue(all(s == state.COMPLETE for s in results.values()))
+
+    def test_dependency_cycle_is_rejected_before_build(self) -> None:
+        # A↔B mutual dependency is unschedulable: reject up front, before any build.
+        self._brief("CYA", depends_on="CYB")
+        self._brief("CYB", depends_on="CYA")
+        real = driver.run_issue
+        built = {"n": 0}
+        driver.run_issue = lambda d, cfg: (built.__setitem__("n", built["n"] + 1)
+                                           or real(d, cfg))
+        try:
+            with self.assertRaises(ValueError):
+                flow.flow_ids(self.cfg, ["CYA", "CYB"], do_publish=False,
+                              do_act=False, today="2026-06-04")
+        finally:
+            driver.run_issue = real
+        self.assertEqual(built["n"], 0)  # rejected before touching any bundle
+
+    def test_unresolved_dependency_is_rejected(self) -> None:
+        # A dep that is neither in the wave nor an existing COMPLETE bundle is a
+        # misconfigured brief — a hard error.
+        self._brief("DEP1", depends_on="GHOST")
+        with self.assertRaises(ValueError):
+            flow.flow_ids(self.cfg, ["DEP1"], do_publish=False, do_act=False,
+                          today="2026-06-04")
+
+
 if __name__ == "__main__":
     unittest.main()

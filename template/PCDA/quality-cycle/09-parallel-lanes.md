@@ -52,6 +52,15 @@ The first defense against integration tangling is to not create it. Assign work 
 
 Partitioning by issue id alone is not enough — it isolates the *runs* but not the *changes*. The information needed is already produced at Plan: root-cause analysis names the files / area a fix will touch. Lane assignment is therefore a **Plan-beat judgment** — the same place the human decides scope and which issues to brief ([03 - Cycle Automation](03-cycle-automation.md)) — not a mechanical sharding step. When the touched areas genuinely cannot be predicted, prefer fewer, broader lanes and lean on the integration check below.
 
+### Declared ordering — `Depends on:` / `Conflicts with:` [built]
+
+Manual wave-splitting (run a prerequisite batch to COMPLETE, *then* the next) enforces ordering by hand; it does not scale to a batch with a real dependency graph, which is exactly when the lane pool is most useful. A brief may instead **declare** its ordering constraints and let the scheduler enforce them:
+
+- **`- **Depends on:** <id>[, <id>…]`** — a topological gate. The in-driver pool dispatches a bundle only once every declared prerequisite is **COMPLETE** (signed off, not merely built). Because a prereq reaches COMPLETE only after its sign-off in an earlier pass, a dependent waits across passes — exactly the manual wave plan, now machine-enforced.
+- **`- **Conflicts with:** <id>[, <id>…]`** — a same-wave exclusion. Two bundles that touch a shared resource (e.g. both edit one `ci.yml`) are **never in flight in the same concurrent wave**; the pool serializes them across lanes while still parallelizing everything else.
+
+The fields are **additive and backwards-compatible**: with none declared, every bundle is always eligible and dispatch is byte-for-byte the prior **sort-by-name pool**. An unschedulable graph — a cycle, or a dependency that is neither in the batch nor an already-COMPLETE bundle — is a **hard error rejected before any build** (`pdca batch` / `flow` abort up front). `pdca status` shows a `[blocked-by: <ids>]` flag so the queue reads as a DAG, not a flat list. Declared ordering complements lane planning: planning *avoids* integration tangling by code locality; `depends_on` / `conflicts_with` *enforce* the residual ordering that locality cannot express.
+
 ## Integration validation — at the merge boundary
 
 Whatever planning misses, correctness-*under-combination* is established where the patches actually meet: the **merge boundary**, not the lane. The harness already has the primitive — the gates are **single-sourced** ([04 - Validation Tooling](04-validation-tooling.md) §Single-sourcing): the same `pdca gates` runs over a bundle (per-fix, in a lane) **and** over the working tree (repo-scoped — `gates.run_working_tree`, "the CI merge re-gate"). Run the repo-scoped re-gate over the **merged** tree and it sees the combination the per-lane gates could not.
