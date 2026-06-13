@@ -19,7 +19,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import state
+from . import revalidate, state
 from .config import Config
 
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
@@ -35,6 +35,7 @@ class ActEntry:
     needs_human: list[str] = field(default_factory=list)  # §6 items (cleared or not)
     unproven: list[str] = field(default_factory=list)  # §7 unproven lines
     act_candidates: list[str] = field(default_factory=list)  # §10 hints
+    reval_deltas: list[str] = field(default_factory=list)  # revalidation stamps (#11)
 
 
 def frozen_bundles(cfg: Config) -> list[Path]:
@@ -77,8 +78,14 @@ def render_index(entries: list[ActEntry], pats: dict[str, list[str]]) -> str:
             f"- §6 NEEDS-HUMAN ({len(e.needs_human)}): " + ("; ".join(e.needs_human) or "—"),
             f"- §7 unproven ({len(e.unproven)}): " + ("; ".join(e.unproven) or "—"),
             f"- §10 Act candidates ({len(e.act_candidates)}): " + ("; ".join(e.act_candidates) or "—"),
-            "",
         ]
+        # Only when present — a frozen gate result the current engine now contradicts
+        # (esp. a frozen FAIL now PASS = stale artifact, or a frozen PASS now FAIL =
+        # regression). Surfaced here so Act can tell stale records from real failures.
+        if e.reval_deltas:
+            lines.append(f"- revalidation deltas ({len(e.reval_deltas)}): "
+                         + "; ".join(e.reval_deltas))
+        lines.append("")
     lines += ["## Recurring signals (appear in >1 cycle)"]
     any_pat = False
     for label, items in pats.items():
@@ -144,6 +151,7 @@ def _extract(summary: Path, bundle: Path) -> ActEntry:
         needs_human=_checkitems(s6),
         unproven=_unproven(s7),
         act_candidates=_candidates(s10),
+        reval_deltas=revalidate.deltas(bundle),  # frozen-gate staleness surfaced (#11)
     )
 
 

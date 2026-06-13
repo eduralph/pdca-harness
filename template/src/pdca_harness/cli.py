@@ -13,7 +13,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import act, brief, driver, flow, gates, publish, queue, signoff, state
+from . import act, brief, driver, flow, gates, publish, queue, revalidate, signoff, state
 from .config import Config
 
 # Ordering for the cheap-first sign-off queue (docs 03 §sign-off queue).
@@ -64,6 +64,11 @@ def main(argv: list[str] | None = None) -> int:
     p_gates.add_argument("issue_id", nargs="?")
     p_gates.add_argument("--working-tree", action="store_true", help="repo-scoped gates only (the CI merge re-gate)")
 
+    p_reval = sub.add_parser("revalidate",
+                             help="re-run gates on a COMPLETE bundle vs the current engine; write a dated stamp (never re-decides §9)")
+    p_reval.add_argument("issue_id")
+    p_reval.add_argument("--date", help="ISO date for the stamp (default: today)")
+
     p_actidx = sub.add_parser("act-index", help="read-only index of frozen cycles + recurring signals")
     p_actidx.add_argument("--since", help="only cycles signed off on/after this ISO date")
 
@@ -106,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
         return _queue(cfg)
     if args.cmd == "gates":
         return _gates(cfg, args)
+    if args.cmd == "revalidate":
+        return _revalidate(cfg, args)
     if args.cmd == "act-index":
         return _act_index(cfg, args)
     if args.cmd == "act-log":
@@ -289,6 +296,29 @@ def _gates(cfg: Config, args: argparse.Namespace) -> int:
         result = gates.run_gates(d, cfg)
     print(gates.render_md(result))
     return 1 if result["overall"] == "fail" else 0
+
+
+def _revalidate(cfg: Config, args: argparse.Namespace) -> int:
+    """Re-gate a COMPLETE bundle against the current engine; write a dated stamp.
+
+    Reuses the single-sourced gate runner (``gates.run_gates_dry`` — no write to the
+    frozen ``check-gates.json``) and records ``revalidation-<date>.json``. Refuses a
+    non-COMPLETE bundle; never re-decides §9. Exits nonzero iff a row changed, so a
+    delta is visible to the caller; an unchanged result is a quiet confirmation.
+    """
+    d = cfg.bundle(args.issue_id)
+    if not d.exists():
+        print(f"no such bundle: {d}", file=sys.stderr)
+        return 1
+    if state.state(d) != state.COMPLETE:
+        print(f"revalidate refuses {d.name}: not COMPLETE (state {state.state(d)}). "
+              "Revalidation re-gates a frozen bundle; finish sign-off first.",
+              file=sys.stderr)
+        return 2
+    date = args.date or datetime.date.today().isoformat()
+    result = revalidate.revalidate(cfg, d, date)
+    print(revalidate.render_md(result))
+    return 1 if result["changed"] else 0
 
 
 def _act_index(cfg: Config, args: argparse.Namespace) -> int:

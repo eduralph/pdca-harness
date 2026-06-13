@@ -45,6 +45,16 @@ def run_working_tree(cfg: Config) -> dict:
     return _finalize(rows, name="working-tree", write_to=None)
 
 
+def run_gates_dry(d: Path, cfg: Config) -> dict:
+    """Run every gate for bundle ``d`` against the CURRENT engine WITHOUT writing the
+    frozen ``check-gates.json`` — the gate runner behind ``pdca revalidate`` (issue #11).
+
+    Same single-sourced ``_run_checks`` as :func:`run_gates`, but ``write_to=None`` so a
+    re-gate of an already-COMPLETE bundle never mutates its frozen record."""
+    rows = _run_checks(cfg, cwd=cfg.root, bundle=d, scopes=("repo", "bundle"))
+    return _finalize(rows, name=d.name, write_to=None)
+
+
 # ----------------------------------------------------------------------------
 def _bundle_target(
     bundle: Path | None,
