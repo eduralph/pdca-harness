@@ -14,13 +14,15 @@ from pathlib import Path
 # Canonical §9 outcome tokens written into SUMMARY.md. The token → bundle-state
 # mapping lives in :mod:`pdca_harness.state` (which owns the state names); this
 # module knows only the tokens, so there is no import cycle between the two.
-VALID_OUTCOMES = frozenset({"merged-wider", "accepted", "iterated-to-Do", "iterated-to-Plan"})
+VALID_OUTCOMES = frozenset(
+    {"merged-wider", "accepted", "iterated-to-Do", "iterated-to-Plan", "parked"})
 
-# What `signoff --accept/--iterate-do/--iterate-plan` writes into the Outcome line.
+# What `signoff --accept/--iterate-do/--iterate-plan/--park` writes into the Outcome line.
 ACTION_TO_OUTCOME = {
     "accept": "merged-wider",
     "iterate-do": "iterated-to-Do",
     "iterate-plan": "iterated-to-Plan",
+    "park": "parked",
 }
 
 _OUTCOME_RE = re.compile(r"^- Outcome:\s*(.*?)\s*$", re.MULTILINE)
@@ -75,7 +77,7 @@ def open_needs_human(summary_path: Path) -> list[str]:
 def record(summary_path: Path, *, action: str, by: str, date: str, delta: str = "") -> None:
     """Write the human's §9 decision into ``SUMMARY.md`` in place.
 
-    ``action`` is one of ``accept`` / ``iterate-do`` / ``iterate-plan``.
+    ``action`` is one of ``accept`` / ``iterate-do`` / ``iterate-plan`` / ``park``.
     """
     outcome = ACTION_TO_OUTCOME[action]
     text = summary_path.read_text(encoding="utf-8")

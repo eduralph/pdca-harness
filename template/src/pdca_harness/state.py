@@ -23,9 +23,10 @@ AWAITING_SIGNOFF = "AWAITING_SIGNOFF"  # SUMMARY assembled, §9 empty — STOP, 
 ITERATE_DO = "ITERATE_DO"  # sign-off chose iterate-to-Do
 ITERATE_PLAN = "ITERATE_PLAN"  # sign-off chose iterate-to-Plan
 COMPLETE = "COMPLETE"  # sign-off accepted — bundle frozen
+DISCONTINUED = "DISCONTINUED"  # sign-off chose park — deliberately abandoned, no transition
 
 # States where the driver does nothing (human work, or done).
-PARKED = {UNPLANNED, AWAITING_SIGNOFF, COMPLETE}
+PARKED = {UNPLANNED, AWAITING_SIGNOFF, COMPLETE, DISCONTINUED}
 
 # §9 outcome token → bundle state. state owns the state names, so the mapping
 # lives here; signoff knows only the tokens (no import cycle).
@@ -34,6 +35,7 @@ _OUTCOME_TO_STATE = {
     "accepted": COMPLETE,
     "iterated-to-Do": ITERATE_DO,
     "iterated-to-Plan": ITERATE_PLAN,
+    "parked": DISCONTINUED,
 }
 
 

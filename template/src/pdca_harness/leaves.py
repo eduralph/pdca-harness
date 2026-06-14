@@ -52,7 +52,7 @@ REVIEWER_INPUTS = ["patch.diff", "brief.md", "check-gates.json"]
 # The interactive sign-off leaf writes its decision here; the flow reads it and
 # routes it through the C6-guarded signoff.record (never a model-written §9).
 SIGNOFF_DECISION = "signoff-decision"
-VALID_DECISIONS = frozenset({"accept", "iterate-do", "iterate-plan"})
+VALID_DECISIONS = frozenset({"accept", "iterate-do", "iterate-plan", "park"})
 
 
 # ----------------------------------------------------------------------------
@@ -409,8 +409,10 @@ def _signoff_prompt(d: Path) -> str:
         f"the human clear the §6 NEEDS-HUMAN items in {d}/SUMMARY.md (change "
         f"`- [ ]` to `- [x]` only with their explicit OK). Then write the agreed "
         f"decision as a single token — one of: {', '.join(sorted(VALID_DECISIONS))} — "
-        f"into {d}/{SIGNOFF_DECISION}. Do not edit §9 yourself; the driver records it "
-        "under a deterministic guard."
+        f"into {d}/{SIGNOFF_DECISION}. For an iterate, add the rationale (why rejected / "
+        f"what to change) on the lines below the token; for park, the rationale (why "
+        f"discontinued / where the work goes instead). Do not edit §9 yourself; the "
+        "driver records it under a deterministic guard."
     )
 
 
