@@ -415,17 +415,20 @@ def flow_batch(
     Runs the batch Plan session, then builds / checks / signs off EVERY bundle that
     has work left — the ones this session briefed AND any already in flight — so
     re-running ``flow --from-csv`` picks up where it left off instead of failing on
-    "no new briefs". COMPLETE bundles (done) and UNPLANNED ones (no brief — e.g. an
-    issue the planner chose to skip) are left alone. Returns ``{issue_id: state}``.
+    "no new briefs". COMPLETE bundles (done), DISCONTINUED ones (parked) and UNPLANNED
+    ones (no brief — e.g. an issue the planner chose to skip) are left alone. Returns
+    ``{issue_id: state}``.
     """
     today = today or datetime.date.today().isoformat()
 
     leaves.do_plan_batch(cfg, csv)
     # Resume set: every bundle with a brief that isn't finished. UNPLANNED (skipped /
-    # un-briefed) and COMPLETE (done) are excluded, so a re-run is idempotent.
+    # un-briefed), COMPLETE (done) and DISCONTINUED (parked — deliberately abandoned)
+    # are excluded, so a re-run is idempotent and a parked bundle stays out of the sweep.
     bundles = sorted(
         (cfg.bundle_root / name for name in _bundle_dirs(cfg)
-         if state.state(cfg.bundle_root / name) not in (state.COMPLETE, state.UNPLANNED)),
+         if state.state(cfg.bundle_root / name)
+         not in (state.COMPLETE, state.UNPLANNED, state.DISCONTINUED)),
         key=lambda p: p.name,
     )
     if not bundles:
@@ -453,8 +456,8 @@ def flow_ids(
 
     Like :func:`flow_batch` but seeded by explicit ids with **no Plan beat** — the
     bundles must already have a brief. Missing / un-briefed (UNPLANNED) ids are
-    skipped with a note (brief them at Plan first); already-COMPLETE ids are left
-    alone. Returns ``{issue_id: state}``.
+    skipped with a note (brief them at Plan first); terminal ids (COMPLETE or
+    DISCONTINUED/parked) are left alone. Returns ``{issue_id: state}``.
     """
     today = today or datetime.date.today().isoformat()
     bundles: list[Path] = []
@@ -464,8 +467,8 @@ def flow_ids(
         if not d.exists() or s == state.UNPLANNED:
             print(f"flow: {d.name} — no brief.md, skipped (brief it at Plan first)", file=sys.stderr)
             continue
-        if s == state.COMPLETE:
-            print(f"flow: {d.name} — already COMPLETE, skipped", file=sys.stderr)
+        if s in (state.COMPLETE, state.DISCONTINUED):
+            print(f"flow: {d.name} — already terminal ({s}), skipped", file=sys.stderr)
             continue
         bundles.append(d)
     if not bundles:

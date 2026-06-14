@@ -62,7 +62,7 @@ def advance(d: Path, cfg: Config) -> None:
         _say(f"→ {d.name}: iterate-to-Plan — archiving the attempt to iteration-v{n}/, re-planning…")
         _carry_forward_into_brief(d, n)  # appended to the brief, archived with it
         _archive_iteration(d, n, include_brief=True)  # brief archived too → UNPLANNED
-    # UNPLANNED / AWAITING_SIGNOFF / COMPLETE: nothing for the driver to do.
+    # UNPLANNED / AWAITING_SIGNOFF / COMPLETE / DISCONTINUED: nothing for the driver to do.
 
 
 def run_issue(d: Path, cfg: Config) -> str:

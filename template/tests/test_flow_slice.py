@@ -79,6 +79,51 @@ class FlowSlice(unittest.TestCase):
         d = self.cfg.bundle("BLOCKED")
         self.assertNotEqual(signoff.outcome_token(d / "SUMMARY.md"), "merged-wider")
 
+    def test_park_disposition_discontinues_without_c6(self) -> None:
+        # A sign-off leaf that parks (even with §6 open — parking is independent of C6)
+        # ends the flow at DISCONTINUED: terminal, no publish, decision consumed.
+        def park_signoff(d: Path, cfg: Config) -> None:
+            (d / leaves.SIGNOFF_DECISION).write_text(
+                "park\nrestructuring task, handled out-of-band\n", encoding="utf-8")
+            # deliberately leaves §6 NEEDS-HUMAN open — park must not be C6-blocked
+
+        orig = leaves.run_signoff
+        leaves.run_signoff = park_signoff
+        try:
+            final = flow.flow(self.cfg, "PARK", today="2026-06-04")
+        finally:
+            leaves.run_signoff = orig
+        self.assertEqual(final, state.DISCONTINUED)
+        d = self.cfg.bundle("PARK")
+        self.assertEqual(signoff.outcome_token(d / "SUMMARY.md"), "parked")
+        self.assertFalse((d / leaves.SIGNOFF_DECISION).exists())  # consumed
+        self.assertFalse((d / "publish.json").exists())           # no publish on a park
+
+    def test_cli_signoff_park_records_parked(self) -> None:
+        # `pdca signoff <id> --park` records §9 and run_issue performs no transition;
+        # the terminal state is in the status queue ordering so `pdca status` renders it.
+        d = self.cfg.bundle("PARKCLI")
+        self.assertTrue(flow._plan_if_unplanned(self.cfg, d, None))  # planner stub briefs it
+        self.assertEqual(driver.run_issue(d, self.cfg), state.AWAITING_SIGNOFF)
+        args = SimpleNamespace(issue_id="PARKCLI", accept=False, iterate_do=False,
+                               iterate_plan=False, park=True, by="tester", delta="")
+        self.assertEqual(cli._signoff(self.cfg, args), 0)
+        self.assertEqual(state.state(d), state.DISCONTINUED)
+        self.assertEqual(signoff.outcome_token(d / "SUMMARY.md"), "parked")
+        self.assertIn(state.DISCONTINUED, cli._STATE_ORDER)
+
+    def test_batch_sweep_excludes_parked_bundle(self) -> None:
+        # A parked (DISCONTINUED) bundle is terminal like COMPLETE: it must stay out
+        # of the flow_batch resume set, never re-driven or reported as in-flight.
+        d = self.cfg.bundle("PARKED")
+        self.assertTrue(flow._plan_if_unplanned(self.cfg, d, None))
+        driver.run_issue(d, self.cfg)
+        signoff.record(d / "SUMMARY.md", action="park", by="t", date="2026-06-04")
+        self.assertEqual(state.state(d), state.DISCONTINUED)
+        results = flow.flow_batch(self.cfg, today="2026-06-04")
+        self.assertNotIn("PARKED", results)                   # excluded from the sweep
+        self.assertEqual(state.state(d), state.DISCONTINUED)  # left untouched
+
     def test_iterate_do_then_complete(self) -> None:
         # First sign-off iterates; the flow rebuilds and the second accepts.
         calls = {"n": 0}

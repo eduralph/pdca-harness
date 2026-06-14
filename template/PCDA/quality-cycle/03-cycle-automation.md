@@ -46,6 +46,7 @@ SUMMARY.md §9 set  →  sign-off applied:
                        accept           → cycle COMPLETE  (frozen bundle)
                        iterate-to-Do    → driver archives every Do+Check artifact into iteration-v<N>/; state ← PLANNED (re-run Do against same brief)
                        iterate-to-Plan  → driver archives the attempt (incl. brief.md) into iteration-v<N>/; state ← UNPLANNED (human authors a new brief.md, then Do re-runs)
+                       park             → state ← DISCONTINUED (no transition, no archive; bundle deliberately abandoned and dropped from the active set)
 ```
 
 The driver stops the issue at AWAITING_SIGNOFF every time — including on iteration. After sign-off, an accepted bundle is **frozen**: it becomes input for the *next* Act review (a separate, cross-cycle pass — see below).
@@ -83,6 +84,7 @@ Check is one beat with three components, each automating at a different level. C
 - **accept** → driver performs the sign-off-gated transitions: marks the draft PR ready, posts the §8 tracker comment, and (where the project's per-repo spec allows it) merges. The push and draft-PR-open may already have happened during Do or Check assembly — accept only performs the steps that *required* sign-off. Cycle closes; bundle frozen.
 - **iterate-to-Do** → driver archives `patch.diff`, the test, and the rest of the Do+Check downstream into `iteration-v<N>/` (preserving `brief.md`), state returns to PLANNED, driver re-invokes the builder. Same cycle.
 - **iterate-to-Plan** → driver archives the whole attempt — incl. `brief.md` — into `iteration-v<N>/`, state returns to UNPLANNED; the human authors a new `brief.md`, then Do re-runs. Same cycle.
+- **park** → driver records §9 and performs **no** transition or archive; state becomes DISCONTINUED (terminal) and the bundle drops out of the active/pending set. For work that, on inspection, doesn't fit the cycle (e.g. handled out-of-band by hand) — a deliberate abandon, independent of §6 (no C6 accept-guard). The human records why parked / where the work goes instead, like the iterate rationale.
 
 Optionally, the human jots §10 Act candidates while at the bundle — these are hints for the next Act review, not gates for this sign-off.
 
