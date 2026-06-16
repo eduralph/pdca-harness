@@ -28,7 +28,10 @@ def assemble_summary(d: Path, cfg: Config) -> None:
         if review_path.exists()
         else _missing_review_text()
     )
-    needs_human = _needs_human(review_text)
+    # §6 is fed by the reviewer's NEEDS-HUMAN verdicts AND any gate that declared itself
+    # unverifiable (issue #46) — both become `- [ ]` items the C6 guard makes the human
+    # clear before accept.
+    needs_human = _needs_human(review_text) + _unverifiable_items(gates)
 
     issue = d.name.replace("issue_", "")
     out = "\n".join(
@@ -91,6 +94,16 @@ def _gate_lines(gates: dict, *, prefix: str) -> str:
             ev = r["path_line"] or r["oracle"]
             lines.append(f"- {r['check']}: {r['result']} — {ev}")
     return "\n".join(lines)
+
+
+def _unverifiable_items(gates: dict) -> list[str]:
+    """Gate rows the mechanic couldn't run (``result == "unverifiable"``) → §6 items, so
+    the C6 accept-guard forces the human to clear them before accept (issue #46)."""
+    return [
+        f"{r['check']} unverifiable — {r['path_line'] or r['oracle'] or 'no reason given'}"
+        for r in gates["rows"]
+        if r.get("result") == "unverifiable"
+    ]
 
 
 def _missing_review_text() -> str:

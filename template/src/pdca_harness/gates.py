@@ -14,13 +14,20 @@ Each configured check: ``{id, tier, label, cmd, gating, scope, target?}`` where
 label set (subset = AND). The bundle is classified from its brief: a primary axis
 (``[gates] target_default`` + ``[gates.target_match]``) plus additive flags
 (``[gates.target_flags]``); unset ⇒ no filtering. A check passes iff its ``cmd``
-exits 0. When ``[[gates.checks]]`` is empty the driver falls back to all-PASS stub
-rows, so the offline vertical slice still runs.
+exits 0, fails on any other exit, and may instead declare itself **unverifiable**
+when it genuinely cannot run its mechanical check (issue #46): exit
+:data:`UNVERIFIABLE_RC` (77, the automake SKIP convention) **or** print a line
+containing :data:`UNVERIFIABLE_MARKER` (``PDCA-UNVERIFIABLE: <reason>``; the marker
+wins over the exit code, so a gate may exit 0 and still defer). When
+``[[gates.checks]]`` is empty the driver falls back to all-PASS stub rows, so the
+offline vertical slice still runs.
 
 A row: {check, result, oracle, rule_id, path_line, gating}. ``result`` ∈
-``pass`` / ``fail`` / ``none``. A ``none`` row is a judgment cell decided by the
-reviewer + human (docs 04 §judgment cell); it is listed for matrix alignment and
-never gates.
+``pass`` / ``fail`` / ``unverifiable`` / ``none``. A ``none`` row is a judgment cell
+decided by the reviewer + human (docs 04 §judgment cell); it is listed for matrix
+alignment and never gates. An ``unverifiable`` row does **not** count toward
+``overall`` (it is not a failure); the driver routes it into SUMMARY §6 NEEDS-HUMAN,
+where the C6 accept-guard forces the human to clear it before sign-off.
 """
 
 from __future__ import annotations
@@ -31,6 +38,12 @@ from pathlib import Path
 
 from . import brief, lane, progress
 from .config import Config
+
+# A gate that cannot RUN its mechanical check (vs. running and failing) declares so:
+# exit 77 (automake SKIP convention) or a marker line. The marker takes precedence —
+# a gate may exit 0 and still defer to the human. Neither is a failure (see _finalize).
+UNVERIFIABLE_RC = 77
+UNVERIFIABLE_MARKER = "PDCA-UNVERIFIABLE:"
 
 
 def run_gates(d: Path, cfg: Config) -> dict:
@@ -156,8 +169,7 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None) -> dict:
             cmd, cwd=cwd, shell=True, env=_merged_env(env), capture=True, label=label,
             status=lambda: progress.bundle_activity(watch),
         )
-        result = "pass" if rc == 0 else "fail"
-        evidence = output.strip().splitlines()[-1:] or [""]
+        result, evidence = _classify(rc, output)
     except Exception as exc:  # command not found, etc. — a failing gate, surfaced
         result, evidence = "fail", [str(exc)]
     return _row(
@@ -165,6 +177,22 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None) -> dict:
         result, oracle=cmd, rule_id=chk.get("id", ""),
         path_line=evidence[0][:120], gating=gating, element=chk.get("tier", ""),
     )
+
+
+def _classify(rc: int, output: str) -> tuple[str, list[str]]:
+    """Map a gate command's exit code + output to (result, evidence-lines).
+
+    ``unverifiable`` (issue #46) wins over the exit code: a gate may exit 0 and still
+    print the marker to defer to the human. The text after the marker is the reason;
+    otherwise the evidence is the command's last output line (as for pass/fail)."""
+    for line in output.splitlines():
+        if UNVERIFIABLE_MARKER in line:
+            reason = line.split(UNVERIFIABLE_MARKER, 1)[1].strip()
+            return "unverifiable", [reason or "gate declared itself unverifiable"]
+    last = output.strip().splitlines()[-1:] or [""]
+    if rc == UNVERIFIABLE_RC:
+        return "unverifiable", [last[0] or f"gate exited unverifiable (rc {UNVERIFIABLE_RC})"]
+    return ("pass" if rc == 0 else "fail"), last
 
 
 def _merged_env(extra: dict | None) -> dict | None:

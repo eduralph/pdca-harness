@@ -221,6 +221,12 @@ A deterministic FAIL with auto-fixable cause (lint, format, genuinely-red test t
 
 *Rationale.* Auto-fixing decisions is a model in the gating path, which the design works to keep deterministic ([03 - Cycle Automation](03-cycle-automation.md) §Implementation substrate). The rule "auto-fix only mechanical FAILs" is what preserves the no-LLM-in-gates invariant.
 
+### C5a. A gate that cannot RUN its check MUST declare `unverifiable`, not pass or hard-fail
+
+When a *gating* gate genuinely cannot run its mechanical check (e.g. a C4 red→green verifier on a test-only fix has no production file to revert), it MUST emit the **`unverifiable`** signal — exit code 77 or a `PDCA-UNVERIFIABLE: <reason>` line ([04 - Validation Tooling](04-validation-tooling.md) §Gate result vocabulary) — NOT pass (which records "verified" when nothing was) and NOT a hard fail (which blocks the bundle and pressures a contributor to *manufacture* an input just to make the mechanic runnable). The driver routes an `unverifiable` result into §6 NEEDS-HUMAN, so C6 (below) makes the human accept it explicitly.
+
+*Rationale.* The standing rule "a green mechanical check is not a correctness verification" cuts both ways: a gate with nothing to verify must not paint itself green, and the cycle must not force a green into existence. `unverifiable` is the honest third outcome — escalate to the human via the seam (§6) the design already has, instead of inventing scaffolding to satisfy a mechanic that does not apply.
+
 ### C6. §6 NEEDS-HUMAN MUST be empty before sign-off can accept
 
 Check sign-off (§9) MUST NOT record an *accept* outcome while §6 contains unresolved items. Each NEEDS-HUMAN item is cleared by the human or routed to iterate-to-Plan / iterate-to-Do before accept is available.
