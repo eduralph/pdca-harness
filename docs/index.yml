@@ -1,0 +1,50 @@
+# The pdca.dev landing page, as structured content.
+#
+# Rendered to / by docs/publishing/tools/render_site.py through
+# templates/home.html; the *design* lives in that template + assets/style.css,
+# so editing here never touches markup. Text fields accept inline Markdown
+# (**bold**, *italic*, [links](/abs/url/), &nbsp; etc.); links should be
+# absolute site URLs (the build's link check verifies them).
+
+meta:
+  title: "PDCA Harness — verified AI contribution, one quality cycle at a time"
+  description: "A Copier template for an AI-driven PDCA quality-cycle harness: Plan, Do, Check, Act over every contribution, with a human at the three touch points that matter."
+  og_title: "PDCA Harness — verified AI contribution, one quality cycle at a time"
+  og_description: "Turn each AI contribution into one PDCA cycle: a precise brief, an automated build, a deterministic red→green Check, and a human sign-off. Copier template, GPLv3."
+
+hero:
+  status: "A Copier template — render it into any repo"
+  title: "Nothing ships&nbsp;until it's&nbsp;verified."
+  lede: "PDCA Harness turns each AI-driven contribution into one **Plan → Do → Check → Act** cycle. A deterministic driver does the work; a human stays at the three touch points that matter — authoring the spec, signing off the check, and improving the process."
+  pron: "**PDCA** — Plan, Do, Check, Act: the improvement loop from quality control, applied one contribution at a time."
+  ctas:
+    - { label: "Read the walkthrough", href: "/guide/", primary: true, arrow: true }
+    - { label: "Read the model spec", href: "/spec/" }
+    - { label: "Get it on GitHub", href: "https://github.com/eduralph/pdca-harness" }
+
+sections:
+  - eyebrow: "What it is"
+    heading: "A prepared harness, not tribal knowledge."
+    body:
+      - "An AI model can write a plausible fix for almost any issue in seconds — which is exactly the danger. A plausible diff is not a verified one, and at volume the maintainer becomes both the bottleneck and the only safety net. PDCA Harness funnels AI-generated contributions through a quality cycle so each one arrives scoped, proven, and ready to sign off."
+      - "Render the [Copier](https://copier.readthedocs.io/) template into a new project, concretize it to your tracker / branches / gates once, and a deterministic driver advances every contribution through a file-derived state machine — stopping only where a human is irreducible."
+
+  - eyebrow: "How it works"
+    heading: "One contribution, one cycle."
+    props:
+      - { term: "Plan",  desc: "**Author the brief.** A precise, field-structured spec every later beat is measured against." }
+      - { term: "Do",    desc: "**Build against the spec.** A headless builder writes the patch, a shipped test, and its rationale — and can't open a PR." }
+      - { term: "Check", desc: "**Verify it.** Deterministic gates (red→green), a decorrelated reviewer, and a 5/5/1 verdict assembled into one SUMMARY." }
+      - { term: "Sign-off", desc: "**The human verdict.** Accept, iterate-do, iterate-plan, or discontinue — accept is refused while anything is unresolved." }
+      - { term: "Act",   desc: "**Improve the process.** Across cycles, recurring misses become new gates, brief fields, and rules — a better baseline every time." }
+
+  - eyebrow: "Why it holds up"
+    heading: "Correctness as the headline, not a vibe."
+    body:
+      - "The one thing allowed to block a sign-off is a deterministic, LLM-free check: a test that is red before the fix and green after it. Everything a gate can't adjudicate — an ambiguous-scope lint, an environmental failure, the irreducibly human judgments — surfaces as an explicit checklist for a person, never silently passed or silently blocked."
+      - "State lives in files, so the driver is idempotent and resumable; one planning session can brief several issues that build unattended and queue for a fast, cheap-first sign-off. And a full cycle rehearses entirely offline — stub models, stub gates — so you can learn it and prove the plumbing before spending a token."
+
+  - eyebrow: "See it for real"
+    heading: "A worked example, end to end."
+    note: "The [walkthrough](/guide/) drives one real contribution — a fix to the Gramps genealogy project — through every beat: the actual brief, the actual patch, the gate table, the §6 checklist, a two-iteration sign-off, and the Act entry that turned a maintainer's review comment into a new gate."
+    quote: "Plan → Do → Check → Act, on a live codebase."

@@ -1,0 +1,36 @@
+name: docs-check
+
+# Validates the documentation on every pull request: lints the Markdown and
+# renders the whole site with the internal-link audit (--check), WITHOUT
+# deploying. The PR-time counterpart to docs.yml, so broken Markdown, dangling
+# internal links, or Obsidian wikilinks are caught before merge rather than only
+# at the post-merge publish step.
+#
+# No paths filter: the check always runs and reports a status, so it can serve as
+# a required status check (a path-filtered workflow would never report on PRs
+# that don't touch docs/, blocking their merge).
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  docs-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install renderer dependencies
+        run: pip install "markdown-it-py[linkify]==3.0.0" "PyYAML==6.0.2"
+
+      - name: Lint docs (Obsidian syntax)
+        run: python3 docs/publishing/tools/lint_docs.py
+
+      - name: Render site (fails on any dangling internal link)
+        run: python3 docs/publishing/tools/render_site.py --check --out ./build
