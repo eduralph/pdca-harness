@@ -76,9 +76,13 @@ worth understanding once, even though you'll mostly drive from the top.
 The offline rehearsal in [step 02](02-rehearse-offline.md) needs only Python
 3.11+. A *live* cycle additionally needs:
 
-- The **Claude CLI** (`claude`) installed and authenticated — the Plan, Do,
-  Check-reviewer, sign-off, publish, and Act beats run as `claude` subprocesses
-  ("leaves").
+- **An agent CLI for the leaves.** The Plan, Do, Check-reviewer, sign-off,
+  publish, and Act beats run as configured subprocesses ("leaves") — arbitrary
+  commands set in `pdca.toml`, so the model is the harness's choice, not a
+  requirement. The cycle model itself is **model-agnostic**; it even recommends a
+  *cross-vendor* reviewer (the template defaults the builder to Claude and the
+  reviewer to Codex). The worked example uses the **Claude CLI** (`claude`)
+  installed and authenticated.
 - Whatever your **gates** need. For gramps that's **Docker** (the test suites run
   in a container) and the sibling fork checkouts (`../gramps`,
   `../addons-source`). Your project's gates will differ — you define them in
