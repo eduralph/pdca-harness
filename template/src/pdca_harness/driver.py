@@ -66,8 +66,8 @@ def advance(d: Path, cfg: Config) -> None:
 
 
 def run_issue(d: Path, cfg: Config) -> str:
-    """Advance until the bundle reaches a parked state; return that state."""
-    while state.state(d) not in state.PARKED:
+    """Advance until the bundle reaches a halted state; return that state."""
+    while state.state(d) not in state.HALTED:
         advance(d, cfg)
     return state.state(d)
 
