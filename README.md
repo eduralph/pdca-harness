@@ -15,6 +15,15 @@ state machine (the driver), the artifact templates, the generic model docs,
 and the 11-item integration scaffold each repo fills in — so a new project
 starts from a prepared harness instead of tribal knowledge.
 
+## Learn by example
+
+New here? **[`docs/`](docs/README.md)** is a step-by-step walkthrough that drives
+one real contribution through every beat of the cycle, using a live project
+([Gramps Testbed v2](docs/README.md)) as the worked example. Start with the
+**[introduction](docs/00-introduction.md)** for the why-and-what, then follow
+steps 01–07 from rendering the template to publishing a fix and the cross-cycle
+Act review.
+
 ## What you get when you render it
 
 ```

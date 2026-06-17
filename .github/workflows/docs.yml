@@ -1,0 +1,60 @@
+name: docs
+
+# Renders the documentation (docs/ + the vendored quality-cycle model) into the
+# hand-rolled static site and publishes the WHOLE site (landing + guide + spec)
+# to the pdca.dev repo's main branch. pdca-harness is the single source of truth;
+# pdca.dev is a generated mirror, served at the apex domain via GitHub Pages
+# (deploy-from-branch: main / root).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "template/PCDA/quality-cycle/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch: {}
+
+# ---------------------------------------------------------------------------
+# Before the first run: (1) enable deploy keys for the org (Settings ->
+# Repository -> Deploy keys -> Enabled), and (2) add a repo secret
+# DOCS_DEPLOY_KEY -- the PRIVATE half of an ed25519 keypair whose PUBLIC half is
+# registered as a write-enabled deploy key on the pdca.dev repo. pdca.dev Pages
+# serves main/root with CNAME = pdca.dev; this workflow overwrites that branch.
+# ---------------------------------------------------------------------------
+env:
+  DOCS_REPO: "eduralph/pdca.dev"
+  SITE_DOMAIN: "pdca.dev"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install renderer dependencies
+        run: pip install "markdown-it-py[linkify]==3.0.0" "PyYAML==6.0.2"
+
+      - name: Lint docs (Obsidian syntax)
+        run: python3 docs/publishing/tools/lint_docs.py
+
+      - name: Render site (fails the build on any dangling internal link)
+        run: python3 docs/publishing/tools/render_site.py --check --out ./build
+
+      - name: Deploy to pdca.dev
+        if: github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          deploy_key: ${{ secrets.DOCS_DEPLOY_KEY }}
+          external_repository: ${{ env.DOCS_REPO }}
+          publish_branch: main
+          publish_dir: ./build
+          cname: ${{ env.SITE_DOMAIN }}
+          commit_message: "site: publish from pdca-harness@${{ github.sha }}"

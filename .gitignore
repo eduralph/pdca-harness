@@ -6,6 +6,10 @@ __pycache__/
 /render-test-out/
 *.egg-info/
 
+# Generated docs-site output + build cache (docs/publishing)
+/build/
+/.cache/
+
 # Obsidian vault state for the PCDA/ reference docs (also excluded from renders
 # via copier.yml _exclude). Editor-local; not part of the template.
 .obsidian/
