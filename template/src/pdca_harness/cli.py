@@ -38,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     p_init.add_argument("issue_id")
     p_init.add_argument("--from-brief", type=Path, help="copy this file as brief.md")
 
-    p_run = sub.add_parser("run", help="advance an issue to a parked state")
+    p_run = sub.add_parser("run", help="advance an issue to a halted state")
     p_run.add_argument("issue_id")
 
     p_flow = sub.add_parser("flow", help="continuous Claude-driven cycle (Plan→Do→Check[→publish]→Act)")
@@ -84,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--accept", action="store_true", help="accept — merge wider")
     g.add_argument("--iterate-do", action="store_true", help="rebuild against same brief")
     g.add_argument("--iterate-plan", action="store_true", help="revise the brief")
-    g.add_argument("--park", action="store_true",
+    g.add_argument("--discontinue", action="store_true",
                    help="discontinue — record §9, no transition, drop from the pending set")
     p_signoff.add_argument("--by", default="", help="who signed off")
     p_signoff.add_argument("--delta", default="", help="iteration delta note")
@@ -370,8 +370,8 @@ def _signoff(cfg: Config, args: argparse.Namespace) -> int:
         action = "iterate-do"
     elif args.iterate_plan:
         action = "iterate-plan"
-    else:  # --park: deliberate abandon, no C6 guard
-        action = "park"
+    else:  # --discontinue: deliberate abandon, no C6 guard
+        action = "discontinue"
 
     date = datetime.date.today().isoformat()
     signoff.record(summary, action=action, by=args.by or "unknown", date=date, delta=args.delta)

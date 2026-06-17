@@ -1,7 +1,7 @@
 """The cheap-first sign-off queue (docs 03 §sign-off queue, §Batch fan-out).
 
 After the driver fans out over a batch, the human works a burn-down: bundles
-parked at AWAITING_SIGNOFF, ordered so the near-instant confirms come first
+halted at AWAITING_SIGNOFF, ordered so the near-instant confirms come first
 (empty §6 — typically already-fixed / wontfix / by-design) and the real
 adjudications (non-empty §6 NEEDS-HUMAN) come last. This module is the pure
 ordering logic; the CLI renders it.

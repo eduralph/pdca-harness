@@ -27,7 +27,7 @@ DO    ── reads brief, writes ──▶  patch.diff + test + build-notes.md
 │       accept          ──▶ mark PR ready / merge → cycle complete  │
 │       iterate-to-Do   ──▶ rebuild (back to DO with same brief)    │
 │       iterate-to-Plan ──▶ revise brief (back to PLAN, same cycle) │
-│       park            ──▶ discontinue — no transition, bundle out │
+│       discontinue     ──▶ no transition — bundle dropped from set │
 └────────────────────────────────────────────────────────────────────┘
                          │
                          ▼
@@ -167,10 +167,10 @@ Assembled across Do (spec + claim) and Check (evidence + verdict). Its job: let 
 
 ## 9. Check sign-off                     ← human completes Check here
 - Disposition confirmed / overridden:
-- Outcome: merged-wider | closed-<reason> | iterated-to-Do | iterated-to-Plan | parked
+- Outcome: merged-wider | closed-<reason> | iterated-to-Do | iterated-to-Plan | discontinued
 - Iteration delta (if iterating): <what the next Do or Plan must change
   for THIS cycle — distinct from process-level Act deltas, which go to §10;
-  on a park, the rationale for discontinuing / where the work goes instead>
+  on a discontinue, the rationale for discontinuing / where the work goes instead>
 - By / date:
 
 ## 10. Act candidates (hints for the next Act review)

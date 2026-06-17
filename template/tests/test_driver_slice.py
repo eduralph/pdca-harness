@@ -98,32 +98,32 @@ class VerticalSlice(unittest.TestCase):
         self.assertTrue((self.d / "iteration-v1" / "brief.md").exists())     # preserved
         self.assertTrue((self.d / "iteration-v1" / "patch.diff").exists())   # attempt preserved
 
-    def test_park_derives_discontinued_and_does_not_transition(self) -> None:
-        # park is terminal: §9 records `parked`, state derives DISCONTINUED, and
+    def test_discontinue_derives_discontinued_and_does_not_transition(self) -> None:
+        # discontinue is terminal: §9 records `discontinued`, state derives DISCONTINUED, and
         # run_issue performs NO transition (no archive — the attempt stays in place,
         # the bundle just drops out of the active set).
         driver.run_issue(self.d, self.cfg)
-        signoff.record(self.d / "SUMMARY.md", action="park", by="tester", date="2026-01-01")
-        self.assertEqual(signoff.outcome_token(self.d / "SUMMARY.md"), "parked")
+        signoff.record(self.d / "SUMMARY.md", action="discontinue", by="tester", date="2026-01-01")
+        self.assertEqual(signoff.outcome_token(self.d / "SUMMARY.md"), "discontinued")
         self.assertEqual(state.state(self.d), state.DISCONTINUED)
         self.assertEqual(driver.run_issue(self.d, self.cfg), state.DISCONTINUED)  # no-op
         self.assertFalse((self.d / "iteration-v1").exists())   # nothing archived
         self.assertTrue((self.d / "patch.diff").exists())      # attempt left untouched
 
-    def test_park_not_guarded_by_open_needs_human(self) -> None:
-        # Parking is a deliberate abandon, independent of §6 — unlike accept (C6), a
-        # bundle with open NEEDS-HUMAN items can still be parked at the record layer.
+    def test_discontinue_not_guarded_by_open_needs_human(self) -> None:
+        # Discontinue is a deliberate abandon, independent of §6 — unlike accept (C6), a
+        # bundle with open NEEDS-HUMAN items can still be discontinued at the record layer.
         driver.run_issue(self.d, self.cfg)
         self.assertTrue(signoff.open_needs_human(self.d / "SUMMARY.md"))  # §6 still open
-        signoff.record(self.d / "SUMMARY.md", action="park", by="tester", date="2026-01-01")
+        signoff.record(self.d / "SUMMARY.md", action="discontinue", by="tester", date="2026-01-01")
         self.assertEqual(state.state(self.d), state.DISCONTINUED)
 
-    def test_signoff_decision_accepts_park_token(self) -> None:
-        # The `park` token was silently dropped before (#42); leaves now recognises it
+    def test_signoff_decision_accepts_discontinue_token(self) -> None:
+        # The `discontinue` token was silently dropped before (#42); leaves now recognises it
         # and reads the rationale written below it.
         (self.d / leaves.SIGNOFF_DECISION).write_text(
-            "park\nrestructuring task — handled by hand upstream\n", encoding="utf-8")
-        self.assertEqual(leaves.signoff_decision(self.d), "park")
+            "discontinue\nrestructuring task — handled by hand upstream\n", encoding="utf-8")
+        self.assertEqual(leaves.signoff_decision(self.d), "discontinue")
         self.assertEqual(leaves.signoff_rationale(self.d),
                          "restructuring task — handled by hand upstream")
 
@@ -305,7 +305,7 @@ class ActTooling(unittest.TestCase):
         live = self.cfg.bundle("LIVE")
         live.mkdir(parents=True)
         shutil.copyfile(TOY_BRIEF, live / "brief.md")
-        driver.run_issue(live, self.cfg)  # parks at AWAITING_SIGNOFF
+        driver.run_issue(live, self.cfg)  # halts at AWAITING_SIGNOFF
         names = [e.bundle.name for e in act.index(self.cfg)]
         self.assertEqual(names, ["issue_DONE"])
 

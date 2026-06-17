@@ -103,7 +103,7 @@ class UnverifiableGate(unittest.TestCase):
 
         # C6: accept is refused while the §6 item is open …
         accept = SimpleNamespace(issue_id="UV", accept=True, iterate_do=False,
-                                 iterate_plan=False, park=False, by="t", delta="")
+                                 iterate_plan=False, discontinue=False, by="t", delta="")
         self.assertEqual(cli._signoff(self.cfg, accept), 1)
         self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)  # not accepted
 

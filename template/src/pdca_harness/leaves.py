@@ -52,7 +52,7 @@ REVIEWER_INPUTS = ["patch.diff", "brief.md", "check-gates.json"]
 # The interactive sign-off leaf writes its decision here; the flow reads it and
 # routes it through the C6-guarded signoff.record (never a model-written §9).
 SIGNOFF_DECISION = "signoff-decision"
-VALID_DECISIONS = frozenset({"accept", "iterate-do", "iterate-plan", "park"})
+VALID_DECISIONS = frozenset({"accept", "iterate-do", "iterate-plan", "discontinue"})
 
 
 # ----------------------------------------------------------------------------
@@ -410,7 +410,7 @@ def _signoff_prompt(d: Path) -> str:
         f"`- [ ]` to `- [x]` only with their explicit OK). Then write the agreed "
         f"decision as a single token — one of: {', '.join(sorted(VALID_DECISIONS))} — "
         f"into {d}/{SIGNOFF_DECISION}. For an iterate, add the rationale (why rejected / "
-        f"what to change) on the lines below the token; for park, the rationale (why "
+        f"what to change) on the lines below the token; for discontinue, the rationale (why "
         f"discontinued / where the work goes instead). Do not edit §9 yourself; the "
         "driver records it under a deterministic guard."
     )
@@ -426,7 +426,7 @@ def _stub_signoff(d: Path, cfg: Config) -> None:
 
 
 def run_signoff_batch(cfg: Config, bundles: list[Path]) -> None:
-    """Batch sign-off: ONE interactive session walks several parked bundles.
+    """Batch sign-off: ONE interactive session walks several halted bundles.
 
     Mirrors :func:`do_plan_batch` — command mode runs a single seeded session over
     the whole (cheap-first) chunk, so the human signs off N bundles without N session

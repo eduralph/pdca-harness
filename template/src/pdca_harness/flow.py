@@ -150,7 +150,7 @@ def flow(
         if not _plan_if_unplanned(cfg, d, csv):
             break
         if driver.run_issue(d, cfg) != state.AWAITING_SIGNOFF:
-            break  # reached COMPLETE, or parked somewhere the human must look at
+            break  # reached COMPLETE, or halted somewhere the human must look at
         if _signoff_and_apply(cfg, d, by=by, today=today) in (None, "blocked"):
             break
         if state.state(d) == state.COMPLETE:
@@ -415,7 +415,7 @@ def flow_batch(
     Runs the batch Plan session, then builds / checks / signs off EVERY bundle that
     has work left — the ones this session briefed AND any already in flight — so
     re-running ``flow --from-csv`` picks up where it left off instead of failing on
-    "no new briefs". COMPLETE bundles (done), DISCONTINUED ones (parked) and UNPLANNED
+    "no new briefs". COMPLETE bundles (done), DISCONTINUED ones (abandoned) and UNPLANNED
     ones (no brief — e.g. an issue the planner chose to skip) are left alone. Returns
     ``{issue_id: state}``.
     """
@@ -423,8 +423,8 @@ def flow_batch(
 
     leaves.do_plan_batch(cfg, csv)
     # Resume set: every bundle with a brief that isn't finished. UNPLANNED (skipped /
-    # un-briefed), COMPLETE (done) and DISCONTINUED (parked — deliberately abandoned)
-    # are excluded, so a re-run is idempotent and a parked bundle stays out of the sweep.
+    # un-briefed), COMPLETE (done) and DISCONTINUED (deliberately abandoned)
+    # are excluded, so a re-run is idempotent and a discontinued bundle stays out of the sweep.
     bundles = sorted(
         (cfg.bundle_root / name for name in _bundle_dirs(cfg)
          if state.state(cfg.bundle_root / name)
@@ -457,7 +457,7 @@ def flow_ids(
     Like :func:`flow_batch` but seeded by explicit ids with **no Plan beat** — the
     bundles must already have a brief. Missing / un-briefed (UNPLANNED) ids are
     skipped with a note (brief them at Plan first); terminal ids (COMPLETE or
-    DISCONTINUED/parked) are left alone. Returns ``{issue_id: state}``.
+    DISCONTINUED) are left alone. Returns ``{issue_id: state}``.
     """
     today = today or datetime.date.today().isoformat()
     bundles: list[Path] = []
