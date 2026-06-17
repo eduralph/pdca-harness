@@ -13,8 +13,8 @@ meta:
   og_description: "Turn each AI contribution into one PDCA cycle: a precise brief, an automated build, a deterministic red→green Check, and a human sign-off. Copier template, GPLv3."
 
 hero:
-  status: "A Copier template — render it into any repo"
-  title: "Nothing ships&nbsp;until it's&nbsp;verified."
+  status: "Iterating your way to a better process, one contribution at a time."
+  title: "Keeping control of your AI-driven process"
   lede: "PDCA Harness turns each AI-driven contribution into one **Plan → Do → Check → Act** cycle. A deterministic driver does the work; a human stays at the three touch points that matter — authoring the spec, signing off the check, and improving the process."
   pron: "**PDCA** — Plan, Do, Check, Act: the improvement loop from quality control, applied one contribution at a time."
   ctas:
