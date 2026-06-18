@@ -154,6 +154,14 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None) -> dict:
     gating = bool(chk.get("gating", True))
     label = f"{chk.get('id', '')}: {chk.get('label', '')}".strip(": ")
     env = {"PDCA_BUNDLE": str(bundle)} if bundle is not None else None
+    # Stack mode (issue #54): when the brief names an existing PR's head to stack onto,
+    # expose it as PDCA_BASE so the verify/repro gate establishes red→green on THAT branch
+    # — the same branch publish commits onto and pushes to. Single-sourced from the brief,
+    # so the test base and the deploy base can't diverge. Absent ⇒ no PDCA_BASE, unchanged.
+    if bundle is not None:
+        onto = brief.onto_branch(bundle / "brief.md")
+        if onto is not None:
+            env = {**(env or {}), "PDCA_BASE": f"{onto[0]}/{onto[1]}"}
     # Under in-driver lane concurrency, expose the worker-slot id so a gate command can
     # scope its checkout / container name / port / scratch per lane (docs 09). Absent
     # (serial driver) → no PDCA_LANE, so gates run exactly as before.

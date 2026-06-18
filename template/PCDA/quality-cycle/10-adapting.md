@@ -76,7 +76,7 @@ Render seeds `pdca.toml` from your answers; you then complete the project-specif
 
 The gates are the only blocking path in Check, and they are entirely yours: the template ships **zero** gate rows (`checks = []`, all-PASS stubs) so the slice runs, and an `engine/README.md` pointing at where your checkers go. Each `[[gates.checks]]` row runs a shell command that PASSES iff it exits 0. Two scopes:
 
-- `scope = "bundle"` — needs the patch context; `$PDCA_BUNDLE` is exported (the gate derives its target from `$PDCA_BUNDLE/patch.diff`). Runs locally only.
+- `scope = "bundle"` — needs the patch context; `$PDCA_BUNDLE` is exported (the gate derives its target from `$PDCA_BUNDLE/patch.diff`). Runs locally only. When the brief declares an `Onto branch:` (stack mode, issue #54), `$PDCA_BASE` is also exported as `<remote>/<branch>` — the existing PR's head the fix stacks onto; a verify/repro gate should establish red→green against `$PDCA_BASE` (the same branch publish commits onto and pushes to), not a clean upstream base. Absent ⇒ no `$PDCA_BASE`, unchanged.
 - `scope = "repo"` — runs against the working tree; this is what CI re-runs via `pdca gates --working-tree` (the merge re-gate, [09](09-parallel-lanes.md)). **Same command** local and CI — single-sourced, no drift.
 
 gramps-testbed-v2's rows, as a model of the **gating policy** (hard-won — read the long comment in `pdca.toml.jinja`):
