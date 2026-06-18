@@ -219,7 +219,10 @@ def _publish_stacked(
     patch = str((d / "patch.diff").resolve())
     git = lambda *a: ["git", "-C", str(repo), *a]
     owner = _fork_owner(repo, remote) or repo_spec.split("/")[0]
-    pr_list = ["gh", "pr", "list", "--repo", repo_spec, "--head", f"{owner}:{branch}",
+    # `gh pr list --head` filters on the bare headRefName only — the `owner:branch` form
+    # (correct for `gh pr create --head`, #23b) is "not supported" here and never matches
+    # (#58). Filter by bare branch; the fork owner is re-checked in code (_existing_pr).
+    pr_list = ["gh", "pr", "list", "--repo", repo_spec, "--head", branch,
                "--state", "open", "--json", "url,number,headRefName,headRepositoryOwner"]
     steps = [
         git("fetch", remote),
@@ -245,7 +248,7 @@ def _publish_stacked(
         return rc
 
     # Resolve the existing PR BEFORE pushing — never push a commit to a branch with no PR.
-    pr_url = _existing_pr(pr_list, branch)
+    pr_url = _existing_pr(pr_list, branch, owner)
     if not pr_url:
         print(f"publish: no open PR with head {owner}:{branch} on {repo_spec} — refusing "
               "to push a commit to a branch with no PR. Open the PR first, or drop the "
@@ -278,11 +281,13 @@ def _publish_stacked(
     return 0
 
 
-def _existing_pr(pr_list_cmd: list[str], branch: str) -> str:
-    """The URL of the open PR whose head is ``branch`` (via ``gh pr list``), or ``""``.
+def _existing_pr(pr_list_cmd: list[str], branch: str, owner: str) -> str:
+    """The URL of the open PR whose head is ``owner:branch`` (via ``gh pr list``), or ``""``.
 
-    The command already filters by ``--head <owner>:<branch> --state open``; the
-    ``headRefName`` re-check guards against a loose match. ``""`` on no PR / gh error /
+    The command filters by the bare ``--head <branch> --state open`` (gh does not support
+    the ``owner:branch`` form there, #58), so the fork owner is disambiguated HERE: match
+    both ``headRefName == branch`` and ``headRepositoryOwner.login == owner`` so a
+    same-named branch on a different fork can't loose-match. ``""`` on no PR / gh error /
     unparseable output — the caller fails loudly rather than pushing."""
     r = subprocess.run(pr_list_cmd, capture_output=True, text=True)
     if r.returncode != 0:
@@ -293,7 +298,8 @@ def _existing_pr(pr_list_cmd: list[str], branch: str) -> str:
     except json.JSONDecodeError:
         return ""
     for pr in prs:
-        if pr.get("headRefName") == branch:
+        if (pr.get("headRefName") == branch
+                and (pr.get("headRepositoryOwner") or {}).get("login") == owner):
             return pr.get("url", "")
     return ""
 

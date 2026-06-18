@@ -67,9 +67,16 @@ _FIX_BRIEF = (
 _STACK_BRIEF = _FIX_BRIEF + "- **Onto branch:** origin/feature/x\n"
 
 
-def _pr_json(branch: str = "feature/x", url: str = "https://github.com/example-org/example-repo/pull/42") -> str:
-    return json.dumps([{"url": url, "number": 42, "headRefName": branch,
-                        "headRepositoryOwner": {"login": "example-org"}}])
+_PR_42 = {"url": "https://github.com/example-org/example-repo/pull/42", "number": 42,
+          "headRefName": "feature/x", "headRepositoryOwner": {"login": "example-org"}}
+
+
+def _gh_pr_list(cmd: list[str], prs: list[dict]) -> SimpleNamespace:
+    """Reproduce `gh pr list --head` filtering faithfully (#58): it matches the **bare**
+    headRefName only — the `owner:branch` form is "not supported" and matches nothing."""
+    head = cmd[cmd.index("--head") + 1]
+    matched = [] if ":" in head else [p for p in prs if p["headRefName"] == head]
+    return SimpleNamespace(returncode=0, stdout=json.dumps(matched), stderr="")
 
 
 class PublishSlice(unittest.TestCase):
@@ -248,16 +255,16 @@ class PublishSlice(unittest.TestCase):
     def test_stack_real_run_records_existing_pr(self) -> None:
         d = _bundle(self.cfg, "STK2", brief_body=_STACK_BRIEF, accepted=True)
 
-        def fake_run(cmd, *a, **k):  # PR exists; every git step (incl. apply --check) ok
+        def fake_run(cmd, *a, **k):  # gh-faithful PR lookup; every git step ok
             if cmd[:3] == ["gh", "pr", "list"]:
-                return SimpleNamespace(returncode=0, stdout=_pr_json(), stderr="")
+                return _gh_pr_list(cmd, [_PR_42])
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         with mock.patch.object(publish, "_check_repo", return_value=0), \
              mock.patch.object(publish.subprocess, "run", side_effect=fake_run), \
              redirect_stdout(io.StringIO()):
             rc = publish.publish(self.cfg, "STK2", by="Tester", today="2026-06-05")
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 0)  # regression #58: --head must be the bare branch to match
         pj = json.loads((d / "publish.json").read_text(encoding="utf-8"))
         self.assertEqual(pj["mode"], "stacked")
         self.assertEqual(pj["branch"], "feature/x")
@@ -273,7 +280,7 @@ class PublishSlice(unittest.TestCase):
         def fake_run(cmd, *a, **k):
             calls.append(cmd)
             if cmd[:3] == ["gh", "pr", "list"]:
-                return SimpleNamespace(returncode=0, stdout=_pr_json(), stderr="")
+                return _gh_pr_list(cmd, [_PR_42])
             if cmd[3:5] == ["apply", "--check"]:
                 return SimpleNamespace(returncode=1, stdout="", stderr="does not apply")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -296,7 +303,7 @@ class PublishSlice(unittest.TestCase):
         def fake_run(cmd, *a, **k):
             calls.append(cmd)
             if cmd[:3] == ["gh", "pr", "list"]:
-                return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+                return _gh_pr_list(cmd, [])   # nothing open for this head
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         err = io.StringIO()
@@ -308,6 +315,29 @@ class PublishSlice(unittest.TestCase):
         self.assertFalse(any("push" in c for c in calls))   # never pushed
         self.assertFalse((d / "publish.json").exists())
         self.assertIn("no open PR", err.getvalue())
+
+    def test_stack_disambiguates_pr_by_fork_owner(self) -> None:
+        # gh's bare --head can return same-named branches across forks; only OUR fork's
+        # PR (headRepositoryOwner.login == owner) may match — never a stranger's branch.
+        d = _bundle(self.cfg, "STK5", brief_body=_STACK_BRIEF, accepted=True)
+        other_fork = {"url": "https://github.com/someone-else/example-repo/pull/99",
+                      "number": 99, "headRefName": "feature/x",
+                      "headRepositoryOwner": {"login": "someone-else"}}
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(cmd)
+            if cmd[:3] == ["gh", "pr", "list"]:        # both forks share the branch name
+                return _gh_pr_list(cmd, [other_fork, _PR_42])
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(publish, "_check_repo", return_value=0), \
+             mock.patch.object(publish.subprocess, "run", side_effect=fake_run), \
+             redirect_stdout(io.StringIO()):
+            rc = publish.publish(self.cfg, "STK5", by="Tester", today="2026-06-05")
+        self.assertEqual(rc, 0)
+        pj = json.loads((d / "publish.json").read_text(encoding="utf-8"))
+        self.assertEqual(pj["pr_url"], _PR_42["url"])   # our fork's PR, not someone-else's
 
     def test_stack_exposes_pdca_base_to_bundle_gate(self) -> None:
         # The driver single-sources the test base from the same brief field publish reads:
