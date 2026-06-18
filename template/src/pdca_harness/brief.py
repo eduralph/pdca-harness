@@ -73,6 +73,24 @@ def conflicts_with(brief_path: Path) -> list[str]:
     return _id_list(field(brief_path, "conflicts with", "conflicts_with"))
 
 
+def onto_branch(brief_path: Path) -> tuple[str, str] | None:
+    """``(remote, branch)`` of an existing PR's head to stack a commit onto, or ``None``.
+
+    The optional ``- **Onto branch:** <remote>/<branch>`` field (issue #54). Present ⇒
+    publish contributes the fix as a commit on that branch instead of a new PR, and the
+    same branch is the test base (Check's ``PDCA_BASE``), the commit base, and the push
+    target. Absent ⇒ ``None`` ⇒ today's new-branch → new-PR flow. The documented shape is
+    ``<remote>/<branch>``; a value with no ``/`` is treated as a branch on ``origin``.
+    """
+    raw = field(brief_path, "onto branch", "onto_branch").strip().strip("`").strip()
+    if not raw:
+        return None
+    if "/" not in raw:
+        return ("origin", raw)
+    remote, _, branch = raw.partition("/")
+    return (remote or "origin", branch)
+
+
 def _id_list(raw: str) -> list[str]:
     """Issue ids out of a comma/space-separated field value, normalised to bare ids.
 

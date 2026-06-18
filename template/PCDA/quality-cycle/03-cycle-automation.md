@@ -88,6 +88,8 @@ Check is one beat with three components, each automating at a different level. C
 
 Optionally, the human jots §10 Act candidates while at the bundle — these are hints for the next Act review, not gates for this sign-off.
 
+**Publish — contribution shape.** On accept, the closing work contributes the fix. The default shape branches off `upstream/<base>`, applies the patch, and opens a new draft PR. When the brief declares an **`Onto branch:` `<remote>/<branch>`** (issue #54), publish instead runs in **stack mode**: the fix is a commit on that existing PR's branch — Check tested against it (`$PDCA_BASE`), and publish checks out `<remote>/<branch>`, verifies the patch still applies to it (else fails loudly — the branch advanced since the fix was built), confirms an open PR has it as head (else refuses to push), then commits and pushes to that branch. No new PR is created; the existing PR's URL is recorded. The same branch is the test base, the commit base, and the push target — so a fix tested against a PR can only land on that PR.
+
 ### Act — instrumented, cross-cycle, batched
 
 Act does not run inside the per-issue state machine. It is a **separate pass**, on a separate cadence (every N completed cycles, weekly, when a pattern surfaces). Its instrumentation:

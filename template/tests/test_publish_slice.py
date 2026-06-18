@@ -19,7 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from pdca_harness import publish, signoff, state
+from pdca_harness import gates, publish, signoff, state
 from pdca_harness.config import Config, LeafConfig
 
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
@@ -62,6 +62,14 @@ _FIX_BRIEF = (
     "- **Slug:** my-fix\n"
     "- **Repo + branch target:** example-org/example-repo @ main\n"
 )
+
+# Stack mode (issue #54): the same brief plus an `Onto branch` naming an existing PR head.
+_STACK_BRIEF = _FIX_BRIEF + "- **Onto branch:** origin/feature/x\n"
+
+
+def _pr_json(branch: str = "feature/x", url: str = "https://github.com/example-org/example-repo/pull/42") -> str:
+    return json.dumps([{"url": url, "number": 42, "headRefName": branch,
+                        "headRepositoryOwner": {"login": "example-org"}}])
 
 
 class PublishSlice(unittest.TestCase):
@@ -173,6 +181,7 @@ class PublishSlice(unittest.TestCase):
             rc = publish.publish(self.cfg, "PUBFAIL", by="Tester", today="2026-06-05")
         self.assertEqual(rc, 1)                                   # partial run, not "done"
         pj = json.loads((d / "publish.json").read_text(encoding="utf-8"))
+        self.assertEqual(pj["mode"], "new-pr")                   # default contribution shape
         self.assertEqual(pj["pr_url"], "")                       # recorded, but empty
         self.assertEqual(pj["branch"], "fix/PUBFAIL-my-fix")     # branch was pushed
 
@@ -220,6 +229,100 @@ class PublishSlice(unittest.TestCase):
         self.cfg.repo_checkouts = {"org/foo": "../custom-foo"}
         self.assertEqual(publish._checkout_path(self.cfg, "org/foo"),
                          (self.cfg.root / "../custom-foo").resolve())
+
+    # --- stack mode (issue #54): commit onto an existing PR branch ---
+
+    def test_stack_dry_run_plans_commit_onto_pr_branch(self) -> None:
+        d = _bundle(self.cfg, "STK", brief_body=_STACK_BRIEF, accepted=True)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = publish.publish(self.cfg, "STK", dry_run=True, by="Tester", today="2026-06-05")
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("checkout -B feature/x origin/feature/x", out)
+        self.assertIn("push origin HEAD:feature/x", out)
+        self.assertIn("gh pr list", out)       # resolves the existing PR …
+        self.assertNotIn("gh pr create", out)  # … never opens a new one
+        self.assertFalse((d / "publish.json").exists())  # dry run records nothing
+
+    def test_stack_real_run_records_existing_pr(self) -> None:
+        d = _bundle(self.cfg, "STK2", brief_body=_STACK_BRIEF, accepted=True)
+
+        def fake_run(cmd, *a, **k):  # PR exists; every git step (incl. apply --check) ok
+            if cmd[:3] == ["gh", "pr", "list"]:
+                return SimpleNamespace(returncode=0, stdout=_pr_json(), stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(publish, "_check_repo", return_value=0), \
+             mock.patch.object(publish.subprocess, "run", side_effect=fake_run), \
+             redirect_stdout(io.StringIO()):
+            rc = publish.publish(self.cfg, "STK2", by="Tester", today="2026-06-05")
+        self.assertEqual(rc, 0)
+        pj = json.loads((d / "publish.json").read_text(encoding="utf-8"))
+        self.assertEqual(pj["mode"], "stacked")
+        self.assertEqual(pj["branch"], "feature/x")
+        self.assertEqual(pj["base"], "origin/feature/x")
+        self.assertEqual(pj["pr_url"], "https://github.com/example-org/example-repo/pull/42")
+
+    def test_stack_branch_drift_aborts_without_push(self) -> None:
+        # The PR exists, but the patch no longer applies to the (advanced) branch:
+        # `git apply --check` fails → publish aborts BEFORE committing or pushing.
+        d = _bundle(self.cfg, "STK3", brief_body=_STACK_BRIEF, accepted=True)
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(cmd)
+            if cmd[:3] == ["gh", "pr", "list"]:
+                return SimpleNamespace(returncode=0, stdout=_pr_json(), stderr="")
+            if cmd[3:5] == ["apply", "--check"]:
+                return SimpleNamespace(returncode=1, stdout="", stderr="does not apply")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        err = io.StringIO()
+        with mock.patch.object(publish, "_check_repo", return_value=0), \
+             mock.patch.object(publish.subprocess, "run", side_effect=fake_run), \
+             redirect_stderr(err), redirect_stdout(io.StringIO()):
+            rc = publish.publish(self.cfg, "STK3", by="Tester", today="2026-06-05")
+        self.assertEqual(rc, 1)
+        self.assertFalse(any("push" in c for c in calls))   # never pushed
+        self.assertFalse((d / "publish.json").exists())
+        self.assertIn("no longer applies", err.getvalue())
+
+    def test_stack_no_open_pr_refuses_to_push(self) -> None:
+        # No open PR with that head → refuse to push a commit to a branch with no PR.
+        d = _bundle(self.cfg, "STK4", brief_body=_STACK_BRIEF, accepted=True)
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(cmd)
+            if cmd[:3] == ["gh", "pr", "list"]:
+                return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        err = io.StringIO()
+        with mock.patch.object(publish, "_check_repo", return_value=0), \
+             mock.patch.object(publish.subprocess, "run", side_effect=fake_run), \
+             redirect_stderr(err), redirect_stdout(io.StringIO()):
+            rc = publish.publish(self.cfg, "STK4", by="Tester", today="2026-06-05")
+        self.assertEqual(rc, 1)
+        self.assertFalse(any("push" in c for c in calls))   # never pushed
+        self.assertFalse((d / "publish.json").exists())
+        self.assertIn("no open PR", err.getvalue())
+
+    def test_stack_exposes_pdca_base_to_bundle_gate(self) -> None:
+        # The driver single-sources the test base from the same brief field publish reads:
+        # a bundle-scoped gate sees $PDCA_BASE = <remote>/<branch> when Onto branch is set.
+        echo_gate = [{"id": "C4", "tier": "C4", "label": "verify", "scope": "bundle",
+                      "gating": True, "cmd": "echo BASE=$PDCA_BASE"}]
+        d = _bundle(self.cfg, "STK6", brief_body=_STACK_BRIEF, accepted=True)
+        self.cfg.gates_checks = echo_gate
+        row = next(r for r in gates.run_gates(d, self.cfg)["rows"] if r["element"] == "C4")
+        self.assertIn("BASE=origin/feature/x", row["path_line"])
+        # absent field ⇒ PDCA_BASE unset
+        d2 = _bundle(self.cfg, "STK6B", brief_body=_FIX_BRIEF, accepted=True)
+        self.cfg.gates_checks = echo_gate
+        row2 = next(r for r in gates.run_gates(d2, self.cfg)["rows"] if r["element"] == "C4")
+        self.assertEqual(row2["path_line"].strip(), "BASE=")
 
 
 if __name__ == "__main__":

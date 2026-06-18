@@ -107,6 +107,14 @@ def publish(
                   "fix them and retry", file=sys.stderr)
             return 1
 
+    # Stack mode (issue #54): the brief names an existing PR's head branch — contribute a
+    # commit onto it instead of a new PR. The shared spine above (guard, target, artifacts,
+    # T4) already ran; the branch/steps/PR step are what differ.
+    onto = brief.onto_branch(d / "brief.md")
+    if onto is not None:
+        return _publish_stacked(cfg, d, repo_spec, onto,
+                                dry_run=dry_run, by=by, today=today, pending_id=pending_id)
+
     branch = _branch_name(cfg, d, slug)
     summary_line = (d / COMMIT_MSG).read_text(encoding="utf-8").splitlines()[0]
     repo = _checkout_path(cfg, repo_spec)
@@ -170,6 +178,7 @@ def publish(
             pr_url = out.splitlines()[-1] if out else ""
 
     (d / "publish.json").write_text(json.dumps({
+        "mode": "new-pr",
         "branch": branch, "pr_url": pr_url, "base": base, "repo": repo_spec,
         "by": by or _signoff_by(d) or cfg.author or "unknown", "date": today,
         "id_pending": pending_id,
@@ -189,6 +198,104 @@ def publish(
               "(Fixes #N) and re-run T4 before marking the PR ready.")
     print("  STOP: review CI, then mark it ready / merge yourself — the human's step.")
     return 0
+
+
+def _publish_stacked(
+    cfg: Config, d: Path, repo_spec: str, onto: tuple[str, str], *,
+    dry_run: bool, by: str, today: str, pending_id: bool,
+) -> int:
+    """Stack mode (issue #54): contribute the fix as a commit on an existing PR's branch.
+
+    The work branch IS the PR branch (``<remote>/<branch>`` from the brief's ``Onto
+    branch``). No ``gh pr create`` — the PR already exists; it is resolved and recorded.
+    Two guards make "tested-against == committed-onto == pushed-to" true before any push:
+    ``git apply --check`` against the freshly-fetched branch (fails loudly if it advanced
+    since the fix was built and tested), and an existing-open-PR lookup (refuse to push a
+    commit to a branch with no PR).
+    """
+    remote, branch = onto
+    base_ref = f"{remote}/{branch}"
+    repo = _checkout_path(cfg, repo_spec)
+    patch = str((d / "patch.diff").resolve())
+    git = lambda *a: ["git", "-C", str(repo), *a]
+    owner = _fork_owner(repo, remote) or repo_spec.split("/")[0]
+    pr_list = ["gh", "pr", "list", "--repo", repo_spec, "--head", f"{owner}:{branch}",
+               "--state", "open", "--json", "url,number,headRefName,headRepositoryOwner"]
+    steps = [
+        git("fetch", remote),
+        git("checkout", "-B", branch, base_ref),
+        git("apply", "--check", patch),  # the fix must still fit the branch it was tested on
+        git("apply", patch),
+        git("add", "--all"),
+        git("commit", "-F", str((d / COMMIT_MSG).resolve())),
+        git("push", remote, f"HEAD:{branch}"),
+    ]
+
+    if dry_run:
+        print(f"publish --dry-run — {d.name} → commit stacked onto {repo_spec} "
+              f"PR branch {branch} (base {base_ref}):")
+        for c in steps:
+            print("  " + " ".join(shlex.quote(x) for x in c))
+        print("  " + " ".join(shlex.quote(x) for x in pr_list)
+              + "   # resolve the existing open PR (no new PR is created)")
+        return 0
+
+    rc = _check_repo(repo, repo_spec)
+    if rc != 0:
+        return rc
+
+    # Resolve the existing PR BEFORE pushing — never push a commit to a branch with no PR.
+    pr_url = _existing_pr(pr_list, branch)
+    if not pr_url:
+        print(f"publish: no open PR with head {owner}:{branch} on {repo_spec} — refusing "
+              "to push a commit to a branch with no PR. Open the PR first, or drop the "
+              "'Onto branch' brief field to use the default new-PR flow.", file=sys.stderr)
+        return 1
+
+    for c in steps:
+        print("→ " + " ".join(c[3:]))  # drop the `git -C <repo>` prefix in the echo
+        if subprocess.run(c).returncode != 0:
+            hint = ""
+            if c[3:5] == ["apply", "--check"]:
+                hint = (f" — the patch no longer applies to {base_ref} (it advanced since "
+                        "the fix was built and tested; rebuild/re-Check against the PR branch)")
+            print(f"publish: step failed: {' '.join(c)}{hint}", file=sys.stderr)
+            return 1
+
+    (d / "publish.json").write_text(json.dumps({
+        "mode": "stacked",
+        "branch": branch, "pr_url": pr_url, "base": base_ref, "repo": repo_spec,
+        "by": by or _signoff_by(d) or cfg.author or "unknown", "date": today,
+        "id_pending": pending_id,
+    }, indent=2) + "\n", encoding="utf-8")
+
+    print(f"\nCommit stacked onto {repo_spec} PR branch {branch} ({pr_url}).")
+    print(f"  watch CI:  gh pr checks {pr_url} --watch")
+    if pending_id:
+        print("  ⚠ id_pending: contributed without a tracker id — add the trailer "
+              "(Fixes #N) and re-run T4 before marking the PR ready.")
+    print("  STOP: review CI, then mark it ready / merge yourself — the human's step.")
+    return 0
+
+
+def _existing_pr(pr_list_cmd: list[str], branch: str) -> str:
+    """The URL of the open PR whose head is ``branch`` (via ``gh pr list``), or ``""``.
+
+    The command already filters by ``--head <owner>:<branch> --state open``; the
+    ``headRefName`` re-check guards against a loose match. ``""`` on no PR / gh error /
+    unparseable output — the caller fails loudly rather than pushing."""
+    r = subprocess.run(pr_list_cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        return ""
+    try:
+        prs = json.loads(r.stdout or "[]")
+    except json.JSONDecodeError:
+        return ""
+    for pr in prs:
+        if pr.get("headRefName") == branch:
+            return pr.get("url", "")
+    return ""
 
 
 # ----------------------------------------------------------------------------
@@ -243,11 +350,12 @@ def _checkout_path(cfg: Config, repo_spec: str) -> Path:
     return (cfg.root.parent / repo_spec.split("/")[-1]).resolve()
 
 
-def _fork_owner(repo: Path) -> str:
-    """The GitHub owner of the fork the branch is pushed to (``origin``), e.g.
+def _fork_owner(repo: Path, remote: str = "origin") -> str:
+    """The GitHub owner of ``remote`` (the fork the branch is pushed to), e.g.
     ``"example-user"`` from ``git@github.com:example-user/repo.git`` or the https form.
-    Used to form the cross-repo PR ``--head OWNER:BRANCH``. ``""`` if undetectable."""
-    url = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "origin"],
+    Used to form the cross-repo PR ``--head OWNER:BRANCH`` (and the stack-mode existing-PR
+    lookup). ``""`` if undetectable."""
+    url = subprocess.run(["git", "-C", str(repo), "remote", "get-url", remote],
                          capture_output=True, text=True).stdout.strip()
     m = re.search(r"[:/]([^/]+)/[^/]+?(?:\.git)?$", url)
     return m.group(1) if m else ""
