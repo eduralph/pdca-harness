@@ -1,6 +1,5 @@
 {
   "permissions": {
-    "defaultMode": "acceptEdits",
     "allow": [
       "Bash(git:*)",
       "Bash(gh pr create:*)",
@@ -53,7 +52,15 @@
       "Edit(**)",
       "Write(**)",
       "Glob",
-      "Grep"
+      "Grep",
+      "Bash(command -v python3)",
+      "Bash(PYTHONPATH=src python3 -m unittest discover -s tests -v)",
+      "Bash(PYTHONPATH=src python3 -m unittest discover -s tests)",
+      "Bash(PYTHONPATH=src python3 -m unittest tests.test_publish_slice.PublishSlice.test_resolve_target_tolerates_backticks_and_prose -v)",
+      "Bash(PYTHONPATH=src python3 -c ' *)",
+      "Bash(PYTHONPATH=src python3 -m unittest tests.test_flow_slice.LaneParallelism -v)",
+      "Bash(PYTHONPATH=src python3 -m unittest tests.test_flow_slice.FlowSlice.test_cli_flow_empty_batch_exits_zero)",
+      "Bash(PYTHONPATH=src python3 -)"
     ],
     "deny": [
       "Bash(sudo:*)",
@@ -78,6 +85,7 @@
     "ask": [
       "Bash(gh pr merge:*)",
       "Bash(gh release:*)"
-    ]
+    ],
+    "defaultMode": "acceptEdits"
   }
 }
