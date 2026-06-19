@@ -23,6 +23,10 @@ DEFAULT_CLOSE_DISPOSITIONS = [
     "duplicate",
     "not-reproducible",
     "manual-verification",
+    # No-patch-lands-here triage outcomes (canonical vocabulary, quality-cycle P-rules):
+    # UPSTREAM = "not this repo's defect", EXTERNAL = "not a defect in scope at all".
+    "upstream",
+    "external",
 ]
 
 
