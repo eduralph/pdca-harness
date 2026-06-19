@@ -52,6 +52,33 @@ def run_gates(d: Path, cfg: Config) -> dict:
     return _finalize(rows, name=d.name, write_to=d)
 
 
+def _close_matrix_rows() -> list[dict]:
+    """The 5/5/1 for a close-disposition bundle: every gate element N/A (no patch to
+    verify). Each gate element is a non-gating ``none`` row, so ``overall`` = pass."""
+    rows = _assemble_matrix([], stub=False)
+    for r in rows:
+        if r["oracle"] == "(no gate configured)":
+            r["path_line"] = "N/A — close disposition (no patch to verify)"
+    return rows
+
+
+def run_close_gates(d: Path, cfg: Config) -> dict:
+    """Write a Check matrix for a close-disposition bundle WITHOUT running any gate.
+
+    A close / no-fix bundle (issue #60) has no patch.diff, so every gate element is
+    N/A: there is nothing to verify. No gate command is executed — the gate
+    *definitions* are unchanged (C4-verify is simply inapplicable). The human confirms
+    the close at sign-off, not a gate.
+    """
+    return _finalize(_close_matrix_rows(), name=d.name, write_to=d)
+
+
+def run_close_gates_dry(d: Path, cfg: Config) -> dict:
+    """The close matrix WITHOUT writing the frozen file — the revalidate counterpart of
+    :func:`run_close_gates` (so re-gating a frozen close bundle confirms, not drifts)."""
+    return _finalize(_close_matrix_rows(), name=d.name, write_to=None)
+
+
 def run_working_tree(cfg: Config) -> dict:
     """Run only repo-scoped gates against the working tree (the CI merge re-gate)."""
     rows = _run_checks(cfg, cwd=cfg.root, bundle=None, scopes=("repo",))

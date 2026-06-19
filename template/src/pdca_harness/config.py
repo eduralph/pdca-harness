@@ -12,6 +12,19 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Disposition hints whose Plan already concluded a CLOSE / no-fix outcome. A bundle
+# whose brief carries one of these takes the driver's fast path (skip the builder +
+# reviewer leaves, route straight to sign-off). The set is a sensible default;
+# instances retune it to their tracker vocabulary via [driver].close_dispositions.
+DEFAULT_CLOSE_DISPOSITIONS = [
+    "likely-close",
+    "wontfix",
+    "by-design",
+    "duplicate",
+    "not-reproducible",
+    "manual-verification",
+]
+
 
 # ----------------------------------------------------------------------------
 #
@@ -78,10 +91,29 @@ class Config:
     # Do+Check band. ``1`` (the default) keeps the driver strictly serial. ``[driver].lanes``
     # in pdca.toml; ``PDCA_LANES`` overrides for a single run (like ``PDCA_BUNDLE_ROOT``).
     lanes: int = 1
+    # Close-disposition fast path (issue #60): the disposition-hint classes that mark a
+    # bundle as close / no-fix, so the driver skips the builder + reviewer leaves and
+    # routes it straight to sign-off. ``[driver].close_dispositions`` in pdca.toml; the
+    # built-in default covers the common tracker vocabulary.
+    close_dispositions: list[str] = field(
+        default_factory=lambda: list(DEFAULT_CLOSE_DISPOSITIONS))
 
     def bundle(self, issue_id: str) -> Path:
         """The per-cycle bundle directory for an issue id."""
         return self.bundle_root / f"issue_{issue_id}"
+
+    def close_class(self, disposition: str) -> str:
+        """The close class matching ``disposition``, or "" if it is not a close hint.
+
+        Returns the first configured close class whose token appears (case-insensitively)
+        in the disposition value — substring-matched like publish's feature detection, so
+        a hint such as ``likely-close`` or ``manual-verification → mac only`` still matches.
+        """
+        low = disposition.lower()
+        for cls in self.close_dispositions:
+            if cls.lower() in low:
+                return cls
+        return ""
 
     @classmethod
     def load(cls, root: Path | None = None) -> "Config":
@@ -130,10 +162,16 @@ class Config:
 
         # In-driver lane pool size. PDCA_LANES overrides [driver].lanes for one run
         # (e.g. to rehearse parallelism without editing pdca.toml). Floor of 1 = serial.
-        lanes = int(data.get("driver", {}).get("lanes", 1))
+        driver_cfg = data.get("driver", {})
+        lanes = int(driver_cfg.get("lanes", 1))
         if os.environ.get("PDCA_LANES"):
             lanes = int(os.environ["PDCA_LANES"])
         lanes = max(1, lanes)
+
+        # Close-disposition classes (issue #60): a configured list retunes the default
+        # for an instance's tracker vocabulary; absent ⇒ the built-in default.
+        close_dispositions = list(
+            driver_cfg.get("close_dispositions", DEFAULT_CLOSE_DISPOSITIONS))
 
         return cls(
             root=root,
@@ -161,6 +199,7 @@ class Config:
             author=data.get("project", {}).get("author", ""),
             gates_checks=gates_checks,
             lanes=lanes,
+            close_dispositions=close_dispositions,
         )
 
 

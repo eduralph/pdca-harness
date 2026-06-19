@@ -28,6 +28,14 @@ templates_dir = "templates"
 # ergonomics actually bite (then prefer this over N separate workspaces).
 [driver]
 lanes = 1
+# Close-disposition fast path (issue #60). A bundle whose brief's `Disposition hint`
+# matches one of these close / no-fix classes skips the builder + reviewer model leaves
+# (the engine's only token spend) and routes straight to sign-off, where the human
+# confirms or overrides the close. It is a HINT, not a gate: reopening to a fix path
+# (iterate-to-Do) re-enables the full Do+Check band. Substring-matched, case-insensitive,
+# against the disposition value. Retune this list to your tracker's vocabulary; omit it
+# to use the built-in default shown here.
+# close_dispositions = ["likely-close", "wontfix", "by-design", "duplicate", "not-reproducible", "manual-verification"]
 
 [tracker]
 system = "{{ tracker_system }}"

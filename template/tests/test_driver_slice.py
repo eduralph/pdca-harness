@@ -16,10 +16,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdca_harness import act, assemble, driver, gates, queue, leaves, signoff, state
-from pdca_harness.config import Config, LeafConfig
+from pdca_harness import act, assemble, driver, gates, publish, queue, leaves, signoff, state
+from pdca_harness.config import DEFAULT_CLOSE_DISPOSITIONS, Config, LeafConfig
 
 TOY_BRIEF = Path(__file__).resolve().parents[1] / "examples" / "toy" / "brief.md"
+TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
 
 
 def _stub_config(root: Path) -> Config:
@@ -126,6 +127,96 @@ class VerticalSlice(unittest.TestCase):
         self.assertEqual(leaves.signoff_decision(self.d), "discontinue")
         self.assertEqual(leaves.signoff_rationale(self.d),
                          "restructuring task — handled by hand upstream")
+
+
+class CloseDispositionFastPath(unittest.TestCase):
+    """The close-disposition fast path (issue #60): a bundle whose Plan concluded a
+    close / no-fix outcome skips the builder + reviewer leaves and routes straight to
+    sign-off, where the human confirms or overrides the close."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _close_bundle(self, issue_id: str, disposition: str = "likely-close") -> Path:
+        """A bundle whose toy brief carries a CLOSE disposition hint."""
+        d = self.cfg.bundle(issue_id)
+        d.mkdir(parents=True)
+        text = TOY_BRIEF.read_text(encoding="utf-8").replace(
+            "- **Disposition hint:** likely-fix",
+            f"- **Disposition hint:** {disposition}")
+        (d / "brief.md").write_text(text, encoding="utf-8")
+        return d
+
+    def test_fast_path_skips_leaves(self) -> None:
+        d = self._close_bundle("CLOSE")
+        final = driver.run_issue(d, self.cfg)
+        self.assertEqual(final, state.AWAITING_SIGNOFF)
+        # The builder leaf never ran — no patch, no shipped test.
+        self.assertFalse((d / "patch.diff").exists())
+        self.assertFalse((d / "test_toy.py").exists())
+        # The close marker (the Do artifact) + the audit breadcrumb are present.
+        self.assertTrue((d / state.CLOSE_MARKER).exists())
+        self.assertEqual((d / state.CLOSE_MARKER).read_text(encoding="utf-8").strip(),
+                         "likely-close")
+        self.assertIn("Leaves skipped: disposition=likely-close",
+                      (d / "build-notes.md").read_text(encoding="utf-8"))
+        # The reviewer leaf was skipped (note, not a verdict table).
+        self.assertIn("SKIPPED (close disposition)",
+                      (d / "check-review.md").read_text(encoding="utf-8"))
+        # Gates are N/A → overall pass, no gate command ran.
+        gates_json = json.loads((d / "check-gates.json").read_text(encoding="utf-8"))
+        self.assertEqual(gates_json["overall"], "pass")
+        # The human must consciously confirm the close: §6 has a NEEDS-HUMAN → C6 blocks accept.
+        self.assertTrue(signoff.open_needs_human(d / "SUMMARY.md"))
+
+    def test_manual_verification_seeds_stub(self) -> None:
+        self.cfg.templates_dir = TEMPLATES_DIR  # the real MANUAL-VERIFICATION.md.tpl
+        d = self._close_bundle("MANUAL", "manual-verification")
+        driver.run_issue(d, self.cfg)
+        self.assertTrue((d / "MANUAL-VERIFICATION.md").exists())
+        self.assertIn("Complete MANUAL-VERIFICATION.md",
+                      (d / "check-review.md").read_text(encoding="utf-8"))
+
+    def test_accept_then_publish_skips(self) -> None:
+        d = self._close_bundle("CLOSE")
+        driver.run_issue(d, self.cfg)
+        summary = d / "SUMMARY.md"
+        summary.write_text(summary.read_text().replace("- [ ]", "- [x]"), encoding="utf-8")
+        signoff.record(summary, action="accept", by="tester", date="2026-01-01")
+        self.assertEqual(state.state(d), state.COMPLETE)
+        # Publish has nothing to git-apply: it skips gracefully (return 0), never errors.
+        rc = publish.publish(self.cfg, "CLOSE", dry_run=True, skip_if_no_target=True)
+        self.assertEqual(rc, 0)
+
+    def test_reopen_does_a_real_build(self) -> None:
+        # Reopening a close bundle to a fix path archives the close marker and runs the
+        # real builder on the next pass — the fast path is a hint, not a gate.
+        d = self._close_bundle("CLOSE")
+        driver.run_issue(d, self.cfg)
+        signoff.record(d / "SUMMARY.md", action="iterate-do", by="tester", date="2026-01-01")
+        self.assertEqual(state.state(d), state.ITERATE_DO)
+        driver.advance(d, self.cfg)  # archive the close attempt → PLANNED
+        self.assertEqual(state.state(d), state.PLANNED)
+        self.assertFalse((d / state.CLOSE_MARKER).exists())              # marker cleared
+        self.assertTrue((d / "iteration-v1" / state.CLOSE_MARKER).exists())  # preserved
+        driver.advance(d, self.cfg)  # real Do this time (iteration exists → not close)
+        self.assertTrue((d / "patch.diff").exists())
+        self.assertEqual(state.state(d), state.BUILT)
+
+    def test_config_close_class(self) -> None:
+        # Default set classifies the close hints; a non-close hint is "".
+        self.assertTrue(all(self.cfg.close_class(c) for c in DEFAULT_CLOSE_DISPOSITIONS))
+        self.assertEqual(self.cfg.close_class("likely-fix"), "")
+        self.assertEqual(self.cfg.close_class("manual-verification → mac only"),
+                         "manual-verification")
+        # An instance override is honoured.
+        self.cfg.close_dispositions = ["upstream"]
+        self.assertEqual(self.cfg.close_class("UPSTREAM"), "upstream")
+        self.assertEqual(self.cfg.close_class("likely-close"), "")
 
 
 class AdvisoryReviewResilience(unittest.TestCase):

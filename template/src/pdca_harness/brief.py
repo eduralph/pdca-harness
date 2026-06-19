@@ -40,6 +40,15 @@ def field(brief_path: Path, *labels: str, default: str = "") -> str:
     return default
 
 
+def disposition_hint(brief_path: Path) -> str:
+    """The brief's ``- **Disposition hint:** value`` field, or "" if absent.
+
+    The one place the disposition label is spelled, so the driver's close-fast-path
+    classifier (issue #60) and any other reader share it.
+    """
+    return field(brief_path, "disposition hint", "disposition")
+
+
 def test_files(brief_path: Path) -> list[Path]:
     """Paths named by the brief's test-requirement field, relative to the bundle.
 
