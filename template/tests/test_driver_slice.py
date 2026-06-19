@@ -213,6 +213,11 @@ class CloseDispositionFastPath(unittest.TestCase):
         self.assertEqual(self.cfg.close_class("likely-fix"), "")
         self.assertEqual(self.cfg.close_class("manual-verification → mac only"),
                          "manual-verification")
+        # No-patch-lands-here triage outcomes are close-class (#62), matching the brief
+        # template's canonical phrasing; POSSIBLY-FIXED needs verification, so it is NOT.
+        self.assertEqual(self.cfg.close_class("UPSTREAM (not this repo's defect)"), "upstream")
+        self.assertEqual(self.cfg.close_class("EXTERNAL (not a defect in scope)"), "external")
+        self.assertEqual(self.cfg.close_class("POSSIBLY-FIXED → verify first"), "")
         # An instance override is honoured.
         self.cfg.close_dispositions = ["upstream"]
         self.assertEqual(self.cfg.close_class("UPSTREAM"), "upstream")
