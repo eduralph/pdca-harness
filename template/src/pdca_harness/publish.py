@@ -72,6 +72,15 @@ def publish(
               file=sys.stderr)
         return 1
 
+    # Close-disposition bundle (issue #60): an accepted close / no-fix outcome has no
+    # patch.diff, so there is nothing to `git apply` / open a PR for. This is not a
+    # failure — close the tracker item by hand. Return 0 so the continuous flow's
+    # publish-on-accept doesn't error (mirrors skip_if_no_target).
+    if not (d / "patch.diff").is_file():
+        print(f"publish: {d.name} has no patch.diff (close / no-fix disposition) — "
+              "nothing to contribute; close the tracker item by hand.", file=sys.stderr)
+        return 0
+
     # Resolve the target from the brief (the contribution's where).
     repo_spec, base, slug = _resolve_target(d)
     if not repo_spec or not base:

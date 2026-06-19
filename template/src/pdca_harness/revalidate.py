@@ -22,7 +22,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from . import gates
+from . import gates, state
 from .config import Config
 
 
@@ -34,7 +34,11 @@ def revalidate(cfg: Config, d: Path, date: str) -> dict:
     touching the frozen ``check-gates.json`` / ``check-gates.md`` / §9.
     """
     frozen = json.loads((d / "check-gates.json").read_text(encoding="utf-8"))
-    fresh = gates.run_gates_dry(d, cfg)
+    # A close-disposition bundle (issue #60) was frozen with the N/A matrix and has no
+    # patch — re-running the real gates would apply a nonexistent patch and report a
+    # spurious delta. Re-gate it with the same close matrix so it confirms, not drifts.
+    fresh = (gates.run_close_gates_dry(d, cfg) if (d / state.CLOSE_MARKER).exists()
+             else gates.run_gates_dry(d, cfg))
 
     old_by = {_row_key(r): r for r in frozen.get("rows", [])}
     new_by = {_row_key(r): r for r in fresh.get("rows", [])}

@@ -28,6 +28,11 @@ DISCONTINUED = "DISCONTINUED"  # sign-off chose discontinue — deliberately aba
 # States where the driver does nothing (human work, or done).
 HALTED = {UNPLANNED, AWAITING_SIGNOFF, COMPLETE, DISCONTINUED}
 
+# Close-disposition fast path (issue #60): a bundle whose Plan concluded a close /
+# no-fix outcome never builds a patch. Its close marker is the Do artifact — the
+# symmetric stand-in for patch.diff — so the state machine reads it as "past Do".
+CLOSE_MARKER = "close-disposition"
+
 # §9 outcome token → bundle state. state owns the state names, so the mapping
 # lives here; signoff knows only the tokens (no import cycle).
 _OUTCOME_TO_STATE = {
@@ -43,7 +48,9 @@ def state(d: Path) -> str:
     """Return the bundle's state from the files present (docs 03 §state)."""
     if not (d / "brief.md").exists():
         return UNPLANNED
-    if not (d / "patch.diff").exists():
+    # Do is done when there's a patch — OR, on the close-disposition fast path, the
+    # close marker that stands in for it (a close bundle never builds a patch.diff).
+    if not (d / "patch.diff").exists() and not (d / CLOSE_MARKER).exists():
         return PLANNED
     if not (d / "check-gates.json").exists():
         return BUILT

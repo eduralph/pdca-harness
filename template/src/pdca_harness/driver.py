@@ -12,6 +12,7 @@ the ``brief.md`` is archived with it (state → UNPLANNED) for the re-authoring 
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -27,10 +28,14 @@ def _say(msg: str) -> None:
 def _headless_note(leaf) -> str:
     return " (headless Claude — no live output, may take minutes)" if leaf.mode == "command" else ""
 
-# Everything Do and Check write, i.e. everything downstream of brief.md.
+# Everything Do and Check write, i.e. everything downstream of brief.md. Includes the
+# close marker (issue #60) so an iterate archives it too — reopening a close bundle to a
+# fix path then clears the marker and runs the real Do+Check band.
 DOWNSTREAM_OF_BRIEF = [
     "patch.diff",
     "build-notes.md",
+    state.CLOSE_MARKER,
+    "MANUAL-VERIFICATION.md",
     "check-gates.json",
     "check-gates.md",
     "check-review.md",
@@ -41,14 +46,24 @@ DOWNSTREAM_OF_BRIEF = [
 def advance(d: Path, cfg: Config) -> None:
     """Run the one beat the bundle's current state calls for."""
     s = state.state(d)
+    close = _close_class(d, cfg)
     if s == state.PLANNED:
-        _say(f"→ {d.name}: Do — builder writing patch.diff + test{_headless_note(cfg.builder)}…")
-        leaves.do_build(d, cfg)  # leaf 1 — Do
+        if close:
+            _say(f"→ {d.name}: close disposition '{close}' — skipping builder leaf (no patch to build)…")
+            _do_close(d, cfg, close)  # write the close marker + breadcrumb instead of leaf 1
+        else:
+            _say(f"→ {d.name}: Do — builder writing patch.diff + test{_headless_note(cfg.builder)}…")
+            leaves.do_build(d, cfg)  # leaf 1 — Do
     elif s == state.BUILT:
-        _say(f"→ {d.name}: Check — running gates…")
-        gates.run_gates(d, cfg)  # deterministic gates
-        _say(f"→ {d.name}: Check — advisory reviewer{_headless_note(cfg.reviewer)}…")
-        leaves.run_review(d, cfg)  # leaf 2 — reviewer (advisory)
+        if close:
+            _say(f"→ {d.name}: close disposition — recording N/A gates, skipping reviewer leaf…")
+            gates.run_close_gates(d, cfg)  # deterministic N/A matrix, no gate subprocess
+            _close_review_note(d, close)   # stand-in for leaf 2 — close-confirm → §6
+        else:
+            _say(f"→ {d.name}: Check — running gates…")
+            gates.run_gates(d, cfg)  # deterministic gates
+            _say(f"→ {d.name}: Check — advisory reviewer{_headless_note(cfg.reviewer)}…")
+            leaves.run_review(d, cfg)  # leaf 2 — reviewer (advisory)
     elif s == state.CHECKED:
         _say(f"→ {d.name}: assembling SUMMARY…")
         assemble.assemble_summary(d, cfg)  # pure code → SUMMARY.md §1–8
@@ -70,6 +85,75 @@ def run_issue(d: Path, cfg: Config) -> str:
     while state.state(d) not in state.HALTED:
         advance(d, cfg)
     return state.state(d)
+
+
+# ----------------------------------------------------------------------------
+# Close-disposition fast path (issue #60) — skip the speculative build for a bundle
+# whose Plan already concluded a close / no-fix outcome. It elides the two model
+# leaves (the engine's only token spend); it does NOT decide the disposition — the
+# human confirms or overrides the close at sign-off (C6 forces a conscious confirm).
+# ----------------------------------------------------------------------------
+def _close_class(d: Path, cfg: Config) -> str:
+    """The close class for a bundle taking the fast path, or "" for the normal Do path.
+
+    Active iff the brief's Disposition hint matches a configured close class AND this is
+    the FIRST attempt (no ``iteration-v*`` archive). The first-attempt guard keeps it a
+    hint, not a gate: reopening to a fix path (iterate-do/-plan) archives the close marker
+    and leaves an iteration behind, so the next pass returns "" and runs the real build.
+    """
+    bp = d / "brief.md"
+    if not bp.exists() or list(d.glob("iteration-v*")):
+        return ""
+    return cfg.close_class(brief.disposition_hint(bp))
+
+
+def _do_close(d: Path, cfg: Config, close_class: str) -> None:
+    """Stand in for the Do builder leaf: write the close marker + an audit breadcrumb.
+
+    The marker is the bundle's Do artifact (state reads it as past Do). build-notes.md
+    records WHY no patch exists, so a frozen close bundle never looks like an incomplete
+    Do. A manual-verification close also seeds MANUAL-VERIFICATION.md for the human.
+    """
+    (d / state.CLOSE_MARKER).write_text(close_class + "\n", encoding="utf-8")
+    (d / "build-notes.md").write_text(
+        "# Build notes — NO PATCH (close disposition)\n\n"
+        f"Leaves skipped: disposition={close_class}. The Plan concluded a close / no-fix "
+        "outcome, so the builder and reviewer model leaves were NOT run — there is nothing "
+        "to build. The human confirms or overrides the close at sign-off; reopening to a "
+        "fix path (iterate-to-Do) re-enables the full Do+Check band.\n",
+        encoding="utf-8",
+    )
+    if _is_manual_verification(close_class):
+        tpl = cfg.templates_dir / "MANUAL-VERIFICATION.md.tpl"
+        dst = d / "MANUAL-VERIFICATION.md"
+        if tpl.exists() and not dst.exists():
+            shutil.copyfile(tpl, dst)
+
+
+def _close_review_note(d: Path, close_class: str) -> None:
+    """Stand in for the advisory reviewer leaf on a close bundle: write check-review.md.
+
+    No patch means nothing to review, but the human must still consciously confirm the
+    close. The ``- NEEDS-HUMAN —`` bullets parse into SUMMARY §6 (assemble._needs_human),
+    so the C6 accept-guard blocks accept until the human ticks them — confirming the close
+    or overriding it via iterate-to-Do.
+    """
+    lines = [
+        "# Advisory review — SKIPPED (close disposition)\n",
+        f"The reviewer leaf was skipped: this bundle's Plan concluded a close / no-fix "
+        f"disposition ({close_class}), so there is no patch to review.\n",
+        f"- NEEDS-HUMAN — Confirm the close disposition '{close_class}' (no patch was "
+        "built). Override to a fix path (iterate-to-Do) if the close is wrong.",
+    ]
+    if _is_manual_verification(close_class):
+        lines.append(
+            "- NEEDS-HUMAN — Complete MANUAL-VERIFICATION.md and record the verdict "
+            "(the manual check the gates cannot run).")
+    (d / "check-review.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _is_manual_verification(close_class: str) -> bool:
+    return "manual" in close_class.lower()
 
 
 # ----------------------------------------------------------------------------

@@ -126,6 +126,23 @@ class Revalidate(unittest.TestCase):
         rc = cli._revalidate(self.cfg, SimpleNamespace(issue_id="GHOST", date=None))
         self.assertEqual(rc, 1)
 
+    def test_close_bundle_revalidates_with_close_matrix(self) -> None:
+        # A frozen close-disposition bundle (no patch, N/A matrix) must re-gate with the
+        # SAME close matrix — running the real gates would apply a missing patch and drift.
+        d = self.cfg.bundle("CLOSE")
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** dup\n", encoding="utf-8")
+        (d / state.CLOSE_MARKER).write_text("duplicate\n", encoding="utf-8")
+        gates.run_close_gates(d, self.cfg)  # frozen N/A matrix
+        (d / "SUMMARY.md").write_text(
+            "## 9. Check sign-off\n- Outcome: accepted\n- By / date: t / 2026-06-04\n",
+            encoding="utf-8")
+        self.assertEqual(state.state(d), state.COMPLETE)
+        self.cfg.gates_checks = [_FAIL]  # a real gate that WOULD fail on a missing patch
+        result = revalidate.revalidate(self.cfg, d, "2026-06-12")
+        self.assertFalse(result["changed"])  # confirmed, not drifted
+        self.assertFalse(result["regression"])
+
     def test_act_index_surfaces_revalidation_delta(self) -> None:
         # A COMPLETE bundle carrying a revalidation delta shows it in the Act index,
         # so Act can tell a stale frozen FAIL from a real accepted failure.
