@@ -71,6 +71,15 @@ author_email:
   help: Primary author / maintainer email
   default: ""
 
+# License the rendered project declares (pyproject + NOTICE). The harness itself is
+# Apache-2.0; the rendered output carries no copyleft, so a permissive host can keep
+# its own policy. An SPDX identifier (e.g. Apache-2.0, MIT, BSD-3-Clause). The shipped
+# LICENSE file is the Apache-2.0 text — swap it if you choose a different license here.
+project_license:
+  type: str
+  help: SPDX license the rendered project declares (Apache-2.0 keeps the shipped LICENSE)
+  default: "Apache-2.0"
+
 # ----------------------------------------------------------------------------
 # Integration: tracker (docs 05 item 1)
 # ----------------------------------------------------------------------------

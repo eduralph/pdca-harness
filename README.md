@@ -116,7 +116,14 @@ See `template/PCDA/quality-cycle.md` for the model and the maturity ladder.
 
 Copyright © 2026 Eduard Ralph.
 
-pdca-harness is free software, licensed under the **GNU General Public License,
-version 3** ([LICENSE](LICENSE)) — use, study, modify, and redistribute it under
-the GPLv3; derivative works must also be GPLv3. The driver code and docs this
-template copies into a rendered project carry the GPLv3 into that project.
+pdca-harness is licensed under the **Apache License, Version 2.0**
+([LICENSE](LICENSE), [NOTICE](NOTICE)) — a permissive license. The driver code and
+templates this project copies into a rendered repo are Apache-2.0, so the rendered
+output carries no copyleft and is compatible with a permissive license policy (e.g. a
+`cargo-deny`-style allowlist); a host repo keeps its own license. A rendered project
+declares its own license via the `project_license` copier question (default
+`Apache-2.0`).
+
+Contributions are accepted under Apache-2.0 and gated on the
+[Developer Certificate of Origin](DCO) — sign off commits with `git commit -s`. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
