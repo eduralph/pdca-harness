@@ -7,7 +7,10 @@
 
 - **Slug:** <short-kebab-slug>
 - **Defect:** <what is wrong — the observable problem>
-- **Success criterion:** <the observable condition that means it is fixed>
+- **Success criterion:** <the observable condition that means it is fixed — must be
+  demonstrable by C4-verify (the patch applied in isolation at Check). Do NOT scope this
+  to a T3 whole-suite pass or a fork-CI green: those only clear after the fix is merged,
+  not at Check. Use them as supplementary evidence only.>
 - **Invariant to restore:** <the property the fix must make true, stated over the
   defect CATEGORY, not the repro file. NOT a mechanism. Cite its source (language spec /
   framework docs / internal rule) per `docs/principles.md` §3–§6. SELF-TEST: could Do
