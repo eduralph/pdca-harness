@@ -48,7 +48,11 @@ not push, branch, or open a PR yourself.**
 
 2. **`pr-description.md`** — the PR body (see `templates/pr-description.md.tpl`): the
    sections **Root cause / Fix / Verified against / Test**, citing `path:lines` on the
-   **target branch**, and referencing the issue.
+   **target branch**. Keep the template's trailing **tracker-reference line** (the same
+   `[tracker].issue_trailer` form as the commit, e.g. `Fixes #<id>`): the contribution
+   gate lints commit-msg.txt and the PR body **independently**, so a ticketed fix needs
+   the id in BOTH — the commit trailer alone does not satisfy it. For a declared-ticketless
+   fix (`--no-issue` / non-core), OMIT the line and state the origin in-body instead.
 
 ## How you work
 

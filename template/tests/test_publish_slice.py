@@ -355,5 +355,21 @@ class PublishSlice(unittest.TestCase):
         self.assertEqual(row2["path_line"].strip(), "BASE=")
 
 
+class ContributionTemplates(unittest.TestCase):
+    """Both publisher templates must scaffold the tracker reference as a first-class
+    line (issue #79) — the contribution gate lints commit-msg and PR body
+    independently, so a slot missing from one reliably drops the id there."""
+
+    def test_pr_description_has_tracker_reference_slot(self) -> None:
+        commit_tpl = (TEMPLATES / "commit-msg.txt.tpl").read_text(encoding="utf-8")
+        pr_tpl = (TEMPLATES / "pr-description.md.tpl").read_text(encoding="utf-8")
+        # The commit template has always had the reference line; the PR body now mirrors it.
+        self.assertIn("Fixes #<id>", commit_tpl)
+        self.assertIn("Fixes #<id>", pr_tpl)
+        # It sits after the Test section, with guidance on the ticketless case.
+        self.assertLess(pr_tpl.index("## Test"), pr_tpl.index("Fixes #<id>"))
+        self.assertIn("declared-ticketless", pr_tpl)
+
+
 if __name__ == "__main__":
     unittest.main()
