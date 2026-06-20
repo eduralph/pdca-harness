@@ -139,7 +139,10 @@ def publish(
         # (checkout -B off upstream + the _check_repo guard), so `add --all` picks up
         # exactly the patch's files (modified and added), nothing stray.
         git("add", "--all"),
-        git("commit", "-F", str((d / COMMIT_MSG).resolve())),
+        # `-s` adds the Signed-off-by trailer (DCO) from the committer identity in the
+        # target checkout, so a DCO-gated host accepts the PR by construction; harmless
+        # on non-DCO hosts (issue #81).
+        git("commit", "-s", "-F", str((d / COMMIT_MSG).resolve())),
         git("push", "-u", "origin", branch),
     ]
     # A fork-based PR's --head must be OWNER:BRANCH — `gh` resolves a bare branch name
@@ -239,7 +242,8 @@ def _publish_stacked(
         git("apply", "--check", patch),  # the fix must still fit the branch it was tested on
         git("apply", patch),
         git("add", "--all"),
-        git("commit", "-F", str((d / COMMIT_MSG).resolve())),
+        # `-s` adds the Signed-off-by trailer (DCO) — same as the new-PR path (issue #81).
+        git("commit", "-s", "-F", str((d / COMMIT_MSG).resolve())),
         git("push", remote, f"HEAD:{branch}"),
     ]
 

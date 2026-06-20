@@ -142,6 +142,19 @@ class PublishSlice(unittest.TestCase):
         self.assertIn("add --all", out)        # stages new files (the regression test)
         self.assertNotIn("commit -aF", out)    # never the modified-only commit
 
+    def test_commit_is_signed_off_both_paths(self) -> None:
+        # DCO (#81): both the new-PR and stack-mode commits carry `-s`, so the
+        # Signed-off-by trailer is present and a DCO-gated host accepts the PR.
+        _bundle(self.cfg, "DCO", brief_body=_FIX_BRIEF, accepted=True)
+        _bundle(self.cfg, "DCOSTK", brief_body=_STACK_BRIEF, accepted=True)
+        for iid in ("DCO", "DCOSTK"):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                publish.publish(self.cfg, iid, dry_run=True)
+            out = buf.getvalue()
+            self.assertIn("commit -s -F", out, f"{iid}: commit not signed off")
+            self.assertNotIn("commit -F", out)  # the unsigned form is gone
+
     def test_pr_head_is_fork_owner_qualified(self) -> None:
         """Regression (#23b): a fork-based PR's --head must be OWNER:BRANCH, else gh
         resolves the branch against the base repo and fails 'Head ref must be a
