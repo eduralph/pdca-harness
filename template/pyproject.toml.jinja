@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "{{ project_slug }}-pdca-harness"
 version = "0.1.0"
 description = "PDCA quality-cycle harness for {{ project_name }}"
+license = "{{ project_license }}"
 requires-python = ">=3.11"
 {% if author_name -%}
 authors = [{ name = "{{ author_name }}"{% if author_email %}, email = "{{ author_email }}"{% endif %} }]

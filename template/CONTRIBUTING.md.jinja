@@ -1,0 +1,24 @@
+# Contributing to {{ project_name }}
+
+This project is licensed under the [{{ project_license }}](LICENSE) license;
+contributions are accepted under the same license.
+
+## Developer Certificate of Origin (sign-off)
+
+Contributions are gated on the [Developer Certificate of Origin](DCO) (DCO 1.1).
+By signing off you certify the DCO's terms for your contribution. Sign off every
+commit with:
+
+```bash
+git commit -s
+```
+
+This appends a `Signed-off-by: Your Name <you@example.com>` trailer. Amend a commit
+that's missing it with `git commit --amend -s`.
+
+## Quality cycle
+
+This project runs the PDCA quality cycle (Plan · Do · Check · Act). Read
+`PCDA/quality-cycle/` for the model and `docs/INTEGRATION.md` for this repo's
+concretizations. Keep the deterministic Check gates green before contributing — see
+`pdca gates` and `.github/` for how they re-run at the merge boundary.

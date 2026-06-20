@@ -10,7 +10,7 @@ meta:
   title: "PDCA Harness — verified AI contribution, one quality cycle at a time"
   description: "A Copier template for an AI-driven PDCA quality-cycle harness: Plan, Do, Check, Act over every contribution, with a human at the three touch points that matter."
   og_title: "PDCA Harness — verified AI contribution, one quality cycle at a time"
-  og_description: "Turn each AI contribution into one PDCA cycle: a precise brief, an automated build, a deterministic red→green Check, and a human sign-off. Copier template, GPLv3."
+  og_description: "Turn each AI contribution into one PDCA cycle: a precise brief, an automated build, a deterministic red→green Check, and a human sign-off. Copier template, Apache-2.0."
 
 hero:
   status: "Iterating your way to a better process, one contribution at a time."
