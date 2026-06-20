@@ -65,6 +65,10 @@ issue_trailer = "Fixes #{id}"
 [publisher]
 fix_branch_pattern = "fix/{id}-{slug}"
 feature_branch_pattern = "enhancement/{id}-{slug}"
+# The remote the new-PR path branches the fix off of (issue #83). A fork branches off
+# `upstream` (canonical) and pushes to `origin` (the fork); an own-repo target has only
+# `origin`. Defaulted from contribution_model; change it if your remotes differ.
+base_remote = "{{ 'upstream' if contribution_model == 'fork' else 'origin' }}"
 
 [publisher.checkouts]
 # "<org/repo>" = "../<checkout-dir>"   # only the exceptions to the sibling default

@@ -82,6 +82,11 @@ class Config:
     # Branch patterns are .format(id=, slug=) strings; issue_trailer is .format(id=).
     fix_branch_pattern: str = "fix/{id}-{slug}"
     feature_branch_pattern: str = "enhancement/{id}-{slug}"
+    # The remote the new-PR path branches the fix off of (issue #83). A fork branches off
+    # ``upstream`` (the canonical repo); an own-repo target has only ``origin``. The
+    # rendered pdca.toml sets it per contribution_model; default ``upstream`` preserves the
+    # prior fork behavior for a config lacking the key.
+    base_remote: str = "upstream"
     issue_trailer: str = "Fixes #{id}"  # commit/PR trailer; "" → none enforced
     repo_checkouts: dict[str, str] = field(default_factory=dict)  # repo_spec → local path
     gates_checks: list[dict] = field(default_factory=list)
@@ -199,6 +204,7 @@ class Config:
             notes_cmd=tracker.get("notes_cmd", ""),
             fix_branch_pattern=publisher_cfg.get("fix_branch_pattern", "fix/{id}-{slug}"),
             feature_branch_pattern=publisher_cfg.get("feature_branch_pattern", "enhancement/{id}-{slug}"),
+            base_remote=publisher_cfg.get("base_remote", "upstream"),
             issue_trailer=tracker.get("issue_trailer", "Fixes #{id}"),
             repo_checkouts=dict(publisher_cfg.get("checkouts", {})),
             gate_target_default=gates.get("target_default", ""),
