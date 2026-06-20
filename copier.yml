@@ -27,6 +27,11 @@ _exclude:
   # PCDA/ is plain-Markdown reference docs (readable in any viewer). It MAY also be
   # opened as an Obsidian vault; if so, don't render that optional local vault config.
   - ".obsidian"
+  # Host-governance opt-outs (issue #67): a host with its own CI / merge governance
+  # can omit the shipped equivalents. _exclude is Jinja-templated; an empty entry
+  # matches nothing. Globs cover the source name with or without the .jinja suffix.
+  - "{% if not ship_ci_workflow %}.github/workflows/check-gates.yml*{% endif %}"
+  - "{% if not ship_merge_guard %}.claude/hooks/builder_guard.py*{% endif %}"
 # Keep the default answers filename (.copier-answers.yml) so `copier update`
 # finds it with no extra flag. The answers-file template is shipped at
 # template/{{ _copier_conf.answers_file }}.jinja.
@@ -164,3 +169,18 @@ gates_runner:
   type: str
   help: "External gate runner to delegate to (e.g. 'cargo xtask'); blank = inline gate commands"
   default: ""
+
+# ----------------------------------------------------------------------------
+# Compose with the host's CI / merge governance (docs 05; issue #67). PDCA should
+# SUPPLEMENT a host's existing PR/issue gates, not duplicate them. Keep these on
+# (default) for a standalone project; turn one off when the host already provides it.
+# ----------------------------------------------------------------------------
+ship_ci_workflow:
+  type: bool
+  help: Ship the GitHub Actions merge re-gate (.github/workflows/check-gates.yml)? Off if the host runs its own CI.
+  default: true
+
+ship_merge_guard:
+  type: bool
+  help: Ship the builder/publisher STOP-discipline PreToolUse hook (builder_guard.py)? Off if host governance enforces it.
+  default: true

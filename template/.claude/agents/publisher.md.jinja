@@ -8,6 +8,7 @@ description: >-
   does not push or open PRs. Invoke as Check's contribution arm, not a separate beat.
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: inherit
+{% if ship_merge_guard %}
 hooks:
   PreToolUse:
     - matcher: Bash
@@ -17,6 +18,7 @@ hooks:
           # block `gh pr ready` / `gh pr merge` here too. Rooted at the project dir
           # (the leaf's Bash cwd is the project root).
           command: python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/builder_guard.py"
+{% endif %}
 ---
 
 # Publisher (the publish step of Check — interactive)

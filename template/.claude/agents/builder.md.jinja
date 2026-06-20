@@ -7,6 +7,7 @@ description: >-
   the Do leaf; not for Plan, Check, or Act.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: inherit
+{% if ship_merge_guard %}
 hooks:
   PreToolUse:
     - matcher: Bash
@@ -16,6 +17,7 @@ hooks:
           # bundle dir (results/issue_<id>/), so a relative path resolved there,
           # did not exist, and the failing hook blocked ALL Bash (exit 2).
           command: python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/builder_guard.py"
+{% endif %}
 ---
 
 # Builder (Do beat)
