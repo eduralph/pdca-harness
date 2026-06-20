@@ -312,6 +312,64 @@ class ConfiguredGates(unittest.TestCase):
         self.assertNotIn("b", {r["rule_id"] for r in result["rows"]})
 
 
+class DelegatedGates(unittest.TestCase):
+    """Delegated gates (issue #67): a host runner single-sources the gates; a check's
+    bare `subcmd` runs as `<runner> <subcmd>`, so PDCA orchestrates without re-declaring."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _cfg(self, checks: list[dict], runner: str = "") -> Config:
+        cfg = _stub_config(self.tmp)
+        cfg.gates_checks = checks
+        cfg.gates_runner = runner
+        return cfg
+
+    def test_subcmd_resolved_against_runner(self) -> None:
+        # `subcmd` is run as `<runner> <subcmd>`; the resolved command is the oracle.
+        cfg = self._cfg(
+            [{"id": "ci", "tier": "T1", "label": "host ci", "subcmd": "ok-step",
+              "gating": True, "scope": "repo"}],
+            runner="echo")
+        result = gates.run_working_tree(cfg)
+        row = next(r for r in result["rows"] if r["rule_id"] == "ci")
+        self.assertEqual(row["result"], "pass")           # `echo ok-step` exits 0
+        self.assertEqual(row["oracle"], "echo ok-step")   # runner prefixed
+
+    def test_missing_runner_is_a_clear_failing_row_not_a_crash(self) -> None:
+        cfg = self._cfg(
+            [{"id": "x", "tier": "T1", "label": "host ci", "subcmd": "build",
+              "gating": True, "scope": "repo"}],
+            runner="definitely-not-a-real-binary-zzz xtask")
+        result = gates.run_working_tree(cfg)  # must not raise
+        row = next(r for r in result["rows"] if r["rule_id"] == "x")
+        self.assertEqual(row["result"], "fail")
+        self.assertIn("not found on PATH", row["path_line"])
+
+    def test_subcmd_without_runner_is_flagged(self) -> None:
+        cfg = self._cfg(
+            [{"id": "y", "tier": "T1", "label": "host ci", "subcmd": "build",
+              "gating": True, "scope": "repo"}],
+            runner="")  # subcmd declared but no runner configured
+        result = gates.run_working_tree(cfg)
+        row = next(r for r in result["rows"] if r["rule_id"] == "y")
+        self.assertEqual(row["result"], "fail")
+        self.assertIn("runner is unset", row["path_line"])
+
+    def test_inline_cmd_unaffected_by_runner(self) -> None:
+        # A full `cmd` still runs verbatim even when a runner is configured.
+        cfg = self._cfg(
+            [{"id": "z", "tier": "T1", "label": "inline", "cmd": "true",
+              "gating": True, "scope": "repo"}],
+            runner="echo")
+        row = next(r for r in gates.run_working_tree(cfg)["rows"] if r["rule_id"] == "z")
+        self.assertEqual(row["result"], "pass")
+        self.assertEqual(row["oracle"], "true")  # not prefixed with the runner
+
+
 class BuilderGuard(unittest.TestCase):
     """The PreToolUse hook enforcing the builder's STOP discipline."""
 

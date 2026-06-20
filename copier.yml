@@ -152,3 +152,14 @@ leaves_mode:
     Stubs (offline; recommended to start): stub
     Real commands: command
   default: stub
+
+# ----------------------------------------------------------------------------
+# Integration: gates (docs 04). A host that already single-sources its gates in its
+# own runner (e.g. `cargo xtask`, `make`, `just`) can DELEGATE to it: set a runner and
+# each gate names a bare sub-command, so PDCA orchestrates the host runner instead of
+# re-declaring the gates (issue #67). Leave blank to declare gate commands inline.
+# ----------------------------------------------------------------------------
+gates_runner:
+  type: str
+  help: "External gate runner to delegate to (e.g. 'cargo xtask'); blank = inline gate commands"
+  default: ""
