@@ -146,6 +146,7 @@ def do_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
 def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
     fix_tpl = cfg.templates_dir / "brief.md.tpl"
     geps_tpl = cfg.templates_dir / "design-proposal.md.tpl"
+    pointer_tpl = cfg.templates_dir / "plan-pointer.md.tpl"
     issue_id = d.name.removeprefix("issue_")
     tracker_csv = csv or cfg.tracker_export_csv
     notes = d / "notes.json"
@@ -178,9 +179,11 @@ def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
         f"to {fix_tpl} — it fits bug fixes AND ordinary new functionality. Use {geps_tpl} "
         "(a design proposal) ONLY for the exception: a change significant enough to "
         "warrant a proposal (major architecture / API / UX). Not every feature is a "
-        "design proposal — when in doubt use the normal brief. Keep the parsed "
-        "`- **Label:** value` field shape; resolve the repo + branch target per "
-        "INTEGRATION §2. One bundle = one brief.md. Plan only."
+        f"design proposal — when in doubt use the normal brief. Use {pointer_tpl} when the "
+        "plan ALREADY lives in a host artifact (an ADR / proposal / normative spec): the "
+        "brief then POINTS at that document (a `Planning artifact:` reference) instead of "
+        "restating it. Keep the parsed `- **Label:** value` field shape; resolve the repo + "
+        "branch target per INTEGRATION §2. One bundle = one brief.md. Plan only."
     )
 
 
@@ -286,7 +289,9 @@ def _build_prompt(d: Path) -> str:
         f"You are the Do builder. Read {d}/brief.md. Build to satisfy its **Success "
         "criterion** (the real end result), not a narrower proxy — an item is done only "
         "when that end result holds, proven red→green; a green mechanical check on "
-        "something adjacent is not done. If brief.md carries an '## Iteration N — "
+        "something adjacent is not done. If brief.md names a **Planning artifact** (an "
+        "ADR / proposal / spec), READ that document — it is the authoritative plan and the "
+        "brief only points at it; build to it and cite it. If brief.md carries an '## Iteration N — "
         "carry-forward' block, address it (the previous attempt's rationale + failing "
         "gate) and do NOT repeat the rejected approach. Produce, in the bundle directory "
         f"{d}: (1) patch.diff — a unified diff against the brief's target branch; "

@@ -49,6 +49,16 @@ def disposition_hint(brief_path: Path) -> str:
     return field(brief_path, "disposition hint", "disposition")
 
 
+def planning_artifact(brief_path: Path) -> str:
+    """The host planning artifact this brief points at, or "" if it's a self-contained brief.
+
+    The optional ``- **Planning artifact:** <path|url>`` field (issue #67, ``plan-pointer``
+    template): a reference to the host's OWN plan (an ADR / proposal / spec) that Do treats
+    as authoritative. Absent ⇒ an ordinary brief that carries its own spec.
+    """
+    return field(brief_path, "planning artifact", "plan artifact", "plan source")
+
+
 def test_files(brief_path: Path) -> list[Path]:
     """Paths named by the brief's test-requirement field, relative to the bundle.
 

@@ -19,6 +19,7 @@ from pdca_harness import brief, cli, driver, flow, leaves, queue, signoff, state
 from pdca_harness.config import Config, LeafConfig
 
 DESIGN_TPL = Path(__file__).resolve().parents[1] / "templates" / "design-proposal.md.tpl"
+POINTER_TPL = Path(__file__).resolve().parents[1] / "templates" / "plan-pointer.md.tpl"
 
 
 def _stub_config(root: Path) -> Config:
@@ -526,6 +527,42 @@ class DesignProposalBrief(unittest.TestCase):
         summary = (self.d / "SUMMARY.md").read_text(encoding="utf-8")
         self.assertIn("Defect / goal:", summary)               # assemble fallback rendered
         self.assertIn("the capability this adds", summary)     # the Goal value, not blank
+
+
+class PlanPointerBrief(unittest.TestCase):
+    """A pointer-brief (issue #67): the Plan is a reference to the host's own planning
+    artifact (ADR / proposal / spec), not a brief authored here. It carries the same
+    parsed-field contract, so the driver treats it as a normal PLANNED brief."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+        self.d = self.cfg.bundle("ADR")
+        self.d.mkdir(parents=True)
+        shutil.copyfile(POINTER_TPL, self.d / "brief.md")  # the plan-pointer template
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_template_keeps_driver_parsed_fields(self) -> None:
+        fields = brief.parse_fields(self.d / "brief.md")
+        for label in ("slug", "success criterion", "repo + branch target", "test file",
+                      "planning artifact"):
+            self.assertIn(label, fields, f"plan-pointer template lost parsed field: {label}")
+
+    def test_planning_artifact_reader(self) -> None:
+        # brief.planning_artifact reads the pointer; a self-contained brief returns "".
+        self.assertTrue(brief.planning_artifact(self.d / "brief.md"))
+        plain = self.cfg.bundle("PLAIN")
+        plain.mkdir(parents=True)
+        (plain / "brief.md").write_text("- **Slug:** x\n", encoding="utf-8")
+        self.assertEqual(brief.planning_artifact(plain / "brief.md"), "")
+
+    def test_pointer_brief_flows_to_signoff(self) -> None:
+        # A pointer-brief is PLANNED and drives Do→Check→sign-off offline like any brief.
+        self.assertEqual(state.state(self.d), state.PLANNED)
+        self.assertEqual(driver.run_issue(self.d, self.cfg), state.AWAITING_SIGNOFF)
+        self.assertTrue((self.d / "SUMMARY.md").exists())
 
 
 _TOY_BRIEF = (
