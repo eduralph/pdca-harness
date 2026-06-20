@@ -17,8 +17,10 @@ driver enforces this by not passing the file; do not ask for it.
 
 - Re-run the asserted evidence: stash the fix → confirm red; unstash → confirm
   green. Re-run the validator / scanners yourself. Trust re-runs, not claims.
-- Re-check that every `path:line` the patch cites resolves on the target branch;
-  drop any finding that does not ground.
+- Re-check that every `path:line` the patch cites resolves on the **target source at
+  `$PDCA_TARGET`** (the driver resolves it from the brief's target). Ground only there —
+  do **not** search other checkouts on the machine; if `$PDCA_TARGET` is unset, ground
+  against `patch.diff` alone. Drop any finding that does not ground.
 - Emit per item `PASS / FAIL / NEEDS-HUMAN` + a one-line rationale + a path:line.
   No free-form prose verdict.
 - You have **execute** access (run tests/validator, git stash/unstash) and **no
@@ -30,7 +32,8 @@ These are structurally undecidable from the artifacts — flag them, don't guess
 
 - Validation fitness-to-purpose ("is this the right thing at all").
 - Symptom-vs-root-cause when the bug's mechanism is contested.
-- Upstream-isn't-ahead *semantic* match (does an open rewrite PR supersede this).
+- Superseded-by: does other open work *semantically* supersede this (e.g. an upstream
+  rewrite PR, or another in-flight change)?
 - Scope-creep / Plan re-entry calls (diff exceeds the brief's scope but looks plausible).
 - Visual sign-off / manual-repro outcomes.
 - The project's enumerated human-only items (INTEGRATION.md §4). **TODO: list them.**

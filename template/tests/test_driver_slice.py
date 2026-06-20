@@ -224,6 +224,39 @@ class CloseDispositionFastPath(unittest.TestCase):
         self.assertEqual(self.cfg.close_class("likely-close"), "")
 
 
+class ReviewerTargetAccess(unittest.TestCase):
+    """The reviewer grounds citations on the brief's target checkout via $PDCA_TARGET
+    (issue #75) — single-sourced from the brief, so it doesn't wander into other
+    checkouts on the machine."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+        self.d = self.cfg.bundle("T")
+        self.d.mkdir(parents=True)
+        (self.d / "brief.md").write_text(
+            "- **Slug:** x\n- **Repo + branch target:** org/myrepo @ main\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_resolves_target_checkout_when_present(self) -> None:
+        self.cfg.repo_checkouts = {"org/myrepo": "target"}  # → <root>/target
+        self.assertIsNone(leaves._reviewer_target(self.d, self.cfg))  # not on disk yet
+        (self.cfg.root / "target").mkdir()
+        self.assertEqual(leaves._reviewer_target(self.d, self.cfg),
+                         (self.cfg.root / "target").resolve())
+
+    def test_no_target_when_brief_has_no_target(self) -> None:
+        (self.d / "brief.md").write_text("- **Slug:** x\n", encoding="utf-8")
+        self.assertIsNone(leaves._reviewer_target(self.d, self.cfg))
+
+    def test_review_prompt_grounds_on_pdca_target(self) -> None:
+        # The prompt names $PDCA_TARGET and forbids wandering to other checkouts.
+        self.assertIn("$PDCA_TARGET", leaves._REVIEW_PROMPT)
+        self.assertIn("do NOT search other checkouts", leaves._REVIEW_PROMPT)
+
+
 class AdvisoryReviewResilience(unittest.TestCase):
     """A failed/interrupted reviewer must degrade to a §6 NEEDS-HUMAN, never crash
     the deterministic spine (the review is advisory, not a gating artifact)."""

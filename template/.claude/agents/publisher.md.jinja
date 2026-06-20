@@ -58,10 +58,14 @@ not push, branch, or open a PR yourself.**
   `cd <checkout> && …` (`git -C` is the safe idiom).
 - Resolve the branch target per INTEGRATION §2. One logical fix per PR; do not invent
   scope the brief didn't accept.
-- Follow `docs/fork-discipline.md` §1–§2: the contribution branches from
-  `upstream/<base>` (not the fork's drifted branch), the PR is **draft-only** and the
-  human marks it ready, and the deterministic `pdca publish` performs the push. Write
-  the commit-msg/PR prose to match the target; do not push or open the PR yourself.
+- The contribution branches from the brief's **target branch** (per INTEGRATION §2),
+  the PR is **draft-only** and the human marks it ready, and the deterministic `pdca
+  publish` performs the push. Write the commit-msg/PR prose to match the target; do not
+  push or open the PR yourself.
+{% if contribution_model == "fork" %}
+- This is a fork contribution — branch from `upstream/<base>` (not the fork's drifted
+  branch); see `docs/fork-discipline.md` §1–§2.
+{% endif %}
 
 ## Boundaries
 
