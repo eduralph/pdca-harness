@@ -107,6 +107,22 @@ List every project-specific script the cycle invokes (role → path + invocation
 - **External-contribution flow differences:** TODO / none
 - **MAINTAINERS file:** TODO / none
 
+### Composing with the host's CI / PR governance (issue #67)
+
+PDCA **supplements** your existing PR/issue governance; it does not replace it. Map
+the harness onto what your host already enforces:
+
+| Host gate (governance layer) | PDCA equivalent (supplement) | How they compose |
+|---|---|---|
+| require-linked-issue on PRs | `[tracker].issue_trailer` (`Fixes #{id}`) in the publish commit/PR | The trailer satisfies the host's linked-issue rule; `init from brief` maps onto an issue that already passes it. |
+| DCO / append-only-doc / ready-mark policy | builder/publisher STOP-discipline (`builder_guard.py` PreToolUse hook) | The hook is a *backstop* that blocks `gh pr ready` / `gh pr merge` for the leaves; your host policy is the authority. |
+| Your own CI (`cargo xtask ci`, etc.) | `pdca gates --working-tree` merge re-gate workflow | Delegate gates to your runner (§4) so both run the *same* checks — no second definition. |
+
+If the host already provides one of these, omit the shipped equivalent at render time:
+`ship_ci_workflow = false` drops `.github/workflows/check-gates.yml`; `ship_merge_guard
+= false` drops the `builder_guard.py` hook (and its agent wiring). Both default on for a
+standalone project.
+
 ## 11. Per-repo P-/D-/C-/A- extensions
 None today. Add repo-prefixed rules (e.g. `{{ project_slug }}-C7`) that *tighten
 or add to* a generic rule — never weaken one — as running cycles surface them.
