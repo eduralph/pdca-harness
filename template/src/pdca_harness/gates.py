@@ -33,6 +33,8 @@ where the C6 accept-guard forces the human to clear it before sign-off.
 from __future__ import annotations
 
 import json
+import shlex
+import shutil
 import sys
 from pathlib import Path
 
@@ -171,15 +173,42 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
                       f"(target={chk.get('target')}, bundle labels {set(labels)})",
                       file=sys.stderr, flush=True)
             continue
-        configured.append(_run_one(chk, cwd=cwd, bundle=bundle))
+        configured.append(_run_one(chk, cwd=cwd, bundle=bundle, runner=cfg.gates_runner))
     # Overlay the configured gate results onto the complete 5/5/1 matrix.
     return _assemble_matrix(configured, stub=False)
 
 
-def _run_one(chk: dict, *, cwd: Path, bundle: Path | None) -> dict:
-    cmd = chk.get("cmd", "")
+def _delegated_cmd(chk: dict, runner: str) -> tuple[str, str]:
+    """Resolve a check's command. A check may declare a bare ``subcmd`` (issue #67)
+    delegated to the host's single-sourced ``[gates] runner`` (e.g. ``cargo xtask``),
+    so PDCA orchestrates the host runner without re-declaring the gate; or a full ``cmd``
+    (which may itself be ``cargo xtask ci`` — wholesale delegation). Returns
+    ``(cmd, error)``: a non-empty ``error`` is a misconfiguration to surface as a fail
+    row (a ``subcmd`` with no runner, or a runner binary missing from PATH)."""
+    subcmd = chk.get("subcmd", "")
+    if not subcmd:
+        return chk.get("cmd", ""), ""
+    if not runner:
+        return "", "check declares 'subcmd' but [gates] runner is unset"
+    first = shlex.split(runner)[0] if runner.strip() else ""
+    # A clear error beats a cryptic shell failure when the host runner isn't installed.
+    if first and not first.startswith((".", "/")) and shutil.which(first) is None:
+        return "", f"delegated runner '{first}' not found on PATH — install it or fix [gates].runner"
+    return f"{runner} {subcmd}", ""
+
+
+def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "") -> dict:
+    cmd, cmd_error = _delegated_cmd(chk, runner)
     gating = bool(chk.get("gating", True))
     label = f"{chk.get('id', '')}: {chk.get('label', '')}".strip(": ")
+    if cmd_error:
+        # Misconfigured delegation — surface as a failing row with a fix hint, never crash.
+        print(f"  · gate {label}: {cmd_error}", file=sys.stderr, flush=True)
+        return _row(
+            f"{chk.get('tier', '?')} {chk.get('label', chk.get('id', ''))}",
+            "fail", oracle=chk.get("subcmd", "") or cmd, rule_id=chk.get("id", ""),
+            path_line=cmd_error[:120], gating=gating, element=chk.get("tier", ""),
+        )
     env = {"PDCA_BUNDLE": str(bundle)} if bundle is not None else None
     # Stack mode (issue #54): when the brief names an existing PR's head to stack onto,
     # expose it as PDCA_BASE so the verify/repro gate establishes red→green on THAT branch

@@ -66,6 +66,28 @@ They become NEEDS-HUMAN items.
 > *new* failure is `[delta]` (your fix may have caused it). You'll see a `[delta]`
 > bite in [step 06](06-signoff.md).
 
+### Delegating to a host runner
+
+If your project already single-sources its gates in its own runner (`cargo xtask`,
+`make`, `just`, …), don't re-declare them in `pdca.toml` — **delegate**. Set a runner
+and give each check a bare `subcmd`:
+
+```toml
+[gates]
+runner = "cargo xtask"
+checks = [
+  { id = "C4-verify", tier = "C4", label = "fix verified red->green", subcmd = "verify", gating = true,  scope = "bundle" },
+  { id = "T3-suite",  tier = "T3", label = "runtime suite",           subcmd = "test",   gating = false, scope = "repo" },
+]
+```
+
+PDCA runs `cargo xtask verify` / `cargo xtask test` and maps the results onto the
+5/5/1 — the host runner stays the single source of truth; PDCA only orchestrates it.
+A full `cmd` (e.g. `cmd = "cargo xtask ci"`) still works for wholesale delegation. A
+missing runner surfaces as a clear failing row (`runner '…' not found on PATH`), never
+a crash. Set it at render time with the `gates_runner` copier question, or later in
+`pdca.toml`.
+
 ## 2. Reviewer — the decorrelated second opinion
 
 Next the `reviewer` leaf runs against `{patch.diff, test, brief.md,

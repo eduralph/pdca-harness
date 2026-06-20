@@ -85,6 +85,10 @@ class Config:
     issue_trailer: str = "Fixes #{id}"  # commit/PR trailer; "" → none enforced
     repo_checkouts: dict[str, str] = field(default_factory=dict)  # repo_spec → local path
     gates_checks: list[dict] = field(default_factory=list)
+    # Delegated gates (issue #67): a host runner that single-sources its own gates
+    # (e.g. "cargo xtask"). A check's bare ``subcmd`` is run as ``<runner> <subcmd>``, so
+    # PDCA orchestrates the host runner instead of re-declaring the gates. "" ⇒ inline only.
+    gates_runner: str = ""
     # Target-aware gate selection (docs 04). A check may carry ``target`` (a label or
     # list); it runs iff its labels are a SUBSET of the bundle's label set. The bundle is
     # classified from its brief on two axes: a PRIMARY one (``gate_target_match``: label →
@@ -135,6 +139,7 @@ class Config:
         leaves = data.get("leaves", {})
         gates = data.get("gates", {})
         gates_checks = list(gates.get("checks", []))
+        gates_runner = gates.get("runner", "")
         # Additive target flags: label → {field, substring}. A bare string is shorthand
         # for the "Repo + branch target" field (so flags and the primary axis can share it).
         gate_target_flags = {
@@ -207,6 +212,7 @@ class Config:
             act=leaf("act"),
             author=data.get("project", {}).get("author", ""),
             gates_checks=gates_checks,
+            gates_runner=gates_runner,
             lanes=lanes,
             close_dispositions=close_dispositions,
         )

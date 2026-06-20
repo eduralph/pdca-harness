@@ -192,6 +192,22 @@ argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
 # full suite — the full suite mixes green tests with known-bug repros, so it is a
 # characterization, not a pass/fail signal. Cite each tier's rules back to the
 # project's normative ruleset (docs/INTEGRATION.md §4) so the gate is auditable.
+#
+# DELEGATED GATES (issue #67). If your project already single-sources its gates in its
+# own runner, point `runner` at it and give each check a bare `subcmd` instead of a full
+# `cmd`; PDCA runs `<runner> <subcmd>` and treats the host runner as the source of truth
+# (it never re-declares the gates). A missing runner surfaces as a clear failing row, not
+# a crash. A full `cmd` (e.g. `cmd = "cargo xtask ci"`) still works for wholesale delegation.
 [gates]
+{% if gates_runner %}
+# Delegated to the host runner — PDCA orchestrates it, the host owns the gate definitions.
+runner = "{{ gates_runner }}"
+checks = [
+  # Map the host's named sub-gates onto the 5/5/1 tiers. Each runs `{{ gates_runner }} <subcmd>`.
+  # { id = "C4-verify", tier = "C4", label = "fix verified red->green", subcmd = "verify", gating = true, scope = "bundle" },
+  # { id = "T3-suite",  tier = "T3", label = "runtime suite (baseline)", subcmd = "test",   gating = false, scope = "repo" },
+]
+{% else %}
 checks = []
+{% endif %}
 
