@@ -10,11 +10,12 @@
 #                   open Claude in your terminal — use a real terminal. Optional:
 #                   ACT=1 also runs the cross-cycle Act review; BY=<name> overrides
 #                   the §9 attribution (defaults to the project author).
-#   make batch IDS="123 456"
+#   make batch IDS="123 456" [PLAN=1] [CSV=…]
 #                   drive issues that are ALREADY briefed through the full cycle
 #                   (Do → Check → sign-off → publish → Act) — no Plan beat. Skips
-#                   ids with no brief or already complete. NOACT=1 stops after
-#                   sign-off; BY=<name> sets the §9 attribution.
+#                   ids with no brief or already complete. PLAN=1 (or CSV=…) adds a
+#                   Plan pre-pass that briefs the UNPLANNED ids in one shared session
+#                   first. NOACT=1 stops after sign-off; BY=<name> sets the §9 attribution.
 #   make rehearse ID=123 [CSV=…]
 #                   dry-run the SAME control flow with stub leaves + stub gates —
 #                   no Claude, no live gates (publish dry-runs too), instant.
@@ -52,8 +53,8 @@ flow:
 # Drive already-briefed issues through the full cycle, no Plan beat (Do → Check →
 # sign-off → publish → Act). NOACT=1 stops after sign-off; BY=<name> sets §9.
 batch:
-	@test -n "$(IDS)" || { echo 'usage: make batch IDS="<id> <id> ..." [NOACT=1] [BY=<name>]'; exit 2; }
-	$(PDCA) batch $(IDS) $(if $(NOACT),--no-act) $(if $(BY),--by "$(BY)")
+	@test -n "$(IDS)" || { echo 'usage: make batch IDS="<id> <id> ..." [PLAN=1] [CSV="<path>"] [NOACT=1] [BY=<name>]'; exit 2; }
+	$(PDCA) batch $(IDS) $(if $(PLAN),--plan) $(if $(CSV),--from-csv "$(CSV)") $(if $(NOACT),--no-act) $(if $(BY),--by "$(BY)")
 
 # Re-publish an accepted bundle as a draft PR (the flow does this on accept).
 publish:

@@ -54,6 +54,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p_batch = sub.add_parser("batch", help="drive already-briefed issues through the full cycle (Do→Check→sign-off→Act)")
     p_batch.add_argument("issue_ids", nargs="+")
+    p_batch.add_argument("--plan", action="store_true",
+                         help="Plan pre-pass: brief any UNPLANNED ids in one shared session before driving (#65)")
+    p_batch.add_argument("--from-csv", help="Plan source for --plan (e.g. a tracker CSV); implies --plan")
     p_batch.add_argument("--from-briefs", type=Path, help="init missing bundles from DIR/<id>.md")
     p_batch.add_argument("--no-act", action="store_true", help="stop after sign-off; skip the end-of-batch Act")
     p_batch.add_argument("--by", default="", help="who signed off (recorded in §9)")
@@ -234,11 +237,13 @@ def _blocked_by(cfg: Config, d: Path) -> list[str]:
 def _batch(cfg: Config, args: argparse.Namespace) -> int:
     """Drive specific already-briefed issues through the FULL cycle, ending at Act.
 
-    Like `flow` but seeded by explicit ids with no Plan beat: each bundle runs
-    Do → Check → interactive sign-off (C6-guarded), walked cheap-first across the
-    set, then Act runs once at the end (skip with --no-act). `--from-briefs` inits
-    any missing bundle from DIR/<id>.md first. Resumable — already-COMPLETE ids are
-    skipped, so re-running picks up whatever is still in flight.
+    Like `flow` but seeded by explicit ids. By default there is no Plan beat: each
+    bundle runs Do → Check → interactive sign-off (C6-guarded), walked cheap-first
+    across the set, then Act runs once at the end (skip with --no-act). `--plan`
+    (or `--from-csv`) adds a Plan pre-pass that briefs any UNPLANNED ids in one shared
+    session first (#65). `--from-briefs` inits any missing bundle from DIR/<id>.md
+    first. Resumable — already-COMPLETE ids are skipped, so re-running picks up
+    whatever is still in flight.
     """
     if getattr(args, "lanes", None) is not None:
         cfg.lanes = max(1, args.lanes)
@@ -254,10 +259,13 @@ def _batch(cfg: Config, args: argparse.Namespace) -> int:
         d.mkdir(parents=True)
         shutil.copyfile(src, d / "brief.md")
 
-    results = flow.flow_ids(cfg, args.issue_ids, do_act=not args.no_act, by=args.by)
+    plan_missing = bool(args.plan or args.from_csv)
+    results = flow.flow_ids(cfg, args.issue_ids, plan_missing=plan_missing,
+                            csv=args.from_csv, do_act=not args.no_act, by=args.by)
     if not results:
         print("batch: nothing to drive — no briefed, non-complete bundles among the ids "
-              "(brief them at Plan first, or pass --from-briefs).", file=sys.stderr)
+              "(brief them at Plan first, pass --plan to brief them now, or --from-briefs).",
+              file=sys.stderr)
         return 0
     for iid, st in sorted(results.items()):
         print(f"{st}\t{iid}")

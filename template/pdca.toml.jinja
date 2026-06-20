@@ -50,6 +50,13 @@ issue_trailer = "Fixes #{id}"
 # Optional default tracker export the Plan leaf reads the issue row from when `flow`
 # runs without --from-csv (it reads ONLY that issue's row, not a repo scan):
 # export_csv = "path/to/export.csv"
+# Optional tracker-scrape command run before a Plan beat to seed a bundle's
+# issue_<id>/notes.json (the planner reads it for the full comment thread) — so a
+# seeded id list briefs end-to-end without scraping by hand (issue #65). It is a
+# `.format(id=)` shell template; $PDCA_BUNDLE is the bundle dir, and the command MUST
+# write notes.json there itself. Skipped when notes.json already exists; a failure is
+# non-fatal (Plan falls back to the CSV / asking the human). "" / unset → no fetch.
+# notes_cmd = "./engine/scripts/scrape-notes.sh {id}"
 
 # Publish mechanics — `pdca publish` and the flow's publish-on-accept (docs 03 §Check
 # closing step). Branch patterns are `{id}` / `{slug}` format strings; the

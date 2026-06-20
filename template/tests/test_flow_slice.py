@@ -374,6 +374,134 @@ class FlowSlice(unittest.TestCase):
         self.assertNotIn("issue_GARBLED", names)  # broken one skipped, no crash
 
 
+class BatchPlanPrepass(unittest.TestCase):
+    """`pdca batch <ids> --plan` (issue #65): an optional Plan pre-pass briefs the
+    UNPLANNED ids in one shared session, making flow_ids the id-seeded analogue of
+    flow_batch. Default (no flag) is unchanged — UNPLANNED ids are skipped."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_prepass_briefs_unplanned_then_drives(self) -> None:
+        # Two seeded-but-UNPLANNED bundles (dir exists, no brief) → the pre-pass briefs
+        # both (stub batch plan) and drives them to COMPLETE.
+        for iid in ("P1", "P2"):
+            self.cfg.bundle(iid).mkdir(parents=True)
+        results = flow.flow_ids(self.cfg, ["P1", "P2"], plan_missing=True, today="2026-06-20")
+        self.assertEqual(set(results), {"P1", "P2"})
+        self.assertTrue(all(s == state.COMPLETE for s in results.values()))
+
+    def test_prepass_only_plans_the_unplanned_ones(self) -> None:
+        # A mix: one already briefed, one UNPLANNED. The shared Plan session is asked to
+        # brief ONLY the UNPLANNED id (the briefed one is not re-planned); both complete.
+        leaves.do_plan(self.cfg.bundle("PB"), self.cfg)   # already PLANNED
+        self.cfg.bundle("PU").mkdir(parents=True)         # UNPLANNED
+        captured = {}
+        real = leaves.do_plan_batch
+
+        def spy(cfg, csv=None, ids=None):
+            captured["ids"] = ids
+            return real(cfg, csv, ids=ids)
+
+        leaves.do_plan_batch = spy
+        try:
+            results = flow.flow_ids(self.cfg, ["PB", "PU"], plan_missing=True, today="2026-06-20")
+        finally:
+            leaves.do_plan_batch = real
+        self.assertEqual(captured["ids"], ["PU"])  # only the un-briefed id planned
+        self.assertEqual(set(results), {"PB", "PU"})
+        self.assertTrue(all(s == state.COMPLETE for s in results.values()))
+
+    def test_prepass_leaves_planner_skipped_id_alone(self) -> None:
+        # If the Plan session briefs nothing (planner declined), the id stays UNPLANNED
+        # and is left out of the drive set — no crash, nothing driven.
+        self.cfg.bundle("SKIP").mkdir(parents=True)
+        orig = leaves.do_plan_batch
+        leaves.do_plan_batch = lambda cfg, csv=None, ids=None: None  # briefs nothing
+        try:
+            results = flow.flow_ids(self.cfg, ["SKIP"], plan_missing=True, today="2026-06-20")
+        finally:
+            leaves.do_plan_batch = orig
+        self.assertEqual(results, {})
+        self.assertEqual(state.state(self.cfg.bundle("SKIP")), state.UNPLANNED)
+
+    def test_default_no_prepass_still_skips_unplanned(self) -> None:
+        # Without plan_missing, an UNPLANNED id is skipped exactly as before (no Plan beat).
+        self.cfg.bundle("U").mkdir(parents=True)
+        leaves.do_plan(self.cfg.bundle("B"), self.cfg)
+        results = flow.flow_ids(self.cfg, ["U", "B"], today="2026-06-20")
+        self.assertEqual(set(results), {"B"})  # U skipped, not briefed
+
+    def test_cli_batch_plan_forwards_plan_missing(self) -> None:
+        # `pdca batch <ids> --plan` wires plan_missing=True through to flow_ids.
+        captured = {}
+        orig = flow.flow_ids
+
+        def spy(cfg, ids, **kw):
+            captured.update(kw)
+            captured["ids"] = ids
+            return {}
+
+        flow.flow_ids = spy
+        try:
+            args = SimpleNamespace(issue_ids=["X1"], plan=True, from_csv=None,
+                                   from_briefs=None, no_act=True, by="", lanes=None)
+            cli._batch(self.cfg, args)
+        finally:
+            flow.flow_ids = orig
+        self.assertTrue(captured["plan_missing"])
+        self.assertEqual(captured["ids"], ["X1"])
+
+
+class NotesFetch(unittest.TestCase):
+    """Config-driven notes-fetch (issue #65): `[tracker].notes_cmd` seeds a bundle's
+    notes.json before a Plan beat so the planner has the tracker thread. Best-effort
+    and idempotent; empty by default (no fetch)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_fetch_writes_notes_json_before_plan(self) -> None:
+        # The command is a .format(id=) template; {id} is substituted, so the scraped
+        # notes carry the bundle's id. (Literal braces would be escaped {{ }}, like the
+        # branch patterns — none needed here.)
+        self.cfg.notes_cmd = 'printf %s "thread-for-{id}" > "$PDCA_BUNDLE/notes.json"'
+        d = self.cfg.bundle("N1")
+        leaves.do_plan(d, self.cfg)  # stub planner; ensure_notes runs first
+        self.assertTrue((d / "notes.json").exists())
+        self.assertEqual((d / "notes.json").read_text(encoding="utf-8"), "thread-for-N1")
+        self.assertTrue((d / "brief.md").exists())  # planner stub still briefed
+
+    def test_fetch_skipped_when_notes_present(self) -> None:
+        d = self.cfg.bundle("N2")
+        d.mkdir(parents=True)
+        (d / "notes.json").write_text("ORIGINAL", encoding="utf-8")
+        self.cfg.notes_cmd = 'echo OVERWRITTEN > "$PDCA_BUNDLE/notes.json"'
+        leaves.ensure_notes(self.cfg, d)
+        self.assertEqual((d / "notes.json").read_text(encoding="utf-8"), "ORIGINAL")
+
+    def test_fetch_failure_is_nonfatal(self) -> None:
+        self.cfg.notes_cmd = "false"  # exits nonzero, writes nothing
+        d = self.cfg.bundle("N3")
+        leaves.do_plan(d, self.cfg)  # must not raise
+        self.assertFalse((d / "notes.json").exists())
+        self.assertTrue((d / "brief.md").exists())  # Plan still proceeded
+
+    def test_no_notes_cmd_is_noop(self) -> None:
+        d = self.cfg.bundle("N4")
+        d.mkdir(parents=True)
+        leaves.ensure_notes(self.cfg, d)  # default empty notes_cmd
+        self.assertFalse((d / "notes.json").exists())
+
+
 class DesignProposalBrief(unittest.TestCase):
     """A GEPS-style feature brief is a richer Plan artifact, not a separate track."""
 
