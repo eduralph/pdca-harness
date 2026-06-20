@@ -10,8 +10,9 @@ __pycache__/
 /build/
 /.cache/
 
-# Obsidian vault state for the PCDA/ reference docs (also excluded from renders
-# via copier.yml _exclude). Editor-local; not part of the template.
+# Optional Obsidian vault state, IF someone opens the plain-Markdown PCDA/ reference
+# docs as a vault (not required to read them; also excluded from renders via copier.yml
+# _exclude). Editor-local; not part of the template.
 .obsidian/
 
 # Personal Claude Code permissions overlay; the shared settings.json is tracked.

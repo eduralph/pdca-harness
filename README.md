@@ -31,7 +31,7 @@ Act review.
   pdca.toml                 # driver config: bundle paths, the two leaf commands
   PCDA/
     quality-cycle.md        # the generic model (Plan/Do/Check/Act, 5/5/1) — reference
-    quality-cycle/          # the full vendored spec (00–07), an Obsidian vault
+    quality-cycle/          # the full vendored spec (00–10), plain Markdown
   docs/
     INTEGRATION.md          # YOUR repo's concretizations — fill the TODOs
   src/pdca_harness/         # the deterministic driver (state machine over bundles)
