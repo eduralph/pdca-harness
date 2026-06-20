@@ -22,6 +22,28 @@ writing `results/issue_11589/brief.md`. You can also seed a brief directly
 (`pdca init-issue 11589 --from-brief path/to/brief.md`) when you've written it by
 hand.
 
+### Planning a specific id list in one session
+
+`pdca flow --from-csv` briefs from a tracker CSV (the planner chooses the issues);
+`pdca batch <ids>` drives an explicit id list but, by default, refuses an un-briefed
+one. To **plan + drive a specific set** — e.g. bundles you seeded from per-bundle
+triage notes, not the CSV — add the Plan pre-pass:
+
+```bash
+make batch IDS="11589 12030 12044" PLAN=1 LANES=6   # or: pdca batch <ids> --plan --lanes 6
+```
+
+`--plan` briefs every UNPLANNED id in the list in **one shared interactive session**,
+then drives exactly those ids through Do+Check. Ids the planner chooses to skip are
+left alone; `--from-csv` overrides the Plan source.
+
+Each bundle's tracker thread can be fetched automatically: set `[tracker].notes_cmd`
+in `pdca.toml` to your scrape tooling (a `{id}` shell template that writes
+`issue_<id>/notes.json`; `$PDCA_BUNDLE` is the bundle dir). The harness runs it before
+any Plan beat when `notes.json` is absent, so the planner has the comment thread
+without you scraping by hand. It's best-effort — a failure just falls back to the
+CSV / asking you.
+
 ## What a real brief looks like
 
 This is the **actual** brief the planner produced for gramps issue 11589, a

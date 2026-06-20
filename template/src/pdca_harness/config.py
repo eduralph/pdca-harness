@@ -74,6 +74,10 @@ class Config:
     act: LeafConfig = field(default_factory=LeafConfig)
     author: str = ""  # default §9 sign-off attribution (the maintainer)
     tracker_export_csv: str = ""  # default tracker CSV the planner reads the issue row from
+    # Notes-fetch (issue #65): a .format(id=) shell command run before a Plan beat to
+    # retrieve a bundle's tracker thread into issue_<id>/notes.json (the planner reads it).
+    # $PDCA_BUNDLE = the bundle dir; the command writes notes.json itself. "" ⇒ no fetch.
+    notes_cmd: str = ""
     # Publish mechanics — config-driven so the harness ships project-agnostic.
     # Branch patterns are .format(id=, slug=) strings; issue_trailer is .format(id=).
     fix_branch_pattern: str = "fix/{id}-{slug}"
@@ -187,6 +191,7 @@ class Config:
             tracker_url=tracker.get("url", ""),
             issue_id_example=tracker.get("issue_id_example", ""),
             tracker_export_csv=tracker.get("export_csv", ""),
+            notes_cmd=tracker.get("notes_cmd", ""),
             fix_branch_pattern=publisher_cfg.get("fix_branch_pattern", "fix/{id}-{slug}"),
             feature_branch_pattern=publisher_cfg.get("feature_branch_pattern", "enhancement/{id}-{slug}"),
             issue_trailer=tracker.get("issue_trailer", "Fixes #{id}"),

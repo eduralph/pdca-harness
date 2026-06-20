@@ -446,20 +446,36 @@ def flow_ids(
     cfg: Config,
     ids: list[str],
     *,
+    plan_missing: bool = False,
+    csv: str | None = None,
     do_publish: bool = True,
     do_act: bool = False,
     by: str = "",
     today: str | None = None,
     max_passes: int = 10,
 ) -> dict[str, str]:
-    """Drive specific already-briefed bundles by id through the FULL cycle to Act.
+    """Drive specific bundles by id through the FULL cycle to Act.
 
-    Like :func:`flow_batch` but seeded by explicit ids with **no Plan beat** — the
-    bundles must already have a brief. Missing / un-briefed (UNPLANNED) ids are
-    skipped with a note (brief them at Plan first); terminal ids (COMPLETE or
-    DISCONTINUED) are left alone. Returns ``{issue_id: state}``.
+    Like :func:`flow_batch` but seeded by explicit ids. By default there is **no Plan
+    beat** — the bundles must already have a brief. With ``plan_missing`` (issue #65) a
+    **Plan pre-pass** first briefs any UNPLANNED id in the list in ONE shared interactive
+    session (``do_plan_batch`` over those ids, reading each bundle's ``notes.json``), making
+    this the id-seeded analogue of ``flow_batch``. Ids still UNPLANNED after the pre-pass
+    (planner skipped them) and terminal ids (COMPLETE / DISCONTINUED) are left alone.
+    Returns ``{issue_id: state}``.
     """
     today = today or datetime.date.today().isoformat()
+
+    # Optional Plan pre-pass (#65): brief the UNPLANNED ids in one shared session, before
+    # the drive set is filtered, so the un-briefed ones become drivable. A csv enables it too.
+    if plan_missing or csv:
+        plan_targets = [iid for iid in ids
+                        if state.state(cfg.bundle(iid)) == state.UNPLANNED]
+        if plan_targets:
+            for iid in plan_targets:
+                cfg.bundle(iid).mkdir(parents=True, exist_ok=True)
+            leaves.do_plan_batch(cfg, csv, ids=plan_targets)
+
     bundles: list[Path] = []
     for iid in ids:
         d = cfg.bundle(iid)

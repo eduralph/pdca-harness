@@ -34,6 +34,7 @@ subprocess in the working dir; ``interactive`` leaves inherit the terminal.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -100,10 +101,42 @@ def _invoke(
 
 
 # ----------------------------------------------------------------------------
+# Notes-fetch (issue #65): retrieve a bundle's tracker thread before the Plan beat.
+# ----------------------------------------------------------------------------
+def ensure_notes(cfg: Config, d: Path) -> None:
+    """Run the configured ``[tracker].notes_cmd`` to seed ``d/notes.json`` if it is absent.
+
+    The command (a ``.format(id=)`` shell template) is the project's tracker-scrape tooling;
+    it runs with ``$PDCA_BUNDLE`` set to the bundle dir and is responsible for writing
+    ``notes.json`` there. So the Plan leaf can read the thread without the operator
+    pre-scraping by hand. Best-effort: no command configured, notes already present, or a
+    failing fetch are all non-fatal — Plan then falls back to the CSV / asking the human.
+    """
+    if not cfg.notes_cmd or (d / "notes.json").exists():
+        return
+    d.mkdir(parents=True, exist_ok=True)
+    issue_id = d.name.removeprefix("issue_")
+    cmd = cfg.notes_cmd.format(id=issue_id)
+    env = {**os.environ, "PDCA_BUNDLE": str(d)}
+    try:
+        rc, _ = progress.run_with_heartbeat(
+            cmd, cwd=cfg.root, shell=True, env=env, capture=True,
+            label=f"fetch notes {d.name}")
+    except Exception as exc:  # noqa: BLE001 — a failed scrape must not break Plan
+        print(f"leaves: notes fetch for {d.name} failed ({exc}); "
+              "Plan will fall back to the CSV / human", file=sys.stderr)
+        return
+    if rc != 0 or not (d / "notes.json").exists():
+        print(f"leaves: notes fetch for {d.name} produced no notes.json (rc {rc}); "
+              "Plan will fall back to the CSV / human", file=sys.stderr)
+
+
+# ----------------------------------------------------------------------------
 # Leaf 0 — Plan (planner, interactive): human feeds documents → writes brief.md.
 # ----------------------------------------------------------------------------
 def do_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
     d.mkdir(parents=True, exist_ok=True)
+    ensure_notes(cfg, d)  # seed notes.json from the tracker scraper if configured (#65)
     if cfg.planner.mode == "command":
         _invoke(cfg.planner, cfg.root, _plan_prompt(cfg, csv, d))
         return
@@ -167,23 +200,47 @@ def _stub_plan(d: Path, cfg: Config) -> None:
     )
 
 
-def do_plan_batch(cfg: Config, csv: str | None = None) -> None:
+def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = None) -> None:
     """Batch Plan: ONE interactive session may brief several issues at once.
 
-    The planner runs in the bundle root and creates an ``issue_<id>/brief.md`` per
-    issue it and the human choose from the documents. The flow then discovers the
-    new bundles and fans Do+Check over all of them (see ``flow.flow_batch``).
+    Default (``ids is None``): the planner reads the documents/CSV and CHOOSES which issues
+    to brief, creating an ``issue_<id>/brief.md`` per chosen issue (``flow.flow_batch``).
+
+    Id-seeded (``ids`` given, issue #65): the planner briefs EACH listed id, reading that
+    bundle's ``notes.json`` as the source — so an explicit set seeded from per-bundle notes
+    (not a tracker CSV) briefs in one shared session. Each id's notes are fetched first via
+    :func:`ensure_notes`; the flow then drives exactly those ids (``flow.flow_ids``).
     """
     cfg.bundle_root.mkdir(parents=True, exist_ok=True)
+    for iid in ids or []:
+        ensure_notes(cfg, cfg.bundle(iid))  # seed notes.json before the session (#65)
     if cfg.planner.mode == "command":
-        _invoke(cfg.planner, cfg.root, _plan_batch_prompt(cfg, csv))
+        _invoke(cfg.planner, cfg.root, _plan_batch_prompt(cfg, csv, ids))
         return
-    _stub_plan_batch(cfg)
+    _stub_plan_batch(cfg, ids)
 
 
-def _plan_batch_prompt(cfg: Config, csv: str | None) -> str:
+def _plan_batch_prompt(cfg: Config, csv: str | None, ids: list[str] | None = None) -> str:
     fix_tpl = cfg.templates_dir / "brief.md.tpl"
     geps_tpl = cfg.templates_dir / "design-proposal.md.tpl"
+    tpl_line = (
+        f"use the fitting template: a bug fix → {fix_tpl}; a feature / enhancement → "
+        f"{geps_tpl}. Keep the parsed `- **Label:** value` field shape")
+    if ids:
+        listing = ", ".join(ids)
+        return (
+            "You are the Plan leaf of a PDCA cycle, in BATCH mode over a SPECIFIC id list: "
+            f"{listing}. Brief EACH listed id. For each, read its bundle's "
+            f"`{cfg.bundle_root}/issue_<id>/notes.json` (the seeded triage notes / comment "
+            "thread) as the source of truth"
+            + (f", and consult the row for it in the tracker export at '{csv}' too" if csv else "")
+            + ". The notes/tracker are the source: do NOT scan THIS harness repo for issue "
+            "info, and cite the target source via `git -C <checkout> ...` (never "
+            f"`cd <checkout> && ...`). Write `{cfg.bundle_root}/issue_<id>/brief.md` for each "
+            f"— {tpl_line}. If a listed id genuinely should NOT be briefed (no actionable "
+            "defect), leave it UNPLANNED (write no brief.md) and say why. One id = one "
+            "`issue_<id>/brief.md`. Plan only — do not implement."
+        )
     tracker_csv = csv or cfg.tracker_export_csv
     src = f"the tracker export at '{tracker_csv}'" if tracker_csv \
         else "the input documents the human shares"
@@ -194,15 +251,14 @@ def _plan_batch_prompt(cfg: Config, csv: str | None) -> str:
         "THIS harness repo for issue info, and cite the target source via "
         "`git -C <checkout> ...` (never `cd <checkout> && ...`). For EACH chosen issue "
         f"create a bundle directory `{cfg.bundle_root}/issue_<id>/` containing a brief.md "
-        f"— use the fitting template: a bug fix → {fix_tpl}; a feature / enhancement → "
-        f"{geps_tpl}. Keep the parsed `- **Label:** value` field shape; `<id>` is the "
+        f"— {tpl_line}; `<id>` is the "
         "tracker id. One issue = one `issue_<id>/brief.md`. Plan only — do not implement."
     )
 
 
-def _stub_plan_batch(cfg: Config) -> None:
-    # Two bundles so the batch flow is exercised offline.
-    for iid in ("BATCH1", "BATCH2"):
+def _stub_plan_batch(cfg: Config, ids: list[str] | None = None) -> None:
+    # Id-seeded: brief exactly the listed ids; else two default bundles (offline slice).
+    for iid in (ids if ids else ("BATCH1", "BATCH2")):
         d = cfg.bundle(iid)
         d.mkdir(parents=True, exist_ok=True)
         _stub_plan(d, cfg)
