@@ -24,7 +24,7 @@
 #                   does this on accept). DRY=1 prints the git/gh plan without pushing.
 #   make status     list every bundle and its state.
 #   make cli ARGS="signoff 123 --accept"
-#                   run any `pdca` subcommand without the source-path boilerplate.
+#                   run any driver subcommand without the source-path boilerplate.
 #
 #   make            full self-test: offline guards + a real driver cycle on stub
 #                   leaves (no model, no live gates).
@@ -32,8 +32,8 @@
 #   make setup      one-time: grant Claude read of the workspace so the interactive
 #                   leaves don't prompt per file/dir (add your project's sibling
 #                   repos to .claude/settings.local.json as needed).
-#   make install    create .venv with a real `pdca` console script (optional —
-#                   the targets above already work without it).
+#   make install    create .venv with the real console script (named per pyproject
+#                   [project.scripts]) (optional — the targets above work without it).
 
 PYTHON ?= python3
 export PYTHONPATH := src
@@ -89,12 +89,15 @@ open('.claude/settings.local.json', 'w'), indent=2)"
 	@echo " the first interactive 'make flow' asks once to TRUST this project — accept it.)"
 
 # --- optional real install (venv console script) ---------------------------
-install: .venv/bin/pdca
-	@printf '\nInstalled. Use `.venv/bin/pdca …` directly, or keep using `make flow …`.\n'
+# Name-agnostic: the console script is named per pyproject [project.scripts]
+# (the cli_name copier choice), so depend on a sentinel, not a fixed script path.
+install: .venv/.installed
+	@printf '\nInstalled. The console script (see pyproject [project.scripts]) is on .venv/bin/; or keep using `make flow …`.\n'
 
-.venv/bin/pdca: pyproject.toml
+.venv/.installed: pyproject.toml
 	$(PYTHON) -m venv .venv
 	.venv/bin/pip install -q -e .
+	@touch $@
 
 # --- self-test -------------------------------------------------------------
 # Depends on `check` so the cheap guards fail fast before the cycle.

@@ -14,7 +14,7 @@ authors = [{ name = "{{ author_name }}"{% if author_email %}, email = "{{ author
 dependencies = []
 
 [project.scripts]
-pdca = "pdca_harness.cli:main"
+{{ cli_name }} = "pdca_harness.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

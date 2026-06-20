@@ -67,6 +67,15 @@ project_description:
   help: One-line description of what this project contributes to
   default: ""
 
+# The installed console-script name (pyproject [project.scripts] + the CLI's --help).
+# Each rendered instance installs this command; when several instances share a machine
+# they collide on a single global name, so NAMESPACE it per project (e.g. "pdca-gramps",
+# "wyrd-pdca"). Default "pdca" keeps the docs' examples literal for a single instance.
+cli_name:
+  type: str
+  help: 'Console-script command this project installs (namespace it if you run multiple instances, e.g. "pdca-{{ project_slug }}")'
+  default: "pdca"
+
 author_name:
   type: str
   help: Primary author / maintainer name
