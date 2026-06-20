@@ -1,5 +1,12 @@
 # Fork & contribution discipline
 
+{% if contribution_model != "fork" %}
+> **This project renders as `own-repo`** (this repo IS the contribution target, not a
+> fork). The agents do **not** cite this file — they resolve targeting from
+> `INTEGRATION.md` §2. It is kept as a reference for the fork model; ignore it unless
+> you switch `contribution_model` to `fork`.
+
+{% endif %}
 > The generic rules for contributing a fix upstream through a fork — the **Check
 > closing / contribution** discipline (the counterpart to [`principles.md`](principles.md),
 > which governs Plan-time solution design). These rules are project-agnostic; **your

@@ -126,6 +126,19 @@ default_branch:
   help: Default branch fixes target unless an area rule overrides
   default: main
 
+# How this project contributes (issue #75). "fork": contribute upstream through a
+# fork (upstream/maintenance-line targeting, cross-version cherry-picks) — the agents
+# cite docs/fork-discipline.md. "own-repo": this repo IS the target (branch from the
+# default branch, no upstream/fork) — the agents drop the fork doctrine and defer
+# targeting to docs/INTEGRATION.md §2. Default "fork" preserves prior behavior.
+contribution_model:
+  type: str
+  help: How this project contributes — own repo (branch from default) or a fork (upstream line)
+  choices:
+    Fork (contribute upstream via a fork): fork
+    Own repo (this repo is the target): own-repo
+  default: fork
+
 # ----------------------------------------------------------------------------
 # Integration: bundle + process layout (docs 05 item 7)
 # ----------------------------------------------------------------------------

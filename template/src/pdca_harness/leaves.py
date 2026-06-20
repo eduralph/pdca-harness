@@ -67,6 +67,8 @@ def _invoke(
     label: str = "",
     status=None,
     stream_json: bool = False,
+    env: dict | None = None,
+    extra_argv: list[str] | None = None,
 ) -> None:
     """Run the leaf's configured command in ``workdir``, feeding it ``prompt``.
 
@@ -83,9 +85,10 @@ def _invoke(
     leaf is using right now. Ignored for non-claude families (e.g. a codex reviewer),
     which don't speak that format.
     """
-    argv = list(leaf.argv)
+    argv = list(leaf.argv) + list(extra_argv or [])
+    run_env = {**os.environ, **env} if env else None
     if leaf.interactive:
-        subprocess.run(argv + [prompt], cwd=workdir)
+        subprocess.run(argv + [prompt], cwd=workdir, env=run_env)
         return
     # Headless: feed the prompt on stdin (a trailing positional would be swallowed
     # by a variadic --allowedTools) and tick a heartbeat, since `claude -p` prints
@@ -95,7 +98,7 @@ def _invoke(
         argv += ["--output-format", "stream-json", "--verbose"]
     rc, _ = progress.run_with_heartbeat(
         argv, cwd=workdir, input_text=prompt, label=label, status=status,
-        stream_json=use_stream)
+        stream_json=use_stream, env=run_env)
     if rc != 0:
         raise subprocess.CalledProcessError(rc, argv)
 
@@ -358,8 +361,31 @@ _REVIEW_PROMPT = (
     "you can). Emit NEEDS-HUMAN for the always-human items (validation "
     "fitness-to-purpose, contested root-cause, ambiguous scope) — each NEEDS-HUMAN "
     "row becomes a §6 item the human must clear. Do not omit a row; use N/A with a "
-    "reason when an element does not apply."
+    "reason when an element does not apply. "
+    "Ground every cited path:line on the target source at $PDCA_TARGET (read-only); "
+    "if $PDCA_TARGET is unset, ground against patch.diff alone — do NOT search other "
+    "checkouts on the machine."
 )
+
+
+def _reviewer_target(d: Path, cfg: Config) -> Path | None:
+    """The local target checkout the reviewer grounds its citations on, or None (#75).
+
+    Single-sourced from the brief's "Repo + branch target" via the same resolution
+    publish uses (``_checkout_path`` — configured ``[publisher.checkouts]`` or the
+    sibling convention). Returned only if it exists on disk; the reviewer is told to
+    ground against ``$PDCA_TARGET`` and not to wander into other checkouts. Best-effort:
+    any failure (no target, unresolved) yields None and the reviewer falls back to the diff.
+    """
+    from . import publish  # lazy: publish imports leaves, avoid an import cycle
+    try:
+        repo_spec, _base, _slug = publish._resolve_target(d)
+        if not repo_spec:
+            return None
+        p = publish._checkout_path(cfg, repo_spec)
+        return p if p.exists() else None
+    except Exception:  # noqa: BLE001 — grounding access is best-effort, never fatal
+        return None
 
 
 def run_review(d: Path, cfg: Config) -> None:
@@ -385,12 +411,20 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
             src = d / name
             if src.exists():
                 shutil.copy2(src, sandbox / name)
+        # Ground citations on the brief's target checkout (#75): name it via $PDCA_TARGET
+        # so the reviewer doesn't wander into unrelated checkouts, and grant read access
+        # for the claude family (--add-dir). Independence holds — the target is the
+        # upstream source, not build-notes.md.
+        target = _reviewer_target(d, cfg)
+        env = {"PDCA_TARGET": str(target)} if target else None
+        extra_argv = ["--add-dir", str(target)] if target and cfg.reviewer.family == "claude" else None
         try:
             _invoke(
                 cfg.reviewer, sandbox, _REVIEW_PROMPT,
                 label=f"Check review {d.name}",
                 status=lambda: progress.bundle_activity(sandbox, ("check-review.md",)),
                 stream_json=True,  # Tier 3 (no-op unless the reviewer family is claude)
+                env=env, extra_argv=extra_argv,
             )
         except Exception as exc:  # a failed reviewer (e.g. dropped connection) must
             _review_unavailable(d, f"reviewer leaf failed: {exc}")  # not crash the cycle
