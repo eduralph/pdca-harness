@@ -24,7 +24,8 @@ _exclude:
   - ".git"
   - ".DS_Store"
   - ".svn"
-  # PCDA/ ships as an Obsidian vault of reference docs; don't render its config.
+  # PCDA/ is plain-Markdown reference docs (readable in any viewer). It MAY also be
+  # opened as an Obsidian vault; if so, don't render that optional local vault config.
   - ".obsidian"
 # Keep the default answers filename (.copier-answers.yml) so `copier update`
 # finds it with no extra flag. The answers-file template is shipped at
