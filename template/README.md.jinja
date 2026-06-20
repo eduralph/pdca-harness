@@ -59,9 +59,9 @@ When a Plan/sign-off/publish session ends, exit Claude (**Ctrl-D**) to let the f
 | `make publish ID=<id> [DRY=1]` | Re-publish an accepted bundle as a draft PR (the flow does this on accept). `DRY=1` prints the git/gh plan without pushing. |
 | `make rehearse ID=<id> [CSV="<path>"]` | Dry-run the *same* control flow with stub leaves + stub gates — **no Claude, no live gates, instant** (publish dry-runs too). |
 | `make status` | List every bundle and its state. |
-| `make cli ARGS="<subcommand>"` | Any other `pdca` subcommand (e.g. `signoff 123 --accept`). |
+| `make cli ARGS="<subcommand>"` | Any other `{{ cli_name }}` subcommand (e.g. `signoff 123 --accept`). |
 | `make` / `make check` | Self-test (full / fast offline). |
-| `make install` | Optional: a real `pdca` console script in `.venv/`. |
+| `make install` | Optional: a real `{{ cli_name }}` console script in `.venv/`. |
 
 If something looks stuck, it isn't — a headless `claude -p` and a long gate print
 nothing until they finish, so the flow shows a `… still working (NmSSs elapsed)`
@@ -70,7 +70,7 @@ heartbeat. Let it run.
 ## Gates (what makes a change "verified")
 
 Configured in [pdca.toml](pdca.toml) `[[gates.checks]]`, single-sourced for the
-local driver and CI (`pdca gates` / `pdca gates --working-tree`). Until you add real
+local driver and CI (`{{ cli_name }} gates` / `{{ cli_name }} gates --working-tree`). Until you add real
 rows the driver uses an all-PASS stub fallback — fill the gates first (see
 [docs/INTEGRATION.md](docs/INTEGRATION.md) §4). Guidance learned the hard way:
 

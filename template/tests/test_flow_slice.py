@@ -773,5 +773,25 @@ class DeclaredOrdering(unittest.TestCase):
                           today="2026-06-04")
 
 
+class ProgName(unittest.TestCase):
+    """The CLI's --help command name follows the per-instance console-script name
+    (issue #73): resolved from argv[0], with a fallback for module invocation."""
+
+    def test_prog_name_resolution(self) -> None:
+        import sys
+        orig = sys.argv
+        try:
+            sys.argv = ["/usr/local/bin/pdca-gramps", "status"]
+            self.assertEqual(cli._prog_name(), "pdca-gramps")  # renamed console script
+            sys.argv = ["pdca"]
+            self.assertEqual(cli._prog_name(), "pdca")          # default console script
+            sys.argv = ["/path/to/src/pdca_harness/cli.py"]
+            self.assertEqual(cli._prog_name(), "pdca")          # python -m … → file path
+            sys.argv = []
+            self.assertEqual(cli._prog_name(), "pdca")          # defensive fallback
+        finally:
+            sys.argv = orig
+
+
 if __name__ == "__main__":
     unittest.main()

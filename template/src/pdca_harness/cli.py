@@ -16,6 +16,21 @@ from pathlib import Path
 from . import act, brief, driver, flow, gates, publish, queue, revalidate, signoff, state
 from .config import Config
 
+
+def _prog_name() -> str:
+    """The command name to show in ``--help``.
+
+    The console-script name is a per-instance copier choice (``cli_name``; issue #73),
+    so the rendered project installs e.g. ``pdca-gramps`` — not always ``pdca``. Resolve
+    it from the actually-invoked script (``argv[0]``) so ``--help`` shows the real command;
+    fall back to ``pdca`` when invoked as a module (``python -m pdca_harness.cli``), where
+    ``argv[0]`` is a file path, not the command.
+    """
+    name = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ""
+    if not name or name.endswith(".py") or name == "__main__":
+        return "pdca"
+    return name
+
 # Ordering for the cheap-first sign-off queue (docs 03 §sign-off queue).
 _STATE_ORDER = [
     state.AWAITING_SIGNOFF,
@@ -31,7 +46,7 @@ _STATE_ORDER = [
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="pdca", description="PDCA quality-cycle driver")
+    parser = argparse.ArgumentParser(prog=_prog_name(), description="PDCA quality-cycle driver")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_init = sub.add_parser("init-issue", help="create a bundle and seed brief.md")
