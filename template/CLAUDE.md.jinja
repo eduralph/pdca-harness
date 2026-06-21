@@ -10,7 +10,7 @@ read it for tracker, branch targets, fixtures, and the conformance ruleset.
 
 `pdca` advances a result bundle through the cycle (`pdca status`, `pdca run <id>`,
 `pdca signoff <id> --accept`, `pdca publish <id>`), or runs it as one continuous
-Claude-driven flow (`pdca flow <id> [--from-csv …] [--no-publish] [--act]`). State is
+Claude-driven flow (`pdca flow <id> [--from-csv …] [--no-publish] [--no-act]`). State is
 the files in `{{ bundle_root }}/issue_<id>/`; nothing is hidden in a database.
 
 The driver is deterministic — **no model decides control flow**. The cycle has exactly

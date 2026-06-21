@@ -28,7 +28,7 @@ Act review.
 
 ```
 <your project>/
-  pdca.toml                 # driver config: bundle paths, the two leaf commands
+  pdca.toml                 # driver config: bundle paths, the model-leaf commands
   PCDA/
     quality-cycle.md        # the generic model (Plan/Do/Check/Act, 5/5/1) — reference
     quality-cycle/          # the full vendored spec (00–10), plain Markdown
@@ -63,16 +63,18 @@ command with `PYTHONPATH=src python -m pdca_harness.cli …`.
 
 ```bash
 pdca init-issue TOY --from-brief examples/toy/brief.md   # seed a bundle from a brief
-pdca run TOY              # Do → gates → reviewer → assembled SUMMARY → AWAITING_SIGNOFF
-pdca status              # all bundle states (cheap-first)
-pdca batch A B C         # fan the driver over many issues
+pdca flow TOY            # the whole cycle: Plan→Do→Check→sign-off→publish→Act
+pdca flow A B C          # several ids → batch fan-out + cheap-first sign-off queue
+pdca status              # all bundle states (cheap-first); bare `pdca` does the same
 pdca queue               # the cheap-first sign-off burn-down
 pdca gates TOY           # the deterministic gates (CI runs `pdca gates --working-tree`)
-pdca signoff TOY --accept --by you   # refused while §6 NEEDS-HUMAN is open (C6)
+pdca signoff TOY --accept --by you   # standalone accept (publishes on accept; --no-publish to skip), refused while §6 NEEDS-HUMAN is open (C6)
 ```
 
 The vertical slice runs **offline** out of the box (stub Do/gates/reviewer
-leaves), so `init-issue` → `run` → `signoff` works before you wire anything real.
+leaves), so `pdca flow TOY` drives a full cycle to COMPLETE before you wire
+anything real; `pdca flow --rehearse <id>` dry-runs the whole control flow in an
+isolated bundle root.
 
 ### 3. Make it yours
 
@@ -87,17 +89,24 @@ leaves), so `init-issue` → `run` → `signoff` works before you wire anything 
   end-to-end with **stubbed** Do/gates/reviewer leaves so the loop runs offline.
 - **Single-sourced gates** — defined once in `pdca.toml` `[[gates.checks]]`, run by
   both the driver and CI via one `pdca gates` command (stub fallback until filled).
-- **Batch fan-out + sign-off queue** — `pdca batch` over N issues, `pdca queue`
+- **Publish on accept** — an accepted bundle opens a draft PR on the target branch as
+  the closing step of Check; `pdca flow` and a standalone `pdca signoff --accept` do
+  this by default (`--no-publish` to skip), and `pdca status` shows each COMPLETE
+  bundle's publish state (doc 07).
+- **Batch fan-out + sign-off queue** — `pdca flow A B C` over N issues, `pdca queue`
   cheap-first burn-down.
 - **In-driver lane concurrency** — `[driver].lanes = N` (`PDCA_LANES` /
-  `pdca flow|batch --lanes N`) fans the unattended Do + Check band across N workers in
+  `pdca flow --lanes N`) fans the unattended Do + Check band across N workers in
   one workspace; each gate sees its worker slot as `$PDCA_LANE` to keep checkouts /
   runners lane-private (doc 09).
+- **Per-cycle worktree isolation** — a cycle's Do/Check run in a git worktree off the
+  target base (`[driver].worktree`, on by default), so the host's primary checkout is
+  never mutated; the builder + gates see it as `$PDCA_WORKTREE` (doc 04).
 - **Mechanical STOP discipline** — `.claude/agents/builder.md` + a PreToolUse hook
   block the builder from marking a PR ready/merging; `reviewer.md` has execute-only
   scope; the decorrelated reviewer path is cross-vendor Codex via `AGENTS.md`.
-- **Act tooling (L4)** — `pdca act-index` is a read-only index of frozen cycles
-  that surfaces §6/§7/§10 and recurring signals; `pdca act-log` scaffolds a dated
+- **Act tooling (L4)** — `pdca act index` is a read-only index of frozen cycles
+  that surfaces §6/§7/§10 and recurring signals; `pdca act log` scaffolds a dated
   act-log entry with the considered bundles + patterns pre-filled (the deltas stay
   the human's). All four L-rungs of the maturity ladder are now present.
 - **Full spec** vendored under `template/PCDA/quality-cycle/` (reference docs,
