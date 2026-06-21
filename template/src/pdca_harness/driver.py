@@ -64,6 +64,9 @@ def advance(d: Path, cfg: Config) -> None:
             gates.run_gates(d, cfg)  # deterministic gates
             _say(f"→ {d.name}: Check — advisory reviewer{_headless_note(cfg.reviewer)}…")
             leaves.run_review(d, cfg)  # leaf 2 — reviewer (advisory)
+            if cfg.advisory_leaves:  # optional extra advisory reviewers (issue #64)
+                _say(f"→ {d.name}: Check — advisory reviewers ({len(cfg.advisory_leaves)})…")
+                leaves.run_advisory_leaves(d, cfg)
     elif s == state.CHECKED:
         _say(f"→ {d.name}: assembling SUMMARY…")
         assemble.assemble_summary(d, cfg)  # pure code → SUMMARY.md §1–8
@@ -237,6 +240,7 @@ def _archive_iteration(d: Path, n: int, *, include_brief: bool) -> None:
     """
     arch = d / f"iteration-v{n}"
     names = list(DOWNSTREAM_OF_BRIEF)
+    names += [p.name for p in d.glob("check-advisory-*.md")]  # advisory artifacts (#64)
     if include_brief:
         names.append("brief.md")
     if (d / "brief.md").exists():

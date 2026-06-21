@@ -28,10 +28,23 @@ def assemble_summary(d: Path, cfg: Config) -> None:
         if review_path.exists()
         else _missing_review_text()
     )
-    # §6 is fed by the reviewer's NEEDS-HUMAN verdicts AND any gate that declared itself
-    # unverifiable (issue #46) — both become `- [ ]` items the C6 guard makes the human
-    # clear before accept.
-    needs_human = _needs_human(review_text) + _unverifiable_items(gates)
+    # Optional advisory reviewers (issue #64): each check-advisory-<id>.md is folded into
+    # §5 and its NEEDS-HUMAN findings into §6, exactly like the main reviewer.
+    advisory_paths = sorted(d.glob("check-advisory-*.md"))
+    advisory_texts = [p.read_text(encoding="utf-8") for p in advisory_paths]
+
+    # §6 is fed by the reviewer's NEEDS-HUMAN verdicts, the advisory reviewers', AND any
+    # gate that declared itself unverifiable (issue #46) — all become `- [ ]` items the C6
+    # guard makes the human clear before accept.
+    needs_human = _needs_human(review_text)
+    for atext in advisory_texts:
+        needs_human += _needs_human(atext)
+    needs_human += _unverifiable_items(gates)
+
+    advisory_block = "\n".join(
+        f"\n### Advisory — {p.stem.removeprefix('check-advisory-')}\n\n{t.strip()}"
+        for p, t in zip(advisory_paths, advisory_texts)
+    )
 
     issue = d.name.replace("issue_", "")
     out = "\n".join(
@@ -60,6 +73,7 @@ def assemble_summary(d: Path, cfg: Config) -> None:
             "Reviewer ran without build-notes.md. Summary:",
             "",
             review_text.strip(),
+            advisory_block,
             "",
             "## 6. NEEDS-HUMAN — items the human must clear before sign-off",
             _needs_human_block(needs_human),
