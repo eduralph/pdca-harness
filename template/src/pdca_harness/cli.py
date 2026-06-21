@@ -123,7 +123,16 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.setdefault("PDCA_LEAVES_MODE", "stub")
         os.environ.setdefault("PDCA_GATES_MODE", "stub")
         os.environ.setdefault("PDCA_BUNDLE_ROOT", ".rehearse")
-    cfg = Config.load()
+    # Surface config problems as a clean one-line error, not a traceback (issue #92):
+    # running outside a rendered project (no pdca.toml) is operator error, not a crash.
+    try:
+        cfg = Config.load()
+    except FileNotFoundError as exc:
+        print(exc, file=sys.stderr)  # "no pdca.toml found … — run inside a rendered project"
+        return 2
+    except ValueError as exc:  # malformed pdca.toml (tomllib) or a bad config value
+        print(f"pdca: invalid pdca.toml — {exc}", file=sys.stderr)
+        return 2
 
     if not args.cmd:  # bare invocation → the status dashboard (#88)
         return _status(cfg, None)

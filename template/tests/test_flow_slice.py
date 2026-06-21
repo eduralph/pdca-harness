@@ -489,6 +489,24 @@ class CliSurface(unittest.TestCase):
     def test_flow_requires_ids_or_csv(self) -> None:
         self.assertEqual(cli.main(["flow"]), 2)  # no ids and no --from-csv → usage error
 
+    def test_no_pdca_toml_is_clean_error_not_traceback(self) -> None:
+        # Run outside a rendered project (no pdca.toml at or above) → one clean line,
+        # exit 2, NO Python traceback (issue #92).
+        import io
+        from contextlib import redirect_stderr
+        other = Path(tempfile.mkdtemp())  # under the system temp dir; no pdca.toml above
+        try:
+            os.chdir(other)
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                rc = cli.main(["status"])
+            self.assertEqual(rc, 2)
+            self.assertIn("no pdca.toml", buf.getvalue())
+            self.assertNotIn("Traceback", buf.getvalue())
+        finally:
+            os.chdir(self.tmp)
+            shutil.rmtree(other, ignore_errors=True)
+
     def test_rehearse_sets_stub_env_before_load(self) -> None:
         cli.main(["flow", "--rehearse"])  # returns 2 (no ids) but sets the dry-run env first
         self.assertEqual(os.environ.get("PDCA_LEAVES_MODE"), "stub")
