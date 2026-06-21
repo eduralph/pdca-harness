@@ -130,6 +130,27 @@ class PublishSlice(unittest.TestCase):
         # …but a standalone publish (no skip) treats the missing target as an error.
         self.assertEqual(publish.publish(self.cfg, "NOTGT", dry_run=True), 1)
 
+    def test_empty_patch_is_treated_as_close_disposition(self) -> None:
+        """Regression (#95): a 0-byte / whitespace-only patch.diff is a close, not a
+        broken contribution. `is_file()` alone let an empty patch past the guard, after
+        which `git apply` was a no-op and the commit failed with 'nothing to commit'.
+
+        The #95 shape is an *empty patch.diff present* — which the state machine reads
+        as past-Do, so the bundle is COMPLETE and reaches publish (unlike a missing
+        patch.diff + close marker, the issue #60 path). Both empty shapes must
+        short-circuit to a non-fatal 0 and plan nothing."""
+        for iid, content in (("CLOSE0", ""), ("CLOSE1", "\n  \n")):
+            d = _bundle(self.cfg, iid, brief_body=_FIX_BRIEF, accepted=True)
+            (d / "patch.diff").write_text(content, encoding="utf-8")
+            self.assertEqual(state.state(d), state.COMPLETE)  # empty patch ⇒ past-Do
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                self.assertEqual(publish.publish(self.cfg, iid, dry_run=True), 0)
+            self.assertIn("no (non-empty) patch.diff", buf.getvalue())
+            # the guard returns before any contribution is planned/recorded
+            self.assertFalse((d / "commit-msg.txt").exists())
+            self.assertFalse((d / "publish.json").exists())
+
     def test_commit_stages_patch_added_files(self) -> None:
         """Regression (#23a): the commit must stage patch-ADDED files (the new
         regression test), not only modified-tracked ones — `git apply` + `add --all`
