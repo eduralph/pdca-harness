@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import os
 import shutil
 import sys
@@ -106,6 +107,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="discontinue — record §9, no transition, drop from the pending set")
     p_signoff.add_argument("--by", default="", help="who signed off")
     p_signoff.add_argument("--delta", default="", help="iteration delta note")
+    p_signoff.add_argument("--no-publish", action="store_true",
+                           help="don't publish-on-accept (record §9, stop at COMPLETE)")
 
     p_publish = sub.add_parser("publish", help="Check's closing work: contribute an accepted fix as a draft PR")
     p_publish.add_argument("issue_id")
@@ -278,11 +281,29 @@ def _status(cfg: Config, issue_id: str | None) -> int:
         if s == state.AWAITING_SIGNOFF:
             n = len(signoff.open_needs_human(d / "SUMMARY.md"))
             flag = "  [cheap: confirm]" if n == 0 else f"  [{n} NEEDS-HUMAN]"
+        if s == state.COMPLETE:  # publish visibility (#97): is the accepted fix actually out?
+            flag += _publish_flag(d)
         blocked = _blocked_by(cfg, d) if s != state.COMPLETE else []
         if blocked:
             flag += f"  [blocked-by: {', '.join(blocked)}]"
         print(f"{s:18}{d.name}{flag}")
     return 0
+
+
+def _publish_flag(d: Path) -> str:
+    """A COMPLETE bundle's publish state (#97): a real publish writes publish.json with the
+    PR url; absent ⇒ accepted-but-unpublished (dry-run / no-target / failed / not-yet-run),
+    so it's visible instead of looking published. A close/no-fix bundle has no patch to ship."""
+    pj = d / "publish.json"
+    if not pj.exists():
+        if not (d / "patch.diff").is_file() or not (d / "patch.diff").read_text(encoding="utf-8").strip():
+            return "  [close: no PR]"
+        return "  [unpublished]"
+    try:
+        url = json.loads(pj.read_text(encoding="utf-8")).get("pr_url")
+    except (ValueError, OSError):
+        return "  [published]"
+    return f"  [PR {url}]" if url else "  [published]"
 
 
 def _blocked_by(cfg: Config, d: Path) -> list[str]:
@@ -416,6 +437,17 @@ def _signoff(cfg: Config, args: argparse.Namespace) -> int:
     # Apply the transition: accept freezes; iterate clears and re-runs the body.
     final = driver.run_issue(d, cfg)
     print(f"{final}\t{d}")
+
+    # Accept → publish by default, like `flow`'s closing step (#97): a standalone
+    # `signoff --accept` otherwise left bundles COMPLETE-but-unpublished with no signal.
+    # `--no-publish` opts out (then the bundle is deliberately, not silently, unpublished).
+    if action == "accept" and final == state.COMPLETE and not getattr(args, "no_publish", False):
+        rc = publish.publish(cfg, args.issue_id, dry_run=cfg.publisher.mode == "stub",
+                             by=args.by, skip_if_no_target=True)
+        if rc != 0:
+            print(f"  publish did not complete (rc {rc}) — {d.name} is COMPLETE but NOT "
+                  f"published; fix and re-run `pdca publish {args.issue_id}`.", file=sys.stderr)
+            return rc
     return 0
 
 

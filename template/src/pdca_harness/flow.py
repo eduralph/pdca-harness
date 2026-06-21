@@ -159,9 +159,13 @@ def flow(
     final = state.state(d)
     if do_publish and final == state.COMPLETE:
         # Closing step of Check. Dry-run when the publisher leaf is stubbed (offline
-        # rehearse / CI) so the flow never pushes without a live model.
-        publish.publish(cfg, issue_id, dry_run=cfg.publisher.mode == "stub",
-                        by=by, today=today, skip_if_no_target=True)
+        # rehearse / CI) so the flow never pushes without a live model. A real failure
+        # is LOUD (#97) — never silently leave a COMPLETE bundle unpublished.
+        rc = publish.publish(cfg, issue_id, dry_run=cfg.publisher.mode == "stub",
+                             by=by, today=today, skip_if_no_target=True)
+        if rc:
+            print(f"flow: issue_{issue_id} is COMPLETE but publish did not complete "
+                  f"(rc {rc}) — NOT published; run `pdca publish {issue_id}`.", file=sys.stderr)
     if do_act and final == state.COMPLETE:
         leaves.run_act(cfg, today)
     return final
@@ -388,10 +392,16 @@ def _drive_and_act(
         # must not abort the batch return / Act for the rest (testbed issue #3).
         for d in bundles:
             if state.state(d) == state.COMPLETE:
-                _isolate(d, "publish", lambda d=d: publish.publish(
+                rc = _isolate(d, "publish", lambda d=d: publish.publish(
                     cfg, d.name.removeprefix("issue_"),
                     dry_run=cfg.publisher.mode == "stub", by=by, today=today,
                     skip_if_no_target=True))
+                # rc != 0 (and not None — None means _isolate already logged an exception):
+                # a publish that returned failure must not pass silently (#97).
+                if rc not in (0, None):
+                    print(f"flow: {d.name} is COMPLETE but publish did not complete "
+                          f"(rc {rc}) — NOT published; run `pdca publish "
+                          f"{d.name.removeprefix('issue_')}`.", file=sys.stderr)
     if do_act and any(s == state.COMPLETE for s in results.values()):
         leaves.run_act(cfg, today)
     return results
