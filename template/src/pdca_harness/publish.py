@@ -76,9 +76,16 @@ def publish(
     # patch.diff, so there is nothing to `git apply` / open a PR for. This is not a
     # failure — close the tracker item by hand. Return 0 so the continuous flow's
     # publish-on-accept doesn't error (mirrors skip_if_no_target).
-    if not (d / "patch.diff").is_file():
-        print(f"publish: {d.name} has no patch.diff (close / no-fix disposition) — "
-              "nothing to contribute; close the tracker item by hand.", file=sys.stderr)
+    #
+    # A 0-byte / whitespace-only patch.diff counts as "no patch" too (issue #95): a
+    # verify-first close can leave an empty patch.diff behind, and `is_file()` alone
+    # would let it past this guard — after which `git apply` is a no-op and the commit
+    # fails with "nothing to commit". Treat empty content the same as a missing file.
+    patch = d / "patch.diff"
+    if not patch.is_file() or not patch.read_text(encoding="utf-8").strip():
+        print(f"publish: {d.name} has no (non-empty) patch.diff (close / no-fix "
+              "disposition) — nothing to contribute; close the tracker item by hand.",
+              file=sys.stderr)
         return 0
 
     # Resolve the target from the brief (the contribution's where).
