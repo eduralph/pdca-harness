@@ -14,7 +14,7 @@ status: active
 
 > **Parallel-lanes extension.** Because the bundle is the unit of isolation, several cycles can run **concurrently** for throughput — see [09 - Parallel Lanes](09-parallel-lanes.md). The key discipline: mechanical isolation (a private working tree per lane) makes concurrent *execution* safe, but correctness *across* the parallel results is a separate problem — handled by **lane planning** (group same-area issues into one lane) and the **merge re-gate** (`gates.run_working_tree` over the merged tree + the draft PR), never by isolation alone. Parallelism stays in the unattended Do + Check band; the human touch points remain serial. Two realizations: N separate workspaces (zero machinery), or the **in-driver worker pool** — `[driver].lanes = N` (`PDCA_LANES` / `--lanes N`) fans the Do + Check band across N workers in one workspace, each exposing its lane slot to gates as `$PDCA_LANE`.
 
-> **Maturity legend** — every major mechanism in this doc is tagged: **[built]** = ships in this template and runs today; **[partial]** = ships but needs per-project wiring (cells in [04 - Validation Tooling](04-validation-tooling.md) §Status today have the breakdown); **[project-provided]** = not shipped by the template — each project supplies it because it is tracker- or repo-specific. The driver (`pdca run` / `batch` / `queue` / `gates` / `act-index` / `act-log`, in `src/pdca_harness/`), the deterministic gate runner, the headless reviewer, the sign-off queue, and the Act-log tooling are all **[built]**. What each project still supplies: the **Plan-draft scaffolding** — a tracker scraper + handoff generator (the per-repo specification's item-9 tooling, **[project-provided]**); the **real gate check rows** (`pdca.toml`; an all-PASS stub fallback ships, **[partial]**); and the **real leaf commands** (the leaves run as offline stubs until a model is wired, **[partial]**).
+> **Maturity legend** — every major mechanism in this doc is tagged: **[built]** = ships in this template and runs today; **[partial]** = ships but needs per-project wiring (cells in [04 - Validation Tooling](04-validation-tooling.md) §Status today have the breakdown); **[project-provided]** = not shipped by the template — each project supplies it because it is tracker- or repo-specific. The driver (`pdca run` / `flow` / `queue` / `gates` / `act index` / `act log`, in `src/pdca_harness/`), the deterministic gate runner, the headless reviewer, the sign-off queue, and the Act-log tooling are all **[built]**. What each project still supplies: the **Plan-draft scaffolding** — a tracker scraper + handoff generator (the per-repo specification's item-9 tooling, **[project-provided]**); the **real gate check rows** (`pdca.toml`; an all-PASS stub fallback ships, **[partial]**); and the **real leaf commands** (the leaves run as offline stubs until a model is wired, **[partial]**).
 
 ## What can and cannot be automated
 
@@ -25,7 +25,7 @@ PDCA has four beats; automation is described per beat. Where a beat has internal
 | Plan | human | **instrumented** — a project-provided scraper / handoff generator produces brief drafts; the human authors the spec/verdict | scaffolder **[project-provided]** (tracker-specific); human step is the design | per cycle |
 | Do | builder | **full** — headless agent (e.g. `claude -p`), builder subagent scope | builder subagent config **[built]** (`.claude/agents/builder.md`); leaf runs as a stub until a model command is wired | per cycle |
 | Check | deterministic gates + advisory reviewer + human sign-off | mixed — **gates: full** (deterministic, unattended); **reviewer: full** (headless, advisory); **sign-off: instrumented** (result document + one-command capture, human completes Check) | gates **[built — partial]** (runner ships; fill real check rows per [04 - Validation Tooling](04-validation-tooling.md) §Status today); reviewer config **[built]**; sign-off queue **[built]** | per cycle |
-| Act | human | **instrumented** — process-baseline tooling (bundle index, act-log scaffold) | tooling **[built]** (L4: `pdca act-index` / `act-log`); manual Act fine indefinitely | **cross-cycle**, batched |
+| Act | human | **instrumented** — process-baseline tooling (bundle index, act-log scaffold) | tooling **[built]** (L4: `pdca act index` / `act log`); manual Act fine indefinitely | **cross-cycle**, batched |
 
 **Human touch points vs beats.** Four rows, four beats — but the human appears at three different places, not four. The three **human touch points** in the cycle are *Plan-authoring*, *Check sign-off*, and *Act* — but these are *not* three beats. Plan and Act are two fully-human beats; Check sign-off is the human-instrumented *step inside* the Check beat (Check's gates and reviewer run unattended; sign-off is the human completion). Do is the fourth beat and has no human touch point. The 4-beat structure is preserved; the three human touches are how humans participate across the three beats that contain human work. The pipeline's job is to make each human touch **rare** (only genuine NEEDS-HUMAN items reach sign-off; Act fires once per batch, not once per cycle) and **fast** (everything pre-assembled, the common confirm-and-close is one keystroke).
 
@@ -33,7 +33,7 @@ The crucial cadence split: **Plan and Check (including sign-off) are per-cycle**
 
 ## The orchestrator is a state machine over the per-cycle bundle
 
-> **Maturity: [built].** The driver described in this section ships in `src/pdca_harness/` and runs today (`pdca run` / `batch`). The `state()` / `advance()` loop below is implemented; each issue's bundle advances unattended to AWAITING_SIGNOFF. What a project supplies *upstream* of the driver is the Plan-draft scaffolding — a tracker scraper + handoff generator (**[project-provided]**) — plus the real gate and leaf wiring.
+> **Maturity: [built].** The driver described in this section ships in `src/pdca_harness/` and runs today (`pdca run` / `flow`). The `state()` / `advance()` loop below is implemented; each issue's bundle advances unattended to AWAITING_SIGNOFF. What a project supplies *upstream* of the driver is the Plan-draft scaffolding — a tracker scraper + handoff generator (**[project-provided]**) — plus the real gate and leaf wiring.
 
 Do not build a monolith. Each issue's **state is its files** in `results/issue_<id>/`, and a driver advances issues idempotently:
 
@@ -116,7 +116,7 @@ These three are orchestrator responsibilities. An LLM told "don't look at the ra
 
 Two substrates, used for what each is good at:
 
-- **Local/container driver** **[built]** runs the **contribution body** — Do + Check + assemble — co-located, full control. This is the fast inner loop: `pdca run <id>` advances one issue to AWAITING_SIGNOFF; `pdca batch` fans it over many.
+- **Local/container driver** **[built]** runs the **contribution body** — Do + Check + assemble — co-located, full control. This is the fast inner loop: `pdca run <id>` advances one issue to AWAITING_SIGNOFF; `pdca flow <ids…>` fans it over many.
 - **CI** **[built — partial]** runs the **same deterministic gates** again as the merge-gate, triggered when sign-off accepts and the draft PR is pushed. The workflow ships (`.github/workflows/check-gates.yml`, invoking `pdca gates --working-tree`); it re-runs whatever check rows are configured in `pdca.toml`, so its coverage tracks the gates a project has actually written (partial until they are). The belt-and-suspenders model is the design; the second belt is in place wherever rules exist.
 
 The two agree because the gates are **single-sourced** — the validator(s), semgrep rules, and the runtime/suite checks are one implementation, invoked by both the local driver and CI. CI is not a second opinion; it is the same check re-run at the merge boundary so nothing merges that the body did not clear.
@@ -151,7 +151,7 @@ The tracker scrape + handoff generator (the per-repo specification's item-9 tool
 The contribution-batch case is the per-issue driver under an existing fan-out:
 
 1. A project-provided scraper + handoff generator turns the selected IDs into N draft `brief.md` (Plan scaffolding, **[project-provided]**). **Human fills verdicts** (Plan judgment, the one human step before the body runs).
-2. `pdca batch <ids>` loops every issue through Do → Check → assemble, unattended, producing N `results/issue_<id>/` bundles. Resumable via the state machine.
+2. `pdca flow <ids>` loops every issue through Do → Check → assemble, unattended, producing N `results/issue_<id>/` bundles. Resumable via the state machine.
 3. `pdca queue` emits the **sign-off queue** (burn-down index, cheap-first). Human works the queue; confirm-and-close items are one keystroke each.
 
 So a contribution-batch is: one human pass at the **Plan** beat to author specs, an unattended run of the **Do** beat and the mechanical portion of the **Check** beat (gates + reviewer) over N issues, then one human pass to complete the **Check** beat (sign-off). Four beats, two human touches inside them.
@@ -164,8 +164,8 @@ Build the automation in order. **The three human touch points — Plan authoring
 
 - **L1 — scripted handoff.** **[project-provided]** A tracker scraper + handoff generator emits draft briefs and bundle directories from a candidate pool (see [Batch selection](#batch-selection-upstream-of-fan-out)). This is tracker-specific, so the template does not ship it; each project supplies it as the per-repo specification's item-9 tooling.
 - **L2 — unattended per-issue body.** **[built]** `pdca run <id>` runs Do→Check→assemble→STOP for a single issue: the state machine + the two headless leaf calls + the single-sourced gate runner. (The leaves run as offline stubs until a model command is wired, and the gates use the all-PASS stub fallback until real check rows are filled — fill the gates first, per [Build order](#build-order).)
-- **L3 — unattended contribution-batch + sign-off queue.** **[built]** `pdca batch` produces N bundles; `pdca queue` is the cheap-first sign-off burn-down.
-- **L4 — Act review tooling.** **[built]** `pdca act-index` is the bundle index across frozen cycles; `pdca act-log` scaffolds the dated entry (the deltas are left to the human). L4 is independent of L1–L3 — you can run Act manually against L3 bundles regardless.
+- **L3 — unattended contribution-batch + sign-off queue.** **[built]** `pdca flow <ids…>` produces N bundles; `pdca queue` is the cheap-first sign-off burn-down.
+- **L4 — Act review tooling.** **[built]** `pdca act index` is the bundle index across frozen cycles; `pdca act log` scaffolds the dated entry (the deltas are left to the human). L4 is independent of L1–L3 — you can run Act manually against L3 bundles regardless.
 
 The driver, queue, and Act tooling all ship; the gate *runner* ships too but only gates meaningfully once real check rows exist — until a project fills Tiers 1–4 into `pdca.toml`, the body runs on the all-PASS stub fallback. So the per-project build order is: **gates first**, then wire the real leaf commands, then lean on the Act tooling as manual Act becomes the bottleneck.
 
@@ -357,7 +357,7 @@ the real gate rows, and the real leaf commands.
    `src/pdca_harness/` (state derivation, the iteration paths, the two
    leaf invocations with file-withholding, the gate runner,
    `assemble_summary`); run via `pdca run`.
-3. **The contribution-batch queue** **[built]** — `pdca batch` fans the
+3. **The contribution-batch queue** **[built]** — `pdca flow <ids…>` fans the
    driver over N issues; `pdca queue` emits the cheap-first sign-off
    burn-down index.
 4. **The two leaf instruction files** **[built]** — the builder subagent
@@ -366,7 +366,7 @@ the real gate rows, and the real leaf commands.
    `.claude/hooks/builder_guard.py` (see [Do — full](#do--full)). The
    configs ship; the leaves run as offline stubs until
    `leaves_mode = "command"` in `pdca.toml` wires a real model.
-5. **Act tooling (L4)** **[built]** — `pdca act-index` (bundle index
-   across frozen cycles) and `pdca act-log` (dated entry scaffold; the
+5. **Act tooling (L4)** **[built]** — `pdca act index` (bundle index
+   across frozen cycles) and `pdca act log` (dated entry scaffold; the
    deltas are the human's). Usable anytime; manual Act is also fine
    indefinitely.

@@ -228,7 +228,7 @@ The testbed's integration lived across `CLAUDE.md`, `agent-work/`, and
 | Batch runner | `agent-work/run-batch.sh` | Entry point for a triage batch — scrape + handoff. | **[built]** |
 | Pre-commit hooks (testbed itself) | `.pre-commit-config.yaml` | Static checks on testbed code; black, ruff E9/F63/F7/F82, ast.parse. | **[built]** |
 | Pre-commit hooks (forks) | `agent-work/dev-tooling/pre-commit/` | Installed via `install.sh` into the forks; per-repo configs. | **[built]** |
-| Driver (state machine + leaf invocations) | `src/pdca_harness/` | `pdca run` / `flow` / `gates` / `queue` / `act-index`. The [03 - Cycle Automation](03-cycle-automation.md) §Driver skeleton, now shipped. | **[built]** |
+| Driver (state machine + leaf invocations) | `src/pdca_harness/` | `pdca run` / `flow` / `gates` / `queue` / `act index`. The [03 - Cycle Automation](03-cycle-automation.md) §Driver skeleton, now shipped. | **[built]** |
 | Reviewer subagent config | `.claude/agents/reviewer.md` (+ `AGENTS.md` for cross-vendor Codex) | execute-only scope; build-notes withheld via sandbox. | **[built]** |
 | Builder subagent config | `.claude/agents/builder.md` | builder subagent scope + the `builder_guard.py` ready-mark hook ([03 - Cycle Automation](03-cycle-automation.md) §Do). | **[built]** |
 

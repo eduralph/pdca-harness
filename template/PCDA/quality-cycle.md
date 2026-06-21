@@ -80,9 +80,9 @@ Properties: **resumable** (crash resumes from file state), **inspectable**
 4. **L4 — Act tooling.** Bundle index across frozen cycles, act-log writer.
 
 This harness ships the **scaffolding for all four rungs**: the L2 driver
-(`pdca run`), the L3 batch fan-out + sign-off queue (`pdca batch`, `pdca queue`),
+(`pdca run`), the L3 batch fan-out + sign-off queue (`pdca flow <ids…>`, `pdca queue`),
 single-sourced gates (`pdca gates`, driver + CI), and the L4 Act tooling
-(`pdca act-index`, `pdca act-log`). The leaves and gates run as **stubs** so the
+(`pdca act index`, `pdca act log`). The leaves and gates run as **stubs** so the
 control flow works offline. The long pole that remains is project-specific: the
 real gate-tier implementations (until Tiers 1–4 are single-sourced, Check is not
 truly automatable) and wiring the real model leaves. Build order:

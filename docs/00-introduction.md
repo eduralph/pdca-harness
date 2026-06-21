@@ -101,7 +101,7 @@ project-specific parts are yours.
 | **`pdca.toml` wiring** | One config file binds the driver to your repo's leaves (the per-beat commands) and gates | [01](01-render-and-integrate.md) |
 | **`INTEGRATION.md` (11 items)** | The contract for concretizing the generic model to your tracker, branches, fixtures, ruleset | [01](01-render-and-integrate.md) |
 | **File-derived state machine** | A bundle's state is *computed from which files exist* — no DB, fully resumable | [02](02-rehearse-offline.md) |
-| **Offline rehearsal** | `make rehearse` drives the whole flow with stubs — instant, free | [02](02-rehearse-offline.md) |
+| **Offline rehearsal** | `pdca flow <id> --rehearse` drives the whole flow with stubs — instant, free | [02](02-rehearse-offline.md) |
 | **The brief** | A parsed, field-structured spec every later beat consumes | [03](03-plan.md) |
 | **Headless builder, narrow tools** | The Do leaf can edit and run tests but not open PRs — STOP discipline by capability | [04](04-do.md) |
 | **Deterministic gates** | Your check commands, each tagged gating (blocks) or advisory (informs); baseline-diffed | [05](05-check.md) |
@@ -111,7 +111,7 @@ project-specific parts are yours.
 | **Iterate carry-forward** | A rejection archives the attempt and folds the *reason* into the next build | [06](06-signoff.md) |
 | **Draft-PR publish** | Contribute the accepted fix as a *draft* — a human marks it ready, never the harness | [07](07-publish-and-act.md) |
 | **Cross-cycle Act loop** | Periodic review that turns recurring misses into spec/gate/rule deltas | [07](07-publish-and-act.md) |
-| **Front-door `Makefile`** | `make flow ID=…` orchestrates the whole cycle; `make status`, `make batch`, … | [README](README.md) |
+| **Console-script front door** | `pdca flow <id>` orchestrates the whole cycle; `pdca flow <ids…>` batches, bare `pdca` is status; `make` is bootstrap-only | [README](README.md) |
 
 ---
 

@@ -52,7 +52,7 @@ Copier asks the questions in `copier.yml`; each answer is a one-time integration
 | Reviewer family | `reviewer_family` | `codex` | **MUST differ** from the builder (decorrelation, [04](04-validation-tooling.md) §reviewer); see the fallback note in Step 2 |
 | Leaves mode | `leaves_mode` | `stub` | **start at `stub`** — the driver runs fully offline; flip to `command` once leaves are real |
 
-After render, the vertical slice runs immediately on stubs (`make rehearse ID=TOY`, or the `init-issue`/`run`/`status` sequence the post-copy message prints). That offline-green slice is your proof the machinery landed before you write a single project-specific line.
+After render, the vertical slice runs immediately on stubs (`pdca flow TOY --rehearse`, or the `init-issue`/`run`/`status` sequence the post-copy message prints). That offline-green slice is your proof the machinery landed before you write a single project-specific line.
 
 ## Step 2 — Fill `pdca.toml` — *[render-time] + [project-provided]*
 

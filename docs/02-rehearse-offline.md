@@ -65,11 +65,11 @@ PYTHONPATH=src python -m pdca_harness.cli signoff TOY --discontinue   # → DISC
 ## The one-shot rehearsal
 
 Typing the beats individually is good for *seeing* the state machine. To rehearse
-the **same orchestration `make flow` uses** — Plan → Do → Check → sign-off →
-publish — but entirely stubbed, use:
+the **same orchestration `pdca flow` uses** — Plan → Do → Check → sign-off →
+publish — but entirely stubbed, use the `--rehearse` flag:
 
 ```bash
-make rehearse ID=TOY
+pdca flow TOY --rehearse
 ```
 
 This forces `PDCA_LEAVES_MODE=stub`, stubs the gates, dry-runs the publish, and

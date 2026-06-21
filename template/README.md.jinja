@@ -13,19 +13,32 @@ code); a model is invoked only at the five **leaves**. See
 ## Prerequisites
 
 - The **Claude CLI** (`claude`) installed and authenticated (for a live `flow`).
-- Python 3.11+ (stdlib only; no install needed — the `Makefile` runs from source).
+- Python 3.11+.
 - Whatever tools your gates need (see `pdca.toml` `[[gates.checks]]`).
 
-## Quick start
+## Install + run
+
+Bootstrap once (per platform), then drive the cycle with the **console script** —
+`{{ cli_name }}`, the cross-platform run interface:
 
 ```bash
-make rehearse ID=123    # offline dry-run: PLANNED → … → COMPLETE on stub leaves
+make install            # Ubuntu/macOS: .venv + the `{{ cli_name }}` console script
+#   pwsh -File scripts/install.ps1   # Windows equivalent
 make setup              # ONCE: grant Claude read of the workspace
-make flow ID=123        # run the whole cycle for issue 123 (live)
 ```
 
-Run `make flow` **in a real terminal** — the Plan, sign-off, publish and Act steps
-open Claude interactively. **Trust:** the first interactive session asks once to
+```bash
+{{ cli_name }} flow 123 --rehearse   # offline dry-run: PLANNED → … → COMPLETE on stubs
+{{ cli_name }} flow 123              # run the whole cycle for issue 123 (live)
+{{ cli_name }} flow 123 124 125      # several ids → batch (lanes + cheap-first sign-off)
+{{ cli_name }}                       # the status dashboard (bare invocation)
+```
+
+Before `make install`, run it from source as `python -m pdca_harness.cli flow 123`
+(with `PYTHONPATH=src`).
+
+Run `{{ cli_name }} flow` **in a real terminal** — the Plan, sign-off, publish and Act
+steps open Claude interactively. **Trust:** the first interactive session asks once to
 *trust* the project — a one-time **global** setting (`~/.claude.json`), not something
 `make setup` can write (`setup` handles file *permissions*). Accept it.
 
@@ -33,7 +46,8 @@ What happens, step by step (the cycle has four beats; review/sign-off/publish ar
 steps *within* Check):
 
 1. **Plan** (interactive) — Claude reads your input documents (e.g. a tracker CSV
-   via `CSV=…`) and, with you, writes `{{ bundle_root }}/issue_<id>/brief.md`.
+   via `--from-csv`) and, with you, writes `{{ bundle_root }}/issue_<id>/brief.md`.
+   An unbriefed id is auto-planned; already-briefed ids go straight to Do.
 2. **Do** (headless) — Claude implements the brief: `patch.diff`, the test, `build-notes.md`.
 3. **Check** — the deterministic gates run (`→ … still working` heartbeats while
    they do), then a headless advisory reviewer.
@@ -42,26 +56,30 @@ steps *within* Check):
    records §9 under the C6 guard.
 5. **Publish** (Check step, interactive, on accept) — Claude drafts the contribution
    artifacts (commit-msg + PR description) and the driver opens a **draft PR** — the
-   closing work of Check. `NO_PUBLISH=1` skips it; offline `rehearse` dry-runs it.
-6. **Act** (interactive, only with `--act` / `ACT=1`) — Claude reviews the frozen
-   cycle and suggests process improvements if any are warranted.
+   closing work of Check. `--no-publish` skips it; `--rehearse` dry-runs it.
+6. **Act** (interactive, on by default after COMPLETE; `--no-act` to skip) — Claude
+   reviews the frozen cycle and suggests process improvements if any are warranted.
 
 When a Plan/sign-off/publish session ends, exit Claude (**Ctrl-D**) to let the flow continue.
 
 ## Commands
 
+Run the cycle through `{{ cli_name }}` (the console script). `make` is bootstrap-only.
+
 | Command | What it does |
 |---|---|
-| `make setup` | One-time: write the permission config so the interactive leaves don't prompt. |
-| `make flow ID=<id> [CSV="<path>"] [NO_PUBLISH=1] [ACT=1] [BY=<name>]` | Run the full cycle for one issue. On an accept it opens a draft PR (`NO_PUBLISH=1` stops at COMPLETE); `ACT=1` runs Act; `BY` overrides §9 attribution. |
-| `make flow CSV="<path>"` | **Batch**: one Plan session may brief several issues; they all build unattended, then you sign off the cheap-first queue. |
-| `make batch IDS="<id> …" [NOACT=1] [BY=<name>]` | Drive **already-briefed** bundles by id through the full cycle, no Plan beat (Do → Check → sign-off → publish → Act). `NOACT=1` stops after sign-off; `BY` overrides §9 attribution. Resumable. |
-| `make publish ID=<id> [DRY=1]` | Re-publish an accepted bundle as a draft PR (the flow does this on accept). `DRY=1` prints the git/gh plan without pushing. |
-| `make rehearse ID=<id> [CSV="<path>"]` | Dry-run the *same* control flow with stub leaves + stub gates — **no Claude, no live gates, instant** (publish dry-runs too). |
-| `make status` | List every bundle and its state. |
-| `make cli ARGS="<subcommand>"` | Any other `{{ cli_name }}` subcommand (e.g. `signoff 123 --accept`). |
+| `{{ cli_name }}` | The status dashboard (bare invocation). |
+| `{{ cli_name }} flow <id> [--from-csv PATH] [--no-publish] [--no-act] [--by NAME] [--lanes N]` | Run the full cycle for one issue. On an accept it opens a draft PR (`--no-publish` stops at COMPLETE); Act runs by default (`--no-act` skips); `--by` sets §9 attribution. |
+| `{{ cli_name }} flow <id> <id> …` | **Batch**: several ids fan out across lanes; unbriefed ids are auto-planned (one shared Plan session); sign off cheap-first. |
+| `{{ cli_name }} flow --from-csv PATH` | Plan a batch the planner picks from a tracker export, then drive it. |
+| `{{ cli_name }} flow <id> … --rehearse` | Dry-run the *same* control flow on stub leaves + stub gates in an isolated bundle root — **no Claude, no live gates, instant**. |
+| `{{ cli_name }} flow <id> … --from-briefs DIR` | Init any missing bundle from `DIR/<id>.md` before driving. |
+| `{{ cli_name }} status` / `queue` | List bundle states / the cheap-first sign-off burn-down. |
+| `{{ cli_name }} publish <id> [--dry-run]` | Re-publish an accepted bundle as a draft PR (the flow does this on accept). |
+| `{{ cli_name }} signoff <id> --accept` | Record the human Check sign-off (refused while §6 NEEDS-HUMAN is open). |
+| `{{ cli_name }} act index` / `act log --date <d>` | Cross-cycle Act tooling. |
 | `make` / `make check` | Self-test (full / fast offline). |
-| `make install` | Optional: a real `{{ cli_name }}` console script in `.venv/`. |
+| `make install` / `make setup` | Bootstrap: console script in `.venv/` / Claude read-permissions. |
 
 If something looks stuck, it isn't — a headless `claude -p` and a long gate print
 nothing until they finish, so the flow shows a `… still working (NmSSs elapsed)`
