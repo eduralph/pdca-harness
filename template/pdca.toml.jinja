@@ -28,6 +28,13 @@ templates_dir = "templates"
 # ergonomics actually bite (then prefer this over N separate workspaces).
 [driver]
 lanes = 1
+# Worktree isolation (issue #94). A cycle's Do/Check run in a dedicated git worktree off
+# the target's base, so the host's primary checkout is NEVER mutated in place. The harness
+# creates/resets it per cycle (per lane slot) and exposes its path as `$PDCA_WORKTREE` —
+# the builder edits there (granted access automatically), and gate commands should target
+# `$PDCA_WORKTREE` too (see the gate examples below). On by default; best-effort (a target
+# that isn't a worktree-capable git checkout falls back to in-place). Set false to disable.
+worktree = true
 # Close-disposition fast path (issue #60). A bundle whose brief's `Disposition hint`
 # matches one of these close / no-fix classes skips the builder + reviewer model leaves
 # (the engine's only token spend) and routes straight to sign-off, where the human
@@ -153,6 +160,9 @@ argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
 # what CI re-runs via `pdca gates --working-tree`); `scope = "bundle"` needs the
 # bundle/patch context ($PDCA_BUNDLE is exported) and runs only locally. The
 # SAME commands run for the local driver and CI — single-sourced, no drift.
+# With worktree isolation on ([driver].worktree), $PDCA_WORKTREE is also exported —
+# the isolated tree Do edited; a bundle-scoped gate should test THAT, not the host
+# checkout (e.g. `cd "$PDCA_WORKTREE" && <run the test>`).
 #
 # TARGET-AWARE SELECTION (optional). A check may carry `target` — a label or a LIST;
 # it runs iff its labels are a SUBSET of the bundle's label set (subset = AND). The

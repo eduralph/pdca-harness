@@ -38,7 +38,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import brief, lane, progress
+from . import brief, lane, progress, worktree
 from .config import Config
 
 # A gate that cannot RUN its mechanical check (vs. running and failing) declares so:
@@ -165,6 +165,9 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
         return _assemble_matrix([], stub=True)
 
     labels = _bundle_target(bundle, cfg.gate_target_match, cfg.gate_target_default, cfg.gate_target_flags)
+    # Worktree isolation (issue #94): if Do ran in an isolated worktree, gates test THAT
+    # tree — expose it as $PDCA_WORKTREE so a gate cmd targets it, not the host checkout.
+    wt = worktree.path(bundle, cfg) if bundle is not None else None
     configured: list[dict] = []
     for chk in cfg.gates_checks:
         if not _applies(chk, scopes, labels):
@@ -173,7 +176,8 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
                       f"(target={chk.get('target')}, bundle labels {set(labels)})",
                       file=sys.stderr, flush=True)
             continue
-        configured.append(_run_one(chk, cwd=cwd, bundle=bundle, runner=cfg.gates_runner))
+        configured.append(_run_one(chk, cwd=cwd, bundle=bundle, runner=cfg.gates_runner,
+                                   worktree_path=wt))
     # Overlay the configured gate results onto the complete 5/5/1 matrix.
     return _assemble_matrix(configured, stub=False)
 
@@ -197,7 +201,8 @@ def _delegated_cmd(chk: dict, runner: str) -> tuple[str, str]:
     return f"{runner} {subcmd}", ""
 
 
-def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "") -> dict:
+def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
+             worktree_path: Path | None = None) -> dict:
     cmd, cmd_error = _delegated_cmd(chk, runner)
     gating = bool(chk.get("gating", True))
     label = f"{chk.get('id', '')}: {chk.get('label', '')}".strip(": ")
@@ -210,6 +215,9 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "") -> 
             path_line=cmd_error[:120], gating=gating, element=chk.get("tier", ""),
         )
     env = {"PDCA_BUNDLE": str(bundle)} if bundle is not None else None
+    # Worktree isolation (issue #94): the tree Do edited; a gate cmd targets $PDCA_WORKTREE.
+    if worktree_path is not None:
+        env = {**(env or {}), "PDCA_WORKTREE": str(worktree_path)}
     # Stack mode (issue #54): when the brief names an existing PR's head to stack onto,
     # expose it as PDCA_BASE so the verify/repro gate establishes red→green on THAT branch
     # — the same branch publish commits onto and pushes to. Single-sourced from the brief,
