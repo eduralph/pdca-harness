@@ -11,13 +11,21 @@ closes the PDCA loop by improving the *process*, not the contribution.
 ## Publish — contribute the accepted fix
 
 Once a bundle is `COMPLETE`, publish opens it as a **draft** PR on the target
-branch from the brief. In `pdca flow` this runs automatically on an accept; you
-can also run it standalone:
+branch from the brief. **Accept publishes by default everywhere** (#97): both
+`pdca flow` and a standalone `pdca signoff <id> --accept` run publish on an accept,
+so "approved" doesn't silently stay "unpublished"; pass `--no-publish` to opt out
+(then it's *deliberately* unpublished, not by accident). A publish that fails is
+**loud** — never swallowed. You can also run it standalone:
 
 ```bash
 pdca publish 11589              # open the draft PR
 pdca publish 11589 --dry-run    # print the git/gh plan without pushing
 ```
+
+`pdca status` (and bare `pdca`) shows each `COMPLETE` bundle's publish state —
+`[PR <url>]` when a PR was opened, `[unpublished]` when it wasn't (dry-run /
+no-target / failed / not-yet-run), `[close: no PR]` for a close/no-fix bundle — so
+an accepted-but-unpublished cycle is visible at a glance.
 
 It writes `publish.json` into the bundle and uses the project's PR conventions
 from INTEGRATION §8. For gramps that's a four-section body (Root cause / Fix /

@@ -849,5 +849,79 @@ class ProgName(unittest.TestCase):
             sys.argv = orig
 
 
+class PublishOnAccept(unittest.TestCase):
+    """Accept → publish by default + publish visibility (issue #97)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _accepted_ready(self, iid: str) -> Path:
+        d = self.cfg.bundle(iid)
+        leaves.do_plan(d, self.cfg)
+        driver.run_issue(d, self.cfg)  # → AWAITING_SIGNOFF (§6 open from the stub reviewer)
+        summ = d / "SUMMARY.md"
+        summ.write_text(summ.read_text().replace("- [ ]", "- [x]"), encoding="utf-8")  # clear §6
+        return d
+
+    def _accept_args(self, iid: str, no_publish: bool = False) -> SimpleNamespace:
+        return SimpleNamespace(issue_id=iid, accept=True, iterate_do=False,
+                               iterate_plan=False, discontinue=False, by="", delta="",
+                               no_publish=no_publish)
+
+    def test_accept_publishes_by_default(self) -> None:
+        from pdca_harness import publish
+        calls, orig = [], publish.publish
+        publish.publish = lambda cfg, iid, **kw: calls.append(iid) or 0
+        try:
+            self._accepted_ready("ACC")
+            self.assertEqual(cli._signoff(self.cfg, self._accept_args("ACC")), 0)
+        finally:
+            publish.publish = orig
+        self.assertEqual(calls, ["ACC"])  # standalone accept publishes (#97)
+
+    def test_no_publish_opts_out(self) -> None:
+        from pdca_harness import publish
+        calls, orig = [], publish.publish
+        publish.publish = lambda cfg, iid, **kw: calls.append(iid) or 0
+        try:
+            self._accepted_ready("NOP")
+            cli._signoff(self.cfg, self._accept_args("NOP", no_publish=True))
+        finally:
+            publish.publish = orig
+        self.assertEqual(calls, [])  # --no-publish ⇒ deliberately unpublished
+
+    def test_accept_publish_failure_is_loud(self) -> None:
+        import io
+        from contextlib import redirect_stderr
+        from pdca_harness import publish
+        orig = publish.publish
+        publish.publish = lambda cfg, iid, **kw: 1  # publish fails
+        try:
+            self._accepted_ready("FAILP")
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                rc = cli._signoff(self.cfg, self._accept_args("FAILP"))
+        finally:
+            publish.publish = orig
+        self.assertEqual(rc, 1)                       # failure surfaced as the return
+        self.assertIn("NOT", buf.getvalue())          # and printed loudly
+
+    def test_status_publish_flag(self) -> None:
+        d = self.cfg.bundle("ST")
+        d.mkdir(parents=True)
+        (d / "patch.diff").write_text("diff --git a/x b/x\n", encoding="utf-8")
+        self.assertEqual(cli._publish_flag(d), "  [unpublished]")  # no publish.json
+        (d / "publish.json").write_text('{"pr_url": "https://x/pr/1"}', encoding="utf-8")
+        self.assertEqual(cli._publish_flag(d), "  [PR https://x/pr/1]")
+        d2 = self.cfg.bundle("ST2")
+        d2.mkdir(parents=True)
+        (d2 / "patch.diff").write_text("", encoding="utf-8")  # close/no-fix → no PR expected
+        self.assertEqual(cli._publish_flag(d2), "  [close: no PR]")
+
+
 if __name__ == "__main__":
     unittest.main()
