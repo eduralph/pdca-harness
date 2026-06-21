@@ -96,7 +96,7 @@ List every project-specific script the cycle invokes (role → path + invocation
 | Conformance gate runners | TODO | | [planned] |
 | Repro / verification runners | TODO | | [planned] |
 | Driver | `src/pdca_harness/` | `{{ cli_name }} run <id>` | [built — stub leaves] |
-| Act tooling (L4) | `src/pdca_harness/act.py` | `{{ cli_name }} act-index`, `{{ cli_name }} act-log --date <d>` | [built] |
+| Act tooling (L4) | `src/pdca_harness/act.py` | `{{ cli_name }} act index`, `{{ cli_name }} act log --date <d>` | [built] |
 | Gates (single-sourced) | `pdca.toml` `[[gates.checks]]` | `{{ cli_name }} gates [<id>] [--working-tree]` | [built — stub fallback; fill checks] |
 | Reviewer config | `AGENTS.md` + `.claude/agents/reviewer.md` | (model leaf) | [built — contract; wire command mode] |
 | Builder subagent | `.claude/agents/builder.md` + `.claude/hooks/builder_guard.py` | (model leaf) | [built — ready-mark blocked] |

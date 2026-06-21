@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -47,7 +48,8 @@ _STATE_ORDER = [
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog=_prog_name(), description="PDCA quality-cycle driver")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    # No subcommand → status (the bundle dashboard), the most-reached-for view (#88).
+    sub = parser.add_subparsers(dest="cmd")
 
     p_init = sub.add_parser("init-issue", help="create a bundle and seed brief.md")
     p_init.add_argument("issue_id")
@@ -56,26 +58,22 @@ def main(argv: list[str] | None = None) -> int:
     p_run = sub.add_parser("run", help="advance an issue to a halted state")
     p_run.add_argument("issue_id")
 
-    p_flow = sub.add_parser("flow", help="continuous Claude-driven cycle (Plan→Do→Check[→publish]→Act)")
-    p_flow.add_argument("issue_id", nargs="?", help="one issue; omit + pass --from-csv for a batch Plan session")
-    p_flow.add_argument("--from-csv", help="input documents for interactive Plan (e.g. a tracker CSV)")
+    # One verb for the whole cycle (#86): arity selects mode — one id is a single
+    # sequential cycle, several ids fan out across lanes with a cheap-first sign-off
+    # queue. Unbriefed ids are auto-planned (one shared Plan session); --from-csv with
+    # no ids plans a batch the planner picks from the export. --rehearse (#87) dry-runs.
+    p_flow = sub.add_parser("flow", help="run the cycle for one or more issues (Plan→Do→Check→sign-off→publish→Act)")
+    p_flow.add_argument("issue_ids", nargs="*", help="issue ids; 1 → single cycle, N → batch; 0 + --from-csv → plan a batch from the export")
+    p_flow.add_argument("--from-csv", help="tracker export to seed the interactive Plan of unbriefed ids")
+    p_flow.add_argument("--from-briefs", type=Path, help="init any missing bundle from DIR/<id>.md before driving")
+    p_flow.add_argument("--rehearse", action="store_true", help="dry-run: stub leaves + stub gates in an isolated bundle root (no Claude/Docker)")
     p_flow.add_argument("--no-publish", action="store_true", help="don't open the draft PR after an accept")
-    p_flow.add_argument("--act", action="store_true", help="run the Act leaf after a COMPLETE sign-off")
+    p_flow.add_argument("--no-act", action="store_true", help="skip the Act leaf (Act runs by default after COMPLETE)")
     p_flow.add_argument("--by", default="", help="who signed off (recorded in §9)")
     p_flow.add_argument("--lanes", type=int, help="unattended Do+Check worker-pool size (docs 09; overrides [driver].lanes / PDCA_LANES)")
 
     p_status = sub.add_parser("status", help="list bundle states (cheap-first queue)")
     p_status.add_argument("issue_id", nargs="?")
-
-    p_batch = sub.add_parser("batch", help="drive already-briefed issues through the full cycle (Do→Check→sign-off→Act)")
-    p_batch.add_argument("issue_ids", nargs="+")
-    p_batch.add_argument("--plan", action="store_true",
-                         help="Plan pre-pass: brief any UNPLANNED ids in one shared session before driving (#65)")
-    p_batch.add_argument("--from-csv", help="Plan source for --plan (e.g. a tracker CSV); implies --plan")
-    p_batch.add_argument("--from-briefs", type=Path, help="init missing bundles from DIR/<id>.md")
-    p_batch.add_argument("--no-act", action="store_true", help="stop after sign-off; skip the end-of-batch Act")
-    p_batch.add_argument("--by", default="", help="who signed off (recorded in §9)")
-    p_batch.add_argument("--lanes", type=int, help="unattended Do+Check worker-pool size (docs 09; overrides [driver].lanes / PDCA_LANES)")
 
     sub.add_parser("queue", help="the cheap-first sign-off burn-down (AWAITING_SIGNOFF)")
 
@@ -88,10 +86,12 @@ def main(argv: list[str] | None = None) -> int:
     p_reval.add_argument("issue_id")
     p_reval.add_argument("--date", help="ISO date for the stamp (default: today)")
 
-    p_actidx = sub.add_parser("act-index", help="read-only index of frozen cycles + recurring signals")
+    # Act tooling as one command group (#89): `act index` / `act log`.
+    p_act = sub.add_parser("act", help="cross-cycle Act tooling (index / log)")
+    act_sub = p_act.add_subparsers(dest="act_cmd", required=True)
+    p_actidx = act_sub.add_parser("index", help="read-only index of frozen cycles + recurring signals")
     p_actidx.add_argument("--since", help="only cycles signed off on/after this ISO date")
-
-    p_actlog = sub.add_parser("act-log", help="scaffold a dated act-log entry (deltas left to the human)")
+    p_actlog = act_sub.add_parser("log", help="scaffold a dated act-log entry (deltas left to the human)")
     p_actlog.add_argument("--since", help="only consider cycles signed off on/after this ISO date")
     p_actlog.add_argument("--date", required=True, help="review date (ISO; Act is out-of-band so pass it)")
     p_actlog.add_argument("--append", action="store_true", help="append to process/act-log.md (default: print)")
@@ -116,8 +116,17 @@ def main(argv: list[str] | None = None) -> int:
     p_publish.add_argument("--by", default="", help="who published (recorded in publish.json)")
 
     args = parser.parse_args(argv)
+    # --rehearse (#87): a dry-run of the SAME control flow with stub leaves + stub gates
+    # in an isolated bundle root — set before Config.load reads the env. setdefault so an
+    # explicit env wins.
+    if getattr(args, "rehearse", False):
+        os.environ.setdefault("PDCA_LEAVES_MODE", "stub")
+        os.environ.setdefault("PDCA_GATES_MODE", "stub")
+        os.environ.setdefault("PDCA_BUNDLE_ROOT", ".rehearse")
     cfg = Config.load()
 
+    if not args.cmd:  # bare invocation → the status dashboard (#88)
+        return _status(cfg, None)
     if args.cmd == "init-issue":
         return _init_issue(cfg, args.issue_id, args.from_brief)
     if args.cmd == "run":
@@ -126,18 +135,14 @@ def main(argv: list[str] | None = None) -> int:
         return _flow(cfg, args)
     if args.cmd == "status":
         return _status(cfg, args.issue_id)
-    if args.cmd == "batch":
-        return _batch(cfg, args)
     if args.cmd == "queue":
         return _queue(cfg)
     if args.cmd == "gates":
         return _gates(cfg, args)
     if args.cmd == "revalidate":
         return _revalidate(cfg, args)
-    if args.cmd == "act-index":
-        return _act_index(cfg, args)
-    if args.cmd == "act-log":
-        return _act_log(cfg, args)
+    if args.cmd == "act":
+        return _act(cfg, args)
     if args.cmd == "signoff":
         return _signoff(cfg, args)
     if args.cmd == "publish":
@@ -178,42 +183,73 @@ def _run(cfg: Config, issue_id: str) -> int:
 
 
 def _flow(cfg: Config, args: argparse.Namespace) -> int:
-    """Run the continuous Claude-driven cycle.
+    """Run the whole cycle for one or more issues (the single ``flow`` verb, #86).
 
-    With an issue id: one issue, Plan → Do + gates + reviewer → interactive
-    sign-off (C6-guarded) → optional Act. Without an id (and with `--from-csv`):
-    a batch Plan session may brief several issues, which are then all built
-    unattended and signed off cheap-first via the queue.
+    Arity selects the mode: **one id** is a single sequential cycle (Plan→Do→Check→
+    sign-off→publish→Act); **several ids** fan out across lanes with a cheap-first
+    sign-off queue; **zero ids + --from-csv** plans a batch the planner picks from the
+    export. Unbriefed ids are auto-planned (one shared interactive Plan session) — no
+    --plan flag. Act runs by default after COMPLETE (--no-act to skip).
     """
     if getattr(args, "lanes", None) is not None:
         cfg.lanes = max(1, args.lanes)
-    if args.issue_id:
-        d = cfg.bundle(args.issue_id)
+    ids = list(args.issue_ids)
+
+    # --from-briefs: seed any missing bundle from DIR/<id>.md before driving.
+    if args.from_briefs:
+        for iid in ids:
+            d = cfg.bundle(iid)
+            if d.exists():
+                continue
+            src = args.from_briefs / f"{iid}.md"
+            if not src.exists():
+                print(f"  skip {iid}: no brief at {src}", file=sys.stderr)
+                continue
+            d.mkdir(parents=True)
+            shutil.copyfile(src, d / "brief.md")
+
+    do_publish, do_act = not args.no_publish, not args.no_act
+
+    if not ids:  # batch the planner picks from the export
+        if not args.from_csv:
+            print("flow needs one or more issue ids, or --from-csv to plan a batch from "
+                  "a tracker export", file=sys.stderr)
+            return 2
+        return _report_batch(flow.flow_batch(
+            cfg, csv=args.from_csv, do_publish=do_publish, do_act=do_act, by=args.by))
+
+    if len(ids) == 1:  # single sequential cycle (auto-plans if unbriefed)
+        iid = ids[0]
+        d = cfg.bundle(iid)
         if d.exists() and state.state(d) == state.COMPLETE:
             print(f"{state.COMPLETE}\t{d}", file=sys.stderr)
             print(f"  already complete — nothing to run. To redo it: rm -rf {d}", file=sys.stderr)
             return 0
         if not d.exists():
             d.mkdir(parents=True)
-        final = flow.flow(cfg, args.issue_id, csv=args.from_csv,
-                          do_publish=not args.no_publish, do_act=args.act, by=args.by)
+        final = flow.flow(cfg, iid, csv=args.from_csv,
+                          do_publish=do_publish, do_act=do_act, by=args.by)
         print(f"{final}\t{d}")
         if final == state.AWAITING_SIGNOFF:
             for it in signoff.open_needs_human(d / "SUMMARY.md"):
                 print(f"    {it}")
         return 0 if final in (state.COMPLETE, state.AWAITING_SIGNOFF) else 1
 
-    if not args.from_csv:
-        print("flow needs an issue id, or --from-csv for a batch Plan session", file=sys.stderr)
-        return 2
-    results = flow.flow_batch(cfg, csv=args.from_csv,
-                              do_publish=not args.no_publish, do_act=args.act, by=args.by)
+    # Several ids: batch — auto-plan unbriefed, drive concurrently, cheap-first sign-off.
+    return _report_batch(flow.flow_ids(
+        cfg, ids, plan_missing=True, csv=args.from_csv,
+        do_publish=do_publish, do_act=do_act, by=args.by))
+
+
+def _report_batch(results: dict[str, str]) -> int:
+    """Print a batch result map and return a process code (0 iff all COMPLETE)."""
     if not results:
-        return 0  # nothing in flight to drive (flow_batch printed why) — not an error
+        print("flow: nothing to drive — no in-flight briefs among the ids.", file=sys.stderr)
+        return 0
     for iid, st in sorted(results.items()):
         print(f"{st}\t{iid}")
     done = sum(1 for s in results.values() if s == state.COMPLETE)
-    print(f"batch: {done}/{len(results)} complete")
+    print(f"flow: {done}/{len(results)} complete")
     return 0 if done == len(results) else 1
 
 
@@ -247,46 +283,6 @@ def _blocked_by(cfg: Config, d: Path) -> list[str]:
         return []
     return [dep for dep in brief.depends_on(bp)
             if state.state(cfg.bundle(dep)) != state.COMPLETE]
-
-
-def _batch(cfg: Config, args: argparse.Namespace) -> int:
-    """Drive specific already-briefed issues through the FULL cycle, ending at Act.
-
-    Like `flow` but seeded by explicit ids. By default there is no Plan beat: each
-    bundle runs Do → Check → interactive sign-off (C6-guarded), walked cheap-first
-    across the set, then Act runs once at the end (skip with --no-act). `--plan`
-    (or `--from-csv`) adds a Plan pre-pass that briefs any UNPLANNED ids in one shared
-    session first (#65). `--from-briefs` inits any missing bundle from DIR/<id>.md
-    first. Resumable — already-COMPLETE ids are skipped, so re-running picks up
-    whatever is still in flight.
-    """
-    if getattr(args, "lanes", None) is not None:
-        cfg.lanes = max(1, args.lanes)
-    # Seed any missing bundles from --from-briefs; sign-off and Act stay human.
-    for issue_id in args.issue_ids:
-        d = cfg.bundle(issue_id)
-        if d.exists() or not args.from_briefs:
-            continue
-        src = args.from_briefs / f"{issue_id}.md"
-        if not src.exists():
-            print(f"  skip {issue_id}: no brief at {src}", file=sys.stderr)
-            continue
-        d.mkdir(parents=True)
-        shutil.copyfile(src, d / "brief.md")
-
-    plan_missing = bool(args.plan or args.from_csv)
-    results = flow.flow_ids(cfg, args.issue_ids, plan_missing=plan_missing,
-                            csv=args.from_csv, do_act=not args.no_act, by=args.by)
-    if not results:
-        print("batch: nothing to drive — no briefed, non-complete bundles among the ids "
-              "(brief them at Plan first, pass --plan to brief them now, or --from-briefs).",
-              file=sys.stderr)
-        return 0
-    for iid, st in sorted(results.items()):
-        print(f"{st}\t{iid}")
-    done = sum(1 for s in results.values() if s == state.COMPLETE)
-    print(f"batch: {done}/{len(results)} complete")
-    return 0 if done == len(results) else 1
 
 
 def _queue(cfg: Config) -> int:
@@ -345,6 +341,15 @@ def _revalidate(cfg: Config, args: argparse.Namespace) -> int:
     result = revalidate.revalidate(cfg, d, date)
     print(revalidate.render_md(result))
     return 1 if result["changed"] else 0
+
+
+def _act(cfg: Config, args: argparse.Namespace) -> int:
+    """Dispatch the `act` command group (#89): `act index` / `act log`."""
+    if args.act_cmd == "index":
+        return _act_index(cfg, args)
+    if args.act_cmd == "log":
+        return _act_log(cfg, args)
+    return 2
 
 
 def _act_index(cfg: Config, args: argparse.Namespace) -> int:

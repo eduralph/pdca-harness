@@ -194,14 +194,14 @@ status: active
   sign-off → publish) → Act as one run. **`flow_batch`** does it for several issues from
   one Plan session.
 - **Batch** — N issues processed together: scrape → draft briefs → one human Plan session →
-  `pdca batch` (unattended Do+Check) → `pdca queue` (cheap-first sign-off).
+  `pdca flow <ids…>` (unattended Do+Check) → `pdca queue` (cheap-first sign-off).
 - **Batch selection** — the deliberate, Plan-front choice of *which* issues go in a batch:
   start from a real pool, profile it (status/severity/**age**/component), pick the
   **batch character** (fix-oriented vs hygiene/long-tail), drop non-defects, pre-disposition
   into buckets, size to the natural set.
 - **Maturity ladder (L1–L4)** — L1 scripted handoff (project-provided scraper) · L2
-  unattended per-issue body (`pdca run`) · L3 batch + sign-off queue (`pdca batch`/`queue`)
-  · L4 Act tooling (`pdca act-index`/`act-log`).
+  unattended per-issue body (`pdca run`) · L3 batch + sign-off queue (`pdca flow <ids…>`/`queue`)
+  · L4 Act tooling (`pdca act index`/`act log`).
 - **Maturity tags** — `[built]` (ships and runs) · `[partial]` (ships, needs per-project
   wiring) · `[project-provided]` (not shipped; the project supplies it) · `[planned]`
   (designed, not yet implemented).
@@ -244,9 +244,9 @@ status: active
 
 - **Process baseline** — what Plan inherits from prior Act: the brief template, the
   conformance ruleset, the branch-target rules, the agent files. Act improves it.
-- **Act review / Act index / act-log** — the cross-cycle pass: `pdca act-index` surfaces
-  frozen-bundle §6/§7/§10 + recurring signals; the human decides deltas; `pdca act-log`
-  scaffolds the dated, **append-only**, **concrete-and-located** entry.
+- **Act review / Act index / act-log** — the cross-cycle pass: `pdca act index` surfaces
+  frozen-bundle §6/§7/§10 + recurring signals; the human decides deltas; `pdca act log`
+  scaffolds the dated, **append-only**, **concrete-and-located** entry (in `act-log.md`).
 - **Integration / per-repo specification** — the project's answer to the "which / where /
   how" the generic cycle leaves open (tracker, branches, fixtures, ruleset, templates,
   paths, scripts, governance). Lives in `docs/INTEGRATION.md`; **generic wins on shape,

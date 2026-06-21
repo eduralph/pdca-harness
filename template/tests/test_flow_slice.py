@@ -9,6 +9,7 @@ publisher leaf is stubbed (never pushes offline). Run from the project root:
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import unittest
@@ -300,8 +301,8 @@ class FlowSlice(unittest.TestCase):
         # A resumable batch with nothing in flight is success (exit 0), not an error,
         # so re-running `flow --from-csv` resumes cleanly instead of looking failed.
         # Regression guard for cli._flow (the bug returned 1 here).
-        args = SimpleNamespace(issue_id=None, from_csv="anything.csv",
-                               no_publish=True, act=False, by="")
+        args = SimpleNamespace(issue_ids=[], from_csv="anything.csv", from_briefs=None,
+                               no_publish=True, no_act=True, by="", lanes=None)
         orig = flow.flow_batch
         flow.flow_batch = lambda cfg, **kw: {}
         try:
@@ -437,8 +438,9 @@ class BatchPlanPrepass(unittest.TestCase):
         results = flow.flow_ids(self.cfg, ["U", "B"], today="2026-06-20")
         self.assertEqual(set(results), {"B"})  # U skipped, not briefed
 
-    def test_cli_batch_plan_forwards_plan_missing(self) -> None:
-        # `pdca batch <ids> --plan` wires plan_missing=True through to flow_ids.
+    def test_cli_flow_multi_id_auto_plans(self) -> None:
+        # Unified `flow <id> <id>` (#86): several ids → batch with plan_missing=True
+        # (auto-plan the unbriefed) wired through to flow_ids — no --plan flag.
         captured = {}
         orig = flow.flow_ids
 
@@ -449,13 +451,49 @@ class BatchPlanPrepass(unittest.TestCase):
 
         flow.flow_ids = spy
         try:
-            args = SimpleNamespace(issue_ids=["X1"], plan=True, from_csv=None,
-                                   from_briefs=None, no_act=True, by="", lanes=None)
-            cli._batch(self.cfg, args)
+            args = SimpleNamespace(issue_ids=["X1", "X2"], from_csv=None, from_briefs=None,
+                                   no_publish=True, no_act=True, by="", lanes=None)
+            cli._flow(self.cfg, args)
         finally:
             flow.flow_ids = orig
         self.assertTrue(captured["plan_missing"])
-        self.assertEqual(captured["ids"], ["X1"])
+        self.assertEqual(captured["ids"], ["X1", "X2"])
+
+
+class CliSurface(unittest.TestCase):
+    """The redesigned CLI surface (#86-89): bare → status, the `act` group, `flow`
+    arity/usage, and the `--rehearse` dry-run env. Exercises cli.main() end-to-end
+    against a minimal pdca.toml (Config.load walks up from cwd)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n', encoding="utf-8")
+        self._cwd = Path.cwd()
+        os.chdir(self.tmp)
+        self._env = dict(os.environ)
+
+    def tearDown(self) -> None:
+        os.chdir(self._cwd)
+        os.environ.clear()
+        os.environ.update(self._env)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_bare_invocation_runs_status(self) -> None:
+        self.assertEqual(cli.main([]), 0)  # no subcommand → status dashboard (#88)
+
+    def test_act_group_routes_index_and_log(self) -> None:
+        self.assertEqual(cli.main(["act", "index"]), 0)  # frozen-cycle index (empty is fine)
+        # `act log` routes through and reports "no frozen cycles" (return 1) — proves the group.
+        self.assertEqual(cli.main(["act", "log", "--date", "2026-01-01"]), 1)
+
+    def test_flow_requires_ids_or_csv(self) -> None:
+        self.assertEqual(cli.main(["flow"]), 2)  # no ids and no --from-csv → usage error
+
+    def test_rehearse_sets_stub_env_before_load(self) -> None:
+        cli.main(["flow", "--rehearse"])  # returns 2 (no ids) but sets the dry-run env first
+        self.assertEqual(os.environ.get("PDCA_LEAVES_MODE"), "stub")
+        self.assertEqual(os.environ.get("PDCA_GATES_MODE"), "stub")
+        self.assertEqual(os.environ.get("PDCA_BUNDLE_ROOT"), ".rehearse")
 
 
 class NotesFetch(unittest.TestCase):

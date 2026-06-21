@@ -16,7 +16,7 @@ templates_dir = "templates"
 # In-driver lane concurrency (docs 09 §parallel lanes). `lanes` is the worker-pool
 # size for the UNATTENDED Do+Check band only — Plan, sign-off, publish, and Act stay
 # serial. 1 (the default) is the strictly-serial driver. Override for a single run
-# with `PDCA_LANES=N` or `--lanes N` on `pdca flow` / `pdca batch`.
+# with `PDCA_LANES=N` or `--lanes N` on `pdca flow`.
 #
 # A pool > 1 runs N bundles concurrently in ONE workspace. Each worker is pinned to a
 # fixed lane slot 0..N-1 and exposes it to every gate command as `$PDCA_LANE`. A gate

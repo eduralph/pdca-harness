@@ -60,15 +60,16 @@ shows the real gramps-testbed-v2 artifact it produces.
 ## The whole cycle in one command
 
 Once a repo is integrated, a maintainer rarely types the per-beat commands. The
-front door is the `Makefile`:
+front door is the **console script** (`pdca`, named per the project):
 
 ```bash
-make flow ID=13636      # Plan → Do → Check → sign-off → publish, for one issue
-make flow CSV=issues.csv   # one Plan session can brief SEVERAL issues, then build + sign off all
-make status             # every bundle and its state
+pdca flow 13636               # Plan → Do → Check → sign-off → publish, for one issue
+pdca flow 13636 13637 13638   # several ids → batch; unbriefed are auto-planned
+pdca flow --from-csv issues.csv   # one Plan session briefs SEVERAL from the export, then drives all
+pdca status                   # every bundle and its state (also the bare `pdca`)
 ```
 
-The per-beat detail in steps 03–07 is what `make flow` orchestrates for you —
+The per-beat detail in steps 03–07 is what `pdca flow` orchestrates for you —
 worth understanding once, even though you'll mostly drive from the top.
 
 ## Prerequisites (for a live run)

@@ -13,7 +13,7 @@ planner co-author the brief from a tracker issue. gramps configured it to read a
 single Mantis CSV row for the issue id:
 
 ```bash
-make flow ID=11589        # opens the planner; you converge on a brief, then the
+pdca flow 11589           # opens the planner; you converge on a brief, then the
                           # driver continues unattended into Do + Check
 ```
 
@@ -24,18 +24,17 @@ hand.
 
 ### Planning a specific id list in one session
 
-`pdca flow --from-csv` briefs from a tracker CSV (the planner chooses the issues);
-`pdca batch <ids>` drives an explicit id list but, by default, refuses an un-briefed
-one. To **plan + drive a specific set** — e.g. bundles you seeded from per-bundle
-triage notes, not the CSV — add the Plan pre-pass:
+Pass **several ids** to `pdca flow` to plan + drive exactly that set — e.g. bundles you
+seeded from per-bundle triage notes, not a tracker CSV:
 
 ```bash
-make batch IDS="11589 12030 12044" PLAN=1 LANES=6   # or: pdca batch <ids> --plan --lanes 6
+pdca flow 11589 12030 12044 --lanes 6
 ```
 
-`--plan` briefs every UNPLANNED id in the list in **one shared interactive session**,
-then drives exactly those ids through Do+Check. Ids the planner chooses to skip are
-left alone; `--from-csv` overrides the Plan source.
+Any UNPLANNED id in the list is briefed in **one shared interactive session** before
+the drive; already-briefed ids skip Plan. Ids the planner chooses to skip are left
+alone. `--from-csv` seeds the Plan source; with **no ids**, `pdca flow --from-csv PATH`
+plans a batch the planner picks from the export.
 
 Each bundle's tracker thread can be fetched automatically: set `[tracker].notes_cmd`
 in `pdca.toml` to your scrape tooling (a `{id}` shell template that writes

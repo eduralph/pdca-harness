@@ -11,12 +11,12 @@ closes the PDCA loop by improving the *process*, not the contribution.
 ## Publish — contribute the accepted fix
 
 Once a bundle is `COMPLETE`, publish opens it as a **draft** PR on the target
-branch from the brief. In `make flow` this runs automatically on an accept; you
+branch from the brief. In `pdca flow` this runs automatically on an accept; you
 can also run it standalone:
 
 ```bash
-make publish ID=11589           # open the draft PR
-make publish ID=11589 DRY=1     # print the git/gh plan without pushing
+pdca publish 11589              # open the draft PR
+pdca publish 11589 --dry-run    # print the git/gh plan without pushing
 ```
 
 It writes `publish.json` into the bundle and uses the project's PR conventions
@@ -49,8 +49,8 @@ itself**, across *many* completed cycles, on its own cadence (every N cycles, or
 weekly — *not* per-cycle). It's touch point #3.
 
 ```bash
-pdca act-index                              # read-only: frozen cycles + recurring signals
-pdca act-log --date 2026-06-12 --append     # scaffold a dated entry into process/act-log.md
+pdca act index                              # read-only: frozen cycles + recurring signals
+pdca act log --date 2026-06-12 --append     # scaffold a dated entry into process/act-log.md
 ```
 
 Act reads the `COMPLETE` bundles' SUMMARYs — especially §6 (what needed a human),
