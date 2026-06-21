@@ -116,6 +116,12 @@ class Config:
     # Do+Check band. ``1`` (the default) keeps the driver strictly serial. ``[driver].lanes``
     # in pdca.toml; ``PDCA_LANES`` overrides for a single run (like ``PDCA_BUNDLE_ROOT``).
     lanes: int = 1
+    # Worktree isolation (issue #94): run a cycle's Do/Check in a dedicated git worktree
+    # off the target's base, so the host's primary checkout is never mutated in place.
+    # On by default; ``[driver].worktree = false`` disables (then Do/Check edit the
+    # checkout directly, as before). Best-effort: a target that isn't a worktree-capable
+    # git checkout silently falls back to in-place.
+    worktree: bool = True
     # Close-disposition fast path (issue #60): the disposition-hint classes that mark a
     # bundle as close / no-fix, so the driver skips the builder + reviewer leaves and
     # routes it straight to sign-off. ``[driver].close_dispositions`` in pdca.toml; the
@@ -200,6 +206,7 @@ class Config:
         if os.environ.get("PDCA_LANES"):
             lanes = int(os.environ["PDCA_LANES"])
         lanes = max(1, lanes)
+        worktree = bool(driver_cfg.get("worktree", True))  # issue #94; on by default
 
         # Close-disposition classes (issue #60): a configured list retunes the default
         # for an instance's tracker vocabulary; absent ⇒ the built-in default.
@@ -236,6 +243,7 @@ class Config:
             advisory_leaves=advisory_leaves,
             gates_runner=gates_runner,
             lanes=lanes,
+            worktree=worktree,
             close_dispositions=close_dispositions,
         )
 

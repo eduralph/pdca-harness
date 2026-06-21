@@ -45,6 +45,7 @@ from . import act as act_mod
 from . import brief
 from . import gates
 from . import progress
+from . import worktree
 from .config import Config, LeafConfig
 
 # build-notes.md is DELIBERATELY ABSENT from this list (independence contract).
@@ -275,6 +276,12 @@ def _stub_plan_batch(cfg: Config, ids: list[str] | None = None) -> None:
 # ----------------------------------------------------------------------------
 def do_build(d: Path, cfg: Config) -> None:
     if cfg.builder.mode == "command":
+        # Isolate Do in a per-cycle worktree off the base (issue #94) so the host's
+        # primary checkout is never mutated; expose it as $PDCA_WORKTREE + grant the
+        # claude builder read/write there. Best-effort: None ⇒ edit in place, as before.
+        wt = worktree.ensure(d, cfg)
+        env = {"PDCA_WORKTREE": str(wt)} if wt else None
+        extra = ["--add-dir", str(wt)] if wt and cfg.builder.family == "claude" else None
         # The builder runs from cfg.root but writes into the bundle d — watch d so the
         # heartbeat shows patch.diff / build-notes.md appearing as it works.
         _invoke(
@@ -282,6 +289,7 @@ def do_build(d: Path, cfg: Config) -> None:
             label=f"Do {d.name}",
             status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
             stream_json=True,  # Tier 3: show the builder's live tool-use
+            env=env, extra_argv=extra,
         )
         return
     _stub_build(d, cfg)
@@ -289,7 +297,10 @@ def do_build(d: Path, cfg: Config) -> None:
 
 def _build_prompt(d: Path) -> str:
     return (
-        f"You are the Do builder. Read {d}/brief.md. Build to satisfy its **Success "
+        f"You are the Do builder. Read {d}/brief.md. If $PDCA_WORKTREE is set, make ALL "
+        "target-source edits there — it is an isolated git worktree off the target's base "
+        "(the host's primary checkout is NOT touched); cite path:line against it. Build to "
+        "satisfy the brief's **Success "
         "criterion** (the real end result), not a narrower proxy — an item is done only "
         "when that end result holds, proven red→green; a green mechanical check on "
         "something adjacent is not done. If brief.md names a **Planning artifact** (an "
