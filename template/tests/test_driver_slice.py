@@ -310,6 +310,52 @@ class AdvisoryReviewResilience(unittest.TestCase):
                       (self.d / "check-review.md").read_text(encoding="utf-8"))
 
 
+class AdvisoryReviewers(unittest.TestCase):
+    """Optional advisory reviewer leaves (issue #64): an open, role-distinct set that
+    write check-advisory-<id>.md and route NEEDS-HUMAN into §6; conditioned by `when`."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+        self.d = self.cfg.bundle("ADV")
+        self.d.mkdir(parents=True)
+        shutil.copyfile(TOY_BRIEF, self.d / "brief.md")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_advisory_leaf_runs_and_routes_to_section6(self) -> None:
+        self.cfg.advisory_leaves = [{"id": "code-review", "role": "bugs+cleanups", "mode": "stub"}]
+        driver.run_issue(self.d, self.cfg)
+        self.assertTrue((self.d / "check-advisory-code-review.md").exists())
+        summary = self.d / "SUMMARY.md"
+        self.assertIn("Advisory — code-review", summary.read_text(encoding="utf-8"))  # §5
+        items = signoff.open_needs_human(summary)  # the advisory NEEDS-HUMAN → §6
+        self.assertTrue(any("advisory" in it.lower() for it in items))
+
+    def test_when_condition_skips_non_matching(self) -> None:
+        self.cfg.advisory_leaves = [{"id": "deep", "role": "x", "mode": "stub",
+                                     "when": {"field": "review depth", "substring": "deep"}}]
+        driver.run_issue(self.d, self.cfg)  # toy brief has no "Review depth" → skipped
+        self.assertFalse((self.d / "check-advisory-deep.md").exists())
+
+    def test_when_condition_runs_on_match(self) -> None:
+        bp = self.d / "brief.md"
+        bp.write_text(bp.read_text() + "\n- **Review depth:** deep\n", encoding="utf-8")
+        self.cfg.advisory_leaves = [{"id": "deep", "role": "x", "mode": "stub",
+                                     "when": {"field": "review depth", "substring": "deep"}}]
+        driver.run_issue(self.d, self.cfg)
+        self.assertTrue((self.d / "check-advisory-deep.md").exists())
+
+    def test_iterate_archives_advisory_artifact(self) -> None:
+        self.cfg.advisory_leaves = [{"id": "code-review", "role": "x", "mode": "stub"}]
+        driver.run_issue(self.d, self.cfg)
+        signoff.record(self.d / "SUMMARY.md", action="iterate-do", by="t", date="2026-01-01")
+        driver.advance(self.d, self.cfg)  # archive the attempt
+        self.assertFalse((self.d / "check-advisory-code-review.md").exists())
+        self.assertTrue((self.d / "iteration-v1" / "check-advisory-code-review.md").exists())
+
+
 class ConfiguredGates(unittest.TestCase):
     """The config-driven, single-sourced gates (docs 04)."""
 

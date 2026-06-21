@@ -90,6 +90,14 @@ class Config:
     issue_trailer: str = "Fixes #{id}"  # commit/PR trailer; "" → none enforced
     repo_checkouts: dict[str, str] = field(default_factory=dict)  # repo_spec → local path
     gates_checks: list[dict] = field(default_factory=list)
+    # Optional advisory reviewer leaves (issue #64): an OPEN list of extra, role-distinct
+    # advisory reviewers ([[leaves.advisory]] in pdca.toml), so an instance adds N of them
+    # (e.g. a correctness/cleanup code-review lens) with no driver change. Each:
+    # {id, role, family, mode, argv, when?}. Always advisory (never gates); their
+    # NEEDS-HUMAN findings route into SUMMARY §6. ``when`` ({field, substring}) conditions
+    # a leaf on a brief field (e.g. a "Review depth" field), the way gate targets do — empty
+    # ⇒ always run.
+    advisory_leaves: list[dict] = field(default_factory=list)
     # Delegated gates (issue #67): a host runner that single-sources its own gates
     # (e.g. "cargo xtask"). A check's bare ``subcmd`` is run as ``<runner> <subcmd>``, so
     # PDCA orchestrates the host runner instead of re-declaring the gates. "" ⇒ inline only.
@@ -171,6 +179,13 @@ class Config:
                 interactive=bool(d.get("interactive", False)),
             )
 
+        # Advisory reviewer leaves (issue #64) — an open list under [[leaves.advisory]].
+        # PDCA_LEAVES_MODE forces their mode too (CI / offline determinism).
+        advisory_leaves = [
+            {**spec, "mode": mode_override or spec.get("mode", "stub")}
+            for spec in leaves.get("advisory", [])
+        ]
+
         # PDCA_BUNDLE_ROOT redirects bundles to a throwaway location so an offline
         # `rehearse` never collides with the real `results/` a live run would use.
         bundle_root = root / paths.get("bundle_root", "results")
@@ -218,6 +233,7 @@ class Config:
             act=leaf("act"),
             author=data.get("project", {}).get("author", ""),
             gates_checks=gates_checks,
+            advisory_leaves=advisory_leaves,
             gates_runner=gates_runner,
             lanes=lanes,
             close_dispositions=close_dispositions,

@@ -104,6 +104,18 @@ hands it over as **`$PDCA_TARGET`** (read-only; for a `claude` reviewer also via
 into other checkouts on the machine — without this it can't ground, or hunts the
 filesystem for "the target" (issue #75).
 
+### Optional advisory reviewers (a second lens)
+
+The `reviewer` judges fix *adequacy*. For other lenses — correctness bugs the patch
+introduces, reuse/simplification/efficiency cleanups — add **advisory reviewer leaves**
+(issue #64): an open `[[leaves.advisory]]` list in `pdca.toml`, each a role-distinct,
+model-agnostic (`family` + `argv`) leaf. Each writes `check-advisory-<id>.md`; its
+`- NEEDS-HUMAN —` findings fold into §6 like the reviewer's. They are **always advisory**
+(never gate). Condition one on a brief field with `when = { field = …, substring = … }`
+(e.g. run a deeper review only when the brief says so) — the way gate targets condition
+on the bundle. A shipped `code-review` agent realizes the correctness+cleanup lens for a
+`claude` instance; `family = "codex"` swaps the vendor.
+
 ## 3. Assembly — the SUMMARY the human signs
 
 The driver folds brief + gates + review into `SUMMARY.md`, a 10-section document.

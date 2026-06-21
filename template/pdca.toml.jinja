@@ -132,6 +132,22 @@ mode = "{{ leaves_mode }}"
 family = "claude"
 interactive = true
 argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
+
+# Optional advisory reviewer leaves (issue #64) — an OPEN list. The `reviewer` leaf above
+# judges fix ADEQUACY (causal adequacy, scope, validation); add role-distinct ADVISORY
+# reviewers here for other lenses (e.g. correctness bugs the patch introduces + reuse /
+# simplification / efficiency cleanups). Each writes check-advisory-<id>.md; its
+# `- NEEDS-HUMAN —` findings route into SUMMARY §6. Always advisory — never gates.
+# Decorrelate: prefer a `family` distinct from the builder AND the reviewer where you can.
+# `when = { field = "<brief field>", substring = "<v>" }` runs it only when that brief
+# field matches (e.g. a "Review depth" field an Act rule tunes) — omit to always run.
+# [[leaves.advisory]]
+# id = "code-review"
+# role = "correctness bugs introduced by the patch + reuse/simplification/efficiency cleanups"
+# mode = "{{ leaves_mode }}"
+# family = "claude"
+# argv = ["claude", "-p", "--agent", "code-review", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
+# when = { field = "review depth", substring = "deep" }
 # Deterministic Check gates (docs 04). Each check runs a shell command; it PASSES
 # iff the command exits 0. `scope = "repo"` runs against the working tree (and is
 # what CI re-runs via `pdca gates --working-tree`); `scope = "bundle"` needs the
