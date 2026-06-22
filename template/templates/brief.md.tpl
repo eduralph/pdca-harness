@@ -19,6 +19,7 @@
 - **Repo + branch target:** <owner/repo> @ <branch>   (resolve here at Plan — do not leave to Do)
 - **Onto branch:** <remote>/<existing-pr-branch>   (optional — stack the fix as a commit onto an existing open PR's branch instead of opening a new PR; the fix is tested, committed, and pushed against THIS branch; docs 03)
 - **Depends on:** <id>[, <id>…]   (optional — ids only on the value line, any trailing note is ignored; batch/lane scheduling waits until these bundles are COMPLETE before this one runs; docs 09)
+- **Depends on (merged):** <id>[, <id>…]   (optional — ids only on the value line, any trailing note is ignored; stricter than Depends on: hold this bundle until each prereq's PR is MERGED, not merely COMPLETE. Use when this edits files a prereq also edits, so Do builds on the merged result instead of conflicting at merge; docs 09)
 - **Conflicts with:** <id>[, <id>…]   (optional — ids only on the value line, any trailing note is ignored; never co-schedule these in the same concurrent wave, e.g. they edit a shared file; docs 09)
 - **Surfaces:** <where the change is observable — `gui` (touches the frontend / an E2E
   through the app is needed), `data` (backend/logic only), or `both`. Drives which

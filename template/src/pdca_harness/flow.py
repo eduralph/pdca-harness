@@ -24,7 +24,7 @@ import sys
 import threading
 from pathlib import Path
 
-from . import brief, driver, lane, leaves, publish, queue, signoff, state
+from . import brief, driver, lane, leaves, merged, publish, queue, signoff, state
 from .config import Config
 
 
@@ -177,17 +177,42 @@ def flow(
 # them. With NO fields declared every bundle is always eligible, so dispatch is
 # byte-for-byte today's sort-by-name pool.
 # ----------------------------------------------------------------------------
-def _deps_met(cfg: Config, d: Path) -> bool:
-    """True iff every bundle ``d`` declares ``Depends on`` is COMPLETE.
+def _declared_deps(bp: Path) -> list[str]:
+    """All declared prerequisite ids — COMPLETE-gated (`Depends on`) and merge-gated
+    (`Depends on (merged)`, #107) — for DAG validation and dispatch."""
+    return brief.depends_on(bp) + brief.depends_on_merged(bp)
 
-    An unplanned/reopened bundle (no brief yet) declares nothing, so it is eligible;
-    its deps, if any, are honoured once it is re-planned on a later pass.
+
+def _merged_snapshot(cfg: Config, bundles: list[Path]) -> set[str]:
+    """Ids whose ``Depends on (merged)`` prereq is merged right now (issue #107).
+
+    Computed **once per build pass** rather than inside the dispatch loop, so the merge
+    check (a ``gh`` call per distinct prereq) stays out of the lane pool's lock and isn't
+    repeated per eligibility test. A prereq is never merged mid-run (the flow only opens
+    draft PRs), so a per-pass snapshot is exact — a held dependent is picked up by a later
+    ``pdca flow`` run, after its prereq's PR merges.
+    """
+    wanted: set[str] = set()
+    for b in bundles:
+        bp = b / "brief.md"
+        if bp.exists():
+            wanted.update(brief.depends_on_merged(bp))
+    return {dep for dep in wanted if merged.is_merged(cfg, dep)}
+
+
+def _deps_met(cfg: Config, d: Path, merged_ids: set[str]) -> bool:
+    """True iff every prerequisite ``d`` declares is satisfied.
+
+    ``Depends on`` prereqs must be COMPLETE; ``Depends on (merged)`` prereqs must be in
+    ``merged_ids`` (this pass's merged set, #107). An unplanned/reopened bundle (no brief
+    yet) declares nothing, so it is eligible; its deps are honoured once it is re-planned.
     """
     bp = d / "brief.md"
     if not bp.exists():
         return True
-    return all(state.state(cfg.bundle(dep)) == state.COMPLETE
-               for dep in brief.depends_on(bp))
+    return (all(state.state(cfg.bundle(dep)) == state.COMPLETE
+                for dep in brief.depends_on(bp))
+            and all(dep in merged_ids for dep in brief.depends_on_merged(bp)))
 
 
 def _conflict_map(cfg: Config, bundles: list[Path]) -> dict[str, set[str]]:
@@ -222,7 +247,10 @@ def _check_dep_graph(cfg: Config, bundles: list[Path]) -> None:
     for b in bundles:
         bp = b / "brief.md"
         edges: list[str] = []
-        for dep in (brief.depends_on(bp) if bp.exists() else []):
+        # Both ordering fields are topological prerequisites for the DAG (existence +
+        # cycle); they differ only in the gate (#107): `Depends on` waits for COMPLETE,
+        # `Depends on (merged)` waits for the prereq's PR to merge.
+        for dep in (_declared_deps(bp) if bp.exists() else []):
             dn = cfg.bundle(dep).name
             if dn in names:
                 edges.append(dn)
@@ -268,10 +296,11 @@ def _build_all(cfg: Config, bundles: list[Path]) -> None:
     lifetime (so only ``lanes`` lane-scoped checkouts/runners are ever needed), pull
     bundles off a shared queue and run the unattended ``driver.run_issue``.
     """
+    merged_ids = _merged_snapshot(cfg, bundles)  # once per pass — keeps gh out of dispatch
     if cfg.lanes <= 1 or len(bundles) <= 1:
         for d in bundles:
-            if not _deps_met(cfg, d):
-                continue  # a declared prereq isn't COMPLETE yet — a later pass picks it up
+            if not _deps_met(cfg, d, merged_ids):
+                continue  # a prereq isn't COMPLETE / merged yet — a later pass picks it up
             def _build(d=d):
                 _plan_if_unplanned(cfg, d, None)  # iterate-plan may have re-opened it
                 driver.run_issue(d, cfg)
@@ -294,7 +323,7 @@ def _build_all(cfg: Config, bundles: list[Path]) -> None:
     def _next_eligible() -> Path | None:
         # caller holds `cond`. Pop+return the first eligible bundle, else None.
         for i, d in enumerate(remaining):
-            if _deps_met(cfg, d) and conflicts[d.name].isdisjoint(inflight):
+            if _deps_met(cfg, d, merged_ids) and conflicts[d.name].isdisjoint(inflight):
                 inflight.add(d.name)
                 return remaining.pop(i)
         return None

@@ -15,7 +15,8 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import act, brief, driver, flow, gates, publish, queue, revalidate, signoff, state
+from . import (act, brief, driver, flow, gates, merged, publish, queue, revalidate,
+               signoff, state)
 from .config import Config
 
 
@@ -307,12 +308,19 @@ def _publish_flag(d: Path) -> str:
 
 
 def _blocked_by(cfg: Config, d: Path) -> list[str]:
-    """Declared `Depends on` ids of bundle ``d`` that are not yet COMPLETE (issue #36)."""
+    """Declared prerequisites of bundle ``d`` that aren't satisfied yet.
+
+    `Depends on` ids not yet COMPLETE (issue #36), plus `Depends on (merged)` ids whose
+    PR isn't merged yet, tagged ``(unmerged)`` so the held dependent reads as awaiting a
+    human merge, not a stuck cycle (issue #107)."""
     bp = d / "brief.md"
     if not bp.exists():
         return []
-    return [dep for dep in brief.depends_on(bp)
-            if state.state(cfg.bundle(dep)) != state.COMPLETE]
+    blocked = [dep for dep in brief.depends_on(bp)
+               if state.state(cfg.bundle(dep)) != state.COMPLETE]
+    blocked += [f"{dep} (unmerged)" for dep in brief.depends_on_merged(bp)
+                if not merged.is_merged(cfg, dep)]
+    return blocked
 
 
 def _queue(cfg: Config) -> int:

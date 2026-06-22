@@ -87,6 +87,16 @@ class OrderingFields(unittest.TestCase):
         f = self._brief("- **Depends on:** AA, PROJ-12 — keep PR order\n")
         self.assertEqual(brief.depends_on(f), ["AA", "PROJ-12"])
 
+    def test_depends_on_merged_is_its_own_field(self) -> None:
+        # The merge-gated field (#107) parses independently of plain Depends on.
+        f = self._brief("- **Depends on:** 7\n- **Depends on (merged):** 8, 9\n")
+        self.assertEqual(brief.depends_on(f), ["7"])
+        self.assertEqual(brief.depends_on_merged(f), ["8", "9"])
+
+    def test_depends_on_merged_absent_is_empty(self) -> None:
+        f = self._brief("- **Depends on:** 7\n")
+        self.assertEqual(brief.depends_on_merged(f), [])
+
 
 if __name__ == "__main__":
     unittest.main()
