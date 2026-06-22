@@ -371,18 +371,18 @@ class FlowSlice(unittest.TestCase):
         for iid in ("GOOD", "BAD"):
             leaves.do_plan(self.cfg.bundle(iid), self.cfg)
 
-        real_run = driver.run_issue
+        real_advance = driver.advance
 
-        def flaky(d: Path, cfg: Config) -> str:
+        def flaky(d: Path, cfg: Config):
             if d.name == "issue_BAD":
                 raise RuntimeError("boom: leaf left the bundle half-written")
-            return real_run(d, cfg)
+            return real_advance(d, cfg)
 
-        flow.driver.run_issue = flaky
+        flow.driver.advance = flaky
         try:
             results = flow.flow_ids(self.cfg, ["GOOD", "BAD"], today="2026-06-06")
         finally:
-            flow.driver.run_issue = real_run
+            flow.driver.advance = real_advance
         self.assertEqual(results["GOOD"], state.COMPLETE)    # other bundle proceeded
         self.assertNotEqual(results["BAD"], state.COMPLETE)  # failing one isolated
 
@@ -766,19 +766,19 @@ class DeclaredOrdering(unittest.TestCase):
         self._brief("AA", depends_on="ZZ")
         self._brief("ZZ")
         seen = {}
-        real = driver.run_issue
+        real = driver.advance  # the batch band advances one beat at a time now (#104)
 
         def spy(d: Path, cfg: Config):
             if d.name == "issue_AA" and "zz_state" not in seen:
                 seen["zz_state"] = state.state(cfg.bundle("ZZ"))
             return real(d, cfg)
 
-        driver.run_issue = spy
+        driver.advance = spy
         try:
             results = flow.flow_ids(self.cfg, ["AA", "ZZ"], do_publish=False,
                                     do_act=False, today="2026-06-04")
         finally:
-            driver.run_issue = real
+            driver.advance = real
         self.assertEqual(seen.get("zz_state"), state.COMPLETE)  # ZZ done before AA built
         self.assertTrue(all(s == state.COMPLETE for s in results.values()))
 
@@ -824,20 +824,47 @@ class DeclaredOrdering(unittest.TestCase):
         for iid in ids:
             self._brief(iid)
         order: list[str] = []
-        real = driver.run_issue
+        real = driver.advance
 
         def spy(d: Path, cfg: Config):
             if d.name not in order:
                 order.append(d.name)
             return real(d, cfg)
 
-        driver.run_issue = spy
+        driver.advance = spy
         try:
             flow.flow_ids(self.cfg, ids, do_publish=False, do_act=False,
                           today="2026-06-04")
         finally:
-            driver.run_issue = real
+            driver.advance = real
+        # First-touch order is sort-by-name: the first beat-round advances N1, N2, N3.
         self.assertEqual(order, ["issue_N1", "issue_N2", "issue_N3"])
+
+    def test_beats_are_synchronised_across_the_wave(self) -> None:
+        # #104: the wave advances one beat at a time — all Dos, then all Checks, then all
+        # SUMMARY assembles — not each bundle end-to-end. Record each beat's FROM-state and
+        # assert the last Do precedes the first Check precedes the first assemble.
+        ids = ["S1", "S2", "S3"]
+        for iid in ids:
+            self._brief(iid)
+        beats: list[str] = []
+        real = driver.advance
+
+        def spy(d: Path, cfg: Config):
+            beats.append(state.state(d))  # the state this beat acts ON
+            return real(d, cfg)
+
+        driver.advance = spy
+        try:
+            flow.flow_ids(self.cfg, ids, do_publish=False, do_act=False, today="2026-06-04")
+        finally:
+            driver.advance = real
+        do = [i for i, s in enumerate(beats) if s == state.PLANNED]      # Do beat
+        check = [i for i, s in enumerate(beats) if s == state.BUILT]     # Check (gates+review)
+        assemble = [i for i, s in enumerate(beats) if s == state.CHECKED]  # SUMMARY assemble
+        self.assertTrue(do and check and assemble)
+        self.assertLess(max(do), min(check))         # every Do before any Check
+        self.assertLess(max(check), min(assemble))   # every Check before any assemble
 
     def test_conflict_pair_never_co_scheduled(self) -> None:
         # C conflicts with D; E/F are free. Under a 2-lane pool, C and D must never be
@@ -855,7 +882,7 @@ class DeclaredOrdering(unittest.TestCase):
         together: set[tuple[str, str]] = set()
         max_conc = [0]
         lk = threading.Lock()
-        real = driver.run_issue
+        real = driver.advance  # one beat is the concurrent unit now (#104)
 
         def spy(d: Path, cfg: Config):
             with lk:
@@ -872,13 +899,13 @@ class DeclaredOrdering(unittest.TestCase):
                 with lk:
                     active.discard(d.name)
 
-        driver.run_issue = spy
+        driver.advance = spy
         try:
             results = flow.flow_ids(self.cfg, ["C", "D", "E", "F"], do_publish=False,
                                     do_act=False, today="2026-06-04")
         finally:
-            driver.run_issue = real
-        self.assertNotIn(("issue_C", "issue_D"), together)  # conflict respected
+            driver.advance = real
+        self.assertNotIn(("issue_C", "issue_D"), together)  # conflict respected, every beat
         self.assertEqual(max_conc[0], 2)                     # pool genuinely concurrent
         self.assertTrue(all(s == state.COMPLETE for s in results.values()))
 
