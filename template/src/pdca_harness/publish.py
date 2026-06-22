@@ -151,7 +151,14 @@ def publish(
         # target checkout, so a DCO-gated host accepts the PR by construction; harmless
         # on non-DCO hosts (issue #81).
         git("commit", "-s", "-F", str((d / COMMIT_MSG).resolve())),
-        git("push", "-u", "origin", branch),
+        # `--force-with-lease`, not a plain push: re-publishing a rebuilt bundle (after
+        # `signoff --iterate-do`) commits a FRESH `checkout -B branch origin/<base>` off
+        # the current base, which is not a fast-forward of the previous attempt already on
+        # the PR branch — a plain push is rejected and the re-Done bundle never publishes
+        # (#108). The lease is safe: `fetch` above refreshed `origin/<branch>`, so the
+        # force refuses if the remote moved unexpectedly, and it still creates the branch
+        # on a first publish.
+        git("push", "--force-with-lease", "-u", "origin", branch),
     ]
     # A fork-based PR's --head must be OWNER:BRANCH — `gh` resolves a bare branch name
     # against the *base* repo (where the fork branch doesn't exist) and fails with
