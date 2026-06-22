@@ -756,8 +756,9 @@ def _publish_prompt(d: Path, cfg: Config) -> str:
         "&& git`).\n"
         f"1) {d}/commit-msg.txt — a summary ≤70 chars, then a blank line, then the body "
         f"wrapped ≤80; reference any other commit by its FULL hash. {trailer_line}\n"
-        f"2) {d}/pr-description.md — sections Root cause / Fix / Verified against / Test, "
-        f"citing path:lines on the target branch (see {pr_tpl}).\n"
+        f"2) {d}/pr-description.md — lead with a plain-language Summary + What to look at "
+        f"(for non-implementors), then Root cause / Fix, then a Verification claim→evidence "
+        f"trail citing path:lines on the target branch; no internal jargon (see {pr_tpl}).\n"
         "Write ONLY those two files. Do NOT push, branch, or open a PR — the driver's "
         "`pdca publish` does the branch/apply/commit/push/draft-PR after you finish."
     )
@@ -765,8 +766,9 @@ def _publish_prompt(d: Path, cfg: Config) -> str:
 
 def _stub_publish(d: Path, cfg: Config) -> None:
     # Offline placeholders, shaped to pass a contribution (T4) gate: summary ≤70,
-    # blank line, body ≤80, the configured issue trailer last; PR body has the four
-    # sections that pr-description.md.tpl prescribes.
+    # blank line, body ≤80, the configured issue trailer last; PR body has the
+    # sections that pr-description.md.tpl prescribes (accessible lead → internals →
+    # verification trail, #106).
     issue_id = d.name.removeprefix("issue_")
     trailer = cfg.issue_trailer.format(id=issue_id) if cfg.issue_trailer else ""
     body = (
@@ -778,8 +780,9 @@ def _stub_publish(d: Path, cfg: Config) -> None:
         body += f"\n{trailer}\n"
     (d / "commit-msg.txt").write_text(body, encoding="utf-8")
     (d / "pr-description.md").write_text(
-        "## Root cause\nstub.\n\n## Fix\nstub.\n\n## Verified against\n"
-        "- path:1 — stub.\n\n## Test\nstub regression test.\n\n"
+        "## Summary\nstub.\n\n## What to look at\nstub.\n\n## Root cause\nstub.\n\n"
+        "## Fix\nstub.\n\n## Verification\n- Claim: stub.\n- Checked: path:1 — stub.\n"
+        "- Test: path:1 — stub regression test, fails pre-fix / passes post-fix.\n\n"
         f"References #{issue_id}\n",
         encoding="utf-8",
     )

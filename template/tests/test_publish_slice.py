@@ -492,9 +492,11 @@ class ContributionTemplates(unittest.TestCase):
         # The commit template has always had the reference line; the PR body now mirrors it.
         self.assertIn("Fixes #<id>", commit_tpl)
         self.assertIn("Fixes #<id>", pr_tpl)
-        # It sits after the Test section, with guidance on the ticketless case.
-        self.assertLess(pr_tpl.index("## Test"), pr_tpl.index("Fixes #<id>"))
+        # It sits after the body sections, with guidance on the ticketless case.
+        self.assertLess(pr_tpl.index("## Verification"), pr_tpl.index("Fixes #<id>"))
         self.assertIn("declared-ticketless", pr_tpl)
+        # The accessibility lead (#106): a plain-language Summary precedes the internals.
+        self.assertLess(pr_tpl.index("## Summary"), pr_tpl.index("## Root cause"))
 
 
 if __name__ == "__main__":
