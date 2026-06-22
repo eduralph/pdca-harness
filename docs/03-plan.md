@@ -43,6 +43,25 @@ any Plan beat when `notes.json` is absent, so the planner has the comment thread
 without you scraping by hand. It's best-effort — a failure just falls back to the
 CSV / asking you.
 
+### Composing several sources
+
+A good brief often draws on more than the ticket — a linked design doc, an accepted
+proposal, a spec section, a CSV row. Declare a list of `[[plan.source]]` providers in
+`pdca.toml` and each contributes context into the bundle's `sources/` dir before Plan,
+so the planner briefs from the **full** picture, not one scrape (issue #102). Built-in
+types: `github` (`gh`), `gitlab` (`glab`), `csv`, `file` (a path/glob, `{id}`
+interpolated), and `command` (the escape hatch — exactly `notes_cmd`, run with
+`$PDCA_BUNDLE` / `$PDCA_SOURCES` set). Each is best-effort; the legacy `notes_cmd` still
+runs alongside them. For example, "the GitHub issue **and** its linked ADR":
+
+```toml
+[[plan.source]]
+type = "github"
+[[plan.source]]
+type = "file"
+path = "docs/adr/*{id}*.md"
+```
+
 ## What a real brief looks like
 
 This is the **actual** brief the planner produced for gramps issue 11589, a
