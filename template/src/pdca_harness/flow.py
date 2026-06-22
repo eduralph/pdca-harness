@@ -24,7 +24,7 @@ import sys
 import threading
 from pathlib import Path
 
-from . import brief, driver, lane, leaves, merged, publish, queue, signoff, state
+from . import act, brief, driver, lane, leaves, merged, publish, queue, signoff, state
 from .config import Config
 
 
@@ -117,6 +117,27 @@ def _signoff_and_apply(
     return _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now)
 
 
+def _maybe_run_act(cfg: Config, today: str, *, any_complete: bool) -> None:
+    """Run the Act beat after a flow only when it's *due* by cadence (issue #109).
+
+    Act is a cross-cycle beat that yields a real delta only once enough cycles have
+    frozen to show a pattern, so auto-running it after every small flow spends an
+    interactive leaf on insufficient signal. Run it only when ``act_cadence`` cycles have
+    frozen SINCE the last Act (counted from a durable marker, so it holds across separate
+    flow invocations — five one-bundle flows trip it on the fifth). Below the threshold,
+    skip with a hint; ``--no-act`` (``do_act=False``) still forces skip upstream.
+    """
+    if not any_complete:
+        return
+    if act.act_due(cfg):
+        leaves.run_act(cfg, today)
+    else:
+        n = act.cycles_since_review(cfg)
+        print(f"flow: Act skipped — {n} cycle(s) frozen since the last Act "
+              f"(cadence {cfg.act_cadence}); run `pdca act log` when the backlog is "
+              f"worth a review.", file=sys.stderr)
+
+
 def _plan_if_unplanned(cfg: Config, d: Path, csv: str | None) -> bool:
     """If the bundle has no brief, run the (single) Plan leaf. Return True if planned."""
     if state.state(d) != state.UNPLANNED:
@@ -166,8 +187,8 @@ def flow(
         if rc:
             print(f"flow: issue_{issue_id} is COMPLETE but publish did not complete "
                   f"(rc {rc}) — NOT published; run `pdca publish {issue_id}`.", file=sys.stderr)
-    if do_act and final == state.COMPLETE:
-        leaves.run_act(cfg, today)
+    if do_act:
+        _maybe_run_act(cfg, today, any_complete=(final == state.COMPLETE))
     return final
 
 
@@ -439,8 +460,9 @@ def _drive_and_act(
                     print(f"flow: {d.name} is COMPLETE but publish did not complete "
                           f"(rc {rc}) — NOT published; run `pdca publish "
                           f"{d.name.removeprefix('issue_')}`.", file=sys.stderr)
-    if do_act and any(s == state.COMPLETE for s in results.values()):
-        leaves.run_act(cfg, today)
+    if do_act:
+        _maybe_run_act(cfg, today,
+                       any_complete=any(s == state.COMPLETE for s in results.values()))
     return results
 
 

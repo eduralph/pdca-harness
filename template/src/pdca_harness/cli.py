@@ -424,6 +424,7 @@ def _act_log(cfg: Config, args: argparse.Namespace) -> int:
     text = act.scaffold_entry(entries, act.patterns(entries), date=args.date)
     if args.append:
         log = act.append_entry(cfg, text)
+        act.mark_reviewed(cfg)  # a manual Act review resets the flow cadence too (#109)
         print(f"appended entry to {log}")
     else:
         print(text)

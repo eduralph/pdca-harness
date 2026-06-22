@@ -697,8 +697,11 @@ def signoff_rationale(d: Path) -> str:
 def run_act(cfg: Config, date: str) -> None:
     if cfg.act.mode == "command":
         _invoke(cfg.act, cfg.root, _act_prompt(cfg, date))
-        return
-    _stub_act(cfg, date)
+    else:
+        _stub_act(cfg, date)
+    # Reset the cadence marker (issue #109) whenever the Act beat runs — even if a
+    # command-mode Act judged "no delta" and wrote no act-log entry, the review happened.
+    act_mod.mark_reviewed(cfg)
 
 
 def _act_prompt(cfg: Config, date: str) -> str:

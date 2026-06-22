@@ -48,6 +48,45 @@ def frozen_bundles(cfg: Config) -> list[Path]:
     )
 
 
+# ----------------------------------------------------------------------------
+# Cadence (issue #109): Act yields a real delta only once enough cycles have frozen to
+# show a pattern. The flow auto-runs it only when this many cycles have frozen SINCE the
+# last Act — counted from a durable marker (the frozen count at the last review) so it
+# holds across flow invocations, and works even when a command-mode Act writes no
+# act-log entry (the model judged "no delta"). Frozen bundles are monotonic (COMPLETE is
+# terminal), so current-minus-marker is the count of unreviewed cycles.
+# ----------------------------------------------------------------------------
+_CADENCE_MARKER = ".act-reviewed"  # holds the frozen-bundle count at the last Act
+
+
+def mark_reviewed(cfg: Config) -> None:
+    """Record that Act just ran: stamp the current frozen-bundle count (issue #109)."""
+    cfg.process_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.process_dir / _CADENCE_MARKER).write_text(
+        f"{len(frozen_bundles(cfg))}\n", encoding="utf-8")
+
+
+def cycles_since_review(cfg: Config) -> int:
+    """How many cycles have frozen since the last Act (issue #109).
+
+    ``current frozen count − marker`` (no marker ⇒ all frozen cycles count). Never
+    negative, so a deleted bundle can't wedge the cadence.
+    """
+    marker = cfg.process_dir / _CADENCE_MARKER
+    last = 0
+    if marker.exists():
+        try:
+            last = int(marker.read_text(encoding="utf-8").strip() or 0)
+        except ValueError:
+            last = 0
+    return max(0, len(frozen_bundles(cfg)) - last)
+
+
+def act_due(cfg: Config) -> bool:
+    """True iff enough cycles have frozen since the last Act to warrant a review (#109)."""
+    return cycles_since_review(cfg) >= cfg.act_cadence
+
+
 def index(cfg: Config, since: str | None = None) -> list[ActEntry]:
     """Extract §6/§7/§9/§10 from each frozen bundle, newest filtering via §9 date."""
     entries = [_extract(d / "SUMMARY.md", d) for d in frozen_bundles(cfg)]
