@@ -35,6 +35,13 @@ lanes = 1
 # `$PDCA_WORKTREE` too (see the gate examples below). On by default; best-effort (a target
 # that isn't a worktree-capable git checkout falls back to in-place). Set false to disable.
 worktree = true
+# Act cadence (issue #109). Act is a cross-cycle beat that yields a real delta only once
+# enough cycles have frozen to show a pattern, so `pdca flow` auto-runs it only when this
+# many cycles have frozen SINCE the last Act review — counted across flow invocations
+# (five one-bundle flows trip it on the fifth), not per-run. Below the threshold the flow
+# skips Act with a hint; `pdca act log` runs it on demand and `--no-act` always skips.
+# Set to 1 to run Act after every completed flow (the prior behaviour).
+act_cadence = 5
 # Close-disposition fast path (issue #60). A bundle whose brief's `Disposition hint`
 # matches one of these close / no-fix classes skips the builder + reviewer model leaves
 # (the engine's only token spend) and routes straight to sign-off, where the human

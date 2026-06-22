@@ -19,7 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from pdca_harness import brief, cli, driver, flow, leaves, queue, signoff, state
+from pdca_harness import act, brief, cli, driver, flow, leaves, queue, signoff, state
 from pdca_harness.config import Config, LeafConfig
 
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
@@ -45,6 +45,7 @@ def _stub_config(root: Path) -> Config:
         signoff=LeafConfig(mode="stub", family="claude", interactive=True),
         publisher=LeafConfig(mode="stub", family="claude", interactive=True),
         act=LeafConfig(mode="stub", family="claude", interactive=True),
+        act_cadence=1,  # most flow tests assert Act runs after a flow; cadence #109 tested separately
     )
 
 
@@ -1015,6 +1016,40 @@ class InitIssueAndPlaceholderGuard(unittest.TestCase):
         (d / "brief.md").write_text("- **Slug:** a-real-slug\n", encoding="utf-8")
         self.assertFalse(brief.is_placeholder(d / "brief.md"))
         self.assertEqual(state.state(d), state.PLANNED)
+
+
+class ActCadence(unittest.TestCase):
+    """flow auto-runs Act only when act_cadence cycles have frozen since the last Act —
+    counted across flow invocations, not per-run (issue #109)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+        self.cfg.act_cadence = 3
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _log(self) -> Path:
+        return self.cfg.process_dir / "act-log.md"
+
+    def test_act_held_below_cadence_then_fires_across_flows(self) -> None:
+        # Three separate single-bundle flows: Act must NOT run until the 3rd freezes the
+        # third cycle (cadence 3), proving the gate persists across invocations.
+        for i in (1, 2):
+            flow.flow(self.cfg, f"AC{i}", do_act=True, today="2026-06-04")
+            self.assertFalse(self._log().exists(), f"Act ran too early (after flow {i})")
+        flow.flow(self.cfg, "AC3", do_act=True, today="2026-06-04")
+        self.assertTrue(self._log().exists())          # the 3rd frozen cycle trips cadence
+
+    def test_act_resets_after_running(self) -> None:
+        for i in (1, 2, 3):
+            flow.flow(self.cfg, f"R{i}", do_act=True, today="2026-06-04")
+        self.assertTrue(self._log().exists())
+        self.assertEqual(act.cycles_since_review(self.cfg), 0)   # marker reset to frozen count
+        before = self._log().read_text(encoding="utf-8")
+        flow.flow(self.cfg, "R4", do_act=True, today="2026-06-04")   # only 1 since → below cadence
+        self.assertEqual(self._log().read_text(encoding="utf-8"), before)  # no new Act entry
 
 
 if __name__ == "__main__":
