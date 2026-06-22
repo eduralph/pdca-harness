@@ -18,8 +18,8 @@
 - **Success criterion:** <the observable condition that means it works — what the shipped test asserts>
 - **Repo + branch target:** <owner/repo> @ <branch>   (resolve here at Plan — do not leave to Do)
 - **Onto branch:** <remote>/<existing-pr-branch>   (optional — stack onto an open PR's branch; docs 03)
-- **Depends on:** <id>[, <id>…]   (optional — scheduling waits until these are COMPLETE; docs 09)
-- **Conflicts with:** <id>[, <id>…]   (optional — never co-schedule in one wave; docs 09)
+- **Depends on:** <id>[, <id>…]   (optional — ids only, any trailing note is ignored; scheduling waits until these are COMPLETE; docs 09)
+- **Conflicts with:** <id>[, <id>…]   (optional — ids only, any trailing note is ignored; never co-schedule in one wave; docs 09)
 - **Scope:** <the one logical change this realizes> / out of scope: <what is excluded>
 - **Test file:** <path where the regression test ships — must fail pre-change, pass post-change>
 - **Citations expected:** Do must cite path:line on the target branch AND the Planning artifact for every change.

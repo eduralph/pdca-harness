@@ -64,6 +64,29 @@ class OrderingFields(unittest.TestCase):
         self.assertEqual(brief.depends_on(f), [])
         self.assertEqual(brief.conflicts_with(f), [])
 
+    def test_trailing_parenthetical_rationale_is_ignored(self) -> None:
+        # The crash in #103: the planner mimics the template's `value (explanation)`
+        # hint, so the field carries a note after the id. Only the leading id parses.
+        f = self._brief(
+            "- **Depends on:** 139   (no data dependency, but PR-order is kept so this "
+            "waits on #139)\n")
+        self.assertEqual(brief.depends_on(f), ["139"])
+
+    def test_trailing_em_dash_rationale_is_ignored(self) -> None:
+        f = self._brief("- **Depends on:** 12, 13 — kept in PR order\n")
+        self.assertEqual(brief.depends_on(f), ["12", "13"])
+
+    def test_em_dash_only_value_means_none(self) -> None:
+        # "—" is the conventional "none"; it must not parse to a bogus ['—'] id.
+        f = self._brief("- **Conflicts with:** —\n")
+        self.assertEqual(brief.conflicts_with(f), [])
+
+    def test_non_numeric_ids_survive_a_trailing_rationale(self) -> None:
+        # Ids needn't be numeric (the driver keys bundles by arbitrary id); a tracker-key
+        # id is kept, while the lowercase rationale that follows is dropped.
+        f = self._brief("- **Depends on:** AA, PROJ-12 — keep PR order\n")
+        self.assertEqual(brief.depends_on(f), ["AA", "PROJ-12"])
+
 
 if __name__ == "__main__":
     unittest.main()
