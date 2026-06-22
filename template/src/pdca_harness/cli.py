@@ -53,9 +53,12 @@ def main(argv: list[str] | None = None) -> int:
     # No subcommand → status (the bundle dashboard), the most-reached-for view (#88).
     sub = parser.add_subparsers(dest="cmd")
 
-    p_init = sub.add_parser("init-issue", help="create a bundle and seed brief.md")
+    p_init = sub.add_parser("init-issue",
+                            help="seed a bundle from a pre-authored brief (requires --from-brief; "
+                                 "to start from a ticket use `flow <id>`, which auto-plans)")
     p_init.add_argument("issue_id")
-    p_init.add_argument("--from-brief", type=Path, help="copy this file as brief.md")
+    p_init.add_argument("--from-brief", type=Path,
+                        help="REQUIRED: copy this file as the bundle's brief.md")
 
     p_run = sub.add_parser("run", help="advance an issue to a halted state")
     p_run.add_argument("issue_id")
@@ -165,16 +168,26 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _init_issue(cfg: Config, issue_id: str, from_brief: Path | None) -> int:
+    # init-issue seeds a bundle from a brief you authored OUTSIDE the loop. With no
+    # --from-brief it used to copy the blank brief.md.tpl, which left a content-less
+    # PLANNED bundle that bypassed the planner (the Plan pre-pass only plans UNPLANNED)
+    # and whose hint lines parsed as a bogus depends_on — a footgun (#113). To start a
+    # new issue from its ticket, `pdca flow <id>` auto-plans; init-issue is now strictly
+    # the pre-authored-brief seeder.
+    if from_brief is None:
+        print("init-issue needs --from-brief <file>. To start a new issue from its "
+              f"ticket, run `pdca flow {issue_id}` — it auto-plans (scrapes the ticket "
+              "and authors the brief).", file=sys.stderr)
+        return 2
+    if not from_brief.exists():
+        print(f"no brief source: {from_brief}", file=sys.stderr)
+        return 1
     d = cfg.bundle(issue_id)
     if d.exists():
         print(f"bundle already exists: {d}", file=sys.stderr)
         return 1
     d.mkdir(parents=True)
-    src = from_brief or (cfg.templates_dir / "brief.md.tpl")
-    if not src.exists():
-        print(f"no brief source: {src}", file=sys.stderr)
-        return 1
-    shutil.copyfile(src, d / "brief.md")
+    shutil.copyfile(from_brief, d / "brief.md")
     print(f"{state.state(d)}\t{d}")
     return 0
 

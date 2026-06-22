@@ -9,10 +9,12 @@ publisher leaf is stubbed (never pushes offline). Run from the project root:
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -20,8 +22,10 @@ from unittest import mock
 from pdca_harness import brief, cli, driver, flow, leaves, queue, signoff, state
 from pdca_harness.config import Config, LeafConfig
 
-DESIGN_TPL = Path(__file__).resolve().parents[1] / "templates" / "design-proposal.md.tpl"
-POINTER_TPL = Path(__file__).resolve().parents[1] / "templates" / "plan-pointer.md.tpl"
+TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
+DESIGN_TPL = TEMPLATES / "design-proposal.md.tpl"
+POINTER_TPL = TEMPLATES / "plan-pointer.md.tpl"
+BRIEF_TPL = TEMPLATES / "brief.md.tpl"
 
 
 def _stub_config(root: Path) -> Config:
@@ -568,7 +572,10 @@ class DesignProposalBrief(unittest.TestCase):
         self.cfg = _stub_config(self.tmp)
         self.d = self.cfg.bundle("GEPS")
         self.d.mkdir(parents=True)
-        shutil.copyfile(DESIGN_TPL, self.d / "brief.md")  # the design-proposal template
+        # An authored design-proposal brief: fill the slug so it's a real PLANNED brief,
+        # not the raw template (a placeholder-slug template now reads UNPLANNED, #113).
+        text = DESIGN_TPL.read_text(encoding="utf-8").replace("<short-kebab-slug>", "geps-feature")
+        (self.d / "brief.md").write_text(text, encoding="utf-8")
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -596,7 +603,10 @@ class PlanPointerBrief(unittest.TestCase):
         self.cfg = _stub_config(self.tmp)
         self.d = self.cfg.bundle("ADR")
         self.d.mkdir(parents=True)
-        shutil.copyfile(POINTER_TPL, self.d / "brief.md")  # the plan-pointer template
+        # An authored pointer-brief: fill the slug so it's a real PLANNED brief, not the
+        # raw template (a placeholder-slug template now reads UNPLANNED, #113).
+        text = POINTER_TPL.read_text(encoding="utf-8").replace("<short-kebab-slug>", "adr-pointer")
+        (self.d / "brief.md").write_text(text, encoding="utf-8")
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -960,6 +970,51 @@ class PublishOnAccept(unittest.TestCase):
         d2.mkdir(parents=True)
         (d2 / "patch.diff").write_text("", encoding="utf-8")  # close/no-fix → no PR expected
         self.assertEqual(cli._publish_flag(d2), "  [close: no PR]")
+
+
+class InitIssueAndPlaceholderGuard(unittest.TestCase):
+    """init-issue is the pre-authored-brief seeder; its no-brief blank-template path is
+    dropped, and a still-unfilled template brief reads UNPLANNED so the Plan beat re-plans
+    it rather than being silently skipped (issue #113)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_init_issue_without_from_brief_errors_and_scaffolds_nothing(self) -> None:
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            rc = cli._init_issue(self.cfg, "NEW", None)
+        self.assertEqual(rc, 2)
+        self.assertFalse(self.cfg.bundle("NEW").exists())   # no content-less PLANNED trap
+        self.assertIn("flow NEW", buf.getvalue())           # points to the auto-plan path
+
+    def test_init_issue_with_from_brief_seeds_planned_bundle(self) -> None:
+        src = self.tmp / "authored.md"
+        src.write_text("- **Slug:** real-fix\n", encoding="utf-8")
+        rc = cli._init_issue(self.cfg, "SEED", src)
+        self.assertEqual(rc, 0)
+        d = self.cfg.bundle("SEED")
+        self.assertEqual(state.state(d), state.PLANNED)
+        self.assertEqual((d / "brief.md").read_text(encoding="utf-8"), "- **Slug:** real-fix\n")
+
+    def test_unfilled_template_brief_reads_unplanned(self) -> None:
+        # The #113 footgun shape: a brief.md that's the raw template (placeholder slug).
+        d = self.cfg.bundle("TPL")
+        d.mkdir(parents=True)
+        shutil.copyfile(BRIEF_TPL, d / "brief.md")
+        self.assertTrue(brief.is_placeholder(d / "brief.md"))
+        self.assertEqual(state.state(d), state.UNPLANNED)   # planner not skipped
+
+    def test_authored_brief_reads_planned(self) -> None:
+        d = self.cfg.bundle("REAL")
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** a-real-slug\n", encoding="utf-8")
+        self.assertFalse(brief.is_placeholder(d / "brief.md"))
+        self.assertEqual(state.state(d), state.PLANNED)
 
 
 if __name__ == "__main__":
