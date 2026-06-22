@@ -45,6 +45,7 @@ from . import act as act_mod
 from . import brief
 from . import gates
 from . import progress
+from . import sources
 from . import worktree
 from .config import Config, LeafConfig
 
@@ -140,7 +141,7 @@ def ensure_notes(cfg: Config, d: Path) -> None:
 # ----------------------------------------------------------------------------
 def do_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
     d.mkdir(parents=True, exist_ok=True)
-    ensure_notes(cfg, d)  # seed notes.json from the tracker scraper if configured (#65)
+    sources.seed(cfg, d)  # seed notes.json + sources/ from the configured providers (#65/#102)
     if cfg.planner.mode == "command":
         _invoke(cfg.planner, cfg.root, _plan_prompt(cfg, csv, d))
         return
@@ -170,6 +171,11 @@ def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
         "discussion and it is absent, ask the human to produce it with the project's "
         "tracker-scrape tooling, and stop. "
     )
+    sources_line = (
+        f"Also read EVERY file under {d / 'sources'} if that directory exists — the Plan "
+        "sources (issue #102) compose the bundle's full context there (the tracker JSON, a "
+        "linked proposal / ADR / spec, a CSV row); brief from ALL of it, not just one. "
+    )
     citation_line = (
         "Cite the root cause against the target source with `git -C <checkout> log/show "
         "-- <file>` plus Read/Grep on the checkout — NEVER `cd <checkout> && git ...` "
@@ -178,7 +184,7 @@ def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
     )
     return (
         "You are the Plan leaf of a PDCA cycle. " + src_line + csv_line + notes_line
-        + citation_line
+        + sources_line + citation_line
         + f"Together with the human, write brief.md in the bundle directory {d}. Default "
         f"to {fix_tpl} — it fits bug fixes AND ordinary new functionality. Use {geps_tpl} "
         "(a design proposal) ONLY for the exception: a change significant enough to "
@@ -220,7 +226,7 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
     """
     cfg.bundle_root.mkdir(parents=True, exist_ok=True)
     for iid in ids or []:
-        ensure_notes(cfg, cfg.bundle(iid))  # seed notes.json before the session (#65)
+        sources.seed(cfg, cfg.bundle(iid))  # seed notes.json + sources/ per bundle (#65/#102)
     if cfg.planner.mode == "command":
         _invoke(cfg.planner, cfg.root, _plan_batch_prompt(cfg, csv, ids))
         return

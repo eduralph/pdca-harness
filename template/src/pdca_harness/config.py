@@ -78,6 +78,11 @@ class Config:
     # retrieve a bundle's tracker thread into issue_<id>/notes.json (the planner reads it).
     # $PDCA_BUNDLE = the bundle dir; the command writes notes.json itself. "" ⇒ no fetch.
     notes_cmd: str = ""
+    # Composable Plan-seeding sources (issue #102): a list of [[plan.source]] providers the
+    # Plan beat runs to seed a bundle's sources/ dir, so a brief can draw on the ticket AND
+    # a linked proposal AND a spec — not just one notes_cmd. Each: {type, ...} where type ∈
+    # {github, gitlab, csv, file, command}; empty ⇒ only the legacy notes_cmd path.
+    plan_sources: list[dict] = field(default_factory=list)
     # Publish mechanics — config-driven so the harness ships project-agnostic.
     # Branch patterns are .format(id=, slug=) strings; issue_trailer is .format(id=).
     fix_branch_pattern: str = "fix/{id}-{slug}"
@@ -154,6 +159,7 @@ class Config:
 
         paths = data.get("paths", {})
         tracker = data.get("tracker", {})
+        plan_sources = list(data.get("plan", {}).get("source", []))  # [[plan.source]] (#102)
         publisher_cfg = data.get("publisher", {})
         leaves = data.get("leaves", {})
         gates = data.get("gates", {})
@@ -224,6 +230,7 @@ class Config:
             issue_id_example=tracker.get("issue_id_example", ""),
             tracker_export_csv=tracker.get("export_csv", ""),
             notes_cmd=tracker.get("notes_cmd", ""),
+            plan_sources=plan_sources,
             fix_branch_pattern=publisher_cfg.get("fix_branch_pattern", "fix/{id}-{slug}"),
             feature_branch_pattern=publisher_cfg.get("feature_branch_pattern", "enhancement/{id}-{slug}"),
             base_remote=publisher_cfg.get("base_remote", "upstream"),
