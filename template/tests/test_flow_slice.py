@@ -195,6 +195,34 @@ class FlowSlice(unittest.TestCase):
         self.assertEqual(set(results), {"BATCH1", "BATCH2"})
         self.assertTrue(all(s == state.COMPLETE for s in results.values()))
 
+    def test_batch_iterate_plan_then_complete(self) -> None:
+        # iterate-plan re-opens a batch member to UNPLANNED (archiving its attempt to
+        # iteration-v1/); the sweep must keep looping so a LATER pass re-plans + rebuilds
+        # it, rather than break at UNPLANNED when nothing is awaiting sign-off (#105).
+        iterated = {"done": False}
+
+        def signoff_batch(cfg: Config, bundles: list[Path]) -> None:
+            for d in bundles:
+                summ = d / "SUMMARY.md"
+                if d.name == "issue_BATCH1" and not iterated["done"]:
+                    iterated["done"] = True
+                    (d / leaves.SIGNOFF_DECISION).write_text("iterate-plan\n", encoding="utf-8")
+                    continue
+                summ.write_text(summ.read_text().replace("- [ ]", "- [x]"), encoding="utf-8")
+                (d / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
+
+        orig = leaves.run_signoff_batch
+        leaves.run_signoff_batch = signoff_batch
+        try:
+            results = flow.flow_batch(self.cfg, today="2026-06-04", max_passes=6)
+        finally:
+            leaves.run_signoff_batch = orig
+        self.assertTrue(iterated["done"])
+        self.assertEqual(set(results), {"BATCH1", "BATCH2"})
+        self.assertTrue(all(s == state.COMPLETE for s in results.values()))
+        # the re-opened bundle re-planned, rebuilt, and preserved its first attempt
+        self.assertTrue((self.cfg.bundle("BATCH1") / "iteration-v1").is_dir())
+
     def test_batch_signoff_chunks_into_sessions(self) -> None:
         # The cheap-first queue is signed off in ONE session per chunk of
         # SIGNOFF_BATCH_SIZE (=5): six halted bundles → sessions of 5 then 1, all
