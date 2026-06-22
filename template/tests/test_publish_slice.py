@@ -229,6 +229,45 @@ class PublishSlice(unittest.TestCase):
                       capture_output=True, text=True).stdout
         self.assertIn("fix/DIRTY-my-fix", refs)
 
+    def test_republish_force_updates_existing_pr_branch(self) -> None:
+        # iterate-do (#108): re-publishing a rebuilt bundle commits a FRESH branch off the
+        # current base and pushes it to the EXISTING PR branch — not a fast-forward of the
+        # prior attempt. A plain push is rejected (the re-Done bundle never publishes);
+        # publish must force-with-lease so the branch is updated to the rebuilt commit.
+        import subprocess as sp
+        repo = self.tmp / "checkout"
+        origin = self.tmp / "origin.git"
+        sp.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        sp.run(["git", "clone", "-q", str(origin), str(repo)], check=True)
+        run = lambda *a: sp.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+        run("config", "user.email", "t@example.com")
+        run("config", "user.name", "T")
+        run("config", "commit.gpgsign", "false")
+        (repo / "file.txt").write_text("base\n", encoding="utf-8")
+        run("add", "-A"); run("commit", "-q", "-m", "base")
+        run("branch", "-M", "main"); run("push", "-q", "-u", "origin", "main")
+
+        self.cfg.base_remote = "origin"
+        self.cfg.repo_checkouts = {"example-org/example-repo": str(repo)}
+        d = _bundle(self.cfg, "REDO", brief_body=_FIX_BRIEF, accepted=True)
+
+        def publish_fix(line: str) -> str:
+            # A distinct fix off the same base → a sibling (non-ff) commit on re-publish.
+            (d / "patch.diff").write_text(
+                "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n"
+                f"@@ -1 +1,2 @@\n base\n+{line}\n", encoding="utf-8")
+            buf = io.StringIO()
+            with redirect_stdout(buf), redirect_stderr(buf):
+                rc = publish.publish(self.cfg, "REDO", open_pr=False, by="T", today="2026-06-05")
+            self.assertEqual(rc, 0, buf.getvalue())
+            return sp.run(["git", "-C", str(repo), "ls-remote", "origin", "fix/REDO-my-fix"],
+                          capture_output=True, text=True).stdout.split()[0]
+
+        tip1 = publish_fix("first fix")
+        tip2 = publish_fix("second fix")   # was rejected (non-fast-forward) before #108
+        self.assertTrue(tip1 and tip2)
+        self.assertNotEqual(tip1, tip2)    # the PR branch was force-updated to the rebuild
+
     def test_pr_head_is_fork_owner_qualified(self) -> None:
         """Regression (#23b): a fork-based PR's --head must be OWNER:BRANCH, else gh
         resolves the branch against the base repo and fails 'Head ref must be a
