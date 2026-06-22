@@ -15,6 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from pdca_harness import brief, cli, driver, flow, leaves, queue, signoff, state
 from pdca_harness.config import Config, LeafConfig
@@ -706,12 +707,15 @@ class DeclaredOrdering(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _brief(self, iid: str, *, depends_on: str = "", conflicts_with: str = "") -> Path:
+    def _brief(self, iid: str, *, depends_on: str = "", conflicts_with: str = "",
+               depends_on_merged: str = "") -> Path:
         d = self.cfg.bundle(iid)
         d.mkdir(parents=True)
         body = _TOY_BRIEF.format(slug=iid.lower())
         if depends_on:
             body += f"- **Depends on:** {depends_on}\n"
+        if depends_on_merged:
+            body += f"- **Depends on (merged):** {depends_on_merged}\n"
         if conflicts_with:
             body += f"- **Conflicts with:** {conflicts_with}\n"
         (d / "brief.md").write_text(body, encoding="utf-8")
@@ -738,6 +742,41 @@ class DeclaredOrdering(unittest.TestCase):
             driver.run_issue = real
         self.assertEqual(seen.get("zz_state"), state.COMPLETE)  # ZZ done before AA built
         self.assertTrue(all(s == state.COMPLETE for s in results.values()))
+
+    def test_merge_gated_dependent_held_until_prereq_merged(self) -> None:
+        # MB needs MA *merged*, not merely COMPLETE (#107). MA is in the batch and reaches
+        # COMPLETE (a draft PR) this run, but the flow never merges it — so MB is held and
+        # left for a later `pdca flow` run, after a human merges MA's PR.
+        self._brief("MA")
+        self._brief("MB", depends_on_merged="MA")
+        driven: list[str] = []
+        real = driver.run_issue
+
+        def spy(d: Path, cfg: Config):
+            driven.append(d.name)
+            return real(d, cfg)
+
+        driver.run_issue = spy
+        try:
+            with mock.patch.object(flow.merged, "is_merged", return_value=False):
+                results = flow.flow_ids(self.cfg, ["MA", "MB"], do_publish=False,
+                                        do_act=False, today="2026-06-04")
+        finally:
+            driver.run_issue = real
+        self.assertEqual(results.get("MA"), state.COMPLETE)   # prereq completes
+        self.assertNotIn("issue_MB", driven)                  # dependent never built
+        self.assertNotEqual(results.get("MB"), state.COMPLETE)
+
+    def test_merge_gated_dependent_proceeds_once_prereq_merged(self) -> None:
+        # With the prereq's PR merged, the same gate lets the dependent run to COMPLETE.
+        self._brief("PA")
+        flow.flow_ids(self.cfg, ["PA"], do_publish=False, do_act=False, today="2026-06-04")
+        self.assertEqual(state.state(self.cfg.bundle("PA")), state.COMPLETE)
+        self._brief("PB", depends_on_merged="PA")
+        with mock.patch.object(flow.merged, "is_merged", return_value=True):
+            results = flow.flow_ids(self.cfg, ["PB"], do_publish=False, do_act=False,
+                                    today="2026-06-04")
+        self.assertEqual(results.get("PB"), state.COMPLETE)
 
     def test_no_deps_keeps_sort_by_name_dispatch(self) -> None:
         # No Depends-on fields → the serial build order is exactly sort-by-name, byte

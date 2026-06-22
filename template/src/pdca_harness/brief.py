@@ -83,6 +83,19 @@ def depends_on(brief_path: Path) -> list[str]:
     return _id_list(field(brief_path, "depends on", "depends_on"))
 
 
+def depends_on_merged(brief_path: Path) -> list[str]:
+    """Issue ids whose PR must be **merged** before this bundle runs (issue #107).
+
+    The optional ``- **Depends on (merged):** <id>[, <id>…]`` field (docs 09): a stricter
+    ``Depends on`` for a dependent that edits files a prerequisite also edits. Plain
+    ``Depends on`` only waits for the prereq to reach COMPLETE — a draft PR, **not
+    merged** — so a dependent built off the target base misses the prereq's diff and
+    conflicts at merge. This gate holds the dependent until the prereq is merged into the
+    base, so Do genuinely builds on the predecessor. Absent ⇒ ``[]``.
+    """
+    return _id_list(field(brief_path, "depends on (merged)", "depends_on_merged"))
+
+
 def conflicts_with(brief_path: Path) -> list[str]:
     """Issue ids that must never run in the same concurrent wave as this bundle.
 
