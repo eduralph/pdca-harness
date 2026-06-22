@@ -59,6 +59,19 @@ def planning_artifact(brief_path: Path) -> str:
     return field(brief_path, "planning artifact", "plan artifact", "plan source")
 
 
+def is_placeholder(brief_path: Path) -> bool:
+    """True if the brief is still an unfilled template — Slug missing or a ``<…>`` token.
+
+    A ``brief.md`` copied from ``brief.md.tpl`` but never authored *looks* PLANNED (the
+    file exists) yet carries no ticket content; ``state`` treats it as UNPLANNED so the
+    Plan beat re-plans it instead of the planner being silently skipped (issue #113). The
+    Slug — the first, always-filled field of any real brief — is the cheap, reliable
+    sentinel: an authored slug is kebab-case, never an angle-bracket placeholder.
+    """
+    slug = field(brief_path, "slug").strip()
+    return not slug or slug.startswith("<")
+
+
 def test_files(brief_path: Path) -> list[Path]:
     """Paths named by the brief's test-requirement field, relative to the bundle.
 

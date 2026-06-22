@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import signoff
+from . import brief, signoff
 
 # The ordered states a bundle moves through. The terminal/halted states
 # (UNPLANNED, AWAITING_SIGNOFF, COMPLETE) are where the driver stops and a human
@@ -46,12 +46,17 @@ _OUTCOME_TO_STATE = {
 
 def state(d: Path) -> str:
     """Return the bundle's state from the files present (docs 03 §state)."""
-    if not (d / "brief.md").exists():
+    bp = d / "brief.md"
+    if not bp.exists():
         return UNPLANNED
     # Do is done when there's a patch — OR, on the close-disposition fast path, the
     # close marker that stands in for it (a close bundle never builds a patch.diff).
     if not (d / "patch.diff").exists() and not (d / CLOSE_MARKER).exists():
-        return PLANNED
+        # Pre-Do only: a brief that's still an unfilled template (Slug missing / a `<…>`
+        # placeholder) means the planner never authored it, so treat it as UNPLANNED and
+        # let the Plan beat re-plan it instead of being skipped (issue #113). Scoped to
+        # the pre-Do boundary so a real, progressed bundle is never reclassified.
+        return UNPLANNED if brief.is_placeholder(bp) else PLANNED
     if not (d / "check-gates.json").exists():
         return BUILT
     if not (d / "SUMMARY.md").exists():
