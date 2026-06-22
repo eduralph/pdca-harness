@@ -361,6 +361,7 @@ def _drive_and_act(
         # Each bundle is isolated — one that raises (a leaf left it half-written) is
         # skipped this pass, never crashing the sweep and losing the others' progress.
         # Serial by default; fans out across cfg.lanes lanes when configured (docs 09).
+        before = [state.state(d) for d in bundles]
         _build_all(cfg, bundles)
         # Sign-off, cheap-first, restricted to this batch. ONE interactive session
         # per chunk (≤ SIGNOFF_BATCH_SIZE) walks several bundles — like batch Plan —
@@ -369,7 +370,14 @@ def _drive_and_act(
         # build-all above applies all the iterations together.
         pending = [e.bundle for e in queue.awaiting_signoff(cfg) if e.bundle.name in names]
         if not pending:
-            break
+            # Break only when the band made NO progress this pass. iterate-plan archives
+            # a bundle back to UNPLANNED — a HALTED state that needs the Plan pre-pass on a
+            # LATER pass; on the pass where that archive happens nothing is awaiting
+            # sign-off, so a bare `break` stranded it at UNPLANNED (#105). A state change
+            # means progress (the re-open) — loop again so the next pass re-plans + rebuilds.
+            if [state.state(d) for d in bundles] == before:
+                break       # genuinely stuck (all terminal / planner declined an UNPLANNED)
+            continue        # progress — give the re-opened bundle its Plan pass
         for chunk in _chunks(pending, SIGNOFF_BATCH_SIZE):
             # The session writes a decision per bundle as it goes; a dropped session
             # still leaves the finished ones, applied below. Isolate it so a crashed
