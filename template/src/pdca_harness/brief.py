@@ -111,12 +111,27 @@ def onto_branch(brief_path: Path) -> tuple[str, str] | None:
 
 
 def _id_list(raw: str) -> list[str]:
-    """Issue ids out of a comma/space-separated field value, normalised to bare ids.
+    """Issue ids out of the **leading id-list** of a field value, normalised to bare ids.
 
     Tolerates a leading ``#`` and the ``issue_`` bundle prefix so a brief may write
     ``#36`` / ``36`` / ``issue_36`` interchangeably; matches how ``cfg.bundle(id)``
-    keys bundles. Mirrors :func:`test_files`' tokenise-the-value approach.
+    keys bundles.
+
+    Parses only the leading run of id tokens and **stops at the first non-id token**, so
+    a trailing rationale is ignored (issue #103). ``Depends on:`` / ``Conflicts with:``
+    are the only list-parsed brief fields, yet authors and the headless planner routinely
+    append a note — a parenthetical, or an em-dash meaning "none" — mirroring the
+    template's own ``value (explanation)`` hint; left whole, that prose parsed into bogus
+    ids and crashed the whole batch in ``_check_dep_graph``. An id is a bare reference
+    (an issue number ``139``, or a tracker key ``PROJ-12`` / ``AA``); a natural-language
+    rationale word — lowercase letters and no digit (``no``, ``kept``, ``PR-order``) —
+    ends the run, so a value of pure prose or a bare ``—`` for "none" yields ``[]``.
     """
-    if not raw:
-        return []
-    return [t.lstrip("#").removeprefix("issue_") for t in re.findall(r"#?[\w./-]+", raw)]
+    ids: list[str] = []
+    for tok in re.findall(r"#?[\w./-]+", raw or ""):
+        bare = tok.lstrip("#").removeprefix("issue_")
+        is_id = any(ch.isdigit() for ch in bare) or not any(ch.islower() for ch in bare)
+        if not is_id:
+            break  # a rationale word — the id-list has ended
+        ids.append(bare)
+    return ids
