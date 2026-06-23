@@ -21,6 +21,7 @@
 - **Depends on:** <id>[, <id>…]   (optional — ids only on the value line, any trailing note is ignored; batch/lane scheduling waits until these bundles are COMPLETE before this one runs; docs 09)
 - **Depends on (merged):** <id>[, <id>…]   (optional — ids only on the value line, any trailing note is ignored; stricter than Depends on: hold this bundle until each prereq's PR is MERGED, not merely COMPLETE. Use when this edits files a prereq also edits, so Do builds on the merged result instead of conflicting at merge; docs 09)
 - **Conflicts with:** <id>[, <id>…]   (optional — ids only on the value line, any trailing note is ignored; never co-schedule these in the same concurrent wave, e.g. they edit a shared file; docs 09)
+- **Ordering note:** <optional free text — WHY the scheduling fields above are set as they are (e.g. "depends-on-merged 12 because both edit cache.py"). Not machine-parsed; it documents the human's sequencing decision next to the bare-id fields.>
 - **Surfaces:** <where the change is observable — `gui` (touches the frontend / an E2E
   through the app is needed), `data` (backend/logic only), or `both`. Drives which
   runtime gates apply (e.g. an E2E gate runs only when this is `gui`). Optional.>
