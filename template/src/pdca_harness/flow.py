@@ -199,9 +199,33 @@ def flow(
 # byte-for-byte today's sort-by-name pool.
 # ----------------------------------------------------------------------------
 def _declared_deps(bp: Path) -> list[str]:
-    """All declared prerequisite ids — COMPLETE-gated (`Depends on`) and merge-gated
-    (`Depends on (merged)`, #107) — for DAG validation and dispatch."""
-    return brief.depends_on(bp) + brief.depends_on_merged(bp)
+    """All declared prerequisite ids — COMPLETE-gated (`Depends on`), merge-gated
+    (`Depends on (merged)`, #107) and stack-gated (`Stacks on`, #123) — for DAG
+    validation and dispatch."""
+    return brief.depends_on(bp) + brief.depends_on_merged(bp) + brief.stacks_on(bp)
+
+
+def _prereq_published(cfg: Config, dep_id: str) -> bool:
+    """True iff prereq ``dep_id`` is COMPLETE and has a published branch (issue #123) — the
+    foundation a ``Stacks on`` dependent builds + publishes on top of."""
+    d = cfg.bundle(dep_id)
+    if state.state(d) != state.COMPLETE:
+        return False
+    rec = publish._publish_record(d)
+    return bool(rec and rec.get("branch"))
+
+
+def _stacked_snapshot(cfg: Config, bundles: list[Path]) -> set[str]:
+    """Prereq ids whose ``Stacks on`` foundation is ready now — COMPLETE with a published
+    branch (issue #123). A stacked dependent is eligible once its parent has produced a
+    branch to build on (not waiting for a *merge*, unlike `Depends on (merged)`), so the
+    whole chain completes in one run. Computed once per pass, like :func:`_merged_snapshot`."""
+    wanted: set[str] = set()
+    for b in bundles:
+        bp = b / "brief.md"
+        if bp.exists():
+            wanted.update(brief.stacks_on(bp))
+    return {dep for dep in wanted if _prereq_published(cfg, dep)}
 
 
 def _merged_snapshot(cfg: Config, bundles: list[Path]) -> set[str]:
@@ -221,19 +245,21 @@ def _merged_snapshot(cfg: Config, bundles: list[Path]) -> set[str]:
     return {dep for dep in wanted if merged.is_merged(cfg, dep)}
 
 
-def _deps_met(cfg: Config, d: Path, merged_ids: set[str]) -> bool:
+def _deps_met(cfg: Config, d: Path, merged_ids: set[str], stacked_ids: set[str]) -> bool:
     """True iff every prerequisite ``d`` declares is satisfied.
 
     ``Depends on`` prereqs must be COMPLETE; ``Depends on (merged)`` prereqs must be in
-    ``merged_ids`` (this pass's merged set, #107). An unplanned/reopened bundle (no brief
-    yet) declares nothing, so it is eligible; its deps are honoured once it is re-planned.
+    ``merged_ids`` (this pass's merged set, #107); ``Stacks on`` prereqs must be in
+    ``stacked_ids`` (COMPLETE-with-a-published-branch, #123). An unplanned/reopened bundle
+    (no brief yet) declares nothing, so it is eligible; its deps are honoured on re-plan.
     """
     bp = d / "brief.md"
     if not bp.exists():
         return True
     return (all(state.state(cfg.bundle(dep)) == state.COMPLETE
                 for dep in brief.depends_on(bp))
-            and all(dep in merged_ids for dep in brief.depends_on_merged(bp)))
+            and all(dep in merged_ids for dep in brief.depends_on_merged(bp))
+            and all(dep in stacked_ids for dep in brief.stacks_on(bp)))
 
 
 def _conflict_map(cfg: Config, bundles: list[Path]) -> dict[str, set[str]]:
@@ -334,33 +360,38 @@ def _build_all(cfg: Config, bundles: list[Path]) -> None:
     Then advance one beat per still-running, deps-met bundle per round until nothing
     progresses: serial by default, or fanned across ``cfg.lanes`` workers when configured.
     """
-    # Merge-gate snapshot once per pass (#107) — keeps the gh merge check out of the beat
-    # sweep / lane-pool dispatch; threaded into _deps_met below.
+    # Eligibility snapshots once per pass — keep the gh merge check (#107) and the
+    # stacked-branch check (#123) out of the beat sweep / lane-pool dispatch; threaded into
+    # _deps_met below.
     merged_ids = _merged_snapshot(cfg, bundles)
+    stacked_ids = _stacked_snapshot(cfg, bundles)
     # Serial Plan pre-pass — the interactive Plan beat must never enter the sweep/pool.
     for d in bundles:
         _isolate(d, "plan", lambda d=d: _plan_if_unplanned(cfg, d, None))
     if cfg.lanes <= 1 or len(bundles) <= 1:
-        _beat_sweep_serial(cfg, bundles, merged_ids)
+        _beat_sweep_serial(cfg, bundles, merged_ids, stacked_ids)
     else:
-        _beat_sweep_pooled(cfg, bundles, merged_ids)
+        _beat_sweep_pooled(cfg, bundles, merged_ids, stacked_ids)
 
 
-def _beat_sweep_serial(cfg: Config, bundles: list[Path], merged_ids: set[str]) -> None:
+def _beat_sweep_serial(cfg: Config, bundles: list[Path], merged_ids: set[str],
+                       stacked_ids: set[str]) -> None:
     """Round-robin one beat per still-running, deps-met bundle (sort-by-name) until no
     bundle progresses — so the wave advances all Dos, then all Checks, then all assembles.
     A dep-blocked bundle simply isn't advanced (a later pass picks it up once its prereq
-    is COMPLETE / merged); a bundle whose beat raises drops out (isolated)."""
+    is COMPLETE / merged / published); a bundle whose beat raises drops out (isolated)."""
     while True:
         progressed = False
         for d in bundles:
-            if _running(d) and _deps_met(cfg, d, merged_ids) and _advance_one(cfg, d):
+            if (_running(d) and _deps_met(cfg, d, merged_ids, stacked_ids)
+                    and _advance_one(cfg, d)):
                 progressed = True
         if not progressed:
             return
 
 
-def _beat_sweep_pooled(cfg: Config, bundles: list[Path], merged_ids: set[str]) -> None:
+def _beat_sweep_pooled(cfg: Config, bundles: list[Path], merged_ids: set[str],
+                       stacked_ids: set[str]) -> None:
     """Pooled beat sweep: each round fans one beat across ``min(lanes, n)`` lane-pinned
     workers, conflict-aware, then **joins (a barrier per beat)** before the next round.
 
@@ -373,7 +404,8 @@ def _beat_sweep_pooled(cfg: Config, bundles: list[Path], merged_ids: set[str]) -
     n_lanes = min(cfg.lanes, len(bundles))
     slot_of: dict[str, int] = {}  # bundle name → its fixed lane slot (worktree affinity)
     while True:
-        eligible = [d for d in bundles if _running(d) and _deps_met(cfg, d, merged_ids)]
+        eligible = [d for d in bundles
+                    if _running(d) and _deps_met(cfg, d, merged_ids, stacked_ids)]
         if not eligible:
             return
         if not _run_beat_round_pooled(cfg, eligible, conflicts, slot_of, n_lanes):
@@ -422,6 +454,17 @@ def _run_beat_round_pooled(
     return progressed[0]
 
 
+def _publish_bundle(cfg: Config, d: Path, *, by: str, today: str) -> None:
+    """Publish one COMPLETE bundle (Check's closing step), isolated so a single failure
+    can't abort the batch (testbed #3); a non-zero return is loud, never silent (#97)."""
+    rc = _isolate(d, "publish", lambda: publish.publish(
+        cfg, d.name.removeprefix("issue_"),
+        dry_run=cfg.publisher.mode == "stub", by=by, today=today, skip_if_no_target=True))
+    if rc not in (0, None):  # None ⇒ _isolate already logged an exception
+        print(f"flow: {d.name} is COMPLETE but publish did not complete (rc {rc}) — NOT "
+              f"published; run `pdca publish {d.name.removeprefix('issue_')}`.", file=sys.stderr)
+
+
 # ----------------------------------------------------------------------------
 # Shared multi-bundle driver: build all → cheap-first sign-off → publish → Act once.
 # ----------------------------------------------------------------------------
@@ -448,6 +491,12 @@ def _drive_and_act(
     # Reject an unschedulable declared-ordering graph (cycle / unresolved dep) before any
     # build touches a bundle (issue #36). No `Depends on` fields ⇒ no-op.
     _check_dep_graph(cfg, bundles)
+    # Stack prerequisites (#123): bundles some other brief `Stacks on`. Each must publish
+    # its branch DURING the loop — not the deferred end-publish — so a dependent's next pass
+    # can base its worktree + PR on it. `published` dedups against the end-publish below.
+    stack_prereqs = {cfg.bundle(dep).name
+                     for b in bundles for dep in brief.stacks_on(b / "brief.md")}
+    published: set[str] = set()
     for _ in range(max_passes):
         # Build-all (unattended): advance each bundle to AWAITING_SIGNOFF / COMPLETE.
         # Each bundle is isolated — one that raises (a leaf left it half-written) is
@@ -483,6 +532,15 @@ def _drive_and_act(
             for d in chunk:
                 _isolate(d, "sign-off", lambda d=d: _apply_decision(
                     cfg, d, by=by, today=today, apply_now=False))
+        # Publish a stack prerequisite the moment it's COMPLETE (#123) so its branch exists
+        # for a dependent's next-pass build/publish; `published` keeps the end-loop from
+        # re-publishing it. Independents / leaf dependents publish in the end-loop as before.
+        if do_publish:
+            for d in bundles:
+                if (d.name in stack_prereqs and d.name not in published
+                        and state.state(d) == state.COMPLETE):
+                    _publish_bundle(cfg, d, by=by, today=today)
+                    published.add(d.name)
         if all(state.state(d) == state.COMPLETE for d in bundles):
             break
 
@@ -491,17 +549,9 @@ def _drive_and_act(
         # Isolated like the other per-bundle loops — one bundle whose publish raises
         # must not abort the batch return / Act for the rest (testbed issue #3).
         for d in bundles:
-            if state.state(d) == state.COMPLETE:
-                rc = _isolate(d, "publish", lambda d=d: publish.publish(
-                    cfg, d.name.removeprefix("issue_"),
-                    dry_run=cfg.publisher.mode == "stub", by=by, today=today,
-                    skip_if_no_target=True))
-                # rc != 0 (and not None — None means _isolate already logged an exception):
-                # a publish that returned failure must not pass silently (#97).
-                if rc not in (0, None):
-                    print(f"flow: {d.name} is COMPLETE but publish did not complete "
-                          f"(rc {rc}) — NOT published; run `pdca publish "
-                          f"{d.name.removeprefix('issue_')}`.", file=sys.stderr)
+            if state.state(d) == state.COMPLETE and d.name not in published:
+                _publish_bundle(cfg, d, by=by, today=today)
+                published.add(d.name)
     if do_act:
         _maybe_run_act(cfg, today,
                        any_complete=any(s == state.COMPLETE for s in results.values()))

@@ -747,7 +747,7 @@ class DeclaredOrdering(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _brief(self, iid: str, *, depends_on: str = "", conflicts_with: str = "",
-               depends_on_merged: str = "") -> Path:
+               depends_on_merged: str = "", stacks_on: str = "") -> Path:
         d = self.cfg.bundle(iid)
         d.mkdir(parents=True)
         body = _TOY_BRIEF.format(slug=iid.lower())
@@ -755,6 +755,8 @@ class DeclaredOrdering(unittest.TestCase):
             body += f"- **Depends on:** {depends_on}\n"
         if depends_on_merged:
             body += f"- **Depends on (merged):** {depends_on_merged}\n"
+        if stacks_on:
+            body += f"- **Stacks on:** {stacks_on}\n"
         if conflicts_with:
             body += f"- **Conflicts with:** {conflicts_with}\n"
         (d / "brief.md").write_text(body, encoding="utf-8")
@@ -816,6 +818,39 @@ class DeclaredOrdering(unittest.TestCase):
             results = flow.flow_ids(self.cfg, ["PB"], do_publish=False, do_act=False,
                                     today="2026-06-04")
         self.assertEqual(results.get("PB"), state.COMPLETE)
+
+    def test_stacked_chain_completes_in_one_run(self) -> None:
+        # #123: a `Stacks on:` dependent is held until its parent is COMPLETE-with-a-
+        # published-branch, then builds + completes in the SAME run (one invocation, not N
+        # interleaved with merges). The parent's first beat precedes the dependent's.
+        # (All-caps ids: _id_list treats a lowercase-with-no-digit token as prose, #103.)
+        self._brief("SPARENT")
+        self._brief("SDEP", stacks_on="SPARENT")
+        order: list[str] = []
+        real_advance = driver.advance
+
+        def spy(d: Path, cfg: Config):
+            if d.name not in order:
+                order.append(d.name)
+            return real_advance(d, cfg)
+
+        def fake_publish(cfg, issue_id, **kw):  # stub publisher writes no publish.json
+            (cfg.bundle(issue_id) / "publish.json").write_text(
+                f'{{"branch": "fix/{issue_id}-x"}}', encoding="utf-8")
+            return 0
+
+        driver.advance = spy
+        orig_pub = flow.publish.publish
+        flow.publish.publish = fake_publish
+        try:
+            results = flow.flow_ids(self.cfg, ["SPARENT", "SDEP"], do_act=False,
+                                    today="2026-06-04")
+        finally:
+            driver.advance = real_advance
+            flow.publish.publish = orig_pub
+        self.assertEqual(results.get("SPARENT"), state.COMPLETE)
+        self.assertEqual(results.get("SDEP"), state.COMPLETE)   # chain done in one run
+        self.assertLess(order.index("issue_SPARENT"), order.index("issue_SDEP"))  # held until published
 
     def test_no_deps_keeps_sort_by_name_dispatch(self) -> None:
         # No Depends-on fields → the serial build order is exactly sort-by-name, byte

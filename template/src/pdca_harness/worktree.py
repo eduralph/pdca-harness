@@ -49,6 +49,11 @@ def _target(d: Path, cfg: Config) -> tuple[Path, str] | None:
     if not (primary / ".git").exists():  # not a git checkout → can't worktree
         return None
     base_ref = f"{cfg.base_remote}/{base}" if base else cfg.default_branch
+    # Auto-stacked chain (#123): base the dependent's Do worktree on the prereq's produced
+    # branch (on origin), not the target base, so Do builds + verifies on top of its diff.
+    stack_branch = publish._stack_base_branch(cfg, d)
+    if stack_branch:
+        base_ref = f"origin/{stack_branch}"
     return primary, base_ref
 
 
@@ -93,6 +98,8 @@ def ensure(d: Path, cfg: Config) -> Path | None:
     wt = _wt_dir(primary)
     try:
         _git(primary, "fetch", cfg.base_remote)  # refresh the base; best-effort
+        if base_ref.startswith("origin/") and cfg.base_remote != "origin":
+            _git(primary, "fetch", "origin")  # stacked base lives on origin (#123)
         if (wt / ".git").exists():
             # Reuse: drop the prior cycle's edits, return to a clean base.
             if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-fdq") != 0:

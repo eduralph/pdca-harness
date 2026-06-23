@@ -118,6 +118,20 @@ def conflicts_with(brief_path: Path) -> list[str]:
     return _id_list(field(brief_path, "conflicts with", "conflicts_with"))
 
 
+def stacks_on(brief_path: Path) -> list[str]:
+    """Issue ids whose just-produced branch this bundle stacks on (issue #123).
+
+    The optional ``- **Stacks on:** <id>[, <id>…]`` field: build this bundle on top of a
+    prerequisite's *produced patch branch* within the SAME ``flow`` run — not waiting for
+    a merge (unlike ``Depends on (merged)``) — and publish it as a separate stacked PR
+    (``gh pr create --base <prereq-branch>``). Use for a planned, file-overlapping refactor
+    sequence so the whole chain completes in one run. Names the immediate parent(s); the
+    worktree + PR base derive from the parent's ``publish.json`` (never hand-written — the
+    branch doesn't exist at Plan time). Absent ⇒ ``[]``.
+    """
+    return _id_list(field(brief_path, "stacks on", "stacks_on"))
+
+
 def onto_branch(brief_path: Path) -> tuple[str, str] | None:
     """``(remote, branch)`` of an existing PR's head to stack a commit onto, or ``None``.
 
