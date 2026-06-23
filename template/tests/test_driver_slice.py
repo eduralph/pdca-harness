@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from pdca_harness import act, assemble, driver, gates, publish, queue, leaves, signoff, state
 from pdca_harness.config import DEFAULT_CLOSE_DISPOSITIONS, Config, LeafConfig
@@ -255,6 +256,37 @@ class ReviewerTargetAccess(unittest.TestCase):
         # The prompt names $PDCA_TARGET and forbids wandering to other checkouts.
         self.assertIn("$PDCA_TARGET", leaves._REVIEW_PROMPT)
         self.assertIn("do NOT search other checkouts", leaves._REVIEW_PROMPT)
+
+    def test_prefers_worktree_over_sibling(self) -> None:
+        # When a per-cycle worktree exists it is the grounding target — pinned to the gate
+        # base + patch applied — never the human's (possibly stale) sibling checkout (#120).
+        wt = self.tmp / "checkout.pdca-wt"
+        wt.mkdir()
+        with mock.patch.object(leaves.worktree, "path", return_value=wt):
+            self.assertEqual(leaves._reviewer_target(self.d, self.cfg), wt)
+
+    def test_sibling_fallback_fetches_without_touching_working_tree(self) -> None:
+        # Worktree off: ground on the sibling, but only `git fetch` it — NEVER reset or
+        # checkout the human's working tree (#120). Real git, no network.
+        self.cfg.worktree = False
+        self.cfg.base_remote = "origin"
+        origin = self.tmp / "origin.git"
+        repo = self.tmp / "myrepo"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        subprocess.run(["git", "clone", "-q", str(origin), str(repo)], check=True)
+        run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True,
+                                        capture_output=True)
+        run("config", "user.email", "t@e.com"); run("config", "user.name", "T")
+        (repo / "f.txt").write_text("base\n", encoding="utf-8")
+        run("add", "-A"); run("commit", "-q", "-m", "base"); run("branch", "-M", "main")
+        run("push", "-q", "-u", "origin", "main")
+        (repo / "f.txt").write_text("human edit\n", encoding="utf-8")   # uncommitted work
+        (repo / "untracked.txt").write_text("x\n", encoding="utf-8")
+        self.cfg.repo_checkouts = {"org/myrepo": str(repo)}
+        got = leaves._reviewer_target(self.d, self.cfg)
+        self.assertEqual(got, repo)
+        self.assertEqual((repo / "f.txt").read_text(encoding="utf-8"), "human edit\n")
+        self.assertTrue((repo / "untracked.txt").exists())   # fetch is refs-only
 
 
 class AdvisoryReviewResilience(unittest.TestCase):

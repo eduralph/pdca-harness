@@ -386,21 +386,34 @@ _REVIEW_PROMPT = (
 
 
 def _reviewer_target(d: Path, cfg: Config) -> Path | None:
-    """The local target checkout the reviewer grounds its citations on, or None (#75).
+    """The local target checkout the reviewer grounds its citations on, or None (#75/#120).
 
-    Single-sourced from the brief's "Repo + branch target" via the same resolution
-    publish uses (``_checkout_path`` — configured ``[publisher.checkouts]`` or the
-    sibling convention). Returned only if it exists on disk; the reviewer is told to
-    ground against ``$PDCA_TARGET`` and not to wander into other checkouts. Best-effort:
-    any failure (no target, unresolved) yields None and the reviewer falls back to the diff.
+    Prefer the per-cycle **worktree** (#94): it is fetched + pinned to
+    ``<base_remote>/<base>`` and carries the patch, so the reviewer grounds on the *same*
+    base the gates ran against — not the human's sibling working checkout, which can lag
+    ``origin/<base>`` (a false "patch cannot apply" C4) or be sandbox-unreadable (#120).
+
+    When no worktree exists (isolation off / non-git target), fall back to the resolved
+    sibling checkout — but first ``git fetch`` it so grounding sees the current base. The
+    fetch is **non-destructive** (refs only): never ``reset``/``checkout`` the human's
+    working tree. Best-effort: any failure yields None and the reviewer grounds on the diff.
     """
+    wt = worktree.path(d, cfg)
+    if wt is not None:
+        return wt
     from . import publish  # lazy: publish imports leaves, avoid an import cycle
     try:
         repo_spec, _base, _slug = publish._resolve_target(d)
         if not repo_spec:
             return None
         p = publish._checkout_path(cfg, repo_spec)
-        return p if p.exists() else None
+        if not p.exists():
+            return None
+        # Refresh refs so a lagging sibling doesn't drift the reviewer's grounding; do NOT
+        # touch the working tree (it is the human's checkout). Best-effort.
+        subprocess.run(["git", "-C", str(p), "fetch", cfg.base_remote],
+                       capture_output=True, text=True)
+        return p
     except Exception:  # noqa: BLE001 — grounding access is best-effort, never fatal
         return None
 
