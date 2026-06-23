@@ -124,6 +124,27 @@ class WorktreeRealGit(unittest.TestCase):
         self.assertFalse((wt / "stray.txt").exists())
         self.assertEqual(self._porcelain(wt), "")  # clean
 
+    def test_stacked_bundle_bases_off_parent_branch(self) -> None:
+        # #123: a `Stacks on:` dependent's worktree bases off the parent's PUBLISHED branch
+        # (on origin), not origin/main — so Do builds + verifies on top of the parent's diff.
+        self._git("checkout", "-qb", "fix/PARENT-x")
+        (self.primary / "parent.txt").write_text("from parent\n", encoding="utf-8")
+        self._git("add", "-A"); self._git("commit", "-q", "-m", "parent change")
+        self._git("push", "-q", "-u", "origin", "fix/PARENT-x")
+        self._git("checkout", "-q", "main")
+        parent = self.cfg.bundle("PARENT")
+        parent.mkdir(parents=True)
+        (parent / "publish.json").write_text('{"branch": "fix/PARENT-x"}', encoding="utf-8")
+        dep = self.cfg.bundle("DEP")
+        dep.mkdir(parents=True)
+        (dep / "brief.md").write_text(
+            "- **Slug:** s\n- **Repo + branch target:** org/repo @ main\n"
+            "- **Stacks on:** PARENT\n", encoding="utf-8")
+        wt = worktree.ensure(dep, self.cfg)
+        self.assertIsNotNone(wt)
+        # the worktree carries the parent's change → it's off fix/PARENT-x, not main
+        self.assertEqual((wt / "parent.txt").read_text(encoding="utf-8"), "from parent\n")
+
 
 if __name__ == "__main__":
     unittest.main()

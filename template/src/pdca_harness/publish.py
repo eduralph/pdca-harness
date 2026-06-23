@@ -131,15 +131,30 @@ def publish(
         return _publish_stacked(cfg, d, repo_spec, onto,
                                 dry_run=dry_run, by=by, today=today, pending_id=pending_id)
 
+    # Auto-stacked chain (issue #123): the brief `Stacks on:` a prereq whose branch was
+    # produced earlier in THIS run — build + publish a NEW draft PR based on that branch (a
+    # separate stacked PR), not on the target base. Distinct from `Onto branch` (#54), which
+    # appends a commit to one existing PR. The base is derived from the prereq's publish.json
+    # (never hand-written — it doesn't exist at Plan time).
+    stack_branch = _stack_base_branch(cfg, d)
+    if brief.stacks_on(d / "brief.md") and not stack_branch:
+        print(f"publish: {d.name} `Stacks on` a prereq with no published branch yet — the "
+              "prereq must publish first (the flow schedules this).", file=sys.stderr)
+        return 1
+
     branch = _branch_name(cfg, d, slug)
     summary_line = (d / COMMIT_MSG).read_text(encoding="utf-8").splitlines()[0]
     repo = _checkout_path(cfg, repo_spec)
 
     git = lambda *a: ["git", "-C", str(repo), *a]
     base_remote = cfg.base_remote
+    # Stacked: cut the dependent's branch off the PARENT branch (on origin) and target the
+    # PR at it; otherwise off the target base (#123). pr_base is what `gh --base` gets.
+    checkout_base = f"origin/{stack_branch}" if stack_branch else f"{base_remote}/{base}"
+    pr_base = stack_branch or base
     steps = [
-        git("fetch", base_remote),
-        git("checkout", "-B", branch, f"{base_remote}/{base}"),
+        git("fetch", "origin" if stack_branch else base_remote),
+        git("checkout", "-B", branch, checkout_base),
         git("apply", str((d / "patch.diff").resolve())),
         # `commit -a` stages only modified-tracked files and would silently drop the
         # patch's NEW files (the regression test — the most important file in a fix
@@ -164,12 +179,13 @@ def publish(
     # against the *base* repo (where the fork branch doesn't exist) and fails with
     # "Head ref must be a branch". The branch lives on origin (the fork).
     head = f"{_fork_owner(repo) or repo_spec.split('/')[0]}:{branch}"
-    pr_cmd = ["gh", "pr", "create", "--draft", "--repo", repo_spec, "--base", base,
+    pr_cmd = ["gh", "pr", "create", "--draft", "--repo", repo_spec, "--base", pr_base,
               "--head", head, "--title", summary_line,
               "--body-file", str((d / PR_BODY).resolve())]
 
     if dry_run:
-        print(f"publish --dry-run — {d.name} → draft PR on {repo_spec} ({branch} → {base}):")
+        kind = "stacked draft PR" if stack_branch else "draft PR"
+        print(f"publish --dry-run — {d.name} → {kind} on {repo_spec} ({branch} → {pr_base}):")
         print(f"  # stash the target working tree (Do/Check leave it dirty), restore it after")
         for c in steps + ([pr_cmd] if open_pr else []):
             print("  " + " ".join(shlex.quote(x) for x in c))
@@ -182,6 +198,8 @@ def publish(
     rc = _check_repo(repo, repo_spec, required_remotes={base_remote, "origin"})
     if rc != 0:
         return rc
+    if stack_branch:
+        _warn_if_squash_only(repo_spec)  # a stacked PR must merge-commit, not squash (#123)
 
     orig_ref = _current_ref(repo)
     stashed = _stash_worktree(repo)
@@ -213,12 +231,15 @@ def publish(
             print(out)
             pr_url = out.splitlines()[-1] if out else ""
 
-    (d / "publish.json").write_text(json.dumps({
-        "mode": "new-pr",
-        "branch": branch, "pr_url": pr_url, "base": base, "repo": repo_spec,
+    record = {
+        "mode": "stacked-pr" if stack_branch else "new-pr",
+        "branch": branch, "pr_url": pr_url, "base": pr_base, "repo": repo_spec,
         "by": by or _signoff_by(d) or cfg.author or "unknown", "date": today,
         "id_pending": pending_id,
-    }, indent=2) + "\n", encoding="utf-8")
+    }
+    if stack_branch:
+        record["stacks_on"] = brief.stacks_on(d / "brief.md")
+    (d / "publish.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 
     # A requested-but-failed PR is a partial run, not a success — the branch is
     # pushed but the cycle isn't done. Exit non-zero so `flow` doesn't read the
@@ -226,7 +247,7 @@ def publish(
     if pr_failed:
         return 1
 
-    print(f"\nDraft PR prepared on {repo_spec} ({branch} → {base}).")
+    print(f"\nDraft PR prepared on {repo_spec} ({branch} → {pr_base}).")
     if pr_url:
         print(f"  {pr_url}\n  watch CI:  gh pr checks {pr_url} --watch")
     if pending_id:
@@ -398,6 +419,56 @@ def _checkout_path(cfg: Config, repo_spec: str) -> Path:
         p = Path(mapped)
         return (p if p.is_absolute() else cfg.root / p).resolve()
     return (cfg.root.parent / repo_spec.split("/")[-1]).resolve()
+
+
+def _publish_record(d: Path) -> dict | None:
+    """The bundle's ``publish.json`` (the recorded PR/branch), or None if absent/unreadable."""
+    pj = d / "publish.json"
+    if not pj.exists():
+        return None
+    try:
+        return json.loads(pj.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+
+
+def _stack_base_branch(cfg: Config, d: Path) -> str | None:
+    """The parent branch a ``Stacks on:`` bundle stacks onto, or None (issue #123).
+
+    The first declared ``Stacks on`` prereq's *published* branch (from its publish.json) —
+    the branch the dependent's worktree bases off and its PR targets (``gh --base``). None
+    when the bundle doesn't stack, or the prereq hasn't published yet (the flow schedules
+    a stacked dependent only once its prereq is COMPLETE-with-a-branch, so in-flow it
+    resolves)."""
+    parents = brief.stacks_on(d / "brief.md")
+    if not parents:
+        return None
+    rec = _publish_record(cfg.bundle(parents[0]))
+    return rec.get("branch") if rec else None
+
+
+def _warn_if_squash_only(repo_spec: str) -> None:
+    """Warn if the target repo can't merge a stacked PR with a merge commit (issue #123).
+
+    Stacked PRs must be merged bottom-up with merge-commit / rebase-merge: a SQUASH drops
+    the parent's commits from the base, so a child retargeted to the base re-shows the
+    parent's diff until rebased. Best-effort via ``gh repo view``; any failure is silent."""
+    try:
+        r = subprocess.run(
+            ["gh", "repo", "view", repo_spec, "--json", "mergeCommitAllowed,squashMergeAllowed"],
+            capture_output=True, text=True)
+    except OSError:  # gh not installed — best-effort, never fatal
+        return
+    if r.returncode != 0:
+        return
+    try:
+        info = json.loads(r.stdout or "{}")
+    except ValueError:
+        return
+    if info.get("mergeCommitAllowed") is False:
+        print(f"publish: ⚠ {repo_spec} does not allow merge commits — a stacked PR must be "
+              "merged bottom-up with a MERGE COMMIT (not squash), or each child re-shows its "
+              "parent's diff until rebased (#123).", file=sys.stderr)
 
 
 def _fork_owner(repo: Path, remote: str = "origin") -> str:

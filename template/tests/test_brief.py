@@ -97,6 +97,13 @@ class OrderingFields(unittest.TestCase):
         f = self._brief("- **Depends on:** 7\n")
         self.assertEqual(brief.depends_on_merged(f), [])
 
+    def test_stacks_on_is_its_own_field(self) -> None:
+        # The stack-gated field (#123) parses independently of the other ordering fields.
+        f = self._brief("- **Depends on:** 7\n- **Stacks on:** 8, 9\n")
+        self.assertEqual(brief.stacks_on(f), ["8", "9"])
+        self.assertEqual(brief.depends_on(f), ["7"])
+        self.assertEqual(brief.depends_on_merged(f), [])
+
 
 if __name__ == "__main__":
     unittest.main()
