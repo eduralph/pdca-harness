@@ -98,11 +98,15 @@ creep. Its output, `check-review.md`, is **advisory** — it annotates, it never
 gates. The blocking path contains no LLM at all.
 
 The reviewer runs in an isolation sandbox (only `{patch.diff, brief.md,
-check-gates.json}` are present), so the driver resolves the brief's target checkout and
-hands it over as **`$PDCA_TARGET`** (read-only; for a `claude` reviewer also via
-`--add-dir`). The reviewer grounds every citation there and is told **not** to wander
-into other checkouts on the machine — without this it can't ground, or hunts the
-filesystem for "the target" (issue #75).
+check-gates.json}` are present), so the driver hands it a read-only grounding target as
+**`$PDCA_TARGET`** (for a `claude` reviewer also via `--add-dir`). That target is the
+**per-cycle worktree** ([step 04](04-do.md)) — pinned to the *same* base the gates ran
+against and carrying the patch — so a stale or unreadable sibling checkout can't drift
+the reviewer's grounding (issue #120); when worktree isolation is off it falls back to
+the brief's target checkout, freshly fetched (refs only — never resetting your working
+tree). The reviewer grounds every citation there and is told **not** to wander into
+other checkouts on the machine — without this it can't ground, or hunts the filesystem
+for "the target" (issue #75).
 
 ### Optional advisory reviewers (a second lens)
 
