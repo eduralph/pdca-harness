@@ -48,6 +48,25 @@ directory per chosen issue under it, each with its own `brief.md`. `<id>` is the
 tracker id. The driver then builds and signs off each. Brief only the issues the
 human confirms — quantity is theirs to decide, not yours.
 
+**Order the batch — set the scheduling fields (don't leave the order to chance).** When
+you brief several issues you are also deciding how they interleave: the flow runs the
+batch as a scheduled wave (docs 09). Before writing the briefs, map the batch's real
+shape — which issues build on another's change, and which touch the same files — then
+set, per brief, the three machine-parsed scheduling fields:
+
+- **`Depends on:`** — a genuine build-on dependency; the flow holds this bundle until
+  each prereq is COMPLETE.
+- **`Depends on (merged):`** — the stricter form: hold until the prereq's PR is *merged*;
+  use when this issue edits files a prereq also edits, so Do builds on the merged result
+  instead of colliding at merge time.
+- **`Conflicts with:`** — no dependency, but two issues edit a shared file, so they must
+  never run in the same concurrent wave.
+
+Set these from the batch's *real* dependency/conflict structure — an unordered batch
+either serialises needlessly or lets two bundles collide on a shared file and waste a Do.
+Bare ids only on the value line; put the *why* in `Ordering note:`. Sequencing is the
+human's to confirm (like scope) — **ask when the order isn't clear.**
+
 ## How you work
 
 - **The tracker is the source of truth — go straight to it, don't scan this repo.**
