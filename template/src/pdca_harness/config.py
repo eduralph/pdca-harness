@@ -103,6 +103,13 @@ class Config:
     # a leaf on a brief field (e.g. a "Review depth" field), the way gate targets do — empty
     # ⇒ always run.
     advisory_leaves: list[dict] = field(default_factory=list)
+    # Builder escalation ladder (issue #135): an OPEN list of stronger Do backends keyed
+    # on the attempt number ([[leaves.builder_escalation]] in pdca.toml). Each:
+    # {min_iteration, family, mode, argv}. On iterate, do_build picks the entry with the
+    # highest min_iteration <= the current attempt, so a hard bundle can't loop forever on
+    # an underpowered executor (e.g. min_iteration=2 → stronger, =3 → frontier). Empty ⇒
+    # every attempt uses the default [leaves.builder].
+    builder_escalation: list[dict] = field(default_factory=list)
     # Delegated gates (issue #67): a host runner that single-sources its own gates
     # (e.g. "cargo xtask"). A check's bare ``subcmd`` is run as ``<runner> <subcmd>``, so
     # PDCA orchestrates the host runner instead of re-declaring the gates. "" ⇒ inline only.
@@ -204,6 +211,14 @@ class Config:
             for spec in leaves.get("advisory", [])
         ]
 
+        # Builder escalation ladder (issue #135) — stronger Do backends keyed on attempt
+        # number. PDCA_LEAVES_MODE forces their mode too (CI / offline determinism); ""
+        # leaves it unset so select_builder falls back to the default builder's mode.
+        builder_escalation = [
+            {**spec, "mode": mode_override or spec.get("mode", "")}
+            for spec in leaves.get("builder_escalation", [])
+        ]
+
         # PDCA_BUNDLE_ROOT redirects bundles to a throwaway location so an offline
         # `rehearse` never collides with the real `results/` a live run would use.
         bundle_root = root / paths.get("bundle_root", "results")
@@ -255,6 +270,7 @@ class Config:
             author=data.get("project", {}).get("author", ""),
             gates_checks=gates_checks,
             advisory_leaves=advisory_leaves,
+            builder_escalation=builder_escalation,
             gates_runner=gates_runner,
             lanes=lanes,
             worktree=worktree,
