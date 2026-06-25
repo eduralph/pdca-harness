@@ -383,7 +383,13 @@ _REVIEW_PROMPT = (
     "reason when an element does not apply. "
     "Ground every cited path:line on the target source at $PDCA_TARGET (read-only); "
     "if $PDCA_TARGET is unset, ground against patch.diff alone — do NOT search other "
-    "checkouts on the machine."
+    "checkouts on the machine. If $PDCA_TARGET is SET yet stale or unreadable (its base "
+    "lags what the patch was built/verified against — a dependent/stacked cycle's base "
+    "routinely trails its prerequisite until it merges), that is a target-state caveat, "
+    "NOT a patch defect: note the staleness and ground the affected citations on "
+    "patch.diff. Do NOT present a stale- or unreadable-target 'patch cannot apply / does "
+    "not compile' as a blocking C4 (verification) FAIL — that fabricates an ordering-gate "
+    "blocker for a patch that is in fact correct."
 )
 
 
