@@ -26,6 +26,12 @@
 - **Surfaces:** <where the change is observable — `gui` (touches the frontend / an E2E
   through the app is needed), `data` (backend/logic only), or `both`. Drives which
   runtime gates apply (e.g. an E2E gate runs only when this is `gui`). Optional.>
+- **Difficulty:** <`low` | `medium` | `high` — the fix's **blast-radius / cross-file
+  reach**: how many files/call-sites it touches and how far its effects propagate (what a
+  diff-reviewer must hold in view), NOT edge-case density (the deterministic gates own
+  that). low = a localized one-site change; high = a wide, cross-cutting change. Routes
+  the Do backend and review depth (issues #133/#134). Optional; absent/unknown is the safe
+  default — no review or capability is skipped on a missing tag.>
 - **Scope:** <the defect to remove — one logical fix. MUST NOT name a probe/guard/helper
   (a capability check, `hasattr`, `try/except import`): naming a mechanism seats the fix
   shape for Do. Leave mechanism to Do; Do prefers removing the cause over guarding it

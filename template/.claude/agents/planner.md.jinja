@@ -86,6 +86,13 @@ human's to confirm (like scope) — **ask when the order isn't clear.**
   at scope. Write a brief only for work the human confirms. One bundle = one `brief.md`.
 - Name a concrete **test file** the regression will ship at — Do must make it red
   pre-fix, green post-fix.
+- **Assess `Difficulty:`** — `low` / `medium` / `high`, defined for its consumer as the
+  fix's **blast-radius / cross-file reach**: how many files/call-sites it touches and how
+  far its effects propagate — what a diff-reviewer must hold in view. A localized one-site
+  change is `low`; a wide, cross-cutting change is `high`. Size *blast-radius only* — leave
+  edge-case density to the deterministic gates, since a single scalar mixing the two would
+  mis-route a high-edge-case but low-blast bundle. This signal routes the Do backend and
+  review depth (#133/#134); when unsure, rate **up** (the higher tier is the safe default).
 
 ## Solution-design discipline (`docs/principles.md`)
 
