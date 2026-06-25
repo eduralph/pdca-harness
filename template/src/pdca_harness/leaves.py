@@ -283,15 +283,26 @@ def _stub_plan_batch(cfg: Config, ids: list[str] | None = None) -> None:
 def do_build(d: Path, cfg: Config) -> None:
     if cfg.builder.mode == "command":
         # Isolate Do in a per-cycle worktree off the base (issue #94) so the host's
-        # primary checkout is never mutated; expose it as $PDCA_WORKTREE + grant the
-        # claude builder read/write there. Best-effort: None ⇒ edit in place, as before.
+        # primary checkout is never mutated. Best-effort: None ⇒ edit in place, as before.
         wt = worktree.ensure(d, cfg)
-        env = {"PDCA_WORKTREE": str(wt)} if wt else None
-        extra = ["--add-dir", str(wt)] if wt and cfg.builder.family == "claude" else None
-        # The builder runs from cfg.root but writes into the bundle d — watch d so the
-        # heartbeat shows patch.diff / build-notes.md appearing as it works.
+        if wt:
+            # CONFINE the builder by running it *in* the worktree (cwd), not merely
+            # exposing $PDCA_WORKTREE (issue #136): a non-claude command builder is
+            # otherwise launched from the harness root with nothing stopping it from
+            # writing the host checkout or a sibling repo — breaking one-bundle-one-diff.
+            # cwd-confinement is a builder contract independent of family. The claude
+            # family also needs the bundle dir granted (--add-dir d) so it can still read
+            # brief.md and write patch.diff / build-notes.md there (d is outside the wt).
+            workdir = wt
+            env = {"PDCA_WORKTREE": str(wt)}
+            extra = ["--add-dir", str(d)] if cfg.builder.family == "claude" else None
+        else:
+            workdir = cfg.root  # best-effort fallback: edit in place, as before
+            env = None
+            extra = None
+        # Watch the bundle d so the heartbeat shows patch.diff / build-notes.md appearing.
         _invoke(
-            cfg.builder, cfg.root, _build_prompt(d),
+            cfg.builder, workdir, _build_prompt(d),
             label=f"Do {d.name}",
             status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
             stream_json=True,  # Tier 3: show the builder's live tool-use
