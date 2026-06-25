@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from . import (act, brief, driver, flow, gates, merged, publish, queue, revalidate,
-               signoff, state)
+               signoff, state, waves)
 from .config import Config
 
 
@@ -79,6 +79,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p_status = sub.add_parser("status", help="list bundle states (cheap-first queue)")
     p_status.add_argument("issue_id", nargs="?")
+
+    p_waves = sub.add_parser("waves",
+                             help="show the computed dependency-wave plan for a batch (no build)")
+    p_waves.add_argument("issue_ids", nargs="*",
+                         help="ids to schedule; none → every in-flight briefed bundle")
 
     sub.add_parser("queue", help="the cheap-first sign-off burn-down (AWAITING_SIGNOFF)")
 
@@ -151,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
         return _flow(cfg, args)
     if args.cmd == "status":
         return _status(cfg, args.issue_id)
+    if args.cmd == "waves":
+        return _waves(cfg, args.issue_ids)
     if args.cmd == "queue":
         return _queue(cfg)
     if args.cmd == "gates":
@@ -304,6 +311,34 @@ def _status(cfg: Config, issue_id: str | None) -> int:
     return 0
 
 
+def _waves(cfg: Config, ids: list[str]) -> int:
+    """Print the computed dependency-wave plan for a batch — deterministic, no build
+    (#wave-model). With no ids, schedules every in-flight briefed bundle. An unschedulable
+    graph (cycle / unresolved dep) is reported, not run."""
+    if ids:
+        bundles = [cfg.bundle(i) for i in ids if (cfg.bundle(i) / "brief.md").exists()]
+    elif cfg.bundle_root.exists():
+        bundles = sorted((d for d in cfg.bundle_root.glob("issue_*")
+                          if d.is_dir() and (d / "brief.md").exists()
+                          and state.state(d) not in (state.COMPLETE, state.DISCONTINUED)),
+                         key=lambda p: p.name)
+    else:
+        bundles = []
+    if not bundles:
+        print("(no briefed bundles to schedule)")
+        return 0
+    try:
+        plan = waves.compute_waves(cfg, bundles)
+    except ValueError as exc:
+        print(f"unschedulable: {exc}", file=sys.stderr)
+        return 1
+    print(f"{len(bundles)} bundle(s) → {len(plan)} wave(s) ({cfg.wave_mode} mode; "
+          f"each wave builds on the prior's accepted work):")
+    for k, wave in enumerate(plan):
+        print(f"  wave {k}: " + ", ".join(d.name.removeprefix("issue_") for d in wave))
+    return 0
+
+
 def _publish_flag(d: Path) -> str:
     """A COMPLETE bundle's publish state (#97): a real publish writes publish.json with the
     PR url; absent ⇒ accepted-but-unpublished (dry-run / no-target / failed / not-yet-run),
@@ -314,10 +349,16 @@ def _publish_flag(d: Path) -> str:
             return "  [close: no PR]"
         return "  [unpublished]"
     try:
-        url = json.loads(pj.read_text(encoding="utf-8")).get("pr_url")
+        rec = json.loads(pj.read_text(encoding="utf-8"))
     except (ValueError, OSError):
         return "  [published]"
-    return f"  [PR {url}]" if url else "  [published]"
+    url, base = rec.get("pr_url"), rec.get("base")
+    if not url:
+        return "  [published]"
+    # A stacked PR (#wave-model / #123) targets the wave integration branch, not the base —
+    # show ↑<base> so the human knows to merge the stack bottom-up.
+    stacked = rec.get("mode") in ("stacked-pr", "stacked")
+    return f"  [PR {url}{f' ↑{base}' if stacked else ''}]"
 
 
 def _blocked_by(cfg: Config, d: Path) -> list[str]:

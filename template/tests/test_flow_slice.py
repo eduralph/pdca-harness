@@ -15,7 +15,7 @@ import re
 import shutil
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -1123,6 +1123,35 @@ class WaveModel(unittest.TestCase):
         self.assertIsNone(flow.publish._stack_base_branch(self.cfg, d))
         flow.publish.write_stack_base(d, "pdca-integration/main")
         self.assertEqual(flow.publish._stack_base_branch(self.cfg, d), "pdca-integration/main")
+
+    def test_waves_command_prints_plan(self) -> None:
+        # `pdca waves` prints the computed wave plan without building (B3 observability).
+        self._brief("WX")
+        self._brief("WY", depends_on="WX")
+        with redirect_stdout(io.StringIO()) as out:
+            rc = cli._waves(self.cfg, ["WX", "WY"])
+        self.assertEqual(rc, 0)
+        self.assertIn("wave 0: WX", out.getvalue())
+        self.assertIn("wave 1: WY", out.getvalue())
+
+    def test_waves_command_reports_unschedulable(self) -> None:
+        self._brief("CZ1", depends_on="CZ2")
+        self._brief("CZ2", depends_on="CZ1")
+        with redirect_stderr(io.StringIO()) as err:
+            rc = cli._waves(self.cfg, ["CZ1", "CZ2"])
+        self.assertEqual(rc, 1)
+        self.assertIn("unschedulable", err.getvalue())
+
+    def test_publish_flag_marks_stacked_pr(self) -> None:
+        # A stacked PR's status flag shows ↑<integration-branch> so the human merges the
+        # stack bottom-up.
+        d = self._brief("SF")
+        (d / "publish.json").write_text(
+            '{"pr_url": "https://gh/pr/9", "base": "pdca-integration/main", '
+            '"mode": "stacked-pr"}', encoding="utf-8")
+        flag = cli._publish_flag(d)
+        self.assertIn("https://gh/pr/9", flag)
+        self.assertIn("↑pdca-integration/main", flag)
 
 
 class ProgName(unittest.TestCase):
