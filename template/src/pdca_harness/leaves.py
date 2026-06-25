@@ -328,12 +328,16 @@ def _record_loop_attempt(d: Path, n: int, builder: LeafConfig) -> None:
     data: dict = {"attempts": []}
     if path.exists():
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            loaded = json.loads(path.read_text(encoding="utf-8"))
         except (ValueError, OSError):
-            data = {"attempts": []}
+            loaded = None
+        # Only adopt a well-shaped prior file; a hand edit / older writer that left a
+        # top-level array (or a non-list `attempts`) must not abort Do via AttributeError —
+        # this sidecar is best-effort. Anything else is replaced with a fresh dict.
+        if isinstance(loaded, dict) and isinstance(loaded.get("attempts"), list):
+            data = loaded
     label = builder.argv[0] if builder.argv else builder.mode
-    data.setdefault("attempts", []).append(
-        {"n": n, "builder": label, "family": builder.family})
+    data["attempts"].append({"n": n, "builder": label, "family": builder.family})
     data["iterations_to_pass"] = len(data["attempts"])
     try:
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")

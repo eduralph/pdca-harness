@@ -102,6 +102,18 @@ class LoopTelemetry(unittest.TestCase):
         self.assertEqual(tel["attempts"][1]["n"], 2)
         self.assertEqual(tel["attempts"][1]["family"], "frontier")  # escalated on iterate
 
+    def test_malformed_telemetry_file_does_not_break_do(self) -> None:
+        # A best-effort sidecar: a hand edit / older writer that left valid-but-wrong-shape
+        # JSON (a top-level array) must not abort Do — it is replaced, not appended to
+        # (Codex review, PR #144).
+        cfg = _cfg(self.tmp, builder=LeafConfig(mode="command", family="local", argv=NOOP))
+        d = self._bundle(cfg)
+        (d / "loop-telemetry.json").write_text("[1, 2, 3]", encoding="utf-8")  # wrong shape
+        leaves.do_build(d, cfg)  # must not raise
+        tel = json.loads((d / "loop-telemetry.json").read_text())
+        self.assertEqual(tel["iterations_to_pass"], 1)
+        self.assertEqual(tel["attempts"][0]["family"], "local")
+
 
 if __name__ == "__main__":
     unittest.main()
