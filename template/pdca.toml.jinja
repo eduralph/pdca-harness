@@ -35,6 +35,29 @@ lanes = 1
 # `$PDCA_WORKTREE` too (see the gate examples below). On by default; best-effort (a target
 # that isn't a worktree-capable git checkout falls back to in-place). Set false to disable.
 worktree = true
+# Wave-based batch sequencing (#wave-model). When `pdca flow` is given several ids it runs
+# them as an ordered sequence of dependency waves (computed from each brief's `Depends on`
+# / `Conflicts with`): a wave's bundles build in parallel, then its accepted work reaches
+# the NEXT wave's base one of two ways.
+#   wave_mode = "stack"  (default) — fold each wave's accepted patches onto a run-scoped
+#       integration branch the next wave builds on, and open each PR as a stacked PR. This
+#       is PUSH-ONLY (a fork has push), keeps the STOP discipline (the harness never merges;
+#       you merge the PR stack bottom-up with a merge commit, not squash), and completes a
+#       dependent batch in one run. The fork-safe default.
+#   wave_mode = "merge"  (own-repo / continuous-delivery ONLY) — `gh pr merge` each
+#       non-final wave's PRs so the next wave builds on the genuinely-merged base. Needs
+#       MERGE RIGHTS on the base remote (a fork contributor lacks them upstream — keep
+#       "stack" there) and relaxes the STOP discipline for the batch. Fail-closed: a
+#       non-mergeable PR stops the run.
+wave_mode = "stack"
+# The `gh pr merge` strategy when wave_mode = "merge": "merge" (a merge commit — auditable,
+# bisectable; the default), "squash", or "rebase".
+merge_method = "merge"
+# Optional integration re-gate (#wave-model). After each wave folds (stack mode), run the
+# repo-scoped gates over the folded integration tip before the next wave builds on it, so a
+# combination that is red though each fix was green ALONE stops the run. Off by default
+# (needs your repo-scoped gates); in merge mode the PR's own CI is the merge-boundary check.
+regate_between_waves = false
 # Act cadence (issue #109). Act is a cross-cycle beat that yields a real delta only once
 # enough cycles have frozen to show a pattern, so `pdca flow` auto-runs it only when this
 # many cycles have frozen SINCE the last Act review — counted across flow invocations
