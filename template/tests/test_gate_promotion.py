@@ -88,6 +88,24 @@ class Promotion(unittest.TestCase):
         self._three(cfg, ("pass", "pass", "pass"))
         self.assertEqual(self._candidates(cfg), [])
 
+    def test_recency_uses_signoff_date_not_an_earlier_section(self) -> None:
+        # Three older PASSING cycles, then the NEWEST cycle FAILS — but its §9 sign-off date
+        # (2026-06-09) sits after an OLD date in §1 (2026-05-01). A "first date anywhere"
+        # heuristic would sort the failing cycle as oldest and wrongly report the check
+        # ready; scoping to §9 keeps it among the most-recent N, so it's NOT ready.
+        cfg = _cfg(self.tmp, [_CHECK])
+        self._bundle(cfg, "A", "2026-06-01", "pass")
+        self._bundle(cfg, "B", "2026-06-02", "pass")
+        self._bundle(cfg, "D", "2026-06-03", "pass")
+        d = cfg.bundle("C")
+        d.mkdir(parents=True)
+        (d / "check-gates.json").write_text(
+            json.dumps({"rows": [{"rule_id": "C5-prod", "result": "fail"}]}), encoding="utf-8")
+        (d / "SUMMARY.md").write_text(
+            "## 1. Spec\n- cited 2026-05-01 in the brief\n\n"
+            "## 9. Check sign-off\n- By / date: t / 2026-06-09\n", encoding="utf-8")
+        self.assertEqual(self._candidates(cfg), [])
+
 
 if __name__ == "__main__":
     unittest.main()

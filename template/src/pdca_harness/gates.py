@@ -71,14 +71,21 @@ def _gates_record(d: Path) -> dict | None:
         return None
 
 
+_SIGNOFF_SECTION = re.compile(r"^##[^\n]*Check sign-off[^\n]*\n(.*?)(?=^##\s|\Z)",
+                              re.MULTILINE | re.DOTALL)
+
+
 def _signoff_date(d: Path) -> str:
-    """A recency key for ordering frozen cycles — the first ISO date in SUMMARY.md (the §9
-    sign-off date in practice), or "" when none."""
+    """A recency key for ordering frozen cycles — the ISO date in the §9 (``Check
+    sign-off``) section of SUMMARY.md, or "" when none. Scoped to §9 so an ISO date in an
+    earlier section (a brief/citation date) can't mis-order cycles and report a check ready
+    whose most-recent sign-off run actually failed."""
     s = d / "SUMMARY.md"
     if not s.exists():
         return ""
-    m = _PROMO_DATE.search(s.read_text(encoding="utf-8"))
-    return m.group(1) if m else ""
+    block = _SIGNOFF_SECTION.search(s.read_text(encoding="utf-8"))
+    dm = _PROMO_DATE.search(block.group(1)) if block else None
+    return dm.group(1) if dm else ""
 
 
 def _check_result(rec: dict, check_id: str) -> str | None:
