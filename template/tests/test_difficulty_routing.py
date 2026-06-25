@@ -11,6 +11,7 @@ difficulty pick so a looping bundle still escalates.
 from __future__ import annotations
 
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +21,7 @@ from pdca_harness.config import Config, LeafConfig
 
 HARD = {"family": "frontier", "argv": ["frontier-build"],
         "when": {"field": "difficulty", "substring": "high"}}
+NOOP = [sys.executable, "-c", "pass"]
 
 
 def _cfg(root: Path, **kw) -> Config:
@@ -32,7 +34,7 @@ def _cfg(root: Path, **kw) -> Config:
         tracker_system="github",
         tracker_url="",
         issue_id_example="1",
-        builder=LeafConfig(mode="command", family="local", argv=["local-build"]),
+        builder=kw.pop("builder", LeafConfig(mode="command", family="local", argv=["local-build"])),
         reviewer=LeafConfig(mode="stub"),
         **kw,
     )
@@ -90,6 +92,19 @@ class DifficultyRouting(unittest.TestCase):
         d = self._bundle("high")
         self.assertEqual(leaves.select_builder(d, cfg, 1).family, "frontier")   # variant
         self.assertEqual(leaves.select_builder(d, cfg, 3).family, "escalated")  # escalation wins
+
+    def test_do_build_dispatches_on_the_routed_builder_mode(self) -> None:
+        # Default is stub, but a high-difficulty variant is a command builder. do_build
+        # must run the routed COMMAND backend (it writes loop-telemetry.json), not fall
+        # through to the stub because cfg.builder.mode is stub (Codex review, PR #146).
+        cfg = _cfg(
+            self.tmp,
+            builder=LeafConfig(mode="stub", family="local", argv=[]),
+            builder_variants=[{"mode": "command", "family": "frontier", "argv": NOOP,
+                               "when": {"field": "difficulty", "substring": "high"}}])
+        d = self._bundle("high")
+        leaves.do_build(d, cfg)
+        self.assertTrue((d / "loop-telemetry.json").exists())  # the command path ran
 
 
 if __name__ == "__main__":

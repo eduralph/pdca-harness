@@ -368,9 +368,12 @@ def _record_loop_attempt(d: Path, n: int, builder: LeafConfig) -> None:
 
 
 def do_build(d: Path, cfg: Config) -> None:
-    if cfg.builder.mode == "command":
-        n = attempt_no(d)
-        builder = select_builder(d, cfg, n)  # escalate-on-iterate (#135); difficulty (#134)
+    # Route the builder FIRST, then dispatch on the SELECTED backend's mode — a variant /
+    # escalation entry may set its own mode, so keying the command-vs-stub decision on
+    # cfg.builder.mode would run a command variant as a stub (or vice versa) (#134).
+    n = attempt_no(d)
+    builder = select_builder(d, cfg, n)  # escalate-on-iterate (#135); difficulty (#134)
+    if builder.mode == "command":
         _record_loop_attempt(d, n, builder)
         # Isolate Do in a per-cycle worktree off the base (issue #94) so the host's
         # primary checkout is never mutated. Best-effort: None ⇒ edit in place, as before.
