@@ -360,15 +360,27 @@ def _stub_plan_batch(cfg: Config, ids: list[str] | None = None) -> None:
 def do_build(d: Path, cfg: Config) -> None:
     if cfg.builder.mode == "command":
         # Isolate Do in a per-cycle worktree off the base (issue #94) so the host's
-        # primary checkout is never mutated; expose it as $PDCA_WORKTREE + grant the
-        # claude builder read/write there. Best-effort: None ⇒ edit in place, as before.
+        # primary checkout is never mutated. Best-effort: None ⇒ edit in place, as before.
         wt = worktree.ensure(d, cfg)
-        env = {"PDCA_WORKTREE": str(wt)} if wt else None
-        extra = ["--add-dir", str(wt)] if wt and cfg.builder.family == "claude" else None
-        # The builder runs from cfg.root but writes into the bundle d — watch d so the
-        # heartbeat shows patch.diff / build-notes.md appearing as it works.
+        if wt and cfg.builder.family == "claude":
+            # The claude builder discovers its `builder` subagent AND the builder_guard
+            # PreToolUse hook by walking up from its cwd, so cwd MUST stay the harness root
+            # (.claude/agents + .claude/settings live there). Confining its cwd to the
+            # worktree would hide both — `--agent builder` would not resolve and the
+            # STOP-discipline guard would not load. It is grounded in the worktree via
+            # --add-dir + the prompt instead (as in #94), not by cwd.
+            workdir, env, extra = cfg.root, {"PDCA_WORKTREE": str(wt)}, ["--add-dir", str(wt)]
+        elif wt:
+            # A non-claude command builder (a local agentic CLI) has no --add-dir / agent
+            # machinery, so CONFINE it by running it *in* the worktree (cwd): otherwise it
+            # is launched from the harness root with nothing stopping it from writing the
+            # host checkout or a sibling repo, breaking one-bundle-one-diff (issue #136).
+            workdir, env, extra = wt, {"PDCA_WORKTREE": str(wt)}, None
+        else:
+            workdir, env, extra = cfg.root, None, None  # best-effort: edit in place, as before
+        # Watch the bundle d so the heartbeat shows patch.diff / build-notes.md appearing.
         _invoke(
-            cfg.builder, cfg.root, _build_prompt(d),
+            cfg.builder, workdir, _build_prompt(d),
             label=f"Do {d.name}",
             status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
             stream_json=True,  # Tier 3: show the builder's live tool-use
