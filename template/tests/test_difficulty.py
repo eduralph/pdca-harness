@@ -37,7 +37,7 @@ class DifficultyField(unittest.TestCase):
         return d
 
     def test_templates_carry_a_canonical_difficulty_field(self) -> None:
-        for tpl in ("brief.md.tpl", "design-proposal.md.tpl"):
+        for tpl in ("brief.md.tpl", "design-proposal.md.tpl", "plan-pointer.md.tpl"):
             text = (TEMPLATES / tpl).read_text(encoding="utf-8")
             self.assertIn("**Difficulty:**", text, f"{tpl} lacks the Difficulty field")
             self.assertIn("blast-radius", text)  # defined for its consumer
@@ -53,6 +53,16 @@ class DifficultyField(unittest.TestCase):
         # Default-open safety: a missing tag must NOT match a high-gated leaf (the field
         # is absent → no skip-routing decision is silently flipped).
         self.assertFalse(leaves._advisory_applies(spec, self._brief(None)))
+
+    def test_unfilled_placeholder_reads_as_absent(self) -> None:
+        # The template placeholder enumerates the values, so its text contains "high".
+        # An untouched Difficulty line must NOT match a substring="high" gate, or the
+        # absent-is-safe default is defeated (Codex review, PR #145).
+        placeholder = "<`low` | `medium` | `high` — the fix's blast-radius>"
+        d = self._brief(placeholder)
+        self.assertEqual(brief.field(d / "brief.md", "difficulty"), "")
+        spec = {"when": {"field": "difficulty", "substring": "high"}}
+        self.assertFalse(leaves._advisory_applies(spec, d))
 
 
 if __name__ == "__main__":
