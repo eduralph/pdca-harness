@@ -1079,7 +1079,7 @@ class WaveModel(unittest.TestCase):
         (b / "patch.diff").write_text(
             "diff --git a/shared.py b/shared.py\n@@ -5 +5 @@\n-p\n+q\n", encoding="utf-8")
         with redirect_stderr(io.StringIO()) as err:
-            flow._audit_wave_overlap(self.cfg, [a, b])
+            flow._audit_wave_overlap([a, b])
         self.assertIn("shared.py", err.getvalue())
         self.assertIn("undeclared conflict", err.getvalue())
 
@@ -1091,8 +1091,30 @@ class WaveModel(unittest.TestCase):
         b.mkdir(parents=True)
         (b / "patch.diff").write_text("diff --git a/two.py b/two.py\n", encoding="utf-8")
         with redirect_stderr(io.StringIO()) as err:
-            flow._audit_wave_overlap(self.cfg, [a, b])
+            flow._audit_wave_overlap([a, b])
         self.assertEqual(err.getvalue(), "")
+
+    def test_merge_mode_routes_to_merge_wave_not_fold(self) -> None:
+        # wave_mode="merge" (opt-in): the driver gh-merges each non-final wave's PRs
+        # instead of folding onto an integration branch. merge_wave is stubbed to 0 (no
+        # real gh); the next wave then builds on the base (which a real merge would advance).
+        self.cfg.wave_mode = "merge"
+        self._brief("GA")
+        self._brief("GB", depends_on="GA")
+        merge_calls: list[list[str]] = []
+        fold_calls: list[int] = []
+        real_merge, real_fold = flow.merge.merge_wave, flow.integrate.fold
+        flow.merge.merge_wave = lambda cfg, bundles, **k: (
+            merge_calls.append([d.name for d in bundles]), 0)[1]
+        flow.integrate.fold = lambda *a, **k: (fold_calls.append(1), (None, None))[1]
+        try:
+            results = flow.flow_ids(self.cfg, ["GA", "GB"], do_act=False, today="2026-06-04")
+        finally:
+            flow.merge.merge_wave, flow.integrate.fold = real_merge, real_fold
+        self.assertEqual(results.get("GA"), state.COMPLETE)
+        self.assertEqual(results.get("GB"), state.COMPLETE)
+        self.assertEqual(merge_calls, [["issue_GA"]])   # merged after wave 0 only
+        self.assertEqual(fold_calls, [])                # fold not used in merge mode
 
     def test_stack_base_file_round_trips(self) -> None:
         # The flow records the integration branch for a wave>0 bundle; worktree + publish

@@ -148,6 +148,9 @@ class Config:
     # "merge" (own-repo / CD) instead `gh pr merge`s each wave before the next.
     # [driver].wave_mode in pdca.toml.
     wave_mode: str = "stack"
+    # The `gh pr merge` strategy for wave_mode="merge" (issue #wave-model): merge | squash |
+    # rebase. Default "merge" (a merge commit — auditable, bisectable). [driver].merge_method.
+    merge_method: str = "merge"
     # Optional integration re-gate (#wave-model): after each wave folds onto the
     # integration branch, run the repo-scoped gates over that tip before the next wave
     # builds on it, so a combination that is red though each fix was green alone STOPs the
@@ -262,6 +265,7 @@ class Config:
         lanes = max(1, lanes)
         worktree = bool(driver_cfg.get("worktree", True))  # issue #94; on by default
         wave_mode = driver_cfg.get("wave_mode", "stack")  # #wave-model: stack | merge
+        merge_method = driver_cfg.get("merge_method", "merge")  # merge | squash | rebase
         regate_between_waves = bool(driver_cfg.get("regate_between_waves", False))
         act_cadence = max(1, int(driver_cfg.get("act_cadence", 5)))  # issue #109
 
@@ -305,6 +309,7 @@ class Config:
             lanes=lanes,
             worktree=worktree,
             wave_mode=wave_mode,
+            merge_method=merge_method,
             regate_between_waves=regate_between_waves,
             act_cadence=act_cadence,
             close_dispositions=close_dispositions,

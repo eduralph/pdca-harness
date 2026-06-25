@@ -24,7 +24,7 @@ import sys
 import threading
 from pathlib import Path
 
-from . import act, driver, integrate, lane, leaves, publish, queue, signoff, state, waves
+from . import act, driver, integrate, lane, leaves, merge, publish, queue, signoff, state, waves
 from .config import Config
 
 
@@ -345,7 +345,7 @@ def _runnable(cfg: Config, wave: list[Path]) -> list[Path]:
     return runnable
 
 
-def _audit_wave_overlap(cfg: Config, wave: list[Path]) -> None:
+def _audit_wave_overlap(wave: list[Path]) -> None:
     """Advisory (#wave-model): flag two bundles in one wave whose patches touch a shared
     file. A wave holds only non-conflicting work by construction, so any overlap is a
     conflict the planner did not declare (it would otherwise have split them into separate
@@ -435,26 +435,34 @@ def _drive_and_act(
         _drive_wave(cfg, runnable, by=by, today=today, max_passes=max_passes)
         complete = [d for d in sorted(runnable, key=lambda p: p.name)
                     if state.state(d) == state.COMPLETE]
-        _audit_wave_overlap(cfg, complete)
+        _audit_wave_overlap(complete)
         if do_publish:
             for d in complete:
                 if d.name not in published:
                     _publish_bundle(cfg, d, by=by, today=today)
                     published.add(d.name)
         accepted += complete
-        # Fold this wave's accepted work onto the integration branch so the NEXT wave's Do
-        # builds on it (default stack mode). Dry-run (stubbed publisher: offline rehearse /
-        # CI) prints the plan and pushes nothing, so the next wave then builds on the base.
-        if k < last and do_publish and cfg.wave_mode == "stack":
+        # Carry this wave's accepted work to the NEXT wave's base (skipped on the final
+        # wave, and by --no-publish). Default "stack": fold onto a run-scoped integration
+        # branch the next wave builds on (fork-safe, no merge). Opt-in "merge": gh-merge the
+        # wave's PRs so the next wave builds on the genuinely-merged base. Dry-run (stubbed
+        # publisher: offline rehearse / CI) prints the plan and changes nothing.
+        if k < last and do_publish:
             dry = cfg.publisher.mode == "stub"
-            try:
-                branch, _wt = integrate.fold(cfg, accepted, dry_run=dry)
-            except integrate.IntegrationError as exc:
-                print(f"flow: wave {k} did not integrate ({exc}); STOPPING — later waves "
-                      f"not run.", file=sys.stderr)
-                break
-            if branch and not dry:
-                integ_branch = branch
+            if cfg.wave_mode == "merge":
+                if merge.merge_wave(cfg, complete, dry_run=dry, method=cfg.merge_method):
+                    print(f"flow: wave {k} did not merge; STOPPING — later waves not run.",
+                          file=sys.stderr)
+                    break
+            else:  # default: stack — fold onto the integration branch
+                try:
+                    branch, _wt = integrate.fold(cfg, accepted, dry_run=dry)
+                except integrate.IntegrationError as exc:
+                    print(f"flow: wave {k} did not integrate ({exc}); STOPPING — later "
+                          f"waves not run.", file=sys.stderr)
+                    break
+                if branch and not dry:
+                    integ_branch = branch
 
     results = {d.name.replace("issue_", ""): state.state(d) for d in bundles}
     if do_act:
