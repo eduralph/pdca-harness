@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from . import (act, brief, driver, flow, gates, merged, publish, queue, revalidate,
-               signoff, state, waves)
+               revert, signoff, state, waves)
 from .config import Config
 
 
@@ -134,6 +134,12 @@ def main(argv: list[str] | None = None) -> int:
                            help="no tracker id yet: relax T4 to a flag, record id_pending (vs a magic #0000)")
     p_publish.add_argument("--by", default="", help="who published (recorded in publish.json)")
 
+    p_revert = sub.add_parser("revert",
+                              help="undo a published contribution: a revert PR if merged, else withdraw the PR (#158)")
+    p_revert.add_argument("issue_id")
+    p_revert.add_argument("--dry-run", action="store_true", help="print the git/gh plan without mutating anything")
+    p_revert.add_argument("--by", default="", help="who reverted (recorded in revert.json)")
+
     args = parser.parse_args(argv)
     # --rehearse (#87): a dry-run of the SAME control flow with stub leaves + stub gates
     # in an isolated bundle root — set before Config.load reads the env. setdefault so an
@@ -178,6 +184,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "publish":
         return publish.publish(cfg, args.issue_id, dry_run=args.dry_run,
                                open_pr=not args.no_pr, by=args.by, pending_id=args.no_issue)
+    if args.cmd == "revert":
+        return revert.revert(cfg, args.issue_id, dry_run=args.dry_run, by=args.by)
     return 2
 
 
