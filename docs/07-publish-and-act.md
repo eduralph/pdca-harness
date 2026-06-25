@@ -126,6 +126,14 @@ Act deltas land in five places: the **spec template** (a brief field), the
 files** (`.claude/agents/*.md`), or the **orchestration** (driver/state). Each is
 a permanent improvement to the baseline every future cycle starts from.
 
+**Closing the loop — the process-delta ledger.** A delta is only worth anything if it
+*works*. Act keeps a `process/act-ledger.json`: each recurring signal it surfaces is
+tracked `open`; once you land the fix you run `pdca act resolve "<signal>" --location
+<path:line>` to mark it **applied**; and on a later review Act flags any applied delta
+whose miss **recurs** in a cycle frozen after the applied date — a loud "⚠ Ineffective
+deltas" section in `act index` / the `act log` scaffold. So Act audits its own
+prescriptions instead of writing them and forgetting.
+
 ---
 
 ## The loop, closed

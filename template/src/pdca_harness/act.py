@@ -14,6 +14,7 @@ contribution's disposition, run the validator/suite, or author the next brief.
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -87,6 +88,106 @@ def act_due(cfg: Config) -> bool:
     return cycles_since_review(cfg) >= cfg.act_cadence
 
 
+# ----------------------------------------------------------------------------
+# Process-delta ledger (issue #149): make Act self-auditing. A recurring signal is
+# REGISTERED (open); the human marks it APPLIED once a delta lands; a later Act flags it
+# when the same signal RECURS after the applied date — a likely-ineffective delta. Stored
+# as process/act-ledger.json: deterministic instrumentation; the human still authors the
+# delta and runs `pdca act resolve`.
+# ----------------------------------------------------------------------------
+_LEDGER = "act-ledger.json"
+
+
+def _ledger_path(cfg: Config) -> Path:
+    """Where the process-delta ledger lives (``process/act-ledger.json``)."""
+    return cfg.process_dir / _LEDGER
+
+
+def load_ledger(cfg: Config) -> list[dict]:
+    """The process-delta ledger, or ``[]`` if absent/unreadable."""
+    p = _ledger_path(cfg)
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except (ValueError, OSError):
+        return []
+
+
+def _save_ledger(cfg: Config, entries: list[dict]) -> None:
+    cfg.process_dir.mkdir(parents=True, exist_ok=True)
+    _ledger_path(cfg).write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+
+
+def _recurring(entries: list[ActEntry]) -> dict[str, str]:
+    """Normalized-signal → a representative raw text, for each signal appearing in more
+    than one cycle (the §10 Act-candidate + §6 NEEDS-HUMAN pool). A miss is "the same"
+    across cycles by its normalized key, so a class showing once in §10 of one cycle and
+    once in §6 of another still counts as recurring."""
+    counts: Counter = Counter()
+    raw_of: dict[str, str] = {}
+    for e in entries:
+        for s in e.act_candidates + e.needs_human:
+            n = _norm(s)
+            if not n:
+                continue
+            counts[n] += 1
+            raw_of.setdefault(n, s)
+    return {n: raw_of[n] for n, c in counts.items() if c > 1}
+
+
+def register_signals(cfg: Config, entries: list[ActEntry], date: str) -> list[str]:
+    """Track each recurring signal not already in the ledger as an ``open`` entry
+    (idempotent, deduped by normalized signal). Returns the raw texts newly registered."""
+    ledger = load_ledger(cfg)
+    known = {e.get("signal") for e in ledger}
+    added: list[str] = []
+    for norm, raw in _recurring(entries).items():
+        if norm not in known:
+            ledger.append({"signal": norm, "raw": raw, "first_seen": date,
+                           "status": "open", "applied_date": None, "location": ""})
+            added.append(raw)
+    if added:
+        _save_ledger(cfg, ledger)
+    return added
+
+
+def resolve(cfg: Config, query: str, location: str, date: str) -> str | None:
+    """Mark the first ``open`` ledger entry matching ``query`` (case-insensitive substring
+    of its raw text or normalized signal) ``applied`` on ``date`` with ``location``.
+    Returns the matched raw text, or ``None`` if nothing matched."""
+    ledger = load_ledger(cfg)
+    q = query.strip().lower()
+    for e in ledger:
+        if e.get("status") == "open" and (
+                q in e.get("raw", "").lower() or q in e.get("signal", "")):
+            e.update(status="applied", applied_date=date, location=location)
+            _save_ledger(cfg, ledger)
+            return e.get("raw", "")
+    return None
+
+
+def recurrences(cfg: Config, entries: list[ActEntry] | None = None) -> list[dict]:
+    """``applied`` ledger entries whose signal reappears in a cycle frozen AFTER the
+    applied date — the delta did not stop the miss, so it is likely ineffective. Each:
+    ``{signal, applied, recurred_in: [ids]}``."""
+    entries = index(cfg) if entries is None else entries
+    out: list[dict] = []
+    for led in load_ledger(cfg):
+        if led.get("status") != "applied":
+            continue
+        applied = led.get("applied_date") or ""
+        sig = led.get("signal", "")
+        hits = [e.bundle.name.replace("issue_", "") for e in entries
+                if e.date and (not applied or e.date > applied)
+                and sig in {_norm(s) for s in (e.act_candidates + e.needs_human)}]
+        if hits:
+            out.append({"signal": led.get("raw", sig), "applied": applied,
+                        "recurred_in": hits})
+    return out
+
+
 def index(cfg: Config, since: str | None = None) -> list[ActEntry]:
     """Extract §6/§7/§9/§10 from each frozen bundle, newest filtering via §9 date."""
     entries = [_extract(d / "SUMMARY.md", d) for d in frozen_bundles(cfg)]
@@ -106,7 +207,8 @@ def patterns(entries: list[ActEntry]) -> dict[str, list[str]]:
 
 
 # ----------------------------------------------------------------------------
-def render_index(entries: list[ActEntry], pats: dict[str, list[str]]) -> str:
+def render_index(entries: list[ActEntry], pats: dict[str, list[str]],
+                 ledger: list[dict] | None = None, recs: list[dict] | None = None) -> str:
     lines = [f"# Act bundle index — {len(entries)} frozen cycle(s)", ""]
     if not entries:
         lines.append("(no frozen bundles — nothing to review yet)")
@@ -133,33 +235,59 @@ def render_index(entries: list[ActEntry], pats: dict[str, list[str]]) -> str:
             any_pat = True
     if not any_pat:
         lines.append("- (none yet)")
+    # Process-delta ledger (#149): tracked signals + a loud flag for any applied delta
+    # whose miss recurred (likely ineffective).
+    if ledger is not None:
+        lines += ["", "## Process-delta ledger"]
+        if not ledger:
+            lines.append("- (empty — no recurring signal tracked yet)")
+        for e in ledger:
+            tag = (f"applied {e.get('applied_date', '')}"
+                   if e.get("status") == "applied" else "open")
+            loc = f" → {e['location']}" if e.get("location") else ""
+            lines.append(f"- [{tag}] {e.get('raw', '')}{loc}")
+    if recs:
+        lines += ["", "## ⚠ Ineffective deltas (recurred after applied)"]
+        for r in recs:
+            lines.append(f"- {r['signal']} — applied {r['applied']}, recurred in "
+                         + ", ".join(r["recurred_in"]))
     return "\n".join(lines) + "\n"
 
 
-def scaffold_entry(entries: list[ActEntry], pats: dict[str, list[str]], date: str) -> str:
-    """A dated act-log entry with bundles + patterns filled, deltas left to the human."""
+def scaffold_entry(entries: list[ActEntry], pats: dict[str, list[str]], date: str,
+                   recs: list[dict] | None = None) -> str:
+    """A dated act-log entry with bundles + patterns filled, deltas left to the human.
+
+    ``recs`` (issue #149) are applied process-deltas whose miss recurred — surfaced as a
+    loud section so the review revisits the ineffective delta, not just new signals."""
     ids = ", ".join(e.bundle.name.replace("issue_", "") for e in entries) or "—"
     exposed = [f"- [{label}] {it}" for label, items in pats.items() for it in items] or [
         "- (no recurring signal surfaced — note any single-cycle observation worth a delta)"
     ]
-    return "\n".join(
-        [
-            f"# Act review — {date} — cycles considered: {ids}",
-            "",
-            "## What the cycles' records exposed",
-            *exposed,
-            "",
-            "## Process deltas  (TODO — the human decides these; each must be located)",
-            "- Spec template: <field added/clarified/removed>            (path)",
-            "- Ruleset: <rule added/retired/relaxed/tightened>           (path:line)",
-            "- Gates: <check added/promoted/moved>                       (path:line)",
-            "- Agent skills: <SKILL.md / AGENTS.md adjustment>           (path:line)",
-            "",
-            "## How effectiveness will be judged",
-            "- The next Do phases should not recreate <specific issue>. Watch the next K cycles.",
-            "",
-        ]
-    )
+    body = [
+        f"# Act review — {date} — cycles considered: {ids}",
+        "",
+        "## What the cycles' records exposed",
+        *exposed,
+    ]
+    if recs:
+        body += ["", "## ⚠ Ineffective deltas (recurred after applied)"]
+        body += [f"- {r['signal']} (applied {r['applied']}) recurred in "
+                 f"{', '.join(r['recurred_in'])} — the delta may be ineffective; revisit it"
+                 for r in recs]
+    body += [
+        "",
+        "## Process deltas  (TODO — the human decides these; each must be located)",
+        "- Spec template: <field added/clarified/removed>            (path)",
+        "- Ruleset: <rule added/retired/relaxed/tightened>           (path:line)",
+        "- Gates: <check added/promoted/moved>                       (path:line)",
+        "- Agent skills: <SKILL.md / AGENTS.md adjustment>           (path:line)",
+        "",
+        "## How effectiveness will be judged",
+        "- The next Do phases should not recreate <specific issue>. Watch the next K cycles.",
+        "",
+    ]
+    return "\n".join(body)
 
 
 def append_entry(cfg: Config, entry_text: str) -> Path:
