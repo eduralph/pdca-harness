@@ -951,7 +951,10 @@ def run_act(cfg: Config, date: str) -> None:
 
 def _act_prompt(cfg: Config, date: str) -> str:
     entries = act_mod.index(cfg)
-    index_md = act_mod.render_index(entries, act_mod.patterns(entries))
+    act_mod.register_signals(cfg, entries, date)  # track recurring signals (#149)
+    recs = act_mod.recurrences(cfg, entries)
+    index_md = act_mod.render_index(entries, act_mod.patterns(entries),
+                                    act_mod.load_ledger(cfg), recs)
     return (
         "You are the Act leaf — cross-cycle process review. Below is the read-only "
         "index of frozen cycles and recurring signals. With the human, decide which "
@@ -964,7 +967,9 @@ def _act_prompt(cfg: Config, date: str) -> str:
 
 def _stub_act(cfg: Config, date: str) -> None:
     entries = act_mod.index(cfg)
-    text = act_mod.scaffold_entry(entries, act_mod.patterns(entries), date=date)
+    act_mod.register_signals(cfg, entries, date)  # track recurring signals (#149)
+    recs = act_mod.recurrences(cfg, entries)
+    text = act_mod.scaffold_entry(entries, act_mod.patterns(entries), date=date, recs=recs)
     act_mod.append_entry(cfg, text)
 
 

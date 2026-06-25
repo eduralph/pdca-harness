@@ -105,6 +105,11 @@ def main(argv: list[str] | None = None) -> int:
     p_actlog.add_argument("--since", help="only consider cycles signed off on/after this ISO date")
     p_actlog.add_argument("--date", required=True, help="review date (ISO; Act is out-of-band so pass it)")
     p_actlog.add_argument("--append", action="store_true", help="append to process/act-log.md (default: print)")
+    p_actres = act_sub.add_parser("resolve",
+                                  help="mark a tracked recurring signal as a delta you applied (#149)")
+    p_actres.add_argument("signal", help="substring of the recurring signal to mark applied")
+    p_actres.add_argument("--location", default="", help="where the delta landed (path:line / rule)")
+    p_actres.add_argument("--date", help="applied date (ISO; default today)")
 
     p_signoff = sub.add_parser("signoff", help="record the human Check sign-off (§9)")
     p_signoff.add_argument("issue_id")
@@ -441,13 +446,16 @@ def _act(cfg: Config, args: argparse.Namespace) -> int:
         return _act_index(cfg, args)
     if args.act_cmd == "log":
         return _act_log(cfg, args)
+    if args.act_cmd == "resolve":
+        return _act_resolve(cfg, args)
     return 2
 
 
 def _act_index(cfg: Config, args: argparse.Namespace) -> int:
     """Print the read-only Act bundle index across frozen cycles."""
     entries = act.index(cfg, since=args.since)
-    print(act.render_index(entries, act.patterns(entries)))
+    print(act.render_index(entries, act.patterns(entries),
+                           act.load_ledger(cfg), act.recurrences(cfg, entries)))
     return 0
 
 
@@ -462,13 +470,27 @@ def _act_log(cfg: Config, args: argparse.Namespace) -> int:
     if not entries:
         print("no frozen cycles to review (need COMPLETE bundles)", file=sys.stderr)
         return 1
-    text = act.scaffold_entry(entries, act.patterns(entries), date=args.date)
+    act.register_signals(cfg, entries, args.date)  # track recurring signals (#149)
+    text = act.scaffold_entry(entries, act.patterns(entries), date=args.date,
+                              recs=act.recurrences(cfg, entries))
     if args.append:
         log = act.append_entry(cfg, text)
         act.mark_reviewed(cfg)  # a manual Act review resets the flow cadence too (#109)
         print(f"appended entry to {log}")
     else:
         print(text)
+    return 0
+
+
+def _act_resolve(cfg: Config, args: argparse.Namespace) -> int:
+    """Mark a tracked recurring signal as a process-delta the human applied (#149)."""
+    date = args.date or datetime.date.today().isoformat()
+    raw = act.resolve(cfg, args.signal, args.location, date)
+    if raw is None:
+        print(f"act resolve: no open ledger signal matching '{args.signal}' — run "
+              f"`pdca act log` to register recurring signals first", file=sys.stderr)
+        return 1
+    print(f"marked applied ({date}): {raw}")
     return 0
 
 
