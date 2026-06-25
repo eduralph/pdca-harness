@@ -455,7 +455,7 @@ def _act_index(cfg: Config, args: argparse.Namespace) -> int:
     """Print the read-only Act bundle index across frozen cycles."""
     entries = act.index(cfg, since=args.since)
     print(act.render_index(entries, act.patterns(entries),
-                           act.load_ledger(cfg), act.recurrences(cfg)))
+                           act.load_ledger(cfg), act.recurrences(cfg, entries)))
     return 0
 
 
@@ -472,7 +472,7 @@ def _act_log(cfg: Config, args: argparse.Namespace) -> int:
         return 1
     act.register_signals(cfg, entries, args.date)  # track recurring signals (#149)
     text = act.scaffold_entry(entries, act.patterns(entries), date=args.date,
-                              recs=act.recurrences(cfg))
+                              recs=act.recurrences(cfg, entries))
     if args.append:
         log = act.append_entry(cfg, text)
         act.mark_reviewed(cfg)  # a manual Act review resets the flow cadence too (#109)

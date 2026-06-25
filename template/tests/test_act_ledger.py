@@ -13,8 +13,9 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from pdca_harness import act
+from pdca_harness import act, leaves
 from pdca_harness.config import Config, LeafConfig
 
 _SIG = "add a po/POTFILES gate for new core .py files"
@@ -118,6 +119,29 @@ class Ledger(unittest.TestCase):
         text = act.scaffold_entry([_entry("C", "2026-06-10")], {}, "2026-06-12", recs=recs)
         self.assertIn("Ineffective deltas", text)
         self.assertIn("revisit", text)
+
+    def test_recurrences_scoped_to_passed_entries(self) -> None:
+        # Passing a filtered entries list scopes recurrence detection to it (the --since
+        # case): a recurrence outside the passed set is not reported.
+        entries = [_entry("A", "2026-06-01", candidates=[_SIG]),
+                   _entry("B", "2026-06-02", candidates=[_SIG])]
+        act.register_signals(self.cfg, entries, "2026-06-03")
+        act.resolve(self.cfg, "POTFILES", "loc", "2026-06-05")
+        full = entries + [_entry("C", "2026-06-10", needs=[_SIG])]
+        self.assertEqual(len(act.recurrences(self.cfg, full)), 1)   # C in scope → flagged
+        self.assertEqual(act.recurrences(self.cfg, entries), [])    # C out of scope → not
+
+    def test_automatic_stub_act_registers_ledger(self) -> None:
+        # The cadence-driven Act beat (leaves._stub_act) registers recurring signals too,
+        # not only the manual `pdca act log` path (#149 / Codex review).
+        entries = [_entry("A", "2026-06-01", candidates=[_SIG]),
+                   _entry("B", "2026-06-02", candidates=[_SIG])]
+        with mock.patch.object(leaves.act_mod, "index", return_value=entries):
+            leaves._stub_act(self.cfg, "2026-06-03")
+        ledger = act.load_ledger(self.cfg)
+        self.assertEqual(len(ledger), 1)
+        self.assertEqual(ledger[0]["status"], "open")
+        self.assertTrue((self.cfg.process_dir / "act-log.md").exists())
 
 
 if __name__ == "__main__":
