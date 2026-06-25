@@ -379,17 +379,26 @@ def _leaf_from_spec(spec: dict, default: LeafConfig) -> LeafConfig:
     )
 
 
-def _variant_applies(spec: dict, d: Path) -> bool:
-    """True iff this builder variant's ``when`` ({field, substring}) matches bundle ``d``'s
-    brief (issue #134) — modelled on :func:`_advisory_applies`. **Default-open**: a variant
-    with no condition, or whose field is absent/doesn't match, does NOT apply, so a missing
-    difficulty tag falls back to the default builder rather than silently reducing
-    capability."""
-    when = spec.get("when") or {}
+def _when_matches(when: dict | None, d: Path, *, default: bool) -> bool:
+    """The single ``when = {field, substring}`` gate predicate (issue #152): the substring is
+    matched case-insensitively against the named brief field. An empty/absent condition
+    yields ``default`` — the one thing the callers differ on: an advisory leaf with no
+    ``when`` runs (``default=True``), a builder variant with no ``when`` is opt-in
+    (``default=False``). Shared by :func:`_advisory_applies` (#64) and :func:`_variant_applies`
+    (#134), so the field/substring matching lives in exactly one place."""
+    when = when or {}
     needle = (when.get("substring") or "").lower()
     if not needle:
-        return False
+        return default
     return needle in brief.field(d / "brief.md", when.get("field", "")).lower()
+
+
+def _variant_applies(spec: dict, d: Path) -> bool:
+    """True iff this builder variant's ``when`` matches bundle ``d``'s brief (issue #134).
+    **Default-open**: a variant with no condition (or an absent/non-matching field) does NOT
+    apply, so a missing difficulty tag falls back to the default builder rather than silently
+    reducing capability. Delegates to the shared :func:`_when_matches`."""
+    return _when_matches(spec.get("when"), d, default=False)
 
 
 def select_builder(d: Path, cfg: Config, n: int) -> LeafConfig:
@@ -750,14 +759,11 @@ def advisory_artifact(d: Path, leaf_id: str) -> Path:
 
 
 def _advisory_applies(spec: dict, d: Path) -> bool:
-    """True iff this advisory leaf should run for bundle ``d``. ``when`` ({field,
-    substring}) matches a brief field case-insensitively (like a gate target flag);
-    absent ⇒ always run."""
-    when = spec.get("when") or {}
-    needle = (when.get("substring") or "").lower()
-    if not needle:
-        return True
-    return needle in brief.field(d / "brief.md", when.get("field", "")).lower()
+    """True iff this advisory leaf should run for bundle ``d``. Its ``when`` ({field,
+    substring}) matches a brief field case-insensitively; absent ⇒ always run. Delegates to
+    the shared :func:`_when_matches` (issue #152) — one predicate for both the advisory leaf
+    and the builder variant, no second implementation."""
+    return _when_matches(spec.get("when"), d, default=True)
 
 
 def _advisory_prompt(spec: dict, leaf_id: str) -> str:

@@ -106,6 +106,30 @@ class DifficultyRouting(unittest.TestCase):
         leaves.do_build(d, cfg)
         self.assertTrue((d / "loop-telemetry.json").exists())  # the command path ran
 
+    def test_shared_when_predicate(self) -> None:
+        # #152: ONE when={field,substring} matcher, two empty-when defaults. The substring
+        # match itself is identical regardless of the caller.
+        d = self._bundle("high")
+        match = {"field": "difficulty", "substring": "high"}
+        miss = {"field": "difficulty", "substring": "low"}
+        self.assertTrue(leaves._when_matches(match, d, default=False))
+        self.assertFalse(leaves._when_matches(miss, d, default=False))
+        # An empty / absent condition yields the caller's default.
+        self.assertFalse(leaves._when_matches({}, d, default=False))
+        self.assertTrue(leaves._when_matches({}, d, default=True))
+        self.assertTrue(leaves._when_matches(None, d, default=True))
+
+    def test_both_gates_delegate_to_the_shared_predicate(self) -> None:
+        # _variant_applies and _advisory_applies are now thin wrappers over _when_matches
+        # (no second implementation of when-matching, #152): same match, different default
+        # for an empty `when` (variant opts out; advisory runs).
+        d = self._bundle("high")
+        match = {"when": {"field": "difficulty", "substring": "high"}}
+        self.assertTrue(leaves._variant_applies(match, d))
+        self.assertTrue(leaves._advisory_applies(match, d))
+        self.assertFalse(leaves._variant_applies({}, d))   # variant is opt-in
+        self.assertTrue(leaves._advisory_applies({}, d))    # advisory is default-on
+
 
 if __name__ == "__main__":
     unittest.main()
