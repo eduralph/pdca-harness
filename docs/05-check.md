@@ -66,6 +66,12 @@ They become NEEDS-HUMAN items.
 > *new* failure is `[delta]` (your fix may have caused it). You'll see a `[delta]`
 > bite in [step 06](06-signoff.md).
 
+**Promoting a check.** A new gate should earn the right to block. Give a check
+`promote_after = N` and run `pdca gates --promotions`: it lists the advisory checks that
+have **passed in their N most-recent frozen cycles** — earned promotion from advisory to
+gating. It's a hint; you flip `gating = true` yourself (nothing is auto-mutated). That is
+the Act "promote a check" delta, with a concrete trigger (issue #156).
+
 ### Delegating to a host runner
 
 If your project already single-sources its gates in its own runner (`cargo xtask`,

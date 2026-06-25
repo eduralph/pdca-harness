@@ -90,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
     p_gates = sub.add_parser("gates", help="run the deterministic Check gates (driver + CI share this)")
     p_gates.add_argument("issue_id", nargs="?")
     p_gates.add_argument("--working-tree", action="store_true", help="repo-scoped gates only (the CI merge re-gate)")
+    p_gates.add_argument("--promotions", action="store_true",
+                         help="list advisory checks clean for their promote_after cycles (#156)")
 
     p_reval = sub.add_parser("revalidate",
                              help="re-run gates on a COMPLETE bundle vs the current engine; write a dated stamp (never re-decides §9)")
@@ -397,6 +399,8 @@ def _gates(cfg: Config, args: argparse.Namespace) -> int:
     The single-sourced entry point: the driver runs gates per bundle during Do,
     CI runs ``pdca gates --working-tree`` on the PR — same impl, same pdca.toml.
     """
+    if getattr(args, "promotions", False):
+        return _gates_promotions(cfg)
     if args.working_tree:
         result = gates.run_working_tree(cfg)
     else:
@@ -410,6 +414,21 @@ def _gates(cfg: Config, args: argparse.Namespace) -> int:
         result = gates.run_gates(d, cfg)
     print(gates.render_md(result))
     return 1 if result["overall"] == "fail" else 0
+
+
+def _gates_promotions(cfg: Config) -> int:
+    """List advisory checks that have earned promotion to gating (#156) — hint-only."""
+    cands = gates.promotion_candidates(cfg)
+    if not cands:
+        print("no advisory checks ready to promote "
+              "(none with `promote_after` clean across the threshold of recent cycles)")
+        return 0
+    print("Advisory checks that have earned promotion to gating "
+          "(flip `gating = true` in pdca.toml):")
+    for c in cands:
+        print(f"  - {c['id']}: {c['label']}  "
+              f"(passed ≥ {c['threshold']} most-recent frozen cycles)")
+    return 0
 
 
 def _revalidate(cfg: Config, args: argparse.Namespace) -> int:
