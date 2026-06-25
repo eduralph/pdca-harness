@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
@@ -32,12 +33,18 @@ def run_with_heartbeat(
     interval: int = 15,
     label: str = "",
     status: Callable[[], str] | None = None,
-) -> tuple[int, str]:
+) -> tuple[int, str, bool]:
     """Run ``cmd``, printing ``… still working (NmSSs elapsed)`` every ``interval`` s.
 
-    Returns ``(returncode, output)``. ``output`` is the combined stdout+stderr when
-    ``capture`` is True (so a gate can keep its evidence line), else ``""`` and the
-    child inherits the terminal. ``input_text``, if given, is written to stdin.
+    Returns ``(returncode, output, produced)``. ``output`` is the combined
+    stdout+stderr when ``capture`` is True (so a gate can keep its evidence line);
+    the bounded **stderr tail** when ``stream_json`` is True (so a failed claude
+    leaf's real error — usage/rate limit, 5xx, auth — survives in the bundle
+    instead of scrolling past on a console nobody is watching); ``""`` otherwise.
+    ``produced`` is whether the child emitted **any stdout** — i.e. a session
+    started; ``produced is False`` on a non-zero exit is the transient-infra
+    signal (the child died at/near invocation, before any stream event).
+    ``input_text``, if given, is written to stdin.
 
     ``status``, if given, is called on every tick to append a live snapshot of the
     child's work (e.g. which artifacts exist yet, time since the last write) — so the
@@ -47,15 +54,17 @@ def run_with_heartbeat(
     ``stream_json`` (Tier 3) parses the child's stdout as Claude's
     ``--output-format stream-json`` event stream and surfaces the **tool it is using
     right now** (``▸ Editing patch.diff`` / ``▸ Running run-tests``) on each tick.
-    stdout is consumed for parsing (not echoed); stderr still inherits the terminal so
-    real errors show. Mutually exclusive with ``capture`` (capture wins if both set).
+    stdout is consumed for parsing (not echoed); stderr is **teed** — still echoed
+    live so real errors show, *and* its tail retained for the caller. Mutually
+    exclusive with ``capture`` (capture wins if both set).
     """
+    tee_stderr = stream_json and not capture
     capture_out = capture or stream_json
     stdin = subprocess.PIPE if input_text is not None else None
     if capture:
         stdout, stderr = subprocess.PIPE, subprocess.STDOUT
     elif stream_json:
-        stdout, stderr = subprocess.PIPE, None  # parse stdout; let stderr show
+        stdout, stderr = subprocess.PIPE, subprocess.PIPE  # parse stdout; tee stderr
     else:
         stdout, stderr = None, None
     proc = subprocess.Popen(
@@ -64,20 +73,34 @@ def run_with_heartbeat(
     )
 
     chunks: list[str] = []
+    err_tail: deque[str] = deque(maxlen=200)  # bounded stderr tail for a failed leaf
+    produced = {"stdout": False}  # did the child emit any stdout (a session started)?
     latest_tool = {"label": ""}  # most recent tool-use, updated by the drain thread
-    reader: threading.Thread | None = None
+    readers: list[threading.Thread] = []
     if capture_out:
         def _drain() -> None:
             assert proc.stdout is not None
             for line in proc.stdout:  # drain so the pipe can't fill and stall the child
+                produced["stdout"] = True
                 if capture:
                     chunks.append(line)
                 if stream_json:
                     lbl = _stream_tool_label(line)
                     if lbl:
                         latest_tool["label"] = lbl
-        reader = threading.Thread(target=_drain, daemon=True)
-        reader.start()
+        t = threading.Thread(target=_drain, daemon=True)
+        t.start()
+        readers.append(t)
+    if tee_stderr:
+        def _drain_err() -> None:
+            assert proc.stderr is not None
+            for line in proc.stderr:  # echo live (errors still show) AND keep the tail
+                sys.stderr.write(line)
+                sys.stderr.flush()
+                err_tail.append(line)
+        t = threading.Thread(target=_drain_err, daemon=True)
+        t.start()
+        readers.append(t)
 
     if input_text is not None:
         try:
@@ -108,9 +131,13 @@ def run_with_heartbeat(
             extra = (" · " + " · ".join(bits)) if bits else ""
             print(f"   … still working ({mins}m{secs:02d}s elapsed){suffix}{extra}",
                   file=sys.stderr, flush=True)
-    if reader is not None:
+    for reader in readers:
         reader.join(timeout=5)
-    return proc.returncode, "".join(chunks)
+    for stream in (proc.stdout, proc.stderr):
+        if stream is not None:
+            stream.close()
+    output = "".join(chunks) if capture else ("".join(err_tail) if stream_json else "")
+    return proc.returncode, output, produced["stdout"]
 
 
 # ----------------------------------------------------------------------------

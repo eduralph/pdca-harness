@@ -102,12 +102,25 @@ class StreamToolUse(unittest.TestCase):
 
     def test_run_with_heartbeat_consumes_stream_json(self) -> None:
         # Wiring smoke: a json-emitting child runs cleanly under stream_json (stdout is
-        # consumed for parsing, not captured/echoed) and returns its exit code.
+        # consumed for parsing, not captured/echoed) and returns its exit code. The
+        # child emitted stdout, so a session started → produced is True.
         prog = "print('{\"type\": \"result\"}')"
-        rc, out = progress.run_with_heartbeat(
+        rc, out, produced = progress.run_with_heartbeat(
             [sys.executable, "-c", prog], stream_json=True)
         self.assertEqual(rc, 0)
-        self.assertEqual(out, "")  # stream_json consumes stdout for parsing, doesn't capture
+        self.assertEqual(out, "")  # stdout is parsed, not captured; this child wrote no stderr
+        self.assertTrue(produced)
+
+    def test_stream_json_tees_stderr_tail_and_flags_no_session(self) -> None:
+        # A child that dies at invocation — only stderr, no stdout stream event — is the
+        # transient signal (#138): the stderr survives as the returned tail and
+        # produced is False (no session started).
+        prog = "import sys; sys.stderr.write('overloaded_error 529\\n'); sys.exit(1)"
+        rc, out, produced = progress.run_with_heartbeat(
+            [sys.executable, "-c", prog], stream_json=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("overloaded_error 529", out)  # stderr teed into the tail
+        self.assertFalse(produced)  # no stdout → no session started
 
 
 if __name__ == "__main__":
