@@ -137,6 +137,17 @@ argv = []
 # [[leaves.builder_escalation]]
 # min_iteration = 2          # 2nd attempt onward → a stronger model
 # argv = ["claude", "-p", "--agent", "builder", "--model", "opus", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob"]
+# Difficulty-routed builder variants (issue #134) — optional. Route the Do backend per
+# bundle from the brief's `Difficulty` field (the planner's blast-radius assessment, #133),
+# so a cheap local model handles easy bundles and a stronger one is reserved for the hard
+# ~20%. Each entry's `when = {field, substring}` matches a brief field (like a gate target);
+# the FIRST match wins, an absent/unknown field falls back to [leaves.builder] (default-open
+# — a missing tag never reduces capability), and the escalation ladder above OVERRIDES the
+# variant on iterate. SAFETY: calibrate before you narrow — run the would-be-skipped path on
+# a sample of low/medium bundles and confirm ~0 NEEDS-HUMAN on "low" before trusting it.
+# [[leaves.builder_variant]]
+# when = { field = "difficulty", substring = "high" }
+# argv = ["claude", "-p", "--agent", "builder", "--model", "opus", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob"]
 # Check reviewer (advisory; build-notes withheld via a sandbox). Cross-vendor
 # decorrelation is the default and the ideal — a DIFFERENT family from the builder
 # (INTEGRATION §4). `--agent reviewer` (same family as the builder) is the
