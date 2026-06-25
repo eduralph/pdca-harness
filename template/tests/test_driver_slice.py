@@ -368,6 +368,48 @@ class AdvisoryReviewResilience(unittest.TestCase):
         self.assertTrue(seen.get("agent"))         # `--agent reviewer` now resolves from the sandbox
         self.assertFalse(seen.get("build_notes"))  # independence held: build-notes.md absent
 
+    def test_sandbox_seeding_skips_dangling_symlink_keeps_good_agent(self) -> None:
+        # #161 review: a broken symlink under .claude/agents must not abort Check, and the
+        # good agent still seeds (ignore_dangling_symlinks).
+        (self.d / "patch.diff").write_text("x\n", encoding="utf-8")
+        (self.d / "check-gates.json").write_text("{}\n", encoding="utf-8")
+        agents = self.cfg.root / ".claude" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "reviewer.md").write_text("---\nname: reviewer\n---\n", encoding="utf-8")
+        (agents / "dangling.md").symlink_to(agents / "no-such-target.md")  # broken link
+        seen: dict = {}
+        orig = leaves._invoke
+
+        def capture(leaf, workdir, prompt, **k):
+            seen["agent"] = (Path(workdir) / ".claude" / "agents" / "reviewer.md").exists()
+            (Path(workdir) / "check-review.md").write_text("ok\n", encoding="utf-8")
+
+        leaves._invoke = capture
+        try:
+            leaves._run_review_sandboxed(self.d, self.cfg)  # must NOT raise
+        finally:
+            leaves._invoke = orig
+        self.assertTrue(seen.get("agent"))  # the good agent seeded despite the broken link
+
+    def test_sandbox_seeding_copy_error_does_not_abort_check(self) -> None:
+        # #161 review: any copy error (e.g. an unreadable file) under .claude/agents must
+        # degrade to a no-op + the §6 placeholder, never crash the deterministic spine.
+        (self.d / "patch.diff").write_text("x\n", encoding="utf-8")
+        (self.d / "check-gates.json").write_text("{}\n", encoding="utf-8")
+        agents = self.cfg.root / ".claude" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "reviewer.md").write_text("---\nname: reviewer\n---\n", encoding="utf-8")
+        orig = leaves._invoke
+        leaves._invoke = lambda *a, **k: None  # leaf returns, writes nothing → placeholder
+        try:
+            with mock.patch.object(leaves.shutil, "copytree",
+                                   side_effect=OSError("unreadable agent file")):
+                leaves._run_review_sandboxed(self.d, self.cfg)  # must NOT raise
+        finally:
+            leaves._invoke = orig
+        self.assertIn("NOT COMPLETED",
+                      (self.d / "check-review.md").read_text(encoding="utf-8"))
+
 
 class AdvisoryReviewers(unittest.TestCase):
     """Optional advisory reviewer leaves (issue #64): an open, role-distinct set that

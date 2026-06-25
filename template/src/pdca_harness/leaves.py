@@ -638,11 +638,22 @@ def _seed_sandbox_agents(cfg: Config, sandbox: Path) -> None:
     fails and the review degrades to a §6 placeholder. Seeding the agent *definitions* into
     the sandbox makes them resolvable while **preserving independence**: only the role
     prompts are copied (never ``build-notes.md``), and the sandbox cwd + each agent's own
-    ``tools:`` still gate which files the leaf can read. Best-effort — no agents dir ⇒ no-op.
+    ``tools:`` still gate which files the leaf can read. **Best-effort**: a missing agents
+    dir, or a copy error (a dangling symlink / unreadable file under ``.claude/agents``),
+    degrades to a no-op — an unresolved ``--agent`` is then handled by the leaf's own
+    failure path (a §6 placeholder), never an aborted Check (issue #161 review).
     """
     src = cfg.root / ".claude" / "agents"
-    if src.is_dir():
-        shutil.copytree(src, sandbox / ".claude" / "agents", dirs_exist_ok=True)
+    if not src.is_dir():
+        return
+    try:
+        # ignore_dangling_symlinks: a broken link doesn't stop the good agents seeding; the
+        # try/except: any other copy error degrades to a no-op rather than aborting Check.
+        shutil.copytree(src, sandbox / ".claude" / "agents",
+                        dirs_exist_ok=True, ignore_dangling_symlinks=True)
+    except (shutil.Error, OSError) as exc:
+        print(f"leaves: could not seed sandbox agents from {src} ({exc}); "
+              "`--agent` may not resolve", file=sys.stderr)
 
 
 def _run_review_sandboxed(d: Path, cfg: Config) -> None:
