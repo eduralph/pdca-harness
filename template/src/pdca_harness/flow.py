@@ -24,7 +24,7 @@ import sys
 import threading
 from pathlib import Path
 
-from . import act, brief, driver, lane, leaves, merged, publish, queue, signoff, state
+from . import act, brief, driver, lane, leaves, merged, publish, queue, signoff, state, waves
 from .config import Config
 
 
@@ -198,13 +198,6 @@ def flow(
 # them. With NO fields declared every bundle is always eligible, so dispatch is
 # byte-for-byte today's sort-by-name pool.
 # ----------------------------------------------------------------------------
-def _declared_deps(bp: Path) -> list[str]:
-    """All declared prerequisite ids — COMPLETE-gated (`Depends on`), merge-gated
-    (`Depends on (merged)`, #107) and stack-gated (`Stacks on`, #123) — for DAG
-    validation and dispatch."""
-    return brief.depends_on(bp) + brief.depends_on_merged(bp) + brief.stacks_on(bp)
-
-
 def _prereq_published(cfg: Config, dep_id: str) -> bool:
     """True iff prereq ``dep_id`` is COMPLETE and has a published branch (issue #123) — the
     foundation a ``Stacks on`` dependent builds + publishes on top of."""
@@ -260,72 +253,6 @@ def _deps_met(cfg: Config, d: Path, merged_ids: set[str], stacked_ids: set[str])
                 for dep in brief.depends_on(bp))
             and all(dep in merged_ids for dep in brief.depends_on_merged(bp))
             and all(dep in stacked_ids for dep in brief.stacks_on(bp)))
-
-
-def _conflict_map(cfg: Config, bundles: list[Path]) -> dict[str, set[str]]:
-    """Symmetric bundle-name → conflicting-bundle-names map, restricted to this wave.
-
-    A declared conflict naming a bundle outside the wave is moot (it cannot be
-    co-scheduled with something that is not running) and is dropped.
-    """
-    names = {b.name for b in bundles}
-    conflicts: dict[str, set[str]] = {b.name: set() for b in bundles}
-    for b in bundles:
-        bp = b / "brief.md"
-        if not bp.exists():
-            continue
-        for cid in brief.conflicts_with(bp):
-            other = cfg.bundle(cid).name
-            if other in names and other != b.name:
-                conflicts[b.name].add(other)
-                conflicts[other].add(b.name)
-    return conflicts
-
-
-def _check_dep_graph(cfg: Config, bundles: list[Path]) -> None:
-    """Validate the declared `Depends on` DAG before any build (issue #36).
-
-    A dependency that is neither in this wave nor an already-COMPLETE bundle on
-    disk is a misconfigured brief; a cycle is unschedulable. Both raise ``ValueError``
-    so the run aborts before touching any bundle. No deps declared ⇒ no-op.
-    """
-    names = {b.name for b in bundles}
-    graph: dict[str, list[str]] = {}
-    for b in bundles:
-        bp = b / "brief.md"
-        edges: list[str] = []
-        # Both ordering fields are topological prerequisites for the DAG (existence +
-        # cycle); they differ only in the gate (#107): `Depends on` waits for COMPLETE,
-        # `Depends on (merged)` waits for the prereq's PR to merge.
-        for dep in (_declared_deps(bp) if bp.exists() else []):
-            dn = cfg.bundle(dep).name
-            if dn in names:
-                edges.append(dn)
-            elif state.state(cfg.bundle(dep)) != state.COMPLETE:
-                raise ValueError(
-                    f"{b.name}: declared dependency '{dep}' is neither in this batch "
-                    f"nor an existing COMPLETE bundle")
-        graph[b.name] = edges
-
-    WHITE, GRAY, BLACK = 0, 1, 2
-    color = dict.fromkeys(graph, WHITE)
-    path: list[str] = []
-
-    def visit(n: str) -> None:
-        color[n] = GRAY
-        path.append(n)
-        for m in graph[n]:
-            if color[m] == GRAY:
-                cyc = path[path.index(m):] + [m]
-                raise ValueError("dependency cycle: " + " → ".join(cyc))
-            if color[m] == WHITE:
-                visit(m)
-        path.pop()
-        color[n] = BLACK
-
-    for n in graph:
-        if color[n] == WHITE:
-            visit(n)
 
 
 # ----------------------------------------------------------------------------
@@ -400,7 +327,7 @@ def _beat_sweep_pooled(cfg: Config, bundles: list[Path], merged_ids: set[str],
     beats are in different rounds — a bundle must not change slots between beats. Conflicts
     (#36) are serialised through a shared in-flight set so two bundles that edit a shared
     resource are never advanced concurrently, on any slots."""
-    conflicts = _conflict_map(cfg, bundles)
+    conflicts = waves.conflict_map(cfg, bundles)
     n_lanes = min(cfg.lanes, len(bundles))
     slot_of: dict[str, int] = {}  # bundle name → its fixed lane slot (worktree affinity)
     while True:
@@ -490,7 +417,7 @@ def _drive_and_act(
     names = {b.name for b in bundles}
     # Reject an unschedulable declared-ordering graph (cycle / unresolved dep) before any
     # build touches a bundle (issue #36). No `Depends on` fields ⇒ no-op.
-    _check_dep_graph(cfg, bundles)
+    waves.check_dep_graph(cfg, bundles)
     # Stack prerequisites (#123): bundles some other brief `Stacks on`. Each must publish
     # its branch DURING the loop — not the deferred end-publish — so a dependent's next pass
     # can base its worktree + PR on it. `published` dedups against the end-publish below.
