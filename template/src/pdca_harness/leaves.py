@@ -65,10 +65,11 @@ VALID_DECISIONS = frozenset({"accept", "iterate-do", "iterate-plan", "discontinu
 class LeafError(subprocess.CalledProcessError):
     """A headless leaf exited non-zero. Carries the captured stderr tail
     (``output``) so a failed reviewer/advisory leaf leaves recoverable error text
-    in the bundle (#138), and ``produced`` — whether the child emitted any stdout
-    before exiting. ``produced is False`` is the transient-infra signal: the child
-    died at/near invocation (usage/rate limit, 5xx, auth, network) before any
-    stream event, so a retry is likely to succeed."""
+    in the bundle (#138), and ``produced`` — whether the child emitted a substantive
+    stream event (real work) before exiting, vs only the CLI's ``system``/``init``
+    or ``api_retry`` events. ``produced is False`` is the transient-infra signal: the
+    child died at/near invocation (usage/rate limit, 5xx, auth, network) before doing
+    any work, so a retry is likely to succeed."""
 
     def __init__(self, returncode: int, cmd, output: str = "", produced: bool = False):
         super().__init__(returncode, cmd, output=output)

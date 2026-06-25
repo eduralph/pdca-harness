@@ -41,9 +41,12 @@ def run_with_heartbeat(
     the bounded **stderr tail** when ``stream_json`` is True (so a failed claude
     leaf's real error — usage/rate limit, 5xx, auth — survives in the bundle
     instead of scrolling past on a console nobody is watching); ``""`` otherwise.
-    ``produced`` is whether the child emitted **any stdout** — i.e. a session
-    started; ``produced is False`` on a non-zero exit is the transient-infra
-    signal (the child died at/near invocation, before any stream event).
+    ``produced`` is whether the child emitted a **substantive** stream event — an
+    ``assistant`` / ``user`` / ``result`` event, i.e. a session that did real work.
+    Claude emits a ``system``/``init`` event (and ``system``/``api_retry`` on a
+    retryable API error) *before* doing anything, so those do NOT count: a non-zero
+    exit with ``produced is False`` is the transient-infra signal (the child died
+    at/near invocation — usage/rate limit, 5xx, auth — before any real output).
     ``input_text``, if given, is written to stdin.
 
     ``status``, if given, is called on every tick to append a live snapshot of the
@@ -74,17 +77,18 @@ def run_with_heartbeat(
 
     chunks: list[str] = []
     err_tail: deque[str] = deque(maxlen=200)  # bounded stderr tail for a failed leaf
-    produced = {"stdout": False}  # did the child emit any stdout (a session started)?
+    produced = {"session": False}  # did a substantive stream event arrive (real work)?
     latest_tool = {"label": ""}  # most recent tool-use, updated by the drain thread
     readers: list[threading.Thread] = []
     if capture_out:
         def _drain() -> None:
             assert proc.stdout is not None
             for line in proc.stdout:  # drain so the pipe can't fill and stall the child
-                produced["stdout"] = True
                 if capture:
                     chunks.append(line)
                 if stream_json:
+                    if _is_session_event(line):
+                        produced["session"] = True  # a system/init line does NOT count
                     lbl = _stream_tool_label(line)
                     if lbl:
                         latest_tool["label"] = lbl
@@ -137,7 +141,7 @@ def run_with_heartbeat(
         if stream is not None:
             stream.close()
     output = "".join(chunks) if capture else ("".join(err_tail) if stream_json else "")
-    return proc.returncode, output, produced["stdout"]
+    return proc.returncode, output, produced["session"]
 
 
 # ----------------------------------------------------------------------------
@@ -145,6 +149,21 @@ def run_with_heartbeat(
 # Vendor-specific (Claude's event shape); a leaf opts in only for a claude family,
 # so it is a no-op for a codex/other leaf, which still gets Tiers 1+2.
 # ----------------------------------------------------------------------------
+_SESSION_EVENT_TYPES = frozenset({"assistant", "user", "result"})
+
+
+def _is_session_event(line: str) -> bool:
+    """True iff a stream-json line is **substantive work** — an assistant/user/result
+    event — as opposed to a ``system`` event (``init`` on startup, ``api_retry`` on a
+    retryable API error) the CLI emits before doing anything. A non-zero exit having
+    produced no such event is the transient-infra signal a retry should target (#138)."""
+    try:
+        ev = json.loads(line)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(ev, dict) and ev.get("type") in _SESSION_EVENT_TYPES
+
+
 def _stream_tool_label(line: str) -> str:
     """A human label for the tool-use in one stream-json line, or "" if none.
 

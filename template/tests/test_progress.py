@@ -100,6 +100,15 @@ class StreamToolUse(unittest.TestCase):
                          "message": {"content": [{"type": "text", "text": "hi"}]}})), "")
         self.assertEqual(progress._stream_tool_label(json.dumps({"type": "result"})), "")
 
+    def test_is_session_event_distinguishes_work_from_system(self) -> None:
+        self.assertTrue(progress._is_session_event(json.dumps({"type": "assistant"})))
+        self.assertTrue(progress._is_session_event(json.dumps({"type": "result"})))
+        self.assertFalse(progress._is_session_event(
+            json.dumps({"type": "system", "subtype": "init"})))
+        self.assertFalse(progress._is_session_event(
+            json.dumps({"type": "system", "subtype": "api_retry"})))
+        self.assertFalse(progress._is_session_event("not json"))
+
     def test_run_with_heartbeat_consumes_stream_json(self) -> None:
         # Wiring smoke: a json-emitting child runs cleanly under stream_json (stdout is
         # consumed for parsing, not captured/echoed) and returns its exit code. The
@@ -121,6 +130,17 @@ class StreamToolUse(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("overloaded_error 529", out)  # stderr teed into the tail
         self.assertFalse(produced)  # no stdout → no session started
+
+    def test_system_init_event_is_not_substantive(self) -> None:
+        # Claude emits system/init (and api_retry) BEFORE doing work. A session that
+        # printed only those then died on a rate limit must still read as transient
+        # (produced False) so the leaf is retried (#138 — Codex review on PR #140).
+        prog = ("import sys; print('{\"type\": \"system\", \"subtype\": \"init\"}'); "
+                "sys.exit(1)")
+        rc, _out, produced = progress.run_with_heartbeat(
+            [sys.executable, "-c", prog], stream_json=True)
+        self.assertEqual(rc, 1)
+        self.assertFalse(produced)  # only a system event → no real work → transient
 
 
 if __name__ == "__main__":
