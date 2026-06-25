@@ -628,6 +628,23 @@ def run_review(d: Path, cfg: Config) -> None:
     _stub_review(d, cfg)
 
 
+def _seed_sandbox_agents(cfg: Config, sandbox: Path) -> None:
+    """Copy the project's ``.claude/agents`` into the sandbox so a leaf running there can
+    resolve ``--agent <name>`` (issue #161).
+
+    Claude Code (>= 2.1.x) discovers project subagents by walking **up from the subprocess
+    cwd**. The reviewer/advisory leaves run in a temp sandbox cwd (the independence
+    contract below), which has no ``.claude/agents`` above it — so ``--agent reviewer``
+    fails and the review degrades to a §6 placeholder. Seeding the agent *definitions* into
+    the sandbox makes them resolvable while **preserving independence**: only the role
+    prompts are copied (never ``build-notes.md``), and the sandbox cwd + each agent's own
+    ``tools:`` still gate which files the leaf can read. Best-effort — no agents dir ⇒ no-op.
+    """
+    src = cfg.root / ".claude" / "agents"
+    if src.is_dir():
+        shutil.copytree(src, sandbox / ".claude" / "agents", dirs_exist_ok=True)
+
+
 def _run_review_sandboxed(d: Path, cfg: Config) -> None:
     """Run the reviewer in a temp dir holding ONLY the reviewer inputs.
 
@@ -641,6 +658,7 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
             src = d / name
             if src.exists():
                 shutil.copy2(src, sandbox / name)
+        _seed_sandbox_agents(cfg, sandbox)  # so `--agent` resolves from the sandbox cwd (#161)
         # Ground citations on the brief's target checkout (#75): name it via $PDCA_TARGET
         # so the reviewer doesn't wander into unrelated checkouts, and grant read access
         # for the claude family (--add-dir). Independence holds — the target is the
@@ -804,6 +822,7 @@ def _run_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict, 
         for name in REVIEWER_INPUTS:
             if (d / name).exists():
                 shutil.copy2(d / name, sandbox / name)
+        _seed_sandbox_agents(cfg, sandbox)  # so `--agent` resolves from the sandbox cwd (#161)
         target = _reviewer_target(d, cfg)
         env = {"PDCA_TARGET": str(target)} if target else None
         extra = ["--add-dir", str(target)] if target and leaf.family == "claude" else None
