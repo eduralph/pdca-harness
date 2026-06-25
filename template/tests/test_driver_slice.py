@@ -341,6 +341,33 @@ class AdvisoryReviewResilience(unittest.TestCase):
         self.assertIn("NOT COMPLETED",
                       (self.d / "check-review.md").read_text(encoding="utf-8"))
 
+    def test_sandbox_seeds_project_agents_preserving_independence(self) -> None:
+        # #161: the reviewer runs in a temp sandbox cwd; Claude Code (>=2.1.x) resolves
+        # `--agent` by walking up from cwd, so the project's .claude/agents must be seeded
+        # INTO the sandbox — exposing only the agent definition, never build-notes.md.
+        (self.d / "patch.diff").write_text("x\n", encoding="utf-8")
+        (self.d / "check-gates.json").write_text("{}\n", encoding="utf-8")
+        (self.d / "build-notes.md").write_text("builder framing — must not leak\n", encoding="utf-8")
+        agents = self.cfg.root / ".claude" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "reviewer.md").write_text("---\nname: reviewer\n---\nrole\n", encoding="utf-8")
+        seen: dict = {}
+        orig = leaves._invoke
+
+        def capture(leaf, workdir, prompt, **k):
+            wd = Path(workdir)
+            seen["agent"] = (wd / ".claude" / "agents" / "reviewer.md").exists()
+            seen["build_notes"] = (wd / "build-notes.md").exists()
+            (wd / "check-review.md").write_text("ok\n", encoding="utf-8")  # let the run succeed
+
+        leaves._invoke = capture
+        try:
+            leaves._run_review_sandboxed(self.d, self.cfg)
+        finally:
+            leaves._invoke = orig
+        self.assertTrue(seen.get("agent"))         # `--agent reviewer` now resolves from the sandbox
+        self.assertFalse(seen.get("build_notes"))  # independence held: build-notes.md absent
+
 
 class AdvisoryReviewers(unittest.TestCase):
     """Optional advisory reviewer leaves (issue #64): an open, role-distinct set that
