@@ -48,6 +48,15 @@ def revert(cfg: Config, issue_id: str, *, dry_run: bool = False, by: str = "",
     if pr_state == "MERGED":
         return _revert_merged(cfg, d, issue_id, rec, pr_url, dry_run=dry_run, by=by, today=today)
     if pr_state == "OPEN":
+        # ``mode: "stacked"`` (Onto branch, #54) means the harness appended a commit to a
+        # PRE-EXISTING PR it did NOT create. Withdrawing it would `gh pr close
+        # --delete-branch` that collaborator's whole PR branch — never do that. (The merged
+        # path is still safe: it opens a *new* revert PR, leaving the original alone.)
+        if rec.get("mode") == "stacked":
+            print(f"revert: {d.name} was published as a commit onto an existing PR "
+                  f"({pr_url}, mode=stacked) the harness did not create — refusing to close "
+                  "it. Revert just that commit on the PR branch by hand.", file=sys.stderr)
+            return 1
         return _withdraw(cfg, d, pr_url, dry_run=dry_run, by=by, today=today)
     print(f"revert: {d.name}'s PR is {pr_state} — nothing to revert ({pr_url}).")
     return 0

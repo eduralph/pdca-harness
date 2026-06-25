@@ -111,6 +111,21 @@ class Revert(unittest.TestCase):
         self.assertEqual(rec["action"], "withdraw")
         self.assertEqual(rec["reverts"], "https://gh/pr/1")
 
+    def test_open_stacked_pr_is_refused(self) -> None:
+        # mode="stacked" (Onto branch #54) = a commit on a PRE-EXISTING PR the harness did
+        # not create — revert must NOT close/delete it.
+        d = self._bundle("S")
+        pj = json.loads((d / "publish.json").read_text(encoding="utf-8"))
+        pj["mode"] = "stacked"
+        (d / "publish.json").write_text(json.dumps(pj), encoding="utf-8")
+        with mock.patch.object(revert, "_pr_state", return_value="OPEN"), \
+                mock.patch.object(revert.subprocess, "run") as run, \
+                redirect_stderr(io.StringIO()) as err:
+            rc = revert.revert(self.cfg, "S")
+        self.assertEqual(rc, 1)
+        run.assert_not_called()                  # never touched the collaborator's PR
+        self.assertIn("refusing to close", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
