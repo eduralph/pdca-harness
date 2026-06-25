@@ -33,12 +33,13 @@ where the C6 accept-guard forces the human to clear it before sign-off.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import shutil
 import sys
 from pathlib import Path
 
-from . import brief, lane, progress, worktree
+from . import brief, lane, progress, state, worktree
 from .config import Config
 
 # A gate that cannot RUN its mechanical check (vs. running and failing) declares so:
@@ -46,6 +47,88 @@ from .config import Config
 # a gate may exit 0 and still defer to the human. Neither is a failure (see _finalize).
 UNVERIFIABLE_RC = 77
 UNVERIFIABLE_MARKER = "PDCA-UNVERIFIABLE:"
+
+
+# ----------------------------------------------------------------------------
+# Gate-promotion lifecycle (issue #156): a check may carry ``promote_after = N``; once it
+# has PASSED in its N most-recent frozen cycles it has earned promotion from advisory to
+# gating. ``pdca gates --promotions`` lists the ready ones — hint-only, the human flips
+# ``gating`` (nothing is auto-mutated). De-risks a new (often Act-proposed) gate, which
+# should prove itself advisory before it is allowed to block.
+# ----------------------------------------------------------------------------
+GATES_JSON = "check-gates.json"
+_PROMO_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+
+def _gates_record(d: Path) -> dict | None:
+    """A bundle's frozen ``check-gates.json``, or None if absent/unreadable."""
+    p = d / GATES_JSON
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+
+
+_SIGNOFF_SECTION = re.compile(r"^##[^\n]*Check sign-off[^\n]*\n(.*?)(?=^##\s|\Z)",
+                              re.MULTILINE | re.DOTALL)
+
+
+def _signoff_date(d: Path) -> str:
+    """A recency key for ordering frozen cycles — the ISO date in the §9 (``Check
+    sign-off``) section of SUMMARY.md, or "" when none. Scoped to §9 so an ISO date in an
+    earlier section (a brief/citation date) can't mis-order cycles and report a check ready
+    whose most-recent sign-off run actually failed."""
+    s = d / "SUMMARY.md"
+    if not s.exists():
+        return ""
+    block = _SIGNOFF_SECTION.search(s.read_text(encoding="utf-8"))
+    dm = _PROMO_DATE.search(block.group(1)) if block else None
+    return dm.group(1) if dm else ""
+
+
+def _check_result(rec: dict, check_id: str) -> str | None:
+    """The result this gate record holds for ``check_id`` (``pass`` / ``fail`` /
+    ``unverifiable``), or None when the check didn't run / isn't recorded."""
+    for row in rec.get("rows", []):
+        if row.get("rule_id") == check_id:
+            res = row.get("result")
+            return res if res in ("pass", "fail", "unverifiable") else None
+    return None
+
+
+def promotion_candidates(cfg: Config) -> list[dict]:
+    """Advisory checks (``gating = false``) carrying ``promote_after = N`` that have PASSED
+    in their N most-recent frozen runs — earned promotion to gating. Each:
+    ``{id, label, threshold}``. Hint-only; the human flips ``gating``."""
+    advisory = [c for c in cfg.gates_checks
+                if c.get("promote_after") and not bool(c.get("gating", True))]
+    if not advisory or not cfg.bundle_root.exists():
+        return []
+    frozen = sorted((d for d in cfg.bundle_root.glob("issue_*")
+                     if d.is_dir() and state.state(d) == state.COMPLETE),
+                    key=_signoff_date, reverse=True)  # newest first
+    records = [rec for rec in (_gates_record(d) for d in frozen) if rec]
+    out: list[dict] = []
+    for chk in advisory:
+        try:
+            n = int(chk["promote_after"])
+        except (TypeError, ValueError):
+            continue
+        if n < 1:
+            continue
+        ran: list[str] = []
+        for rec in records:
+            res = _check_result(rec, chk.get("id", ""))
+            if res is not None:
+                ran.append(res)
+            if len(ran) >= n:
+                break
+        if len(ran) >= n and all(r == "pass" for r in ran[:n]):
+            out.append({"id": chk.get("id", ""), "label": chk.get("label", ""),
+                        "threshold": n})
+    return out
 
 
 def run_gates(d: Path, cfg: Config) -> dict:
