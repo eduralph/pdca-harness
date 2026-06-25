@@ -28,8 +28,14 @@ _DIFF_GIT = re.compile(r"^diff --git a/(.+) b/(.+)$")
 
 
 def added_test_blocks(diff_text: str) -> dict[str, list[str]]:
-    """``{test_path: [added lines]}`` for each test ``.py`` file the diff adds to."""
-    blocks: dict[str, list[str]] = {}
+    """``{test_path: [added lines]}`` for each **newly-added** test ``.py`` file in the diff.
+
+    Only NEW test files (``new file mode`` / ``--- /dev/null``) are returned: an *edit* to
+    an existing test may already import production as unchanged context, so requiring the
+    import among the added lines would false-positive on routine test edits. A new test
+    file, by contrast, has all of its content in the added lines — the import must be there.
+    """
+    files: dict[str, dict] = {}
     cur, keep = None, False
     for line in diff_text.splitlines():
         m = _DIFF_GIT.match(line)
@@ -37,11 +43,15 @@ def added_test_blocks(diff_text: str) -> dict[str, list[str]]:
             cur = m.group(2).strip()
             keep = bool(_TEST_RE.search(cur))
             if keep:
-                blocks.setdefault(cur, [])
+                files.setdefault(cur, {"new": False, "added": []})
             continue
-        if keep and cur and line.startswith("+") and not line.startswith("+++"):
-            blocks[cur].append(line[1:])
-    return blocks
+        if not keep or not cur:
+            continue
+        if line.startswith("new file mode") or line.startswith("--- /dev/null"):
+            files[cur]["new"] = True
+        elif line.startswith("+") and not line.startswith("+++"):
+            files[cur]["added"].append(line[1:])
+    return {p: f["added"] for p, f in files.items() if f["new"]}
 
 
 def unverifiable_reason(diff_text: str, pkg: str) -> str | None:

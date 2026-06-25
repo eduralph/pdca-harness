@@ -72,6 +72,16 @@ class ProdPathGate(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertNotIn("PDCA-UNVERIFIABLE", out)
 
+    def test_edit_to_existing_test_not_flagged(self) -> None:
+        # An EDIT to an existing test (no new-file marker) must NOT be flagged even though
+        # the added lines don't add a production import — the import is unchanged context.
+        patch = ("diff --git a/tests/test_foo.py b/tests/test_foo.py\n"
+                 "--- a/tests/test_foo.py\n+++ b/tests/test_foo.py\n"
+                 "@@ -3,1 +3,2 @@\n existing\n+    assert bar() == 2\n")
+        rc, out = self._run(patch)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("PDCA-UNVERIFIABLE", out)
+
     def test_unset_package_is_unverifiable(self) -> None:
         patch = "diff --git a/tests/test_foo.py b/tests/test_foo.py\n+from mypkg import x\n"
         rc, out = self._run(patch, pkg=None)
