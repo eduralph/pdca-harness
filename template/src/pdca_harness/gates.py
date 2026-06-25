@@ -237,7 +237,7 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
     try:
         # Output is captured for the evidence line; the heartbeat ticks meanwhile so
         # a long, silent gate (e.g. a Docker-backed test suite) doesn't look hung.
-        rc, output = progress.run_with_heartbeat(
+        rc, output, _ = progress.run_with_heartbeat(
             cmd, cwd=cwd, shell=True, env=_merged_env(env), capture=True, label=label,
             status=lambda: progress.bundle_activity(watch),
         )
