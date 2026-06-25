@@ -303,6 +303,19 @@ argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
 # gating = false
 # scope = "repo"
 #
+# A reference C5 ADVISORY check (issue #154): does the bundle's shipped test exercise
+# PRODUCTION, or a hand-ported copy? The script asserts each added test file in the patch
+# imports the production package (PDCA_PROD_PACKAGE = the production import root, e.g.
+# `gramps`); when it can't confirm it declares itself UNVERIFIABLE → SUMMARY §6 for the
+# human to adjudicate. A Python/import heuristic — tune the package + test-file pattern.
+# [[gates.checks]]
+# id = "C5-prod-path"
+# tier = "C5"
+# label = "test exercises the production path (not a copy)"
+# cmd = "PDCA_PROD_PACKAGE=yourpkg python3 scripts/checks/test_exercises_production.py"
+# gating = false
+# scope = "bundle"
+#
 # GATING POLICY (learned the hard way): default a tier to ADVISORY (gating =
 # false). The per-fix C4 (red→green) is the one gate that ships gating = true —
 # runtime, conformance (T1/T2/T4), and interface/E2E tiers all audit code the
