@@ -24,7 +24,8 @@ import sys
 import threading
 from pathlib import Path
 
-from . import act, driver, integrate, lane, leaves, merge, publish, queue, signoff, state, waves
+from . import (act, driver, gates, integrate, lane, leaves, merge, publish, queue,
+               signoff, state, waves)
 from .config import Config
 
 
@@ -456,13 +457,21 @@ def _drive_and_act(
                     break
             else:  # default: stack — fold onto the integration branch
                 try:
-                    branch, _wt = integrate.fold(cfg, accepted, dry_run=dry)
+                    branch, wt = integrate.fold(cfg, accepted, dry_run=dry)
                 except integrate.IntegrationError as exc:
                     print(f"flow: wave {k} did not integrate ({exc}); STOPPING — later "
                           f"waves not run.", file=sys.stderr)
                     break
                 if branch and not dry:
                     integ_branch = branch
+                    # Optional re-gate (#wave-model): validate the folded combination over
+                    # the integration tip before the next wave builds on it; red ⇒ STOP.
+                    if cfg.regate_between_waves and wt is not None and \
+                            gates.run_integration(cfg, wt).get("overall") == "fail":
+                        print(f"flow: wave {k} integration re-gate FAILED — the combination "
+                              f"is red though each fix was green alone; STOPPING (later "
+                              f"waves not run).", file=sys.stderr)
+                        break
 
     results = {d.name.replace("issue_", ""): state.state(d) for d in bundles}
     if do_act:

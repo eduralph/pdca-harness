@@ -87,6 +87,19 @@ def run_working_tree(cfg: Config) -> dict:
     return _finalize(rows, name="working-tree", write_to=None)
 
 
+def run_integration(cfg: Config, worktree_path: Path) -> dict:
+    """Run the repo-scoped gates against a wave integration worktree (#wave-model re-gate).
+
+    Like :func:`run_working_tree`, but targeted at an explicit tree — the folded
+    integration tip the *next* wave will build on. The gate commands run from it and see it
+    as ``$PDCA_WORKTREE``, so a project's repo-scoped gate validates the *combination* of
+    the waves so far: a result that is red though each fix was green alone means the
+    caller STOPs before building the next wave on it. Never writes a frozen record."""
+    rows = _run_checks(cfg, cwd=worktree_path, bundle=None, scopes=("repo",),
+                       worktree_override=worktree_path)
+    return _finalize(rows, name="integration", write_to=None)
+
+
 def run_gates_dry(d: Path, cfg: Config) -> dict:
     """Run every gate for bundle ``d`` against the CURRENT engine WITHOUT writing the
     frozen ``check-gates.json`` — the gate runner behind ``pdca revalidate`` (issue #11).
@@ -158,7 +171,8 @@ def _applies(chk: dict, scopes: tuple[str, ...], labels: frozenset[str] | None) 
     return want <= labels
 
 
-def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[str, ...]) -> list[dict]:
+def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[str, ...],
+                worktree_override: Path | None = None) -> list[dict]:
     # No configured gates → the offline stub: the full 5/5/1 with the mechanical
     # gate elements stub-passed (so the offline slice runs green).
     if not cfg.gates_checks:
@@ -167,7 +181,10 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
     labels = _bundle_target(bundle, cfg.gate_target_match, cfg.gate_target_default, cfg.gate_target_flags)
     # Worktree isolation (issue #94): if Do ran in an isolated worktree, gates test THAT
     # tree — expose it as $PDCA_WORKTREE so a gate cmd targets it, not the host checkout.
-    wt = worktree.path(bundle, cfg) if bundle is not None else None
+    # ``worktree_override`` (the wave integration re-gate, #wave-model) points the
+    # repo-scoped gates at an explicit tree (the folded integration tip) instead.
+    wt = worktree_override if worktree_override is not None else (
+        worktree.path(bundle, cfg) if bundle is not None else None)
     configured: list[dict] = []
     for chk in cfg.gates_checks:
         if not _applies(chk, scopes, labels):
