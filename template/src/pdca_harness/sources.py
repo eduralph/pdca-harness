@@ -193,8 +193,13 @@ def _command(cfg: Config, d: Path, out: Path, issue_id: str, spec: dict, i: int)
         print(f"sources: {d.name} — command source failed (rc {r.returncode}): "
               f"{(r.stderr or '').strip()}", file=sys.stderr)
         return
-    if _is_tracker_source(spec) and (r.stdout or "").strip():
-        (d / "notes.json").write_text(r.stdout, encoding="utf-8")
+    if _is_tracker_source(spec):
+        # A migrated notes_cmd writes $PDCA_BUNDLE/notes.json ITSELF (it may also print
+        # progress/logs to stdout). Only fall back to stdout when the command did NOT
+        # create notes.json — otherwise we'd clobber the real thread with log text.
+        notes = d / "notes.json"
+        if not notes.exists() and (r.stdout or "").strip():
+            notes.write_text(r.stdout, encoding="utf-8")
     elif spec.get("out") and (r.stdout or "").strip():
         (out / str(spec["out"])).write_text(r.stdout, encoding="utf-8")
 

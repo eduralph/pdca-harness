@@ -148,6 +148,16 @@ class PlanSources(unittest.TestCase):
         sources.seed(cfg, d)
         self.assertEqual((d / "notes.json").read_text(encoding="utf-8"), "thread\n")
 
+    def test_tracker_command_that_writes_notes_json_is_not_clobbered_by_stdout(self) -> None:
+        # A migrated notes_cmd writes notes.json itself and may also log to stdout; the
+        # real thread must survive, not be replaced by the log text (Codex review, PR #141).
+        cfg = _cfg(self.tmp, plan_sources=[{
+            "type": "command", "role": "tracker",
+            "cmd": "printf REAL_THREAD > \"$PDCA_BUNDLE/notes.json\"; echo progress-log"}])
+        d = self._bundle(cfg)
+        sources.seed(cfg, d)
+        self.assertEqual((d / "notes.json").read_text(encoding="utf-8"), "REAL_THREAD")
+
     def test_non_tracker_source_leaves_notes_cmd_running(self) -> None:
         # Back-compat: a plain (non-tracker) plan.source does NOT suppress notes_cmd.
         cfg = _cfg(
