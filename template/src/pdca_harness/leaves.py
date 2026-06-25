@@ -285,21 +285,22 @@ def do_build(d: Path, cfg: Config) -> None:
         # Isolate Do in a per-cycle worktree off the base (issue #94) so the host's
         # primary checkout is never mutated. Best-effort: None ⇒ edit in place, as before.
         wt = worktree.ensure(d, cfg)
-        if wt:
-            # CONFINE the builder by running it *in* the worktree (cwd), not merely
-            # exposing $PDCA_WORKTREE (issue #136): a non-claude command builder is
-            # otherwise launched from the harness root with nothing stopping it from
-            # writing the host checkout or a sibling repo — breaking one-bundle-one-diff.
-            # cwd-confinement is a builder contract independent of family. The claude
-            # family also needs the bundle dir granted (--add-dir d) so it can still read
-            # brief.md and write patch.diff / build-notes.md there (d is outside the wt).
-            workdir = wt
-            env = {"PDCA_WORKTREE": str(wt)}
-            extra = ["--add-dir", str(d)] if cfg.builder.family == "claude" else None
+        if wt and cfg.builder.family == "claude":
+            # The claude builder discovers its `builder` subagent AND the builder_guard
+            # PreToolUse hook by walking up from its cwd, so cwd MUST stay the harness root
+            # (.claude/agents + .claude/settings live there). Confining its cwd to the
+            # worktree would hide both — `--agent builder` would not resolve and the
+            # STOP-discipline guard would not load. It is grounded in the worktree via
+            # --add-dir + the prompt instead (as in #94), not by cwd.
+            workdir, env, extra = cfg.root, {"PDCA_WORKTREE": str(wt)}, ["--add-dir", str(wt)]
+        elif wt:
+            # A non-claude command builder (a local agentic CLI) has no --add-dir / agent
+            # machinery, so CONFINE it by running it *in* the worktree (cwd): otherwise it
+            # is launched from the harness root with nothing stopping it from writing the
+            # host checkout or a sibling repo, breaking one-bundle-one-diff (issue #136).
+            workdir, env, extra = wt, {"PDCA_WORKTREE": str(wt)}, None
         else:
-            workdir = cfg.root  # best-effort fallback: edit in place, as before
-            env = None
-            extra = None
+            workdir, env, extra = cfg.root, None, None  # best-effort: edit in place, as before
         # Watch the bundle d so the heartbeat shows patch.diff / build-notes.md appearing.
         _invoke(
             cfg.builder, workdir, _build_prompt(d),

@@ -81,9 +81,10 @@ class DoBuildConfinement(unittest.TestCase):
         self.assertEqual(probe.read_text(encoding="utf-8"), str(wt))  # cwd WAS the worktree
         self.assertFalse((cfg.root / "cwd-probe.txt").exists())       # not the harness root
 
-    def test_claude_family_is_granted_the_bundle_dir(self) -> None:
-        # The claude family runs in the worktree (cwd) but still needs the bundle dir
-        # granted (--add-dir d) to read brief.md and write patch.diff there.
+    def test_claude_family_keeps_root_cwd_for_agent_discovery(self) -> None:
+        # The claude builder must run from the harness root (cwd), not the worktree, so it
+        # can discover its `builder` subagent + builder_guard hook under .claude/; it is
+        # grounded in the worktree via --add-dir instead (Codex review, PR #143).
         captured: dict = {}
 
         def fake_invoke(leaf, workdir, prompt, **kw):
@@ -101,8 +102,8 @@ class DoBuildConfinement(unittest.TestCase):
         finally:
             leaves._invoke = orig
         wt = self.tmp / "checkout.pdca-wt"
-        self.assertEqual(captured["workdir"], wt)                       # confined to the wt
-        self.assertEqual(captured["extra_argv"], ["--add-dir", str(d)])  # bundle granted
+        self.assertEqual(captured["workdir"], cfg.root)                  # agent/hook discovery
+        self.assertEqual(captured["extra_argv"], ["--add-dir", str(wt)])  # grounded in the wt
 
 
 if __name__ == "__main__":
