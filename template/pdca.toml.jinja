@@ -79,9 +79,14 @@ issue_trailer = "Fixes #{id}"
 # / file / failing command is non-fatal). Built-in types: github (gh), gitlab (glab), csv,
 # file (a path/glob, {id} interpolated), command (the escape hatch — a `.format(id=)` shell
 # command run with $PDCA_BUNDLE / $PDCA_SOURCES set; it writes its own output). The legacy
-# notes_cmd above still runs, so this is purely additive. Examples (uncomment to use):
+# notes_cmd above still runs alongside these, so they are purely additive — EXCEPT a source
+# that sets `role = "tracker"` (issue #132): it IS the tracker thread, writes the canonical
+# notes.json itself, and SUPPRESSES notes_cmd, so the issue is sourced once rather than
+# fetched/stored twice. `notes_cmd` and a tracker-role plan.source are mutually exclusive.
+# Examples (uncomment to use):
 # [[plan.source]]
 # type = "github"            # gh issue view {id} --json … → sources/github-<id>.json
+# # role = "tracker"         # make THIS the tracker fetch (→ notes.json) and drop notes_cmd
 # # repo = "owner/repo"      # optional; omit to use gh's default repo
 # [[plan.source]]
 # type = "file"              # a linked design doc / ADR / proposal / spec

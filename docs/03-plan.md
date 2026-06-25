@@ -52,7 +52,10 @@ so the planner briefs from the **full** picture, not one scrape (issue #102). Bu
 types: `github` (`gh`), `gitlab` (`glab`), `csv`, `file` (a path/glob, `{id}`
 interpolated), and `command` (the escape hatch — exactly `notes_cmd`, run with
 `$PDCA_BUNDLE` / `$PDCA_SOURCES` set). Each is best-effort; the legacy `notes_cmd` still
-runs alongside them. For example, "the GitHub issue **and** its linked ADR":
+runs alongside them — **unless** a source sets `role = "tracker"`, which makes that source
+the tracker thread (it writes `notes.json` itself) and suppresses `notes_cmd` so the issue
+is sourced once, not fetched and stored twice (issue #132). `notes_cmd` and a tracker-role
+plan.source are mutually exclusive. For example, "the GitHub issue **and** its linked ADR":
 
 ```toml
 [[plan.source]]

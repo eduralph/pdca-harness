@@ -120,6 +120,54 @@ class PlanSources(unittest.TestCase):
         sources.seed(cfg, d)
         self.assertTrue((d / "notes.json").exists())   # #65 back-compat preserved
 
+    def test_tracker_role_github_sources_once_and_skips_notes_cmd(self) -> None:
+        # #132: a github plan.source declared role="tracker" writes the canonical
+        # notes.json and the legacy notes_cmd is skipped — the issue is fetched once,
+        # not stored in both notes.json and sources/github-<id>.json.
+        cfg = _cfg(
+            self.tmp,
+            notes_cmd="printf NOTES_CMD_RAN > \"$PDCA_BUNDLE/notes.json\"",
+            plan_sources=[{"type": "github", "role": "tracker"}])
+        d = self._bundle(cfg)
+        fake = SimpleNamespace(returncode=0, stdout='{"title":"t"}', stderr="")
+        with mock.patch("pdca_harness.sources.subprocess.run", return_value=fake):
+            sources.seed(cfg, d)
+        self.assertEqual((d / "notes.json").read_text(encoding="utf-8"), '{"title":"t"}')
+        self.assertNotIn("NOTES_CMD_RAN", (d / "notes.json").read_text(encoding="utf-8"))
+        self.assertFalse((d / "sources" / "github-42.json").exists())  # not stored twice
+
+    def test_tracker_role_command_writes_notes_json_and_skips_notes_cmd(self) -> None:
+        # The `command` escape hatch as the tracker source: its stdout becomes notes.json
+        # and notes_cmd does not also run (moving a notes_cmd into a tracker plan.source
+        # must not run it twice).
+        cfg = _cfg(
+            self.tmp,
+            notes_cmd="printf NOTES_CMD_RAN > \"$PDCA_BUNDLE/notes.json\"",
+            plan_sources=[{"type": "command", "role": "tracker", "cmd": "echo thread"}])
+        d = self._bundle(cfg)
+        sources.seed(cfg, d)
+        self.assertEqual((d / "notes.json").read_text(encoding="utf-8"), "thread\n")
+
+    def test_tracker_command_that_writes_notes_json_is_not_clobbered_by_stdout(self) -> None:
+        # A migrated notes_cmd writes notes.json itself and may also log to stdout; the
+        # real thread must survive, not be replaced by the log text (Codex review, PR #141).
+        cfg = _cfg(self.tmp, plan_sources=[{
+            "type": "command", "role": "tracker",
+            "cmd": "printf REAL_THREAD > \"$PDCA_BUNDLE/notes.json\"; echo progress-log"}])
+        d = self._bundle(cfg)
+        sources.seed(cfg, d)
+        self.assertEqual((d / "notes.json").read_text(encoding="utf-8"), "REAL_THREAD")
+
+    def test_non_tracker_source_leaves_notes_cmd_running(self) -> None:
+        # Back-compat: a plain (non-tracker) plan.source does NOT suppress notes_cmd.
+        cfg = _cfg(
+            self.tmp,
+            notes_cmd="printf thread > \"$PDCA_BUNDLE/notes.json\"",
+            plan_sources=[{"type": "file", "path": "missing-{id}.md"}])
+        d = self._bundle(cfg)
+        sources.seed(cfg, d)
+        self.assertEqual((d / "notes.json").read_text(encoding="utf-8"), "thread")
+
 
 if __name__ == "__main__":
     unittest.main()

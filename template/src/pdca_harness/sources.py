@@ -18,8 +18,16 @@ Built-in providers:
 
 Every provider is **best-effort**: a missing tool, an absent file, or a failing command is
 non-fatal — that source is skipped with a note and Plan falls back to the others / the
-human. The legacy ``[tracker].notes_cmd`` still runs (back-compat), so a project that sets
-neither sees no change.
+human.
+
+**The tracker thread is sourced once (#132).** The legacy ``[tracker].notes_cmd`` still
+runs for back-compat — *unless* a ``[[plan.source]]`` declares itself the tracker thread
+with ``role = "tracker"``. A tracker-role ``github``/``gitlab``/``command`` source writes
+the canonical ``notes.json`` (at the bundle root, where the planner and the id-seeded
+batch flow read it) and ``seed()`` then **skips** ``notes_cmd``, so a GitHub-Issues
+project configures the tracker fetch once instead of fetching/storing the same issue
+twice. ``notes_cmd`` and a tracker-role plan.source are therefore mutually exclusive; a
+project that sets neither sees no change.
 """
 
 from __future__ import annotations
@@ -37,17 +45,26 @@ def seed(cfg: Config, d: Path) -> None:
     """Seed bundle ``d`` from every configured Plan source, plus the legacy notes_cmd.
 
     Idempotent-ish and best-effort: providers that fail are skipped. New providers write
-    into ``d/sources/``; the legacy ``notes_cmd`` still writes ``d/notes.json``. The
-    planner reads both.
+    into ``d/sources/``; the legacy ``notes_cmd`` writes ``d/notes.json``. The planner
+    reads both.
+
+    The tracker issue is sourced **once** (#132): if a plan.source declares ``role =
+    "tracker"`` it supplies the canonical ``notes.json`` itself, and the legacy
+    ``notes_cmd`` is skipped so the same issue isn't fetched and stored twice.
     """
     from . import leaves  # lazy: leaves imports sources via do_plan; avoid an import cycle
 
-    leaves.ensure_notes(cfg, d)  # legacy [tracker].notes_cmd → notes.json (#65), unchanged
-    if not cfg.plan_sources:
+    plan_sources = cfg.plan_sources or []
+    # Skip the legacy notes_cmd when a plan.source is the declared tracker thread —
+    # otherwise the issue is fetched twice (notes_cmd AND the provider) and both copies
+    # land in the bundle (#132). notes_cmd stays as back-compat for projects with none.
+    if not any(_is_tracker_source(s) for s in plan_sources):
+        leaves.ensure_notes(cfg, d)  # legacy [tracker].notes_cmd → notes.json (#65)
+    if not plan_sources:
         return
     sources_dir = d / "sources"
     issue_id = d.name.removeprefix("issue_")
-    for i, spec in enumerate(cfg.plan_sources):
+    for i, spec in enumerate(plan_sources):
         kind = (spec.get("type") or "").strip().lower()
         provider = _PROVIDERS.get(kind)
         if provider is None:
@@ -72,8 +89,26 @@ def _run_capture(cmd: list[str], cwd: Path) -> tuple[int, str]:
     return r.returncode, (r.stdout or "")
 
 
+def _is_tracker_source(spec: dict) -> bool:
+    """True iff this plan.source declares itself the tracker thread (``role =
+    "tracker"``) — a github/gitlab/command source that supplies the canonical
+    ``notes.json``, making the legacy ``notes_cmd`` redundant (#132)."""
+    return (spec.get("role") or "").strip().lower() == "tracker"
+
+
+def _tracker_dest(d: Path, sources_dir: Path, spec: dict, default_name: str) -> Path:
+    """Where a fetched issue is written: the canonical ``d/notes.json`` when this source
+    is the declared tracker thread (so the planner / id-seeded flow find it), else its
+    default file under ``sources/`` (supplementary context). #132."""
+    if _is_tracker_source(spec):
+        return d / "notes.json"
+    return sources_dir / (spec.get("out") or default_name)
+
+
 def _github(cfg: Config, d: Path, out: Path, issue_id: str, spec: dict, i: int) -> None:
-    """`gh issue view <id>` as JSON. A ``repo`` in the spec scopes it; absent ⇒ gh's default."""
+    """`gh issue view <id>` as JSON. A ``repo`` in the spec scopes it; absent ⇒ gh's
+    default. ``role = "tracker"`` writes the canonical ``notes.json`` (#132) instead of
+    ``sources/github-<id>.json`` so this provider can be the single tracker source."""
     fields = spec.get("fields", "title,body,comments,url,state,labels")
     cmd = ["gh", "issue", "view", issue_id, "--json", fields]
     if spec.get("repo"):
@@ -83,7 +118,7 @@ def _github(cfg: Config, d: Path, out: Path, issue_id: str, spec: dict, i: int) 
         print(f"sources: {d.name} — `gh issue view {issue_id}` produced nothing (rc {rc}); "
               "skipping github source", file=sys.stderr)
         return
-    (out / f"github-{issue_id}.json").write_text(text, encoding="utf-8")
+    _tracker_dest(d, out, spec, f"github-{issue_id}.json").write_text(text, encoding="utf-8")
 
 
 def _gitlab(cfg: Config, d: Path, out: Path, issue_id: str, spec: dict, i: int) -> None:
@@ -95,7 +130,7 @@ def _gitlab(cfg: Config, d: Path, out: Path, issue_id: str, spec: dict, i: int) 
         print(f"sources: {d.name} — `glab issue view {issue_id}` produced nothing (rc {rc}); "
               "skipping gitlab source", file=sys.stderr)
         return
-    (out / f"gitlab-{issue_id}.txt").write_text(text, encoding="utf-8")
+    _tracker_dest(d, out, spec, f"gitlab-{issue_id}.txt").write_text(text, encoding="utf-8")
 
 
 def _csv(cfg: Config, d: Path, out: Path, issue_id: str, spec: dict, i: int) -> None:
@@ -145,7 +180,9 @@ def _file(cfg: Config, d: Path, out: Path, issue_id: str, spec: dict, i: int) ->
 def _command(cfg: Config, d: Path, out: Path, issue_id: str, spec: dict, i: int) -> None:
     """The escape hatch — a ``.format(id=)`` shell command (exactly today's notes_cmd). It
     runs with ``$PDCA_BUNDLE`` (the bundle) and ``$PDCA_SOURCES`` (sources/) set and is
-    responsible for writing its own output there. Captured stdout, if any, is also saved."""
+    responsible for writing its own output there. Captured stdout, if any, is also saved —
+    to the canonical ``notes.json`` when ``role = "tracker"`` (#132, so a notes_cmd moved
+    into a tracker plan.source still seeds notes.json), else to ``sources/<out>``."""
     cmd = str(spec.get("cmd", "")).format(id=issue_id)
     if not cmd:
         return
@@ -156,7 +193,14 @@ def _command(cfg: Config, d: Path, out: Path, issue_id: str, spec: dict, i: int)
         print(f"sources: {d.name} — command source failed (rc {r.returncode}): "
               f"{(r.stderr or '').strip()}", file=sys.stderr)
         return
-    if spec.get("out") and (r.stdout or "").strip():
+    if _is_tracker_source(spec):
+        # A migrated notes_cmd writes $PDCA_BUNDLE/notes.json ITSELF (it may also print
+        # progress/logs to stdout). Only fall back to stdout when the command did NOT
+        # create notes.json — otherwise we'd clobber the real thread with log text.
+        notes = d / "notes.json"
+        if not notes.exists() and (r.stdout or "").strip():
+            notes.write_text(r.stdout, encoding="utf-8")
+    elif spec.get("out") and (r.stdout or "").strip():
         (out / str(spec["out"])).write_text(r.stdout, encoding="utf-8")
 
 
