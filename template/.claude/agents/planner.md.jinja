@@ -50,17 +50,19 @@ human confirms — quantity is theirs to decide, not yours.
 
 **Order the batch — set the scheduling fields (don't leave the order to chance).** When
 you brief several issues you are also deciding how they interleave: the flow runs the
-batch as a scheduled wave (docs 09). Before writing the briefs, map the batch's real
-shape — which issues build on another's change, and which touch the same files — then
-set, per brief, the three machine-parsed scheduling fields:
+batch as an ordered sequence of dependency **waves** (docs 09). Each wave's bundles build
+in parallel; its accepted work is folded onto the base the next wave builds on, so a
+dependent completes in the same run. Before writing the briefs, map the batch's real shape
+— which issues build on another's change, and which touch the same files — then set, per
+brief, the two machine-parsed scheduling fields:
 
-- **`Depends on:`** — a genuine build-on dependency; the flow holds this bundle until
-  each prereq is COMPLETE.
-- **`Depends on (merged):`** — the stricter form: hold until the prereq's PR is *merged*;
-  use when this issue edits files a prereq also edits, so Do builds on the merged result
-  instead of colliding at merge time.
-- **`Conflicts with:`** — no dependency, but two issues edit a shared file, so they must
-  never run in the same concurrent wave.
+- **`Depends on:`** — the PRIMARY field: a genuine build-on dependency. This bundle lands
+  in a LATER wave than each prereq and builds on its accepted result. (This subsumes the
+  old `Depends on (merged):` / `Stacks on:` — both are now just `Depends on`: the wave fold
+  gives the dependent the prereq's diff without waiting for a human merge. Don't reach for
+  them.)
+- **`Conflicts with:`** — no dependency, but two issues edit a shared file: they are
+  scheduled into DIFFERENT waves, never built blind on the same base.
 
 Set these from the batch's *real* dependency/conflict structure — an unordered batch
 either serialises needlessly or lets two bundles collide on a shared file and waste a Do.

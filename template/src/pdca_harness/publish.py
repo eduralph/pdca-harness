@@ -36,6 +36,10 @@ from .config import Config
 
 COMMIT_MSG = "commit-msg.txt"
 PR_BODY = "pr-description.md"
+# The wave driver records the run's integration branch here for a wave>0 bundle, so its
+# Do worktree and stacked PR base off the prior waves' folded work (#wave-model); absent ⇒
+# build / open the PR off the target base.
+STACK_BASE_FILE = "stack-base"
 
 
 def publish(
@@ -432,14 +436,29 @@ def _publish_record(d: Path) -> dict | None:
         return None
 
 
-def _stack_base_branch(cfg: Config, d: Path) -> str | None:
-    """The parent branch a ``Stacks on:`` bundle stacks onto, or None (issue #123).
+def write_stack_base(d: Path, branch: str) -> None:
+    """Record the integration branch a wave>0 bundle stacks on, so its Do worktree and
+    stacked PR base off the prior waves' folded work (read by :func:`_stack_base_branch`)."""
+    (d / STACK_BASE_FILE).write_text(branch + "\n", encoding="utf-8")
 
-    The first declared ``Stacks on`` prereq's *published* branch (from its publish.json) —
-    the branch the dependent's worktree bases off and its PR targets (``gh --base``). None
-    when the bundle doesn't stack, or the prereq hasn't published yet (the flow schedules
-    a stacked dependent only once its prereq is COMPLETE-with-a-branch, so in-flow it
-    resolves)."""
+
+def _read_stack_base(d: Path) -> str:
+    """The recorded integration branch for a wave>0 bundle, or "" (absent ⇒ build off base)."""
+    p = d / STACK_BASE_FILE
+    return p.read_text(encoding="utf-8").strip() if p.exists() else ""
+
+
+def _stack_base_branch(cfg: Config, d: Path) -> str | None:
+    """The branch a stacked bundle bases off (worktree + ``gh --base``), or None.
+
+    The wave driver's run-scoped integration branch — recorded in the bundle's
+    ``stack-base`` file (#wave-model) — wins: a wave>0 bundle builds + opens its PR on the
+    prior waves' folded work. Else the legacy single-chain ``Stacks on:`` (#123) parent
+    branch from its publish.json, for a brief that still hand-declares a stack. None when
+    neither applies (or the legacy prereq hasn't published yet)."""
+    wave_base = _read_stack_base(d)
+    if wave_base:
+        return wave_base
     parents = brief.stacks_on(d / "brief.md")
     if not parents:
         return None

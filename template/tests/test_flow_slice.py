@@ -15,7 +15,7 @@ import re
 import shutil
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -789,39 +789,40 @@ class DeclaredOrdering(unittest.TestCase):
         self.assertEqual(seen.get("zz_state"), state.COMPLETE)  # ZZ done before AA built
         self.assertTrue(all(s == state.COMPLETE for s in results.values()))
 
-    def test_merge_gated_dependent_held_until_prereq_merged(self) -> None:
-        # MB needs MA *merged*, not merely COMPLETE (#107). MA is in the batch and reaches
-        # COMPLETE (a draft PR) this run, but the flow never merges it — so MB is held and
-        # left for a later `pdca flow` run, after a human merges MA's PR.
+    def test_merge_gated_dependent_completes_after_prereq_in_one_run(self) -> None:
+        # `Depends on (merged)` (#107) is SUBSUMED by the wave model: MB lands in the wave
+        # after MA, so MA reaches COMPLETE first and MB completes in the SAME run — no human
+        # merge between runs. The recorded beat order shows MA's first beat before MB's.
         self._brief("MA")
         self._brief("MB", depends_on_merged="MA")
-        driven: list[str] = []
-        real = driver.run_issue
+        order: list[str] = []
+        real = driver.advance
 
         def spy(d: Path, cfg: Config):
-            driven.append(d.name)
+            if d.name not in order:
+                order.append(d.name)
             return real(d, cfg)
 
-        driver.run_issue = spy
+        driver.advance = spy
         try:
-            with mock.patch.object(flow.merged, "is_merged", return_value=False):
-                results = flow.flow_ids(self.cfg, ["MA", "MB"], do_publish=False,
-                                        do_act=False, today="2026-06-04")
+            results = flow.flow_ids(self.cfg, ["MA", "MB"], do_publish=False,
+                                    do_act=False, today="2026-06-04")
         finally:
-            driver.run_issue = real
-        self.assertEqual(results.get("MA"), state.COMPLETE)   # prereq completes
-        self.assertNotIn("issue_MB", driven)                  # dependent never built
-        self.assertNotEqual(results.get("MB"), state.COMPLETE)
+            driver.advance = real
+        self.assertEqual(results.get("MA"), state.COMPLETE)
+        self.assertEqual(results.get("MB"), state.COMPLETE)              # one run now
+        self.assertLess(order.index("issue_MA"), order.index("issue_MB"))  # MA's wave first
 
-    def test_merge_gated_dependent_proceeds_once_prereq_merged(self) -> None:
-        # With the prereq's PR merged, the same gate lets the dependent run to COMPLETE.
+    def test_dependent_on_already_complete_prereq_runs_alone(self) -> None:
+        # A dependent whose prereq is already COMPLETE on disk (from an earlier run) is
+        # driven on its own: the wave leveler accepts an out-of-batch COMPLETE prereq, and
+        # _runnable lets the dependent build on the base it's already merged into.
         self._brief("PA")
         flow.flow_ids(self.cfg, ["PA"], do_publish=False, do_act=False, today="2026-06-04")
         self.assertEqual(state.state(self.cfg.bundle("PA")), state.COMPLETE)
-        self._brief("PB", depends_on_merged="PA")
-        with mock.patch.object(flow.merged, "is_merged", return_value=True):
-            results = flow.flow_ids(self.cfg, ["PB"], do_publish=False, do_act=False,
-                                    today="2026-06-04")
+        self._brief("PB", depends_on="PA")
+        results = flow.flow_ids(self.cfg, ["PB"], do_publish=False, do_act=False,
+                                today="2026-06-04")
         self.assertEqual(results.get("PB"), state.COMPLETE)
 
     def test_stacked_chain_completes_in_one_run(self) -> None:
@@ -972,6 +973,185 @@ class DeclaredOrdering(unittest.TestCase):
         with self.assertRaises(ValueError):
             flow.flow_ids(self.cfg, ["DEP1"], do_publish=False, do_act=False,
                           today="2026-06-04")
+
+
+class WaveModel(unittest.TestCase):
+    """The wave-based batch driver (#wave-model): a dependent batch runs as an ordered
+    sequence of waves, each wave's accepted work folded onto a run-scoped integration
+    branch the next builds on; a discontinued prerequisite drops its dependents; an
+    undeclared same-wave file overlap is flagged; the final / single wave folds nothing."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _brief(self, iid: str, *, depends_on: str = "") -> Path:
+        d = self.cfg.bundle(iid)
+        d.mkdir(parents=True)
+        body = _TOY_BRIEF.format(slug=iid.lower())
+        if depends_on:
+            body += f"- **Depends on:** {depends_on}\n"
+        (d / "brief.md").write_text(body, encoding="utf-8")
+        return d
+
+    def test_integration_fold_runs_once_between_two_waves(self) -> None:
+        # WB depends on WA → wave 0 = [WA], wave 1 = [WB]. After wave 0 completes its
+        # accepted work folds onto the integration branch (dry-run, stub publisher); the
+        # final wave folds nothing. The fold's cumulative `accepted` is exactly [WA].
+        self._brief("WA")
+        self._brief("WB", depends_on="WA")
+        calls: list[list[str]] = []
+        real = flow.integrate.fold
+
+        def spy(cfg: Config, accepted: list, *, dry_run: bool = False):
+            calls.append([d.name for d in accepted])
+            return real(cfg, accepted, dry_run=dry_run)
+
+        flow.integrate.fold = spy
+        try:
+            results = flow.flow_ids(self.cfg, ["WA", "WB"], do_act=False, today="2026-06-04")
+        finally:
+            flow.integrate.fold = real
+        self.assertEqual(results.get("WA"), state.COMPLETE)
+        self.assertEqual(results.get("WB"), state.COMPLETE)   # completes in one run
+        self.assertEqual(calls, [["issue_WA"]])               # folded once, after wave 0
+
+    def test_single_wave_folds_nothing(self) -> None:
+        # No deps → one wave → the last wave, which never folds (STOP discipline holds).
+        self._brief("SOLO")
+        calls: list[int] = []
+        real = flow.integrate.fold
+        flow.integrate.fold = lambda *a, **k: calls.append(1) or real(*a, **k)
+        try:
+            flow.flow_ids(self.cfg, ["SOLO"], do_act=False, today="2026-06-04")
+        finally:
+            flow.integrate.fold = real
+        self.assertEqual(calls, [])
+
+    def test_no_publish_does_not_fold(self) -> None:
+        # --no-publish sequences nothing: every wave drives to COMPLETE but no fold runs.
+        self._brief("NA")
+        self._brief("NB", depends_on="NA")
+        calls: list[int] = []
+        real = flow.integrate.fold
+        flow.integrate.fold = lambda *a, **k: calls.append(1) or real(*a, **k)
+        try:
+            results = flow.flow_ids(self.cfg, ["NA", "NB"], do_publish=False,
+                                    do_act=False, today="2026-06-04")
+        finally:
+            flow.integrate.fold = real
+        self.assertEqual(calls, [])
+        self.assertTrue(all(s == state.COMPLETE for s in results.values()))
+
+    def test_discontinued_prereq_skips_dependent(self) -> None:
+        # DA is discontinued in wave 0; DB (depends on DA) can't build on a base missing
+        # DA's change, so wave 1 skips DB — it never reaches COMPLETE.
+        self._brief("DA")
+        self._brief("DB", depends_on="DA")
+
+        def signoff(cfg: Config, chunk: list) -> None:
+            for d in chunk:
+                tok = "discontinue\nout of scope\n" if d.name == "issue_DA" else "accept\n"
+                (d / leaves.SIGNOFF_DECISION).write_text(tok, encoding="utf-8")
+
+        orig = leaves.run_signoff_batch
+        leaves.run_signoff_batch = signoff
+        try:
+            results = flow.flow_ids(self.cfg, ["DA", "DB"], do_publish=False,
+                                    do_act=False, today="2026-06-04")
+        finally:
+            leaves.run_signoff_batch = orig
+        self.assertEqual(results.get("DA"), state.DISCONTINUED)
+        self.assertNotEqual(results.get("DB"), state.COMPLETE)   # skipped, never built
+
+    def test_overlap_audit_flags_shared_file(self) -> None:
+        # Two same-wave bundles whose patches touch a shared file but declare no conflict —
+        # an advisory warning (a Conflicts with the planner missed), never a stop.
+        a = self.cfg.bundle("OA")
+        a.mkdir(parents=True)
+        (a / "patch.diff").write_text(
+            "diff --git a/shared.py b/shared.py\n@@ -1 +1 @@\n-x\n+y\n", encoding="utf-8")
+        b = self.cfg.bundle("OB")
+        b.mkdir(parents=True)
+        (b / "patch.diff").write_text(
+            "diff --git a/shared.py b/shared.py\n@@ -5 +5 @@\n-p\n+q\n", encoding="utf-8")
+        with redirect_stderr(io.StringIO()) as err:
+            flow._audit_wave_overlap([a, b])
+        self.assertIn("shared.py", err.getvalue())
+        self.assertIn("undeclared conflict", err.getvalue())
+
+    def test_overlap_audit_silent_on_disjoint(self) -> None:
+        a = self.cfg.bundle("PA")
+        a.mkdir(parents=True)
+        (a / "patch.diff").write_text("diff --git a/one.py b/one.py\n", encoding="utf-8")
+        b = self.cfg.bundle("PB")
+        b.mkdir(parents=True)
+        (b / "patch.diff").write_text("diff --git a/two.py b/two.py\n", encoding="utf-8")
+        with redirect_stderr(io.StringIO()) as err:
+            flow._audit_wave_overlap([a, b])
+        self.assertEqual(err.getvalue(), "")
+
+    def test_merge_mode_routes_to_merge_wave_not_fold(self) -> None:
+        # wave_mode="merge" (opt-in): the driver gh-merges each non-final wave's PRs
+        # instead of folding onto an integration branch. merge_wave is stubbed to 0 (no
+        # real gh); the next wave then builds on the base (which a real merge would advance).
+        self.cfg.wave_mode = "merge"
+        self._brief("GA")
+        self._brief("GB", depends_on="GA")
+        merge_calls: list[list[str]] = []
+        fold_calls: list[int] = []
+        real_merge, real_fold = flow.merge.merge_wave, flow.integrate.fold
+        flow.merge.merge_wave = lambda cfg, bundles, **k: (
+            merge_calls.append([d.name for d in bundles]), 0)[1]
+        flow.integrate.fold = lambda *a, **k: (fold_calls.append(1), (None, None))[1]
+        try:
+            results = flow.flow_ids(self.cfg, ["GA", "GB"], do_act=False, today="2026-06-04")
+        finally:
+            flow.merge.merge_wave, flow.integrate.fold = real_merge, real_fold
+        self.assertEqual(results.get("GA"), state.COMPLETE)
+        self.assertEqual(results.get("GB"), state.COMPLETE)
+        self.assertEqual(merge_calls, [["issue_GA"]])   # merged after wave 0 only
+        self.assertEqual(fold_calls, [])                # fold not used in merge mode
+
+    def test_stack_base_file_round_trips(self) -> None:
+        # The flow records the integration branch for a wave>0 bundle; worktree + publish
+        # read it via publish._stack_base_branch (the generalised stack base).
+        d = self._brief("SBX")
+        self.assertIsNone(flow.publish._stack_base_branch(self.cfg, d))
+        flow.publish.write_stack_base(d, "pdca-integration/main")
+        self.assertEqual(flow.publish._stack_base_branch(self.cfg, d), "pdca-integration/main")
+
+    def test_waves_command_prints_plan(self) -> None:
+        # `pdca waves` prints the computed wave plan without building (B3 observability).
+        self._brief("WX")
+        self._brief("WY", depends_on="WX")
+        with redirect_stdout(io.StringIO()) as out:
+            rc = cli._waves(self.cfg, ["WX", "WY"])
+        self.assertEqual(rc, 0)
+        self.assertIn("wave 0: WX", out.getvalue())
+        self.assertIn("wave 1: WY", out.getvalue())
+
+    def test_waves_command_reports_unschedulable(self) -> None:
+        self._brief("CZ1", depends_on="CZ2")
+        self._brief("CZ2", depends_on="CZ1")
+        with redirect_stderr(io.StringIO()) as err:
+            rc = cli._waves(self.cfg, ["CZ1", "CZ2"])
+        self.assertEqual(rc, 1)
+        self.assertIn("unschedulable", err.getvalue())
+
+    def test_publish_flag_marks_stacked_pr(self) -> None:
+        # A stacked PR's status flag shows ↑<integration-branch> so the human merges the
+        # stack bottom-up.
+        d = self._brief("SF")
+        (d / "publish.json").write_text(
+            '{"pr_url": "https://gh/pr/9", "base": "pdca-integration/main", '
+            '"mode": "stacked-pr"}', encoding="utf-8")
+        flag = cli._publish_flag(d)
+        self.assertIn("https://gh/pr/9", flag)
+        self.assertIn("↑pdca-integration/main", flag)
 
 
 class ProgName(unittest.TestCase):

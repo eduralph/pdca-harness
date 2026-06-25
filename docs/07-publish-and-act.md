@@ -37,6 +37,14 @@ ready — the harness never does. gramps' governance makes this explicit
 (INTEGRATION §10): *"Eduard opens fork PRs as draft, marks ready himself; builder
 commits and stops — no push/PR-open/ready-mark without explicit instruction."*
 
+This holds for a **batch**, too. A multi-id `pdca flow` runs the batch as dependency
+waves ([09 parallel lanes](../template/PCDA/quality-cycle/09-parallel-lanes.md)); in the
+default `stack` mode each wave's accepted work is folded onto a run-scoped integration
+branch the next wave builds on, and each dependent opens a **stacked** draft PR — the
+harness still never merges, so you review and merge the stack bottom-up yourself. Only the
+opt-in `[driver].wave_mode = "merge"` (own-repo / CD, where you hold merge rights on the
+base) relaxes this, `gh pr merge`-ing each wave before the next builds.
+
 In gramps' git history you can see cycles land this way — each result bundle gets
 a branch and a PR:
 
