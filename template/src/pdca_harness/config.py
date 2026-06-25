@@ -110,6 +110,13 @@ class Config:
     # an underpowered executor (e.g. min_iteration=2 → stronger, =3 → frontier). Empty ⇒
     # every attempt uses the default [leaves.builder].
     builder_escalation: list[dict] = field(default_factory=list)
+    # Difficulty-routed builder variants (issue #134): an OPEN list of per-bundle Do
+    # backends ([[leaves.builder_variant]] in pdca.toml), each {family, mode, argv, when}
+    # where when = {field, substring} matches a brief field (e.g. difficulty=high), like a
+    # gate target / advisory leaf. do_build routes the first matching variant; non-matching
+    # / absent fields fall back to the default [leaves.builder] (default-open — a missing
+    # difficulty tag never reduces capability). The escalation ladder overrides the variant.
+    builder_variants: list[dict] = field(default_factory=list)
     # Delegated gates (issue #67): a host runner that single-sources its own gates
     # (e.g. "cargo xtask"). A check's bare ``subcmd`` is run as ``<runner> <subcmd>``, so
     # PDCA orchestrates the host runner instead of re-declaring the gates. "" ⇒ inline only.
@@ -219,6 +226,14 @@ class Config:
             for spec in leaves.get("builder_escalation", [])
         ]
 
+        # Difficulty-routed builder variants (issue #134) — per-bundle backends keyed on a
+        # brief field via `when`. PDCA_LEAVES_MODE forces their mode too; "" inherits the
+        # default builder's mode in select_builder.
+        builder_variants = [
+            {**spec, "mode": mode_override or spec.get("mode", "")}
+            for spec in leaves.get("builder_variant", [])
+        ]
+
         # PDCA_BUNDLE_ROOT redirects bundles to a throwaway location so an offline
         # `rehearse` never collides with the real `results/` a live run would use.
         bundle_root = root / paths.get("bundle_root", "results")
@@ -271,6 +286,7 @@ class Config:
             gates_checks=gates_checks,
             advisory_leaves=advisory_leaves,
             builder_escalation=builder_escalation,
+            builder_variants=builder_variants,
             gates_runner=gates_runner,
             lanes=lanes,
             worktree=worktree,

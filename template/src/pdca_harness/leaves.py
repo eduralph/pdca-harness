@@ -379,20 +379,39 @@ def _leaf_from_spec(spec: dict, default: LeafConfig) -> LeafConfig:
     )
 
 
-def select_builder(d: Path, cfg: Config, n: int) -> LeafConfig:
-    """Pick the Do builder backend for attempt ``n`` (issue #135; #134 extends this).
+def _variant_applies(spec: dict, d: Path) -> bool:
+    """True iff this builder variant's ``when`` ({field, substring}) matches bundle ``d``'s
+    brief (issue #134) — modelled on :func:`_advisory_applies`. **Default-open**: a variant
+    with no condition, or whose field is absent/doesn't match, does NOT apply, so a missing
+    difficulty tag falls back to the default builder rather than silently reducing
+    capability."""
+    when = spec.get("when") or {}
+    needle = (when.get("substring") or "").lower()
+    if not needle:
+        return False
+    return needle in brief.field(d / "brief.md", when.get("field", "")).lower()
 
-    The default is ``[leaves.builder]``. The escalation ladder
-    (``[[leaves.builder_escalation]]``, keyed on ``min_iteration``) bumps to a stronger
-    backend once a bundle has iterated — the entry with the highest ``min_iteration`` ≤
-    ``n`` wins — so a hard bundle can't loop forever on an underpowered executor. ``d`` is
-    unused here but is part of the seam #134 keys on (the brief's difficulty field);
-    escalation overrides any difficulty pick."""
+
+def select_builder(d: Path, cfg: Config, n: int) -> LeafConfig:
+    """Pick the Do builder backend for bundle ``d`` on attempt ``n`` (issues #134/#135).
+
+    Two layers over the default ``[leaves.builder]``:
+      1. **Difficulty-routed variant (#134)** — the first ``[[leaves.builder_variant]]``
+         whose ``when`` matches the brief (e.g. difficulty=high) wins; default-open, so an
+         absent/unknown field keeps the default.
+      2. **Escalation ladder (#135)** — the entry with the highest ``min_iteration`` ≤ ``n``
+         **overrides the variant**, so a bundle that iterates escalates regardless of its
+         self-reported difficulty (a hard bundle mis-rated "low" can't loop forever on an
+         underpowered executor)."""
     builder = cfg.builder
+    for spec in cfg.builder_variants:  # 1. difficulty routing (first match wins)
+        if _variant_applies(spec, d):
+            builder = _leaf_from_spec(spec, cfg.builder)
+            break
     chosen = -1
-    for spec in cfg.builder_escalation:
+    for spec in cfg.builder_escalation:  # 2. escalation OVERRIDES the difficulty pick
         threshold = int(spec.get("min_iteration", 0))
-        if threshold <= n and threshold > chosen:
+        if chosen < threshold <= n:
             chosen = threshold
             builder = _leaf_from_spec(spec, cfg.builder)
     return builder
@@ -426,9 +445,12 @@ def _record_loop_attempt(d: Path, n: int, builder: LeafConfig) -> None:
 
 
 def do_build(d: Path, cfg: Config) -> None:
-    if cfg.builder.mode == "command":
-        n = attempt_no(d)
-        builder = select_builder(d, cfg, n)  # escalate-on-iterate (#135); difficulty (#134)
+    # Route the builder FIRST, then dispatch on the SELECTED backend's mode — a variant /
+    # escalation entry may set its own mode, so keying the command-vs-stub decision on
+    # cfg.builder.mode would run a command variant as a stub (or vice versa) (#134).
+    n = attempt_no(d)
+    builder = select_builder(d, cfg, n)  # escalate-on-iterate (#135); difficulty (#134)
+    if builder.mode == "command":
         _record_loop_attempt(d, n, builder)
         # Isolate Do in a per-cycle worktree off the base (issue #94) so the host's
         # primary checkout is never mutated. Best-effort: None ⇒ edit in place, as before.
