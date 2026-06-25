@@ -31,12 +31,29 @@ def parse_fields(brief_path: Path) -> dict[str, str]:
     return fields
 
 
+def _is_placeholder(value: str) -> bool:
+    """True if a value is still the template's unfilled ``<…>`` placeholder, so a
+    consumer treats it as absent. Without this, a substring gate matches the placeholder
+    text itself — e.g. an untouched ``Difficulty: <low | medium | high>`` would fire a
+    ``substring="high"`` advisory/variant, defeating the absent-is-safe default (#133).
+
+    A field value is parsed line-by-line, so a *multi-line* placeholder yields only its
+    first line — which opens with ``<`` but never closes. So a value counts as a
+    placeholder when it opens with ``<`` and either closes with ``>`` (a single-line
+    placeholder) or has no ``>`` at all (the unterminated first line of a multi-line one).
+    A partly-filled value (no leading ``<``, or a closed ``<x>`` mid-text) is kept."""
+    v = value.strip()
+    return v.startswith("<") and (v.endswith(">") or ">" not in v)
+
+
 def field(brief_path: Path, *labels: str, default: str = "") -> str:
-    """First matching field value among ``labels`` (lowercased), else ``default``."""
+    """First matching field value among ``labels`` (lowercased), else ``default``. A field
+    left as its ``<…>`` template placeholder reads as absent (falls through to ``default``)."""
     fields = parse_fields(brief_path)
     for label in labels:
-        if label.lower() in fields:
-            return fields[label.lower()]
+        val = fields.get(label.lower())
+        if val and not _is_placeholder(val):
+            return val
     return default
 
 

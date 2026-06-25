@@ -22,6 +22,10 @@
 - **Depends on (merged):** <id>[, <id>…]   (optional — ids only, any trailing note is ignored; hold until each prereq's PR is MERGED, not just COMPLETE; use when this edits files a prereq also edits; docs 09)
 - **Conflicts with:** <id>[, <id>…]   (optional — ids only, any trailing note is ignored; never co-schedule in one wave; docs 09)
 - **Scope:** <the one logical change this realizes> / out of scope: <what is excluded>
+- **Difficulty:** <`low` | `medium` | `high` — the change's **blast-radius / cross-file
+  reach** (files/call-sites touched and how far effects propagate, what a diff-reviewer
+  must hold in view), NOT edge-case density. Routes the Do backend and review depth
+  (issues #133/#134). Optional; absent/unknown is the safe default — nothing is skipped.>
 - **Test file:** <path where the regression test ships — must fail pre-change, pass post-change>
 - **Citations expected:** Do must cite path:line on the target branch AND the Planning artifact for every change.
 - **Disposition hint:** <likely-fix | likely-close | … see brief.md.tpl for the full set>

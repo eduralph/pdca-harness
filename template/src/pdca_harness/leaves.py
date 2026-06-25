@@ -271,7 +271,9 @@ def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
         "plan ALREADY lives in a host artifact (an ADR / proposal / normative spec): the "
         "brief then POINTS at that document (a `Planning artifact:` reference) instead of "
         "restating it. Keep the parsed `- **Label:** value` field shape; resolve the repo + "
-        "branch target per INTEGRATION §2. One bundle = one brief.md. Plan only."
+        "branch target per INTEGRATION §2; set `Difficulty` (the fix's blast-radius / "
+        "cross-file reach, NOT edge-case density) so Do/review routing can key on it. "
+        "One bundle = one brief.md. Plan only."
     )
 
 
@@ -316,7 +318,8 @@ def _plan_batch_prompt(cfg: Config, csv: str | None, ids: list[str] | None = Non
     geps_tpl = cfg.templates_dir / "design-proposal.md.tpl"
     tpl_line = (
         f"use the fitting template: a bug fix → {fix_tpl}; a feature / enhancement → "
-        f"{geps_tpl}. Keep the parsed `- **Label:** value` field shape")
+        f"{geps_tpl}. Keep the parsed `- **Label:** value` field shape; set `Difficulty` "
+        "(the change's blast-radius / cross-file reach, NOT edge-case density) for routing")
     if ids:
         listing = ", ".join(ids)
         return (

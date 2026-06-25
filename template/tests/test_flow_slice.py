@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -633,8 +634,12 @@ class PlanPointerBrief(unittest.TestCase):
         self.d = self.cfg.bundle("ADR")
         self.d.mkdir(parents=True)
         # An authored pointer-brief: fill the slug so it's a real PLANNED brief, not the
-        # raw template (a placeholder-slug template now reads UNPLANNED, #113).
+        # raw template (a placeholder-slug template now reads UNPLANNED, #113). Fill the
+        # Planning artifact too — an UNFILLED <…> placeholder now reads as absent (#133),
+        # so a real authored pointer must give it a concrete value.
         text = POINTER_TPL.read_text(encoding="utf-8").replace("<short-kebab-slug>", "adr-pointer")
+        text = re.sub(r"(\*\*Planning artifact:\*\*) <.*?>", r"\1 docs/adr/0042-thing.md",
+                      text, flags=re.DOTALL)
         (self.d / "brief.md").write_text(text, encoding="utf-8")
 
     def tearDown(self) -> None:
