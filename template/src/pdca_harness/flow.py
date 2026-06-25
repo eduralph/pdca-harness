@@ -24,7 +24,7 @@ import sys
 import threading
 from pathlib import Path
 
-from . import act, brief, driver, lane, leaves, merged, publish, queue, signoff, state, waves
+from . import act, driver, integrate, lane, leaves, publish, queue, signoff, state, waves
 from .config import Config
 
 
@@ -193,69 +193,6 @@ def flow(
 
 
 # ----------------------------------------------------------------------------
-# Declared inter-bundle ordering (docs 09, issue #36). Bundles may declare
-# `Depends on:` / `Conflicts with:` in their brief; the scheduler gates dispatch on
-# them. With NO fields declared every bundle is always eligible, so dispatch is
-# byte-for-byte today's sort-by-name pool.
-# ----------------------------------------------------------------------------
-def _prereq_published(cfg: Config, dep_id: str) -> bool:
-    """True iff prereq ``dep_id`` is COMPLETE and has a published branch (issue #123) — the
-    foundation a ``Stacks on`` dependent builds + publishes on top of."""
-    d = cfg.bundle(dep_id)
-    if state.state(d) != state.COMPLETE:
-        return False
-    rec = publish._publish_record(d)
-    return bool(rec and rec.get("branch"))
-
-
-def _stacked_snapshot(cfg: Config, bundles: list[Path]) -> set[str]:
-    """Prereq ids whose ``Stacks on`` foundation is ready now — COMPLETE with a published
-    branch (issue #123). A stacked dependent is eligible once its parent has produced a
-    branch to build on (not waiting for a *merge*, unlike `Depends on (merged)`), so the
-    whole chain completes in one run. Computed once per pass, like :func:`_merged_snapshot`."""
-    wanted: set[str] = set()
-    for b in bundles:
-        bp = b / "brief.md"
-        if bp.exists():
-            wanted.update(brief.stacks_on(bp))
-    return {dep for dep in wanted if _prereq_published(cfg, dep)}
-
-
-def _merged_snapshot(cfg: Config, bundles: list[Path]) -> set[str]:
-    """Ids whose ``Depends on (merged)`` prereq is merged right now (issue #107).
-
-    Computed **once per build pass** rather than inside the dispatch loop, so the merge
-    check (a ``gh`` call per distinct prereq) stays out of the lane pool's lock and isn't
-    repeated per eligibility test. A prereq is never merged mid-run (the flow only opens
-    draft PRs), so a per-pass snapshot is exact — a held dependent is picked up by a later
-    ``pdca flow`` run, after its prereq's PR merges.
-    """
-    wanted: set[str] = set()
-    for b in bundles:
-        bp = b / "brief.md"
-        if bp.exists():
-            wanted.update(brief.depends_on_merged(bp))
-    return {dep for dep in wanted if merged.is_merged(cfg, dep)}
-
-
-def _deps_met(cfg: Config, d: Path, merged_ids: set[str], stacked_ids: set[str]) -> bool:
-    """True iff every prerequisite ``d`` declares is satisfied.
-
-    ``Depends on`` prereqs must be COMPLETE; ``Depends on (merged)`` prereqs must be in
-    ``merged_ids`` (this pass's merged set, #107); ``Stacks on`` prereqs must be in
-    ``stacked_ids`` (COMPLETE-with-a-published-branch, #123). An unplanned/reopened bundle
-    (no brief yet) declares nothing, so it is eligible; its deps are honoured on re-plan.
-    """
-    bp = d / "brief.md"
-    if not bp.exists():
-        return True
-    return (all(state.state(cfg.bundle(dep)) == state.COMPLETE
-                for dep in brief.depends_on(bp))
-            and all(dep in merged_ids for dep in brief.depends_on_merged(bp))
-            and all(dep in stacked_ids for dep in brief.stacks_on(bp)))
-
-
-# ----------------------------------------------------------------------------
 # The unattended band: advance every bundle through Do + Check (docs 09), **one beat at
 # a time across the wave** — all Dos, then all Checks, then all SUMMARY assembles —
 # mirroring the batched Plan (one session) and sign-off (chunked sessions), instead of
@@ -280,63 +217,57 @@ def _running(d: Path) -> bool:
 
 
 def _build_all(cfg: Config, bundles: list[Path]) -> None:
-    """Beat-synchronise the wave through Do+Check to AWAITING_SIGNOFF / COMPLETE.
+    """Beat-synchronise one wave through Do+Check to AWAITING_SIGNOFF / COMPLETE.
 
     A serial Plan pre-pass runs first (an ``iterate-plan`` may have re-opened a bundle to
     UNPLANNED, and the Plan leaf is **interactive** — it must never enter the sweep/pool).
-    Then advance one beat per still-running, deps-met bundle per round until nothing
-    progresses: serial by default, or fanned across ``cfg.lanes`` workers when configured.
+    Then advance one beat per still-running bundle per round until nothing progresses:
+    serial by default, or fanned across ``cfg.lanes`` workers when configured. Every bundle
+    in a wave is eligible — the wave holds only mutually-independent work
+    (:func:`waves.compute_waves`), so there is no in-wave dependency to gate on; a prior
+    wave's accepted work has already been folded onto the base this wave builds on.
     """
-    # Eligibility snapshots once per pass — keep the gh merge check (#107) and the
-    # stacked-branch check (#123) out of the beat sweep / lane-pool dispatch; threaded into
-    # _deps_met below.
-    merged_ids = _merged_snapshot(cfg, bundles)
-    stacked_ids = _stacked_snapshot(cfg, bundles)
     # Serial Plan pre-pass — the interactive Plan beat must never enter the sweep/pool.
     for d in bundles:
         _isolate(d, "plan", lambda d=d: _plan_if_unplanned(cfg, d, None))
     if cfg.lanes <= 1 or len(bundles) <= 1:
-        _beat_sweep_serial(cfg, bundles, merged_ids, stacked_ids)
+        _beat_sweep_serial(cfg, bundles)
     else:
-        _beat_sweep_pooled(cfg, bundles, merged_ids, stacked_ids)
+        _beat_sweep_pooled(cfg, bundles)
 
 
-def _beat_sweep_serial(cfg: Config, bundles: list[Path], merged_ids: set[str],
-                       stacked_ids: set[str]) -> None:
-    """Round-robin one beat per still-running, deps-met bundle (sort-by-name) until no
-    bundle progresses — so the wave advances all Dos, then all Checks, then all assembles.
-    A dep-blocked bundle simply isn't advanced (a later pass picks it up once its prereq
-    is COMPLETE / merged / published); a bundle whose beat raises drops out (isolated)."""
+def _beat_sweep_serial(cfg: Config, bundles: list[Path]) -> None:
+    """Round-robin one beat per still-running bundle (sort-by-name) until no bundle
+    progresses — so the wave advances all Dos, then all Checks, then all assembles. A
+    bundle whose beat raises drops out (isolated); progress is the termination condition."""
     while True:
         progressed = False
         for d in bundles:
-            if (_running(d) and _deps_met(cfg, d, merged_ids, stacked_ids)
-                    and _advance_one(cfg, d)):
+            if _running(d) and _advance_one(cfg, d):
                 progressed = True
         if not progressed:
             return
 
 
-def _beat_sweep_pooled(cfg: Config, bundles: list[Path], merged_ids: set[str],
-                       stacked_ids: set[str]) -> None:
+def _beat_sweep_pooled(cfg: Config, bundles: list[Path]) -> None:
     """Pooled beat sweep: each round fans one beat across ``min(lanes, n)`` lane-pinned
-    workers, conflict-aware, then **joins (a barrier per beat)** before the next round.
+    workers, then **joins (a barrier per beat)** before the next round.
 
     Each bundle is pinned to a **stable lane slot for the whole sweep**, so its per-cycle
     worktree (#94, keyed by slot) is the same across its Do and Check beats even though
-    beats are in different rounds — a bundle must not change slots between beats. Conflicts
-    (#36) are serialised through a shared in-flight set so two bundles that edit a shared
-    resource are never advanced concurrently, on any slots."""
+    beats are in different rounds — a bundle must not change slots between beats. The
+    conflict map (#36) still serialises any two bundles that name each other in
+    ``Conflicts with``; within a wave that map is normally empty (conflicts are split into
+    separate waves by :func:`waves.compute_waves`), so the pool fans freely."""
     conflicts = waves.conflict_map(cfg, bundles)
     n_lanes = min(cfg.lanes, len(bundles))
     slot_of: dict[str, int] = {}  # bundle name → its fixed lane slot (worktree affinity)
     while True:
-        eligible = [d for d in bundles
-                    if _running(d) and _deps_met(cfg, d, merged_ids, stacked_ids)]
+        eligible = [d for d in bundles if _running(d)]
         if not eligible:
             return
         if not _run_beat_round_pooled(cfg, eligible, conflicts, slot_of, n_lanes):
-            return  # nothing progressed (all dep-blocked / failing) — leave for a later pass
+            return  # nothing progressed (all failing) — leave for a later pass
 
 
 def _run_beat_round_pooled(
@@ -393,8 +324,77 @@ def _publish_bundle(cfg: Config, d: Path, *, by: str, today: str) -> None:
 
 
 # ----------------------------------------------------------------------------
-# Shared multi-bundle driver: build all → cheap-first sign-off → publish → Act once.
+# Shared multi-bundle driver: compute waves → per wave (drive → cheap-first sign-off →
+# publish → fold onto the integration branch the next wave builds on) → Act once (docs 09).
 # ----------------------------------------------------------------------------
+def _runnable(cfg: Config, wave: list[Path]) -> list[Path]:
+    """Drop a wave bundle whose declared prerequisite never reached COMPLETE — e.g. one
+    DISCONTINUED in an earlier wave. Such a dependent can't build on a base missing its
+    prerequisite's change, so it is skipped loudly; since it never completes, its own
+    dependents fall out of later waves the same way (the skip cascades)."""
+    runnable: list[Path] = []
+    for d in wave:
+        bp = d / "brief.md"
+        unmet = [dep for dep in (waves.declared_deps(bp) if bp.exists() else [])
+                 if state.state(cfg.bundle(dep)) != state.COMPLETE]
+        if unmet:
+            print(f"flow: {d.name} skipped — prerequisite(s) not COMPLETE "
+                  f"({', '.join(unmet)}); not built on a base missing them.", file=sys.stderr)
+        else:
+            runnable.append(d)
+    return runnable
+
+
+def _audit_wave_overlap(cfg: Config, wave: list[Path]) -> None:
+    """Advisory (#wave-model): flag two bundles in one wave whose patches touch a shared
+    file. A wave holds only non-conflicting work by construction, so any overlap is a
+    conflict the planner did not declare (it would otherwise have split them into separate
+    waves). Loud, but never a stop — the integration fold (and the optional re-gate) is the
+    hard check."""
+    touched = {d.name: waves.diff_files(d / "patch.diff") for d in wave}
+    touched = {n: fs for n, fs in touched.items() if fs}
+    names = sorted(touched)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            shared = touched[a] & touched[b]
+            if shared:
+                print(f"flow: ⚠ {a} and {b} both touch {', '.join(sorted(shared))} but "
+                      f"neither declares `Conflicts with` the other — a likely undeclared "
+                      f"conflict; review before merge.", file=sys.stderr)
+
+
+def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
+                max_passes: int = 10) -> None:
+    """Drive ONE wave's bundles to all-terminal (COMPLETE / DISCONTINUED) with iteration,
+    then the cheap-first sign-off restricted to the wave. Publishing and folding are the
+    caller's. The pass loop mirrors the prior single-batch driver: build-all
+    (beat-synchronised, isolated), then a chunked sign-off whose decisions are recorded
+    (``apply_now=False``) so an iterate-do doesn't rebuild mid-review — looping until the
+    wave makes no progress (an iterate-plan re-open #105 still counts as progress) or every
+    bundle is terminal."""
+    names = {b.name for b in wave}
+    for _ in range(max_passes):
+        before = [state.state(d) for d in wave]
+        _build_all(cfg, wave)
+        pending = [e.bundle for e in queue.awaiting_signoff(cfg) if e.bundle.name in names]
+        if not pending:
+            if [state.state(d) for d in wave] == before:
+                return  # genuinely stuck (all terminal / planner declined an UNPLANNED)
+            continue    # progress (e.g. an iterate-plan re-open) — give it another pass
+        for chunk in _chunks(pending, SIGNOFF_BATCH_SIZE):
+            try:
+                leaves.run_signoff_batch(cfg, chunk)
+            except Exception as exc:  # noqa: BLE001 — a dropped session is not fatal
+                print(f"flow: sign-off session over {[b.name for b in chunk]} failed "
+                      f"({type(exc).__name__}: {exc}); applying decisions written so far",
+                      file=sys.stderr)
+            for d in chunk:
+                _isolate(d, "sign-off", lambda d=d: _apply_decision(
+                    cfg, d, by=by, today=today, apply_now=False))
+        if all(state.state(d) in (state.COMPLETE, state.DISCONTINUED) for d in wave):
+            return
+
+
 def _drive_and_act(
     cfg: Config,
     bundles: list[Path],
@@ -405,80 +405,58 @@ def _drive_and_act(
     today: str,
     max_passes: int = 10,
 ) -> dict[str, str]:
-    """Drive a fixed set of in-flight bundles through the full cycle to Act.
+    """Drive a fixed set of in-flight bundles through the full cycle to Act, in waves.
 
-    The shared body of both batch entry points: each pass builds / gates / reviews
-    every bundle unattended, then walks the cheap-first sign-off queue
-    (:func:`queue.awaiting_signoff`) interactively, restricted to this set; iteration
-    re-loops. When all are COMPLETE, publish runs per accepted bundle (Check's closing
-    step; dry-run when the publisher leaf is stubbed) and Act runs **once** across the
-    batch — the endpoint is Act, like any single cycle, just fanned over several bundles.
+    The shared body of both batch entry points. :func:`waves.compute_waves` orders the
+    batch into dependency waves (rejecting a cycle / unresolved dep up front); each wave is
+    driven to sign-off, its accepted bundles published, and — in the default ``stack``
+    mode — its cumulative accepted work folded onto a run-scoped integration branch
+    (:func:`integrate.fold`) the **next** wave builds on. So a dependent builds on its
+    prerequisite's accepted result within one run, as a reviewable PR stack the human
+    merges (the harness never merges). Act runs **once** across the batch at the end.
+
+    ``--no-publish`` (``do_publish=False``) drives every wave to COMPLETE but sequences
+    nothing — no publish, no fold — so a later wave builds on the unchanged base.
     """
-    names = {b.name for b in bundles}
-    # Reject an unschedulable declared-ordering graph (cycle / unresolved dep) before any
-    # build touches a bundle (issue #36). No `Depends on` fields ⇒ no-op.
-    waves.check_dep_graph(cfg, bundles)
-    # Stack prerequisites (#123): bundles some other brief `Stacks on`. Each must publish
-    # its branch DURING the loop — not the deferred end-publish — so a dependent's next pass
-    # can base its worktree + PR on it. `published` dedups against the end-publish below.
-    stack_prereqs = {cfg.bundle(dep).name
-                     for b in bundles for dep in brief.stacks_on(b / "brief.md")}
+    wave_list = waves.compute_waves(cfg, bundles)  # validates (raises) + levels the batch
+    last = len(wave_list) - 1
     published: set[str] = set()
-    for _ in range(max_passes):
-        # Build-all (unattended): advance each bundle to AWAITING_SIGNOFF / COMPLETE.
-        # Each bundle is isolated — one that raises (a leaf left it half-written) is
-        # skipped this pass, never crashing the sweep and losing the others' progress.
-        # Serial by default; fans out across cfg.lanes lanes when configured (docs 09).
-        before = [state.state(d) for d in bundles]
-        _build_all(cfg, bundles)
-        # Sign-off, cheap-first, restricted to this batch. ONE interactive session
-        # per chunk (≤ SIGNOFF_BATCH_SIZE) walks several bundles — like batch Plan —
-        # then every decision is recorded FIRST (apply_now=False) so an iterate-do
-        # doesn't rebuild mid-sweep and interrupt review of the rest; the next pass's
-        # build-all above applies all the iterations together.
-        pending = [e.bundle for e in queue.awaiting_signoff(cfg) if e.bundle.name in names]
-        if not pending:
-            # Break only when the band made NO progress this pass. iterate-plan archives
-            # a bundle back to UNPLANNED — a HALTED state that needs the Plan pre-pass on a
-            # LATER pass; on the pass where that archive happens nothing is awaiting
-            # sign-off, so a bare `break` stranded it at UNPLANNED (#105). A state change
-            # means progress (the re-open) — loop again so the next pass re-plans + rebuilds.
-            if [state.state(d) for d in bundles] == before:
-                break       # genuinely stuck (all terminal / planner declined an UNPLANNED)
-            continue        # progress — give the re-opened bundle its Plan pass
-        for chunk in _chunks(pending, SIGNOFF_BATCH_SIZE):
-            # The session writes a decision per bundle as it goes; a dropped session
-            # still leaves the finished ones, applied below. Isolate it so a crashed
-            # session can't take the sweep down — we then apply whatever it wrote.
-            try:
-                leaves.run_signoff_batch(cfg, chunk)
-            except Exception as exc:  # noqa: BLE001 — a dropped session is not fatal
-                print(f"flow: sign-off session over {[b.name for b in chunk]} failed "
-                      f"({type(exc).__name__}: {exc}); applying decisions written so far",
-                      file=sys.stderr)
-            for d in chunk:
-                _isolate(d, "sign-off", lambda d=d: _apply_decision(
-                    cfg, d, by=by, today=today, apply_now=False))
-        # Publish a stack prerequisite the moment it's COMPLETE (#123) so its branch exists
-        # for a dependent's next-pass build/publish; `published` keeps the end-loop from
-        # re-publishing it. Independents / leaf dependents publish in the end-loop as before.
+    accepted: list[Path] = []        # cumulative COMPLETE bundles, wave then name order
+    integ_branch: str | None = None  # the live integration branch a later wave stacks on
+    for k, wave in enumerate(wave_list):
+        runnable = _runnable(cfg, wave)
+        if not runnable:
+            continue
+        # A later wave stacks on the prior waves' folded work: point each bundle's Do
+        # worktree + stacked PR at the integration branch (read via _stack_base_branch).
+        if integ_branch:
+            for d in runnable:
+                publish.write_stack_base(d, integ_branch)
+        _drive_wave(cfg, runnable, by=by, today=today, max_passes=max_passes)
+        complete = [d for d in sorted(runnable, key=lambda p: p.name)
+                    if state.state(d) == state.COMPLETE]
+        _audit_wave_overlap(cfg, complete)
         if do_publish:
-            for d in bundles:
-                if (d.name in stack_prereqs and d.name not in published
-                        and state.state(d) == state.COMPLETE):
+            for d in complete:
+                if d.name not in published:
                     _publish_bundle(cfg, d, by=by, today=today)
                     published.add(d.name)
-        if all(state.state(d) == state.COMPLETE for d in bundles):
-            break
+        accepted += complete
+        # Fold this wave's accepted work onto the integration branch so the NEXT wave's Do
+        # builds on it (default stack mode). Dry-run (stubbed publisher: offline rehearse /
+        # CI) prints the plan and pushes nothing, so the next wave then builds on the base.
+        if k < last and do_publish and cfg.wave_mode == "stack":
+            dry = cfg.publisher.mode == "stub"
+            try:
+                branch, _wt = integrate.fold(cfg, accepted, dry_run=dry)
+            except integrate.IntegrationError as exc:
+                print(f"flow: wave {k} did not integrate ({exc}); STOPPING — later waves "
+                      f"not run.", file=sys.stderr)
+                break
+            if branch and not dry:
+                integ_branch = branch
 
     results = {d.name.replace("issue_", ""): state.state(d) for d in bundles}
-    if do_publish:
-        # Isolated like the other per-bundle loops — one bundle whose publish raises
-        # must not abort the batch return / Act for the rest (testbed issue #3).
-        for d in bundles:
-            if state.state(d) == state.COMPLETE and d.name not in published:
-                _publish_bundle(cfg, d, by=by, today=today)
-                published.add(d.name)
     if do_act:
         _maybe_run_act(cfg, today,
                        any_complete=any(s == state.COMPLETE for s in results.values()))

@@ -141,6 +141,18 @@ class Config:
     # checkout directly, as before). Best-effort: a target that isn't a worktree-capable
     # git checkout silently falls back to in-place.
     worktree: bool = True
+    # Wave-based batch sequencing (#wave-model). A batch handed to `flow` runs as an
+    # ordered sequence of dependency waves; `wave_mode` selects how each wave's accepted
+    # work reaches the next: "stack" (default) folds it onto a run-scoped integration
+    # branch the next wave builds on — push-only, fork-safe, STOP discipline intact;
+    # "merge" (own-repo / CD) instead `gh pr merge`s each wave before the next.
+    # [driver].wave_mode in pdca.toml.
+    wave_mode: str = "stack"
+    # Optional integration re-gate (#wave-model): after each wave folds onto the
+    # integration branch, run the repo-scoped gates over that tip before the next wave
+    # builds on it, so a combination that is red though each fix was green alone STOPs the
+    # run. Off by default (needs the project's repo-scoped gates). [driver].regate_between_waves.
+    regate_between_waves: bool = False
     # Act cadence (issue #109): Act is a cross-cycle beat that only yields a real delta
     # once enough cycles have frozen to show a pattern, so ``flow`` auto-runs it only when
     # this many cycles have frozen SINCE the last Act review (counted across flow
@@ -249,6 +261,8 @@ class Config:
             lanes = int(os.environ["PDCA_LANES"])
         lanes = max(1, lanes)
         worktree = bool(driver_cfg.get("worktree", True))  # issue #94; on by default
+        wave_mode = driver_cfg.get("wave_mode", "stack")  # #wave-model: stack | merge
+        regate_between_waves = bool(driver_cfg.get("regate_between_waves", False))
         act_cadence = max(1, int(driver_cfg.get("act_cadence", 5)))  # issue #109
 
         # Close-disposition classes (issue #60): a configured list retunes the default
@@ -290,6 +304,8 @@ class Config:
             gates_runner=gates_runner,
             lanes=lanes,
             worktree=worktree,
+            wave_mode=wave_mode,
+            regate_between_waves=regate_between_waves,
             act_cadence=act_cadence,
             close_dispositions=close_dispositions,
         )
