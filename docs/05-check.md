@@ -118,7 +118,11 @@ model-agnostic (`family` + `argv`) leaf. Each writes `check-advisory-<id>.md`; i
 (never gate). Condition one on a brief field with `when = { field = …, substring = … }`
 (e.g. run a deeper review only when the brief says so) — the way gate targets condition
 on the bundle. A shipped `code-review` agent realizes the correctness+cleanup lens for a
-`claude` instance; `family = "codex"` swaps the vendor.
+`claude` instance; `family = "codex"` swaps the vendor. A second shipped agent,
+`adversary` (issue #151), is a **refutation** lens — it tries to *disprove* the red→green
+evidence and the reviewer's verdict, defaulting to "refuted" when uncertain; the
+`pdca.toml` example gates it on `Difficulty: high` so it runs only on the highest
+blast-radius bundles, where a confirmatory pass is most likely to be fooled.
 
 ## 3. Assembly — the SUMMARY the human signs
 

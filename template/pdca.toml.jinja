@@ -233,6 +233,18 @@ argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
 # family = "claude"
 # argv = ["claude", "-p", "--agent", "code-review", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
 # when = { field = "review depth", substring = "deep" }
+#
+# A second reference lens — an ADVERSARIAL reviewer (issue #151) that tries to REFUTE the
+# red→green evidence and the reviewer's verdict (defaults to "refuted" when uncertain),
+# gated to the highest blast-radius bundles via the Difficulty signal (#133). Advisory —
+# never gates; its `- NEEDS-HUMAN —` findings route into SUMMARY §6.
+# [[leaves.advisory]]
+# id = "adversary"
+# role = "refute the red→green evidence and the reviewer's verdict; find the input that breaks the fix"
+# mode = "{{ leaves_mode }}"
+# family = "claude"
+# argv = ["claude", "-p", "--agent", "adversary", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
+# when = { field = "difficulty", substring = "high" }
 # Deterministic Check gates (docs 04). Each check runs a shell command; it PASSES
 # iff the command exits 0. `scope = "repo"` runs against the working tree (and is
 # what CI re-runs via `pdca gates --working-tree`); `scope = "bundle"` needs the
