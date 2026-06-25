@@ -34,6 +34,7 @@ subprocess in the working dir; ``interactive`` leaves inherit the terminal.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -357,18 +358,86 @@ def _stub_plan_batch(cfg: Config, ids: list[str] | None = None) -> None:
 # ----------------------------------------------------------------------------
 # Leaf 1 — Do (builder, headless): writes patch.diff + the test + build-notes.md.
 # ----------------------------------------------------------------------------
+def attempt_no(d: Path) -> int:
+    """This bundle's current Do attempt number (1-based). Mirrors the driver's iteration
+    numbering: each iterate archives the prior attempt into ``iteration-v<N>/``, so the
+    count of archives + 1 is the attempt about to run."""
+    return len(list(d.glob("iteration-v*"))) + 1
+
+
+def _leaf_from_spec(spec: dict, default: LeafConfig) -> LeafConfig:
+    """A LeafConfig from an escalation/variant spec, inheriting any field the spec omits
+    from ``default`` (so a variant need only override what differs, e.g. just ``argv``)."""
+    return LeafConfig(
+        mode=spec.get("mode") or default.mode,
+        family=spec.get("family", default.family),
+        argv=list(spec.get("argv") or default.argv),
+        interactive=bool(spec.get("interactive", default.interactive)),
+    )
+
+
+def select_builder(d: Path, cfg: Config, n: int) -> LeafConfig:
+    """Pick the Do builder backend for attempt ``n`` (issue #135; #134 extends this).
+
+    The default is ``[leaves.builder]``. The escalation ladder
+    (``[[leaves.builder_escalation]]``, keyed on ``min_iteration``) bumps to a stronger
+    backend once a bundle has iterated — the entry with the highest ``min_iteration`` ≤
+    ``n`` wins — so a hard bundle can't loop forever on an underpowered executor. ``d`` is
+    unused here but is part of the seam #134 keys on (the brief's difficulty field);
+    escalation overrides any difficulty pick."""
+    builder = cfg.builder
+    chosen = -1
+    for spec in cfg.builder_escalation:
+        threshold = int(spec.get("min_iteration", 0))
+        if threshold <= n and threshold > chosen:
+            chosen = threshold
+            builder = _leaf_from_spec(spec, cfg.builder)
+    return builder
+
+
+def _record_loop_attempt(d: Path, n: int, builder: LeafConfig) -> None:
+    """Append this Do attempt to ``loop-telemetry.json`` (issue #135) so iterations-to-pass
+    and which backend ran each pass are visible. Loop cost ≈ plan + iterations×review (an
+    iterate re-runs builder *and* the frontier reviewer), so the attempt count is the
+    go/no-go metric for adopting a cheaper local executor. The file persists across
+    iterations (it is not archived), so it accumulates. Best-effort: never break Do."""
+    path = d / "loop-telemetry.json"
+    data: dict = {"attempts": []}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            loaded = None
+        # Only adopt a well-shaped prior file; a hand edit / older writer that left a
+        # top-level array (or a non-list `attempts`) must not abort Do via AttributeError —
+        # this sidecar is best-effort. Anything else is replaced with a fresh dict.
+        if isinstance(loaded, dict) and isinstance(loaded.get("attempts"), list):
+            data = loaded
+    label = builder.argv[0] if builder.argv else builder.mode
+    data["attempts"].append({"n": n, "builder": label, "family": builder.family})
+    data["iterations_to_pass"] = len(data["attempts"])
+    try:
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def do_build(d: Path, cfg: Config) -> None:
     if cfg.builder.mode == "command":
+        n = attempt_no(d)
+        builder = select_builder(d, cfg, n)  # escalate-on-iterate (#135); difficulty (#134)
+        _record_loop_attempt(d, n, builder)
         # Isolate Do in a per-cycle worktree off the base (issue #94) so the host's
         # primary checkout is never mutated. Best-effort: None ⇒ edit in place, as before.
         wt = worktree.ensure(d, cfg)
-        if wt and cfg.builder.family == "claude":
+        if wt and builder.family == "claude":
             # The claude builder discovers its `builder` subagent AND the builder_guard
             # PreToolUse hook by walking up from its cwd, so cwd MUST stay the harness root
             # (.claude/agents + .claude/settings live there). Confining its cwd to the
             # worktree would hide both — `--agent builder` would not resolve and the
             # STOP-discipline guard would not load. It is grounded in the worktree via
-            # --add-dir + the prompt instead (as in #94), not by cwd.
+            # --add-dir + the prompt instead (as in #94), not by cwd. (Family is the
+            # SELECTED builder's, so an escalated/variant claude backend gets this too.)
             workdir, env, extra = cfg.root, {"PDCA_WORKTREE": str(wt)}, ["--add-dir", str(wt)]
         elif wt:
             # A non-claude command builder (a local agentic CLI) has no --add-dir / agent
@@ -380,7 +449,7 @@ def do_build(d: Path, cfg: Config) -> None:
             workdir, env, extra = cfg.root, None, None  # best-effort: edit in place, as before
         # Watch the bundle d so the heartbeat shows patch.diff / build-notes.md appearing.
         _invoke(
-            cfg.builder, workdir, _build_prompt(d),
+            builder, workdir, _build_prompt(d),
             label=f"Do {d.name}",
             status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
             stream_json=True,  # Tier 3: show the builder's live tool-use

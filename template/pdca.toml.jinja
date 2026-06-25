@@ -132,6 +132,16 @@ argv = ["claude", "-p", "--agent", "builder", "--permission-mode", "acceptEdits"
 {% else -%}
 argv = []
 {% endif %}
+# Builder escalation ladder (issue #135) — optional. A bundle that fails Check and
+# iterates re-runs the builder; without escalation it re-fails with the same model until
+# you discontinue. Declare stronger backends keyed on the attempt number; do_build picks
+# the entry with the highest `min_iteration` <= the current attempt (so a hard bundle
+# can't loop forever on an underpowered executor). Each entry inherits any field it omits
+# from [leaves.builder]. Iterations-to-pass + which backend ran each pass land in the
+# bundle's loop-telemetry.json — the go/no-go metric for adopting a cheaper local builder.
+# [[leaves.builder_escalation]]
+# min_iteration = 2          # 2nd attempt onward → a stronger model
+# argv = ["claude", "-p", "--agent", "builder", "--model", "opus", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob"]
 # Check reviewer (advisory; build-notes withheld via a sandbox). Cross-vendor
 # decorrelation is the default and the ideal — a DIFFERENT family from the builder
 # (INTEGRATION §4). `--agent reviewer` (same family as the builder) is the
