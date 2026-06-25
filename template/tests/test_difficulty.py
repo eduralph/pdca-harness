@@ -27,8 +27,11 @@ class DifficultyField(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    _seq = 0
+
     def _brief(self, difficulty: str | None) -> Path:
-        d = self.tmp / f"issue_{difficulty}"
+        DifficultyField._seq += 1
+        d = self.tmp / f"issue_{DifficultyField._seq}"
         d.mkdir(parents=True)
         body = "- **Slug:** s\n- **Success criterion:** it works\n"
         if difficulty is not None:
@@ -57,12 +60,30 @@ class DifficultyField(unittest.TestCase):
     def test_unfilled_placeholder_reads_as_absent(self) -> None:
         # The template placeholder enumerates the values, so its text contains "high".
         # An untouched Difficulty line must NOT match a substring="high" gate, or the
-        # absent-is-safe default is defeated (Codex review, PR #145).
-        placeholder = "<`low` | `medium` | `high` — the fix's blast-radius>"
-        d = self._brief(placeholder)
-        self.assertEqual(brief.field(d / "brief.md", "difficulty"), "")
+        # absent-is-safe default is defeated (Codex review, PR #145). Covers both a
+        # single-line placeholder and a multi-line one (parsed as an unterminated `<` line).
         spec = {"when": {"field": "difficulty", "substring": "high"}}
-        self.assertFalse(leaves._advisory_applies(spec, d))
+        for placeholder in ("<`low` | `medium` | `high` — the fix's blast-radius>",
+                            "<`low` | `medium` | `high` — blast-radius / cross-file\n"
+                            "  reach: ... a wide, cross-cutting change.>"):
+            d = self._brief(placeholder)
+            self.assertEqual(brief.field(d / "brief.md", "difficulty"), "")
+            self.assertFalse(leaves._advisory_applies(spec, d))
+
+    def test_real_shipped_templates_difficulty_placeholder_is_inert(self) -> None:
+        # The strongest guard: copy each SHIPPED template verbatim as the brief and confirm
+        # its (multi-line) Difficulty placeholder reads as absent — what the hand-written
+        # cases above approximate, and what the first fix missed.
+        spec = {"when": {"field": "difficulty", "substring": "high"}}
+        for tpl in ("brief.md.tpl", "design-proposal.md.tpl", "plan-pointer.md.tpl"):
+            d = self.tmp / f"from-{tpl}"
+            d.mkdir()
+            (d / "brief.md").write_text((TEMPLATES / tpl).read_text(encoding="utf-8"),
+                                        encoding="utf-8")
+            self.assertEqual(brief.field(d / "brief.md", "difficulty"), "",
+                             f"{tpl} difficulty placeholder leaked a value")
+            self.assertFalse(leaves._advisory_applies(spec, d),
+                             f"{tpl} difficulty placeholder fired a high gate")
 
 
 if __name__ == "__main__":
