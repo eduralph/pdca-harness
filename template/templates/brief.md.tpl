@@ -32,6 +32,10 @@
   that). low = a localized one-site change; high = a wide, cross-cutting change. Routes
   the Do backend and review depth (issues #133/#134). Optional; absent/unknown is the safe
   default — no review or capability is skipped on a missing tag.>
+- **Do model:** <optional — pin the Do backend explicitly to a `[[leaves.builder_variant]]`
+  `model` name (e.g. `frontier`), OVERRIDING the difficulty `when` routing. Use when a bundle
+  must run on a specific backend regardless of difficulty (e.g. keep a privacy-sensitive fix on
+  a local model). Absent ⇒ the difficulty routing / default builder; issue #167.>
 - **Scope:** <the defect to remove — one logical fix. MUST NOT name a probe/guard/helper
   (a capability check, `hasattr`, `try/except import`): naming a mechanism seats the fix
   shape for Do. Leave mechanism to Do; Do prefers removing the cause over guarding it

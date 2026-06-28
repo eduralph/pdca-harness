@@ -401,24 +401,50 @@ def _variant_applies(spec: dict, d: Path) -> bool:
     return _when_matches(spec.get("when"), d, default=False)
 
 
-def select_builder(d: Path, cfg: Config, n: int) -> LeafConfig:
-    """Pick the Do builder backend for bundle ``d`` on attempt ``n`` (issues #134/#135).
+def _routed_variant(d: Path, cfg: Config) -> dict | None:
+    """The first ``[[leaves.builder_variant]]`` whose ``when`` matches the brief (issue
+    #134), or ``None``."""
+    return next((spec for spec in cfg.builder_variants if _variant_applies(spec, d)), None)
 
-    Two layers over the default ``[leaves.builder]``:
-      1. **Difficulty-routed variant (#134)** — the first ``[[leaves.builder_variant]]``
-         whose ``when`` matches the brief (e.g. difficulty=high) wins; default-open, so an
-         absent/unknown field keeps the default.
+
+def _explicit_model_variant(d: Path, cfg: Config) -> dict | None:
+    """The builder variant the brief names by ``- **Do model:** <name>`` (issue #167), or
+    ``None``. An explicit per-bundle choice matches a variant's ``model`` key (case-folded)
+    and **overrides** the ``when`` routing — so a bundle can pin its Do backend directly,
+    no ``when`` gate required. A name matching no variant is a no-op (warned), falling back
+    to the ``when`` routing / default builder."""
+    if not cfg.builder_variants:  # nothing to match; skip the brief read (no variants ⇒ no-op)
+        return None
+    wanted = brief.do_model(d / "brief.md")
+    if not wanted:
+        return None
+    for spec in cfg.builder_variants:
+        if str(spec.get("model", "")).strip().lower() == wanted.lower():
+            return spec
+    print(f"leaves: brief 'Do model: {wanted}' matches no [[leaves.builder_variant]] "
+          "`model` — using the routed/default builder", file=sys.stderr)
+    return None
+
+
+def select_builder(d: Path, cfg: Config, n: int) -> LeafConfig:
+    """Pick the Do builder backend for bundle ``d`` on attempt ``n`` (issues #134/#135/#167).
+
+    Layers over the default ``[leaves.builder]`` (each later one wins):
+      1. **Variant pick** — the brief may name a backend **explicitly** via
+         ``- **Do model:** <name>`` (#167): the first ``[[leaves.builder_variant]]`` whose
+         ``model`` matches is used, overriding the ``when`` routing. Otherwise the first
+         variant whose ``when`` matches the brief wins (#134, e.g. difficulty=high).
+         Default-open: no explicit name and no ``when`` match keeps the default builder.
       2. **Escalation ladder (#135)** — the entry with the highest ``min_iteration`` ≤ ``n``
          **overrides the variant**, so a bundle that iterates escalates regardless of its
          self-reported difficulty (a hard bundle mis-rated "low" can't loop forever on an
          underpowered executor)."""
     builder = cfg.builder
-    for spec in cfg.builder_variants:  # 1. difficulty routing (first match wins)
-        if _variant_applies(spec, d):
-            builder = _leaf_from_spec(spec, cfg.builder)
-            break
+    spec = _explicit_model_variant(d, cfg) or _routed_variant(d, cfg)  # #167 then #134
+    if spec is not None:
+        builder = _leaf_from_spec(spec, cfg.builder)
     chosen = -1
-    for spec in cfg.builder_escalation:  # 2. escalation OVERRIDES the difficulty pick
+    for spec in cfg.builder_escalation:  # escalation OVERRIDES the variant pick (#135)
         threshold = int(spec.get("min_iteration", 0))
         if chosen < threshold <= n:
             chosen = threshold
