@@ -66,7 +66,7 @@ def check_dep_graph(cfg: Config, bundles: list[Path]) -> None:
             dn = cfg.bundle(dep).name
             if dn in names:
                 edges.append(dn)
-            elif state.state(cfg.bundle(dep)) != state.COMPLETE:
+            elif state.state(cfg.find_bundle(dep)) != state.COMPLETE:  # archived prereq too (#171)
                 raise ValueError(
                     f"{b.name}: declared dependency '{dep}' is neither in this batch "
                     f"nor an existing COMPLETE bundle")

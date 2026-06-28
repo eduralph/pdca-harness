@@ -337,7 +337,7 @@ def _runnable(cfg: Config, wave: list[Path]) -> list[Path]:
     for d in wave:
         bp = d / "brief.md"
         unmet = [dep for dep in (waves.declared_deps(bp) if bp.exists() else [])
-                 if state.state(cfg.bundle(dep)) != state.COMPLETE]
+                 if state.state(cfg.find_bundle(dep)) != state.COMPLETE]  # archived prereq too (#171)
         if unmet:
             print(f"flow: {d.name} skipped — prerequisite(s) not COMPLETE "
                   f"({', '.join(unmet)}); not built on a base missing them.", file=sys.stderr)

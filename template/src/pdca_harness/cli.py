@@ -386,7 +386,7 @@ def _blocked_by(cfg: Config, d: Path) -> list[str]:
     if not bp.exists():
         return []
     blocked = [dep for dep in brief.depends_on(bp)
-               if state.state(cfg.bundle(dep)) != state.COMPLETE]
+               if state.state(cfg.find_bundle(dep)) != state.COMPLETE]  # archived prereq too (#171)
     blocked += [f"{dep} (unmerged)" for dep in brief.depends_on_merged(bp)
                 if not merged.is_merged(cfg, dep)]
     return blocked
