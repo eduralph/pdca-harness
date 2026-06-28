@@ -66,6 +66,15 @@ def disposition_hint(brief_path: Path) -> str:
     return field(brief_path, "disposition hint", "disposition")
 
 
+def do_model(brief_path: Path) -> str:
+    """The Do backend the brief pins explicitly via ``- **Do model:** <name>`` (issue #167).
+
+    The name is matched against a ``[[leaves.builder_variant]]`` ``model`` key to select the
+    Do builder directly, bypassing the ``when`` routing. "" ⇒ unset ⇒ the ``when`` routing /
+    default builder (the common case)."""
+    return field(brief_path, "do model", "do_model", "builder model")
+
+
 def planning_artifact(brief_path: Path) -> str:
     """The host planning artifact this brief points at, or "" if it's a self-contained brief.
 

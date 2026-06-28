@@ -173,7 +173,12 @@ argv = []
 # — a missing tag never reduces capability), and the escalation ladder above OVERRIDES the
 # variant on iterate. SAFETY: calibrate before you narrow — run the would-be-skipped path on
 # a sample of low/medium bundles and confirm ~0 NEEDS-HUMAN on "low" before trusting it.
+# A variant may also carry `model = "<name>"` so a brief pins it EXPLICITLY via
+# `- **Do model:** <name>` (issue #167) — an explicit per-bundle choice that OVERRIDES the
+# `when` routing (e.g. force a privacy-sensitive bundle onto a local backend regardless of
+# difficulty); a `Do model` naming no variant `model` falls back to the `when` routing.
 # [[leaves.builder_variant]]
+# model = "frontier"
 # when = { field = "difficulty", substring = "high" }
 # argv = ["claude", "-p", "--agent", "builder", "--model", "opus", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob"]
 # Check reviewer (advisory; build-notes withheld via a sandbox). Cross-vendor

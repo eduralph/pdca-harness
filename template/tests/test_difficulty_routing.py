@@ -130,6 +130,51 @@ class DifficultyRouting(unittest.TestCase):
         self.assertFalse(leaves._variant_applies({}, d))   # variant is opt-in
         self.assertTrue(leaves._advisory_applies({}, d))    # advisory is default-on
 
+    # --- #167: explicit per-bundle Do model, matched by a variant's `model` key ---
+
+    def _model_bundle(self, model: str | None, *, difficulty: str | None = None) -> Path:
+        d = self.tmp / f"issue_m_{model}_{difficulty}"
+        d.mkdir(parents=True)
+        body = "- **Slug:** s\n"
+        if difficulty is not None:
+            body += f"- **Difficulty:** {difficulty}\n"
+        if model is not None:
+            body += f"- **Do model:** {model}\n"
+        (d / "brief.md").write_text(body, encoding="utf-8")
+        return d
+
+    def test_explicit_do_model_selects_named_variant(self) -> None:
+        # #167: `Do model: <name>` picks the variant whose `model` matches, no `when` gate.
+        variants = [{"family": "frontier", "model": "frontier", "argv": ["f"]},
+                    {"family": "local-big", "model": "local", "argv": ["l"]}]
+        cfg = _cfg(self.tmp, builder_variants=variants)
+        self.assertEqual(leaves.select_builder(self._model_bundle("frontier"), cfg, 1).family, "frontier")
+        self.assertEqual(leaves.select_builder(self._model_bundle("local"), cfg, 1).family, "local-big")
+
+    def test_explicit_do_model_overrides_when_routing(self) -> None:
+        # difficulty=high would route to HARD/frontier via `when`, but the brief pins
+        # `Do model: local` — the explicit choice wins over `when`.
+        variants = [HARD, {"family": "local-big", "model": "local", "argv": ["l"]}]
+        cfg = _cfg(self.tmp, builder_variants=variants)
+        d = self._model_bundle("local", difficulty="high")
+        self.assertEqual(leaves.select_builder(d, cfg, 1).family, "local-big")
+
+    def test_unknown_do_model_falls_back_to_when_routing(self) -> None:
+        # A `Do model` naming no variant `model` is a no-op → fall back to `when` routing.
+        cfg = _cfg(self.tmp, builder_variants=[HARD])
+        d = self._model_bundle("nonexistent", difficulty="high")
+        self.assertEqual(leaves.select_builder(d, cfg, 1).family, "frontier")
+
+    def test_escalation_overrides_explicit_do_model(self) -> None:
+        # Even an explicit Do model is overridden by the escalation ladder on iterate.
+        cfg = _cfg(
+            self.tmp,
+            builder_variants=[{"family": "frontier", "model": "frontier", "argv": ["f"]}],
+            builder_escalation=[{"min_iteration": 2, "family": "escalated", "argv": ["e"]}])
+        d = self._model_bundle("frontier")
+        self.assertEqual(leaves.select_builder(d, cfg, 1).family, "frontier")    # explicit pick
+        self.assertEqual(leaves.select_builder(d, cfg, 2).family, "escalated")   # escalation wins
+
 
 if __name__ == "__main__":
     unittest.main()
