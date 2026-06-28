@@ -57,6 +57,15 @@ sections:
       - { term: "Sign-off", desc: "**The human verdict.** Accept, iterate-do, iterate-plan, or discontinue — accept is refused while anything is unresolved." }
       - { term: "Act",   desc: "**Improve the process.** Across cycles, recurring misses become new gates, brief fields, and rules — a better baseline every time." }
 
+  - eyebrow: "Key features"
+    heading: "Built for a backlog, not a single fix."
+    props:
+      - { term: "Parallel processing", desc: "**Many issues at once.** The unattended Do + Check band fans across a pool of lane workers, each with its own git worktree and `$PDCA_LANE` slot — while Plan, sign-off, and Act stay serial, so the human touch points never fork." }
+      - { term: "Dependency resolution", desc: "**Order computed, not hand-run.** Declare `Depends on:` / `Conflicts with:` and the scheduler levels the batch deterministically — conflicting bundles split into different waves, and an unschedulable graph (a cycle, an unknown prereq) is rejected before any build." }
+      - { term: "Dependency waves", desc: "**A whole chain in one run.** Each wave's accepted work is folded onto a run-scoped integration branch the next wave builds on, so a *B-needs-A* batch lands as a reviewable PR stack — push-only and fork-safe; the harness never merges for you. `pdca waves` previews the plan." }
+      - { term: "Per-issue model selection", desc: "**The right backend per fix.** Route a bundle's builder by a brief field (`Difficulty: high` → a frontier model) or pin it explicitly (`Do model:` keeps a sensitive fix local). Issues in one wave can run on different models; a repeatedly-failing one escalates." }
+      - { term: "Structured verification", desc: "**Correctness, not vibes — the 5/5/1.** Deterministic gates (a red→green proof, the *only* thing allowed to block — no LLM in the gating path), a decorrelated reviewer, and the irreducibly human judgments, assembled into one SUMMARY with an explicit NEEDS-HUMAN checklist." }
+
   - eyebrow: "Why it holds up"
     heading: "Correctness as the headline, not a vibe."
     body:
