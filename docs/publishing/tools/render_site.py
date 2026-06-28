@@ -325,6 +325,9 @@ class Renderer:
         for s in data.get("sections") or []:
             parts = [f'    <p class="eyebrow">{self.inline(s.get("eyebrow", ""))}</p>',
                      f'    <h2>{self.inline(s.get("heading", ""))}</h2>']
+            if s.get("diagram"):
+                parts.append(f'    <pre class="cycle" aria-label="The PDCA cycle">'
+                             f'{html.escape(s["diagram"].rstrip())}</pre>')
             for para in s.get("body") or []:
                 parts.append(f'    <p class="muted">{self.inline(para)}</p>')
             if s.get("props"):

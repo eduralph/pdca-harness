@@ -31,6 +31,25 @@ sections:
 
   - eyebrow: "How it works"
     heading: "One contribution, one cycle."
+    diagram: |
+      PLAN      ◆  author the brief — the spec every beat is measured against
+        │
+        ▼
+      DO           a headless builder writes the patch + a red→green test
+        │
+        ▼
+      CHECK        deterministic gates (red→green) + a decorrelated reviewer
+        │
+        ▼
+      SIGN-OFF  ◆  the human verdict — accept · iterate · discontinue
+        │
+        ▼
+      PUBLISH      a draft PR — the harness never marks it ready
+        ┊
+      ACT       ◆  every N cycles: recurring misses → new gates · rules · fields
+        └──▶ back to a better-baselined PLAN
+
+      ◆  one of the three human touch points — everything else is automated
     props:
       - { term: "Plan",  desc: "**Author the brief.** A precise, field-structured spec every later beat is measured against." }
       - { term: "Do",    desc: "**Build against the spec.** A headless builder writes the patch, a shipped test, and its rationale — and can't open a PR." }
