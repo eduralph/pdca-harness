@@ -65,6 +65,28 @@ type = "file"
 path = "docs/adr/*{id}*.md"
 ```
 
+### Ordering and routing the batch
+
+When a batch has **dependencies**, you don't run it by hand in waves — you *declare* the
+shape and the driver schedules it. Optional brief fields, set at Plan:
+
+- **`Depends on:` / `Conflicts with:`** — the batch runs as dependency **waves**
+  ([09 parallel lanes](../template/PCDA/quality-cycle/09-parallel-lanes.md)): a bundle
+  lands in a later wave than its prerequisites and builds on their *accepted* result (the
+  wave driver folds each wave onto the base the next builds on — no human merge between
+  them). `Conflicts with` puts two file-overlapping bundles in different waves.
+  (`Depends on (merged)` / `Stacks on` still parse but are deprecated — in the wave model
+  they are just `Depends on`.)
+- **`Difficulty:` / `Do model:`** — route this bundle's Do to the right backend
+  ([step 04](04-do.md)): `Difficulty` feeds the `when` routing (and the iterate escalation
+  ladder); `Do model` pins a backend by name. So different bundles in one wave can build
+  on different models.
+
+Declaring the constraints is a Plan judgment — the planner sets them from the batch's real
+dependency/conflict structure; an unschedulable graph (a cycle, or a dep that is neither in
+the batch nor already COMPLETE) is rejected up front. `pdca waves <ids…>` prints the
+computed wave plan without building.
+
 ## What a real brief looks like
 
 This is the **actual** brief the planner produced for gramps issue 11589, a
