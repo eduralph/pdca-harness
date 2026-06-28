@@ -112,6 +112,32 @@ class UnverifiableGate(unittest.TestCase):
         self.assertEqual(cli._signoff(self.cfg, accept), 0)
         self.assertEqual(state.state(d), state.COMPLETE)
 
+    def test_gating_fail_routes_to_section6_and_c6_blocks_accept(self) -> None:
+        # #166: a gating gate that hard-FAILS must become a §6 item so C6 blocks accept —
+        # previously only `unverifiable` reached §6, so a red gating gate could reach COMPLETE.
+        d = self._gated_bundle("GF", _FAIL)
+        self.assertEqual(gates.run_gates(d, self.cfg)["overall"], "fail")  # gating fail
+        # A clean advisory review so §6 is fed ONLY by the failing gate.
+        (d / "check-review.md").write_text("All advisory items PASS.\n", encoding="utf-8")
+        assemble.assemble_summary(d, self.cfg)
+        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
+
+        summary = d / "SUMMARY.md"
+        open_items = signoff.open_needs_human(summary)
+        self.assertTrue(any("FAILED (gating)" in it for it in open_items),
+                        f"gating fail not routed to §6: {open_items}")
+
+        # C6: accept is refused while the §6 item is open …
+        accept = SimpleNamespace(issue_id="GF", accept=True, iterate_do=False,
+                                 iterate_plan=False, discontinue=False, by="t", delta="")
+        self.assertEqual(cli._signoff(self.cfg, accept), 1)
+        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)  # not accepted
+
+        # … and allowed once the human clears it (an explicit override).
+        summary.write_text(summary.read_text().replace("- [ ]", "- [x]"), encoding="utf-8")
+        self.assertEqual(cli._signoff(self.cfg, accept), 0)
+        self.assertEqual(state.state(d), state.COMPLETE)
+
 
 if __name__ == "__main__":
     unittest.main()
