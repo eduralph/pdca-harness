@@ -75,11 +75,13 @@ def _apply_decision(
     applied, ``None`` if no decision / unrecordable, or ``"blocked"`` if an accept was
     refused because §6 NEEDS-HUMAN is still open. Pure deterministic code — no leaf.
 
-    ``apply_now`` advances the bundle immediately (single-issue ``flow``); the batch
-    sweep passes ``apply_now=False`` so an ``iterate-do`` / ``iterate-plan`` does NOT
-    rebuild on the spot — the human first reviews the whole sign-off queue, and the
-    next pass's build-all applies every iteration together. (``accept`` is final at
-    ``record`` regardless — ``state`` becomes COMPLETE without a re-drive.)
+    ``apply_now`` advances the bundle immediately (single-issue ``flow``). The batch
+    sweep passes ``apply_now=False`` so an ``iterate-do`` does NOT rebuild on the spot —
+    the human reviews the whole cheap-first queue first, and the next pass's build-all
+    rebuilds. An ``iterate-plan`` re-open is applied **even then** (it only archives →
+    UNPLANNED — no rebuild), so the next pass's serial Plan pre-pass re-plans it BEFORE
+    those deferred rebuilds, not a pass later (issue #174). (``accept`` is final at
+    ``record`` — ``state`` becomes COMPLETE without a re-drive.)
     """
     action = leaves.signoff_decision(d)
     if not action:
@@ -105,8 +107,12 @@ def _apply_decision(
     signoff.record(d / "SUMMARY.md", action=action, by=by or cfg.author or "unknown",
                    date=today, delta=rationale)
     (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
-    if apply_now:
-        driver.run_issue(d, cfg)  # apply the transition: COMPLETE | ITERATE_* → re-loop
+    # Apply now for single-issue flow; in the batch sweep apply an ``iterate-plan`` re-open
+    # too — it only archives → UNPLANNED (no rebuild), so it can't interrupt the cheap-first
+    # queue review, and the next pass's Plan pre-pass then re-plans it BEFORE the deferred
+    # iterate-do rebuilds (issue #174). ``iterate-do`` (a headless rebuild) stays deferred.
+    if apply_now or action == "iterate-plan":
+        driver.run_issue(d, cfg)  # COMPLETE | ITERATE_* → re-loop (iterate-plan: archive → UNPLANNED)
     return action
 
 
