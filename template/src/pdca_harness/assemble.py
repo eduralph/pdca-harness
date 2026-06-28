@@ -33,13 +33,14 @@ def assemble_summary(d: Path, cfg: Config) -> None:
     advisory_paths = sorted(d.glob("check-advisory-*.md"))
     advisory_texts = [p.read_text(encoding="utf-8") for p in advisory_paths]
 
-    # §6 is fed by the reviewer's NEEDS-HUMAN verdicts, the advisory reviewers', AND any
-    # gate that declared itself unverifiable (issue #46) — all become `- [ ]` items the C6
-    # guard makes the human clear before accept.
+    # §6 is fed by the reviewer's NEEDS-HUMAN verdicts, the advisory reviewers', any gate
+    # that declared itself unverifiable (issue #46), AND any gating gate that hard-FAILED
+    # (issue #166) — all become `- [ ]` items the C6 guard makes the human clear before accept.
     needs_human = _needs_human(review_text)
     for atext in advisory_texts:
         needs_human += _needs_human(atext)
     needs_human += _unverifiable_items(gates)
+    needs_human += _failed_gating_items(gates)
 
     advisory_block = "\n".join(
         f"\n### Advisory — {p.stem.removeprefix('check-advisory-')}\n\n{t.strip()}"
@@ -117,6 +118,21 @@ def _unverifiable_items(gates: dict) -> list[str]:
         f"{r['check']} unverifiable — {r['path_line'] or r['oracle'] or 'no reason given'}"
         for r in gates["rows"]
         if r.get("result") == "unverifiable"
+    ]
+
+
+def _failed_gating_items(gates: dict) -> list[str]:
+    """A **gating** gate that returned a hard FAIL → a §6 NEEDS-HUMAN item (issue #166).
+
+    Without this, only ``unverifiable`` rows reached §6; a gating ``fail`` set
+    ``overall = fail`` and showed in §5 but added no §6 item — and the C6 accept-guard
+    (:func:`signoff.open_needs_human`) only blocks on open §6 ``- [ ]`` items, so a red
+    gating gate could be signed off to COMPLETE. Routing it here forces the human to clear
+    it (accept with override, iterate, or discontinue) before sign-off."""
+    return [
+        f"{r['check']} FAILED (gating) — {r['path_line'] or r['oracle'] or 'no reason given'}"
+        for r in gates["rows"]
+        if r.get("gating") and r.get("result") == "fail"
     ]
 
 
