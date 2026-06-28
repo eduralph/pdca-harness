@@ -50,12 +50,14 @@ class DepsInCompleted(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _brief(self, iid: str, *, depends_on: str = "") -> Path:
+    def _brief(self, iid: str, *, depends_on: str = "", stacks_on: str = "") -> Path:
         d = self.cfg.bundle(iid)
         d.mkdir(parents=True)
         body = "- **Slug:** s\n- **Repo + branch target:** o/r @ main\n"
         if depends_on:
             body += f"- **Depends on:** {depends_on}\n"
+        if stacks_on:
+            body += f"- **Stacks on:** {stacks_on}\n"
         (d / "brief.md").write_text(body, encoding="utf-8")
         return d
 
@@ -87,6 +89,15 @@ class DepsInCompleted(unittest.TestCase):
 
     def test_genuinely_missing_prereq_still_aborts(self) -> None:
         dep = self._brief("DEP", depends_on="GHOST")
+        with self.assertRaises(ValueError):
+            waves.check_dep_graph(self.cfg, [dep])
+
+    def test_archived_stacks_on_parent_is_rejected(self) -> None:
+        # A `Stacks on` parent must be ACTIVE — the dependent stacks its worktree + PR on the
+        # parent's LIVE published branch (read from the active bundle). An archived-only stack
+        # parent stays rejected, even though an archived Depends on parent is accepted (above).
+        self.assertEqual(state.state(self._completed("SP")), state.COMPLETE)
+        dep = self._brief("SDEP", stacks_on="SP")
         with self.assertRaises(ValueError):
             waves.check_dep_graph(self.cfg, [dep])
 

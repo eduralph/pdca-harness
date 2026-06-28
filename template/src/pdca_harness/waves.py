@@ -62,11 +62,19 @@ def check_dep_graph(cfg: Config, bundles: list[Path]) -> None:
         edges: list[str] = []
         # All three ordering fields are topological prerequisites for the DAG (existence
         # + cycle); in the wave model they fold into one dependency edge (#107/#123).
+        stacks = set(brief.stacks_on(bp)) if bp.exists() else set()
         for dep in (declared_deps(bp) if bp.exists() else []):
             dn = cfg.bundle(dep).name
             if dn in names:
                 edges.append(dn)
-            elif state.state(cfg.find_bundle(dep)) != state.COMPLETE:  # archived prereq too (#171)
+                continue
+            # Out-of-batch: an archived (completed/) prereq satisfies Depends on / Depends
+            # on (merged) (#171). But a `Stacks on` parent must be an ACTIVE bundle — the
+            # dependent bases its worktree + stacked PR on the parent's *live* published
+            # branch, read from the active bundle by publish._stack_base_branch — so resolve
+            # Stacks on against bundle() (an archived-only stack parent stays rejected).
+            resolved = cfg.bundle(dep) if dep in stacks else cfg.find_bundle(dep)
+            if state.state(resolved) != state.COMPLETE:
                 raise ValueError(
                     f"{b.name}: declared dependency '{dep}' is neither in this batch "
                     f"nor an existing COMPLETE bundle")
