@@ -225,6 +225,31 @@ class FlowSlice(unittest.TestCase):
         # the re-opened bundle re-planned, rebuilt, and preserved its first attempt
         self.assertTrue((self.cfg.bundle("BATCH1") / "iteration-v1").is_dir())
 
+    def test_iterate_plan_reopens_immediately_iterate_do_deferred(self) -> None:
+        # #174: in the batch sweep (apply_now=False), an iterate-plan re-open is applied
+        # IMMEDIATELY (archive → UNPLANNED, no rebuild) so the next pass's Plan pre-pass
+        # re-plans it BEFORE the deferred iterate-do bundles rebuild. An iterate-do stays
+        # deferred (ITERATE_DO, no archive/rebuild) so it can't interrupt the queue review.
+        dp = self.cfg.bundle("IPLAN")
+        self.assertTrue(flow._plan_if_unplanned(self.cfg, dp, None))
+        self.assertEqual(driver.run_issue(dp, self.cfg), state.AWAITING_SIGNOFF)
+        (dp / leaves.SIGNOFF_DECISION).write_text(
+            "iterate-plan\nneeds a different approach\n", encoding="utf-8")
+        self.assertEqual(flow._apply_decision(
+            self.cfg, dp, by="t", today="2026-06-04", apply_now=False), "iterate-plan")
+        self.assertEqual(state.state(dp), state.UNPLANNED)   # re-opened immediately
+        self.assertTrue((dp / "iteration-v1").is_dir())      # attempt archived
+
+        dd = self.cfg.bundle("IDO")
+        self.assertTrue(flow._plan_if_unplanned(self.cfg, dd, None))
+        self.assertEqual(driver.run_issue(dd, self.cfg), state.AWAITING_SIGNOFF)
+        (dd / leaves.SIGNOFF_DECISION).write_text(
+            "iterate-do\nfix the off-by-one\n", encoding="utf-8")
+        self.assertEqual(flow._apply_decision(
+            self.cfg, dd, by="t", today="2026-06-04", apply_now=False), "iterate-do")
+        self.assertEqual(state.state(dd), state.ITERATE_DO)  # deferred, NOT yet rebuilt
+        self.assertFalse((dd / "iteration-v1").is_dir())     # no archive/rebuild on the spot
+
     def test_batch_signoff_chunks_into_sessions(self) -> None:
         # The cheap-first queue is signed off in ONE session per chunk of
         # SIGNOFF_BATCH_SIZE (=5): six halted bundles → sessions of 5 then 1, all
