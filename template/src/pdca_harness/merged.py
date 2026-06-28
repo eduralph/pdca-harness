@@ -33,7 +33,7 @@ def is_merged(cfg: Config, dep_id: str) -> bool:
     the recorded PR's ``state`` is queried; ``MERGED`` ⇒ ``True``, and any ``gh`` failure
     is treated as not-merged.
     """
-    d = cfg.bundle(dep_id)
+    d = cfg.find_bundle(dep_id)  # a merged prereq may be archived to completed/ (#171)
     if state.state(d) != state.COMPLETE:
         return False  # prereq hasn't even finished its own cycle
     patch = d / "patch.diff"

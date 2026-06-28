@@ -173,6 +173,24 @@ class Config:
         """The per-cycle bundle directory for an issue id."""
         return self.bundle_root / f"issue_{issue_id}"
 
+    def find_bundle(self, issue_id: str) -> Path:
+        """Resolve an EXISTING bundle dir for dependency / state **reads** (issue #171).
+
+        The active ``results/issue_<id>`` if it exists, else the archived
+        ``results/completed/issue_<id>`` if it exists, else the active path. A prerequisite
+        finished and moved to ``completed/`` (a manual archive convention) still satisfies a
+        dependent's ``Depends on`` — the dep resolver looks at ``bundle()`` only and would
+        otherwise miss it and abort the batch — while a genuinely-missing id resolves to its
+        canonical active path and reads as ``UNPLANNED``, preserving the misconfigured-brief
+        guard. Use ``bundle()`` to create / locate the *active* bundle; use this only to
+        resolve a *dependency* by id.
+        """
+        active = self.bundle(issue_id)
+        if active.exists():
+            return active
+        archived = self.bundle_root / "completed" / f"issue_{issue_id}"
+        return archived if archived.exists() else active
+
     def close_class(self, disposition: str) -> str:
         """The close class matching ``disposition``, or "" if it is not a close hint.
 
