@@ -151,6 +151,17 @@ code {
   background: var(--line-soft); padding: 1px 6px; border-radius: 4px;
 }
 
+/* ---- landing page: the PDCA cycle diagram ---- */
+.cycle {
+  font-family: var(--font-mono); font-size: 13px; line-height: 1.5;
+  color: var(--ink-soft);
+  background: var(--paper-raised);
+  border: 1px solid var(--line); border-left: 3px solid var(--thread);
+  border-radius: var(--radius);
+  padding: 18px 20px; margin: 16px 0 4px;
+  overflow-x: auto; -webkit-overflow-scrolling: touch;
+}
+
 /* ---- landing page: principles list ---- */
 .props { list-style: none; padding: 0; margin: 8px 0 0; }
 .props li {

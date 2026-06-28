@@ -174,6 +174,11 @@ is unchecked.** That's the `C6` guard. It's why §6 items above are `- [x]` — 
 human worked them before accepting. (`--iterate-*` and `--discontinue` are *not*
 guarded — you can redirect or abandon a bundle with §6 still open.)
 
+A **gating** gate that hard-FAILS (`overall = fail`, not just an advisory row) also lands
+in §6 (issue #166), so the guard blocks accept on a red gate too — you clear it with a
+conscious override, `--iterate`, or `--discontinue`, never by it slipping silently to
+COMPLETE.
+
 State: `AWAITING_SIGNOFF`. Your move — [step 06](06-signoff.md).
 
 ← [04 Do](04-do.md) · [Index](README.md) · next: [06 Sign-off →](06-signoff.md)
