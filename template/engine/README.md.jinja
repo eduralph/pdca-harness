@@ -30,6 +30,17 @@ driver) and in CI (`pdca gates --working-tree`) — single-sourced, no drift.
   fix, green with it**. The driver exports `$PDCA_BUNDLE` (the bundle dir) to the
   command. `scripts/run-verify.sh` is a skeleton for this — fill it in. This is the
   gate that makes a cycle mean something: it validates *this* change.
+  - **Classify the patch's files first (issue #165).** The red leg reverts the
+    *production* change and expects the test to go red. A patch may also touch
+    **non-behavioral** files a project MUST update but that can't move the test —
+    translation manifests, file-registration lists, generated assets (e.g.
+    `po/POTFILES.{in,skip}`). Treat those as **non-production**: a patch whose only
+    non-test change is such a file has nothing to revert that would go red, so
+    `run-verify` must take the **`UNVERIFIABLE` (exit 77)** branch (→ §6 NEEDS-HUMAN,
+    non-gating), not a red→green it is guaranteed to fail. Otherwise a verify-first
+    bundle (bug already fixed upstream; the patch ships only the regression test + its
+    required manifest entry) gets a **false C4 fail**. Keep the non-production set as a
+    config list of path globs in your run-verify classification.
 - **Everything else is advisory by default** — `gating = false`. Runtime
   (whole-suite T3), conformance (T1/T2/T4), and interface/E2E tiers all audit code
   the *current* fix did not introduce, so gating them on pre-existing/legacy

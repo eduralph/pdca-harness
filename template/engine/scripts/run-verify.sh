@@ -21,6 +21,14 @@
 #   2. revert the production change, run the test  -> expect FAIL (red)
 #   3. apply $PDCA_BUNDLE/patch.diff, run the test -> expect PASS (green)
 #   4. exit 0 on red-then-green, non-zero otherwise
+#
+# CLASSIFY THE PATCH FIRST (issue #165). If the patch's only non-test change is a
+# NON-BEHAVIORAL file a project must update but that can't move the test — a translation
+# manifest / file-registration list / generated asset (e.g. po/POTFILES.{in,skip}) — there
+# is nothing to revert that would go red. Emit `PDCA-UNVERIFIABLE: <reason>` and exit 77
+# (-> SUMMARY §6 NEEDS-HUMAN, non-gating) instead of a red->green the bundle is guaranteed
+# to fail (a false C4 fail for a verify-first test-only fix). Keep the non-production set as
+# a config list of path globs. See engine/README.md (§The two gate shapes that matter).
 set -euo pipefail
 
 BUNDLE="${PDCA_BUNDLE:?run from the driver — \$PDCA_BUNDLE must be set}"
