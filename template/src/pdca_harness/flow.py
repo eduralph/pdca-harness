@@ -24,8 +24,8 @@ import sys
 import threading
 from pathlib import Path
 
-from . import (act, driver, gates, integrate, lane, leaves, merge, publish, queue,
-               signoff, state, waves)
+from . import (act, brief, driver, gates, integrate, lane, leaves, merge, merged,
+               publish, queue, signoff, state, waves)
 from .config import Config
 
 
@@ -334,18 +334,34 @@ def _publish_bundle(cfg: Config, d: Path, *, by: str, today: str) -> None:
 # Shared multi-bundle driver: compute waves → per wave (drive → cheap-first sign-off →
 # publish → fold onto the integration branch the next wave builds on) → Act once (docs 09).
 # ----------------------------------------------------------------------------
-def _runnable(cfg: Config, wave: list[Path]) -> list[Path]:
-    """Drop a wave bundle whose declared prerequisite never reached COMPLETE — e.g. one
-    DISCONTINUED in an earlier wave. Such a dependent can't build on a base missing its
-    prerequisite's change, so it is skipped loudly; since it never completes, its own
-    dependents fall out of later waves the same way (the skip cascades)."""
+def _runnable(cfg: Config, wave: list[Path], batch_names: set[str]) -> list[Path]:
+    """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
+
+    A prerequisite **in this run's batch** is carried into the dependent's base by the wave
+    fold once it reaches COMPLETE (it sits in an earlier wave), so COMPLETE is the bar — e.g.
+    a prereq DISCONTINUED earlier never gets there, and its dependent is skipped loudly. A
+    prerequisite **outside this batch** (a prior run's) is gated on its on-disk COMPLETE state
+    (archived `completed/` too, #171) — **except** an out-of-batch ``Depends on (merged)``
+    prereq, which keeps its stricter #107 merge-gate (#186): nothing in *this* run carries an
+    out-of-batch prereq's diff into the base, and COMPLETE means only "a draft PR was opened",
+    so a dependent built on a COMPLETE-but-unmerged base would miss the prerequisite. It must
+    wait until the PR is genuinely merged (``merged.is_merged``) — a later ``pdca flow`` run
+    then picks it up. A skipped bundle never completes, so its own dependents fall out of later
+    waves the same way (the skip cascades)."""
     runnable: list[Path] = []
     for d in wave:
         bp = d / "brief.md"
-        unmet = [dep for dep in (waves.declared_deps(bp) if bp.exists() else [])
-                 if state.state(cfg.find_bundle(dep)) != state.COMPLETE]  # archived prereq too (#171)
+        merged_deps = set(brief.depends_on_merged(bp)) if bp.exists() else set()
+        unmet: list[str] = []
+        for dep in (waves.declared_deps(bp) if bp.exists() else []):
+            out_of_batch = cfg.bundle(dep).name not in batch_names
+            if out_of_batch and dep in merged_deps:
+                if not merged.is_merged(cfg, dep):  # PR not yet merged — wait, don't build (#186)
+                    unmet.append(dep)
+            elif state.state(cfg.find_bundle(dep)) != state.COMPLETE:  # archived prereq too (#171)
+                unmet.append(dep)
         if unmet:
-            print(f"flow: {d.name} skipped — prerequisite(s) not COMPLETE "
+            print(f"flow: {d.name} skipped — prerequisite(s) not ready "
                   f"({', '.join(unmet)}); not built on a base missing them.", file=sys.stderr)
         else:
             runnable.append(d)
@@ -427,11 +443,12 @@ def _drive_and_act(
     """
     wave_list = waves.compute_waves(cfg, bundles)  # validates (raises) + levels the batch
     last = len(wave_list) - 1
+    batch_names = {b.name for b in bundles}  # in-batch prereqs ride the fold; #186 gates the rest
     published: set[str] = set()
     accepted: list[Path] = []        # cumulative COMPLETE bundles, wave then name order
     integ_branch: str | None = None  # the live integration branch a later wave stacks on
     for k, wave in enumerate(wave_list):
-        runnable = _runnable(cfg, wave)
+        runnable = _runnable(cfg, wave, batch_names)
         if not runnable:
             continue
         # A later wave stacks on the prior waves' folded work: point each bundle's Do
