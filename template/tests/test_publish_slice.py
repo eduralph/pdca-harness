@@ -98,13 +98,28 @@ class PublishSlice(unittest.TestCase):
     def test_publish_prompt_hyperlinks_tracker_when_pattern_set(self) -> None:
         # #266: with [tracker].issue_url_pattern set, the publish prompt instructs the leaf
         # to hyperlink the resolved ticket URL (not just the bare id); absent ⇒ no link clause.
-        d = _bundle(self.cfg, "P266", brief_body=_FIX_BRIEF, accepted=True)
+        d = _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)   # a numeric ticket id
         self.cfg.issue_url_pattern = "https://tracker/view.php?id={id}"
         prompt = leaves._publish_prompt(d, self.cfg)
-        self.assertIn("https://tracker/view.php?id=P266", prompt)
+        self.assertIn("https://tracker/view.php?id=266", prompt)
         self.assertIn("Hyperlink the tracker ticket", prompt)
         self.cfg.issue_url_pattern = ""
         self.assertNotIn("Hyperlink the tracker ticket", leaves._publish_prompt(d, self.cfg))
+
+    def test_publish_prompt_omits_link_for_a_slug_or_pending_bundle(self) -> None:
+        # #192/#196: a slug bundle (fork issue), a `--no-issue`/id_pending placeholder, or any
+        # non-numeric id has no real ticket number, so the pattern would format a broken link —
+        # omit the clause even with issue_url_pattern set (the bare-number trailer is gated the
+        # same way). Only a real ticket NUMBER links.
+        self.cfg.issue_url_pattern = "https://tracker/view.php?id={id}"
+        for iid in ("820-build-toolchain-coverage", "PEND"):     # slug, then a pending placeholder
+            d = _bundle(self.cfg, iid, brief_body=_FIX_BRIEF, accepted=True)
+            prompt = leaves._publish_prompt(d, self.cfg)
+            self.assertNotIn("Hyperlink the tracker ticket", prompt)        # no link clause
+            self.assertNotIn(f"view.php?id={iid}", prompt)                  # no broken URL
+        # …but a real numeric ticket still gets the link.
+        num = _bundle(self.cfg, "13865", brief_body=_FIX_BRIEF, accepted=True)
+        self.assertIn("https://tracker/view.php?id=13865", leaves._publish_prompt(num, self.cfg))
 
     def test_dry_run_plans_commands_and_writes_artifacts(self) -> None:
         d = _bundle(self.cfg, "PUB", brief_body=_FIX_BRIEF, accepted=True)
