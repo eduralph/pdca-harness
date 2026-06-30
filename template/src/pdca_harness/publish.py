@@ -152,10 +152,18 @@ def publish(
 
     git = lambda *a: ["git", "-C", str(repo), *a]
     base_remote = cfg.base_remote
-    # Stacked: cut the dependent's branch off the PARENT branch (on origin) and target the
-    # PR at it; otherwise off the target base (#123). pr_base is what `gh --base` gets.
+    # Stacked: cut the dependent's branch off the PARENT / integration branch (on origin) so it
+    # carries the predecessors' diffs; otherwise off the target base (#123). pr_base is what
+    # `gh --base` gets — and it MUST be a branch in the upstream (`--repo`) repo.
     checkout_base = f"origin/{stack_branch}" if stack_branch else f"{base_remote}/{base}"
-    pr_base = stack_branch or base
+    # Own-repo (base on origin): the integration/parent branch IS an upstream branch, so
+    # `--base` it for a clean, increment-only stacked PR. Fork (base on a separate upstream a
+    # fork contributor can't push to): that branch lives on origin (the fork) and can't be a
+    # `--base`, so the PR opens against the upstream base and carries the CUMULATIVE stacked
+    # diff (predecessors + this fix) until the parent merges bottom-up and GitHub auto-reduces
+    # it (#185). The dependent's branch is still cut off the parent branch either way.
+    own_repo = base_remote == "origin"
+    pr_base = stack_branch if (stack_branch and own_repo) else base
     steps = [
         git("fetch", "origin" if stack_branch else base_remote),
         git("checkout", "-B", branch, checkout_base),
@@ -188,7 +196,9 @@ def publish(
               "--body-file", str((d / PR_BODY).resolve())]
 
     if dry_run:
-        kind = "stacked draft PR" if stack_branch else "draft PR"
+        kind = "draft PR"
+        if stack_branch:
+            kind = "stacked draft PR" if own_repo else "stacked draft PR (fork: cumulative diff vs base)"
         print(f"publish --dry-run — {d.name} → {kind} on {repo_spec} ({branch} → {pr_base}):")
         print(f"  # stash the target working tree (Do/Check leave it dirty), restore it after")
         for c in steps + ([pr_cmd] if open_pr else []):
