@@ -559,6 +559,18 @@ def flow_batch(
         print("flow: nothing to do — no in-flight briefs (all COMPLETE or none authored; "
               "brief new issues to add work).", file=sys.stderr)
         return {}
+    # Resume tolerance (#191): the sweep pulls in EVERY in-flight bundle, so a stale /
+    # misconfigured `Depends on` in an unrelated leftover must not abort the whole run. Hold
+    # (skip this run, leave in-flight) any bundle with an unresolvable dependency or in a
+    # cycle — plus its in-batch dependents — and drive the schedulable remainder.
+    bundles, held = waves.partition_schedulable(cfg, bundles)
+    for name, reason in sorted(held.items()):
+        print(f"flow: {name} held this run — {reason}; left in-flight (resolve it, then "
+              f"re-run).", file=sys.stderr)
+    if not bundles:
+        print("flow: nothing schedulable — every in-flight bundle is held on an unresolved "
+              "dependency or a cycle.", file=sys.stderr)
+        return {}
     return _drive_and_act(cfg, bundles, do_publish=do_publish, do_act=do_act, by=by,
                           today=today, max_passes=max_passes)
 

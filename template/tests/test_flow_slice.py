@@ -339,6 +339,23 @@ class FlowSlice(unittest.TestCase):
         self.assertEqual(set(results), {"BATCH1", "BATCH2", "RESUME"})
         self.assertTrue(all(s == state.COMPLETE for s in results.values()))
 
+    def test_batch_holds_a_stale_dep_bundle_without_aborting(self) -> None:
+        # #191: a leftover in-flight bundle with a stale `Depends on: GHOST` must NOT abort the
+        # whole resume sweep — it is held (left in-flight), and the rest of the batch still runs.
+        bad = self.cfg.bundle("BADDEP")
+        leaves.do_plan(bad, self.cfg)                        # pre-briefed leftover (PLANNED)
+        bp = bad / "brief.md"
+        bp.write_text(bp.read_text(encoding="utf-8") + "- **Depends on:** GHOST\n",
+                      encoding="utf-8")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            results = flow.flow_batch(self.cfg, today="2026-06-04")
+        self.assertEqual(set(results), {"BATCH1", "BATCH2"})            # BADDEP held, not driven
+        self.assertTrue(all(s == state.COMPLETE for s in results.values()))
+        self.assertEqual(state.state(bad), state.PLANNED)              # left in-flight for a re-run
+        self.assertIn("issue_BADDEP held this run", err.getvalue())
+        self.assertIn("GHOST", err.getvalue())
+
     def test_batch_leaves_complete_bundle_alone_on_rerun(self) -> None:
         # First run completes BATCH1/BATCH2. A second run re-briefs them (stub) but
         # they are already COMPLETE, so the resume set excludes them → nothing to do.

@@ -131,6 +131,95 @@ class ComputeWaves(unittest.TestCase):
         self.assertEqual(waves.compute_waves(self.cfg, []), [])
 
 
+class PartitionSchedulable(unittest.TestCase):
+    """`partition_schedulable` holds a bundle with an unresolvable dependency (or in a cycle)
+    plus its in-batch dependents, and keeps the rest schedulable — so the resume sweep (#191)
+    can't let one stale leftover abort the whole run, the way `check_dep_graph` would `raise`."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _cfg(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _brief(self, iid: str, *, depends_on: str = "") -> Path:
+        d = self.cfg.bundle(iid)
+        d.mkdir(parents=True)
+        body = _BRIEF.format(slug=iid.lower())
+        if depends_on:
+            body += f"- **Depends on:** {depends_on}\n"
+        (d / "brief.md").write_text(body, encoding="utf-8")
+        return d
+
+    def _partition(self, *ids: str) -> tuple[list[str], dict[str, str]]:
+        sched, held = waves.partition_schedulable(self.cfg, [self.cfg.bundle(i) for i in ids])
+        return sorted(p.name for p in sched), held
+
+    def test_clean_batch_is_all_schedulable(self) -> None:
+        self._brief("A")
+        self._brief("B", depends_on="A")          # in-batch edge resolves
+        sched, held = self._partition("A", "B")
+        self.assertEqual(sched, ["issue_A", "issue_B"])
+        self.assertEqual(held, {})
+
+    def test_stale_dep_holds_only_that_bundle(self) -> None:
+        # BAD has a stale `Depends on: GHOST` (not in batch, not COMPLETE on disk); GOOD is
+        # unrelated and must still run — the #191 property (one bad leftover ≠ whole-run abort).
+        self._brief("GOOD")
+        self._brief("BAD", depends_on="GHOST")
+        sched, held = self._partition("GOOD", "BAD")
+        self.assertEqual(sched, ["issue_GOOD"])
+        self.assertIn("issue_BAD", held)
+        self.assertIn("GHOST", held["issue_BAD"])
+
+    def test_hold_propagates_to_in_batch_dependents(self) -> None:
+        # DEP depends on BAD (held on a stale dep) → DEP can't build on a missing base either.
+        self._brief("BAD", depends_on="GHOST")
+        self._brief("DEP", depends_on="BAD")
+        self._brief("OK")
+        sched, held = self._partition("BAD", "DEP", "OK")
+        self.assertEqual(sched, ["issue_OK"])
+        self.assertEqual(set(held), {"issue_BAD", "issue_DEP"})
+
+    def test_cycle_members_are_held_not_raised(self) -> None:
+        # An A↔B cycle is unschedulable (leveling can't terminate) — hold both, don't raise;
+        # the unrelated C still runs.
+        self._brief("A", depends_on="B")
+        self._brief("B", depends_on="A")
+        self._brief("C")
+        sched, held = self._partition("A", "B", "C")
+        self.assertEqual(sched, ["issue_C"])
+        self.assertEqual(set(held), {"issue_A", "issue_B"})
+        self.assertTrue(all("cycle" in held[n] for n in ("issue_A", "issue_B")))
+
+    def test_cycle_hold_propagates_to_downstream_dependents(self) -> None:
+        # A↔B cycle with C depending on A: C must be held too (#197) — otherwise it survives
+        # into a reduced batch where A is gone and compute_waves would raise, defeating the
+        # tolerance. OK is unrelated and still runs.
+        self._brief("A", depends_on="B")
+        self._brief("B", depends_on="A")
+        self._brief("C", depends_on="A")
+        self._brief("OK")
+        sched, held = self._partition("A", "B", "C", "OK")
+        self.assertEqual(sched, ["issue_OK"])
+        self.assertEqual(set(held), {"issue_A", "issue_B", "issue_C"})
+        self.assertIn("prerequisite held", held["issue_C"])   # C held via the cycle member A
+        self.assertEqual([[p.name for p in w]
+                          for w in waves.compute_waves(self.cfg, [self.cfg.bundle("OK")])],
+                         [["issue_OK"]])
+
+    def test_schedulable_remainder_levels_without_raising(self) -> None:
+        # The partition's remainder must pass compute_waves cleanly (the whole point: the bad
+        # bundle is gone, so the strict check no longer aborts).
+        self._brief("GOOD")
+        self._brief("BAD", depends_on="GHOST")
+        sched, _ = waves.partition_schedulable(
+            self.cfg, [self.cfg.bundle(i) for i in ("GOOD", "BAD")])
+        self.assertEqual([[p.name for p in w] for w in waves.compute_waves(self.cfg, sched)],
+                         [["issue_GOOD"]])
+
+
 class DiffFiles(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
