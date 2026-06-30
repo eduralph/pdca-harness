@@ -54,35 +54,46 @@ class FoldDryAndUnit(unittest.TestCase):
             (d / "patch.diff").write_text(patch, encoding="utf-8")
         return d
 
-    def test_integration_branch_name_flattens_base(self) -> None:
+    def test_integration_branch_name_is_injective_per_base(self) -> None:
         self.assertEqual(integrate.integration_branch(self.cfg, "main"),
                          "pdca-integration/main")
+        # `/` → `-`, but existing `-` is doubled first, so two bases that differ only by
+        # `/` vs `-` never collide onto one branch / worktree (#187).
         self.assertEqual(integrate.integration_branch(self.cfg, "release/2.0"),
                          "pdca-integration/release-2.0")
+        self.assertEqual(integrate.integration_branch(self.cfg, "release-2.0"),
+                         "pdca-integration/release--2.0")
+        self.assertNotEqual(integrate.integration_branch(self.cfg, "release/2.0"),
+                            integrate.integration_branch(self.cfg, "release-2.0"))
 
     def test_nothing_to_fold(self) -> None:
-        self.assertEqual(integrate.fold(self.cfg, []), (None, None))
+        self.assertEqual(integrate.fold(self.cfg, []), {})
         no_patch = self._bundle("NP", patch=None)            # close/no-fix: nothing to ship
-        self.assertEqual(integrate.fold(self.cfg, [no_patch]), (None, None))
+        self.assertEqual(integrate.fold(self.cfg, [no_patch]), {})
 
     def test_dry_run_shells_nothing(self) -> None:
         b = self._bundle("D1")
         with mock.patch("pdca_harness.integrate.subprocess.run") as m, \
                 redirect_stdout(io.StringIO()) as out:
-            branch, wt = integrate.fold(self.cfg, [b], dry_run=True)
-        self.assertEqual(branch, "pdca-integration/main")
-        self.assertIsNone(wt)
+            folded = integrate.fold(self.cfg, [b], dry_run=True)
+        self.assertEqual(folded, {("org/repo", "main"): ("pdca-integration/main", None)})
         m.assert_not_called()                                 # no git in a dry-run
         self.assertIn("pdca-integration/main", out.getvalue())
 
-    def test_different_target_excluded_from_fold(self) -> None:
-        same = self._bundle("S1", target="org/repo @ main")
-        other = self._bundle("O1", target="other/repo @ main")
-        with redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:
-            integrate.fold(self.cfg, [same, other], dry_run=True)
-        self.assertIn("excluded from the fold", err.getvalue())
-        self.assertIn("issue_O1", err.getvalue())
-        self.assertIn("fold 1 patch(es)", out.getvalue())     # only the same-target one
+    def test_each_target_gets_its_own_integration_line(self) -> None:
+        # A batch spanning two (repo, base) targets folds one line per target — not a single
+        # global branch a sibling-target bundle would wrongly stack on (#187).
+        a = self._bundle("S1", target="org/repo @ main")
+        b = self._bundle("O1", target="other/repo @ develop")
+        self.cfg.repo_checkouts["other/repo"] = str(self.tmp / "other")
+        with redirect_stdout(io.StringIO()) as out:
+            folded = integrate.fold(self.cfg, [a, b], dry_run=True)
+        self.assertEqual(folded, {
+            ("org/repo", "main"): ("pdca-integration/main", None),
+            ("other/repo", "develop"): ("pdca-integration/develop", None)})
+        self.assertNotIn("excluded", out.getvalue())          # nothing dropped anymore
+        self.assertIn("fold 1 patch(es) onto pdca-integration/main", out.getvalue())
+        self.assertIn("fold 1 patch(es) onto pdca-integration/develop", out.getvalue())
 
 
 class FoldGit(unittest.TestCase):
@@ -149,7 +160,8 @@ class FoldGit(unittest.TestCase):
 
     def test_single_fold_pushes_branch(self) -> None:
         b = self._bundle("F1", self._modify_patch("one\n"))
-        branch, wt = integrate.fold(self.cfg, [b])
+        folded = integrate.fold(self.cfg, [b])
+        branch, wt = folded[("org/repo", "main")]
         self.assertEqual(branch, "pdca-integration/main")
         self.assertIsNotNone(wt)
         self.assertEqual((wt / "base.txt").read_text(encoding="utf-8"), "one\n")
@@ -160,7 +172,7 @@ class FoldGit(unittest.TestCase):
         # the old _stack_base_branch parents[0] could not express.
         b1 = self._bundle("M1", self._modify_patch("one\n"))
         b2 = self._bundle("M2", self._add_patch("feature.txt", "hi\n"))
-        branch, wt = integrate.fold(self.cfg, [b1, b2])
+        branch, wt = integrate.fold(self.cfg, [b1, b2])[("org/repo", "main")]
         self.assertEqual((wt / "base.txt").read_text(encoding="utf-8"), "one\n")
         self.assertTrue((wt / "feature.txt").is_file())
         self.assertTrue(self._pushed(branch))
@@ -173,6 +185,48 @@ class FoldGit(unittest.TestCase):
         with redirect_stderr(io.StringIO()):
             with self.assertRaises(integrate.IntegrationError):
                 integrate.fold(self.cfg, [b1, b2])
+
+
+class PointAtIntegration(unittest.TestCase):
+    """`flow._point_at_integration` writes each later-wave bundle's stack base from the
+    integration line matching *its own* (repo, base) — the second half of the #187 fix
+    (fold tracks per target; the driver routes per target)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _cfg(self.tmp, "org/repo", self.tmp / "repo")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _bundle(self, iid: str, target: str) -> Path:
+        d = self.cfg.bundle(iid)
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(
+            f"- **Slug:** {iid.lower()}\n- **Repo + branch target:** {target}\n",
+            encoding="utf-8")
+        return d
+
+    def test_routes_each_bundle_to_its_own_target_branch(self) -> None:
+        from pdca_harness import flow, publish
+        a = self._bundle("A", "org/repo @ main")
+        b = self._bundle("B", "other/repo @ develop")
+        c = self._bundle("C", "third/repo @ main")          # not integrated → off its own base
+        integ = {("org/repo", "main"): "pdca-integration/main",
+                 ("other/repo", "develop"): "pdca-integration/develop"}
+        flow._point_at_integration(integ, [a, b, c])
+        self.assertEqual(publish._read_stack_base(a), "pdca-integration/main")
+        self.assertEqual(publish._read_stack_base(b), "pdca-integration/develop")  # not main!
+        self.assertEqual(publish._read_stack_base(c), "")   # no integ line → builds off base
+
+    def test_clears_a_stale_stack_base_for_an_un_integrated_target(self) -> None:
+        # A bundle carrying a stack base from a prior/resumed run whose target isn't integrated
+        # this run must have it CLEARED, else it builds against an old integration branch (#187).
+        from pdca_harness import flow, publish
+        d = self._bundle("D", "third/repo @ main")
+        publish.write_stack_base(d, "pdca-integration/stale")     # left by a prior run
+        flow._point_at_integration({("org/repo", "main"): "pdca-integration/main"}, [d])
+        self.assertEqual(publish._read_stack_base(d), "")          # cleared → off its own base
 
 
 if __name__ == "__main__":

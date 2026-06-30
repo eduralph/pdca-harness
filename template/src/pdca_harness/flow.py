@@ -368,6 +368,22 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str]) -> list[Path
     return runnable
 
 
+def _point_at_integration(integ: dict[tuple[str, str], str], runnable: list[Path]) -> None:
+    """Reconcile each runnable bundle's stack base with THIS run's integration state (#187).
+
+    ``integ`` maps each integrated target to its run-scoped integration branch. A bundle is
+    pointed at the branch for **its own** ``(repo, base)`` target only — never a sibling
+    target's, which is absent on that repo or carries unrelated patches. A bundle whose target
+    wasn't integrated this run has any **stale** stack base (left by a prior/resumed run)
+    cleared, so it builds off its own target base rather than an old integration branch."""
+    for d in runnable:
+        branch = integ.get(publish._resolve_target(d)[:2])
+        if branch:
+            publish.write_stack_base(d, branch)
+        else:
+            publish.clear_stack_base(d)
+
+
 def _audit_wave_overlap(wave: list[Path]) -> None:
     """Advisory (#wave-model): flag two bundles in one wave whose patches touch a shared
     file. A wave holds only non-conflicting work by construction, so any overlap is a
@@ -446,16 +462,16 @@ def _drive_and_act(
     batch_names = {b.name for b in bundles}  # in-batch prereqs ride the fold; #186 gates the rest
     published: set[str] = set()
     accepted: list[Path] = []        # cumulative COMPLETE bundles, wave then name order
-    integ_branch: str | None = None  # the live integration branch a later wave stacks on
+    integ: dict[tuple[str, str], str] = {}  # per-target (repo, base) → integration branch (#187)
     for k, wave in enumerate(wave_list):
         runnable = _runnable(cfg, wave, batch_names)
         if not runnable:
             continue
-        # A later wave stacks on the prior waves' folded work: point each bundle's Do
-        # worktree + stacked PR at the integration branch (read via _stack_base_branch).
-        if integ_branch:
-            for d in runnable:
-                publish.write_stack_base(d, integ_branch)
+        # Reconcile each runnable bundle's stack base with this run's integration state:
+        # point it at its OWN (repo, base) target's branch, or clear a stale marker a
+        # prior/resumed run left so it builds off its own base (#187). Unconditional — the
+        # stale-clear must run even before any wave has folded (integ still empty).
+        _point_at_integration(integ, runnable)
         _drive_wave(cfg, runnable, by=by, today=today, max_passes=max_passes)
         complete = [d for d in sorted(runnable, key=lambda p: p.name)
                     if state.state(d) == state.COMPLETE]
@@ -478,22 +494,24 @@ def _drive_and_act(
                     print(f"flow: wave {k} did not merge; STOPPING — later waves not run.",
                           file=sys.stderr)
                     break
-            else:  # default: stack — fold onto the integration branch
+            else:  # default: stack — fold onto a per-target integration branch
                 try:
-                    branch, wt = integrate.fold(cfg, accepted, dry_run=dry)
+                    folded = integrate.fold(cfg, accepted, dry_run=dry)
                 except integrate.IntegrationError as exc:
                     print(f"flow: wave {k} did not integrate ({exc}); STOPPING — later "
                           f"waves not run.", file=sys.stderr)
                     break
-                if branch and not dry:
-                    integ_branch = branch
-                    # Optional re-gate (#wave-model): validate the folded combination over
-                    # the integration tip before the next wave builds on it; red ⇒ STOP.
-                    if cfg.regate_between_waves and wt is not None and \
-                            gates.run_integration(cfg, wt).get("overall") == "fail":
-                        print(f"flow: wave {k} integration re-gate FAILED — the combination "
-                              f"is red though each fix was green alone; STOPPING (later "
-                              f"waves not run).", file=sys.stderr)
+                if folded and not dry:
+                    integ = {tgt: branch for tgt, (branch, _wt) in folded.items()}
+                    # Optional re-gate (#wave-model): validate EACH folded combination over
+                    # its integration tip before the next wave builds on it; any red ⇒ STOP.
+                    if cfg.regate_between_waves and any(
+                            wt is not None
+                            and gates.run_integration(cfg, wt).get("overall") == "fail"
+                            for _tgt, (_branch, wt) in folded.items()):
+                        print(f"flow: wave {k} integration re-gate FAILED — a combination is "
+                              f"red though each fix was green alone; STOPPING (later waves "
+                              f"not run).", file=sys.stderr)
                         break
 
     results = {d.name.replace("issue_", ""): state.state(d) for d in bundles}
