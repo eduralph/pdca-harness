@@ -1352,5 +1352,64 @@ class ActCadence(unittest.TestCase):
         self.assertEqual(self._log().read_text(encoding="utf-8"), before)  # no new Act entry
 
 
+class RunnableMergeGate(unittest.TestCase):
+    """`_runnable` keeps the #107 merge-gate for an *out-of-batch* `Depends on (merged)`
+    prereq (#186): the wave fold carries only in-batch prereqs into the next base, so an
+    out-of-batch one must be genuinely MERGED — COMPLETE-but-PR-open is not enough."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _brief(self, iid: str, body_extra: str = "") -> Path:
+        d = self.cfg.bundle(iid)
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(
+            f"- **Slug:** {iid.lower()}\n- **Repo + branch target:** org/repo @ main\n"
+            + body_extra, encoding="utf-8")
+        return d
+
+    def _complete(self, iid: str) -> Path:
+        d = self._brief(iid)
+        (d / "patch.diff").write_text("diff --git a/x b/x\n", encoding="utf-8")
+        (d / "check-gates.json").write_text("{}", encoding="utf-8")
+        shutil.copyfile(TEMPLATES / "SUMMARY.md.tpl", d / "SUMMARY.md")
+        signoff.record(d / "SUMMARY.md", action="accept", by="T", date="2026-06-05")
+        self.assertEqual(state.state(d), state.COMPLETE)
+        return d
+
+    def test_out_of_batch_depends_on_merged_waits_until_merged(self) -> None:
+        # B `Depends on (merged): X`, X from a PRIOR run (not in this batch). Nothing here
+        # carries X's diff into the base, so X must be MERGED, not merely COMPLETE (#186).
+        b = self._brief("B", "- **Depends on (merged):** X\n")
+        with mock.patch("pdca_harness.flow.merged.is_merged", return_value=False) as m:
+            self.assertEqual(flow._runnable(self.cfg, [b], {b.name}), [])   # X's PR open → defer
+        m.assert_called_once_with(self.cfg, "X")
+        with mock.patch("pdca_harness.flow.merged.is_merged", return_value=True):
+            self.assertEqual(flow._runnable(self.cfg, [b], {b.name}), [b])  # X merged → runnable
+
+    def test_in_batch_depends_on_merged_rides_the_fold_without_gh(self) -> None:
+        # An IN-BATCH `Depends on (merged)` prereq is carried by the fold once COMPLETE — no
+        # `gh`/merge check (the regression #186 must not over-correct an in-batch dep into).
+        p = self._complete("P")
+        b = self._brief("B", "- **Depends on (merged):** P\n")
+        with mock.patch("pdca_harness.flow.merged.is_merged") as m:
+            runnable = flow._runnable(self.cfg, [b], {b.name, p.name})
+        m.assert_not_called()
+        self.assertEqual(runnable, [b])
+
+    def test_out_of_batch_plain_depends_on_keeps_complete_bar(self) -> None:
+        # A plain out-of-batch `Depends on` keeps the COMPLETE-on-disk bar (#171) — no merge
+        # check; only the `(merged)` variant carries the stricter gate.
+        self._complete("PRIOR")
+        b = self._brief("B", "- **Depends on:** PRIOR\n")
+        with mock.patch("pdca_harness.flow.merged.is_merged") as m:
+            self.assertEqual(flow._runnable(self.cfg, [b], {b.name}), [b])
+        m.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
