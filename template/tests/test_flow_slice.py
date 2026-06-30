@@ -1428,5 +1428,65 @@ class RunnableMergeGate(unittest.TestCase):
         m.assert_not_called()
 
 
+class PlanBatchUnseededWarning(unittest.TestCase):
+    """`do_plan_batch` surfaces a VISIBLE warning (#190) when the CSV/default planner briefs an
+    id mid-session without seeded tracker notes — it never lets a CSV-row-only brief flow on
+    silently. (The seeders are never auto-run unattended; the human seeds + refines.)"""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+        self.cfg.planner = LeafConfig(mode="command", argv=["true"], interactive=True)
+        self.cfg.notes_cmd = "fetch-notes"            # a Plan source IS configured
+        self.cfg.bundle_root.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _planner_writes(self, *, notes: bool):
+        def _fake(*_a, **_k):                          # simulate the planner choosing an id
+            d = self.cfg.bundle("CHOSEN")
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "brief.md").write_text("- **Slug:** chosen\n", encoding="utf-8")
+            if notes:
+                (d / "notes.json").write_text("{}", encoding="utf-8")
+        return _fake
+
+    def _run_csv_plan(self) -> str:
+        err = io.StringIO()
+        with redirect_stderr(err):
+            leaves.do_plan_batch(self.cfg, csv="export.csv")   # ids=None → the CSV path
+        return err.getvalue()
+
+    def test_warns_when_csv_planner_briefs_without_notes(self) -> None:
+        with mock.patch("pdca_harness.leaves._invoke",
+                        side_effect=self._planner_writes(notes=False)):
+            msg = self._run_csv_plan()
+        self.assertIn("WITHOUT seeded tracker notes", msg)
+        self.assertIn("CHOSEN", msg)
+
+    def test_warns_for_a_brief_added_to_a_preexisting_unplanned_dir(self) -> None:
+        # An `issue_<id>` dir can already exist UNPLANNED (no brief); the planner adds brief.md
+        # to it mid-session. That's still a NEW brief without notes — must warn (we snapshot
+        # which dirs HAD a brief, not just dir names; Codex review on #198).
+        self.cfg.bundle("CHOSEN").mkdir(parents=True, exist_ok=True)   # pre-existing empty dir
+        with mock.patch("pdca_harness.leaves._invoke",
+                        side_effect=self._planner_writes(notes=False)):
+            msg = self._run_csv_plan()
+        self.assertIn("WITHOUT seeded tracker notes", msg)
+        self.assertIn("CHOSEN", msg)
+
+    def test_no_warning_when_the_brief_carries_notes(self) -> None:
+        with mock.patch("pdca_harness.leaves._invoke",
+                        side_effect=self._planner_writes(notes=True)):
+            self.assertNotIn("WITHOUT seeded tracker notes", self._run_csv_plan())
+
+    def test_no_warning_when_no_plan_source_configured(self) -> None:
+        self.cfg.notes_cmd = ""                        # no notes_cmd, no plan.sources
+        with mock.patch("pdca_harness.leaves._invoke",
+                        side_effect=self._planner_writes(notes=False)):
+            self.assertNotIn("WITHOUT seeded tracker notes", self._run_csv_plan())
+
+
 if __name__ == "__main__":
     unittest.main()
