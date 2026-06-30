@@ -309,9 +309,11 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
         sources.seed(cfg, cfg.bundle(iid))  # seed notes.json + sources/ per bundle (#65/#102)
     if cfg.planner.mode == "command":
         # On the CSV/default path the planner CHOOSES the ids mid-session, so the per-bundle
-        # seed above never ran for them. Snapshot the existing bundles so we can flag any
-        # briefed THIS session that the seed never reached (#190).
-        before = set() if ids else {d.name for d in cfg.bundle_root.glob("issue_*")}
+        # seed above never ran for them. Snapshot which bundles ALREADY HAD a brief so we can
+        # flag any briefed THIS session that the seed never reached — including a brief.md
+        # added to a pre-existing UNPLANNED dir, which a dir-name snapshot would miss (#190).
+        before = set() if ids else {d.name for d in cfg.bundle_root.glob("issue_*")
+                                    if (d / "brief.md").exists()}
         _invoke(cfg.planner, cfg.root, _plan_batch_prompt(cfg, csv, ids))
         if ids is None:
             _warn_unseeded_briefs(cfg, before)
@@ -325,11 +327,14 @@ def _warn_unseeded_briefs(cfg: Config, before: set[str]) -> None:
 
     On the id-seeded path each bundle's notes/sources are fetched first; on the CSV/default
     path the planner picks the ids *mid-session*, so that per-bundle seed never runs — those
-    briefs rest on the CSV row alone, missing the reporter thread / attached repro. We never
-    auto-run the seeders unattended (a tracker scraper is human-in-the-loop — a browser, a
-    login), so surface it as a VISIBLE sub-step: name the ids and tell the human to seed +
-    refine before the work is driven. No-op when no Plan source is configured (the CSV/docs are
-    then the only source) or every new brief already carries notes.json / a sources/ dir."""
+    briefs rest on the CSV row alone, missing the reporter thread / attached repro. ``before``
+    is the set of bundles that already carried a ``brief.md`` before this session (NOT just the
+    existing dir names — an ``issue_<id>`` dir can pre-exist UNPLANNED and gain its brief now),
+    so a bundle is freshly briefed iff it has a brief that ``before`` lacked. We never auto-run
+    the seeders unattended (a tracker scraper is human-in-the-loop — a browser, a login), so
+    surface it as a VISIBLE sub-step: name the ids and tell the human to seed + refine before
+    the work is driven. No-op when no Plan source is configured (the CSV/docs are then the only
+    source) or every fresh brief already carries notes.json / a sources/ dir."""
     if not (cfg.notes_cmd or cfg.plan_sources):
         return
     unseeded = sorted(

@@ -1448,6 +1448,17 @@ class PlanBatchUnseededWarning(unittest.TestCase):
         self.assertIn("WITHOUT seeded tracker notes", msg)
         self.assertIn("CHOSEN", msg)
 
+    def test_warns_for_a_brief_added_to_a_preexisting_unplanned_dir(self) -> None:
+        # An `issue_<id>` dir can already exist UNPLANNED (no brief); the planner adds brief.md
+        # to it mid-session. That's still a NEW brief without notes — must warn (we snapshot
+        # which dirs HAD a brief, not just dir names; Codex review on #198).
+        self.cfg.bundle("CHOSEN").mkdir(parents=True, exist_ok=True)   # pre-existing empty dir
+        with mock.patch("pdca_harness.leaves._invoke",
+                        side_effect=self._planner_writes(notes=False)):
+            msg = self._run_csv_plan()
+        self.assertIn("WITHOUT seeded tracker notes", msg)
+        self.assertIn("CHOSEN", msg)
+
     def test_no_warning_when_the_brief_carries_notes(self) -> None:
         with mock.patch("pdca_harness.leaves._invoke",
                         side_effect=self._planner_writes(notes=True)):
