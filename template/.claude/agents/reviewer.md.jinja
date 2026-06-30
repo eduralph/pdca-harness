@@ -47,6 +47,9 @@ physically cannot patch what you judge.
 
 ## Always emit the complete 5/5/1 verdict table
 
+**Open `check-review.md` with a one-line outline of the task under review** (the bug to
+fix / the functionality to implement) so the verdict table that follows has context. Then:
+
 `check-review.md` **must** contain one verdict row for **every** element of the
 5/5/1 matrix — never a partial list — as a Markdown table `| Item | Verdict |
 Basis |`. This is the canonical order the gates assemble; mirror it exactly:
@@ -80,6 +83,15 @@ Validation fitness-to-purpose; contested symptom-vs-root-cause; semantic
 upstream-isn't-ahead; scope-creep / Plan re-entry; visual / manual-repro
 outcomes; and the project's enumerated human-only items (INTEGRATION.md §4).
 Each becomes a `- [ ]` row in `SUMMARY.md` §6 the human must clear.
+
+For a **visual / manual-repro** NEEDS-HUMAN row, verify as much as you can yourself first —
+**where feasible, exercise the change with the patch applied in `$PDCA_TARGET`** (the
+per-cycle worktree): run the relevant test, or start / drive the application if the runner
+allows it, observe, and report what you saw. Only where it genuinely can't be driven (an
+irreducibly visual / GUI check) fall back to handing the human **concrete, runnable steps** —
+how to launch / exercise the change and what to look for, not a bare "needs manual check".
+And if a verdict turns on an **investigation** (does X exist, is Y reachable), run it and
+**show the result directly** — don't ask whether to investigate.
 
 Confirm the prior-art check ran by **affected file path** (merged history + closed/
 rejected work); where it can't be mechanically settled, raise it NEEDS-HUMAN.
