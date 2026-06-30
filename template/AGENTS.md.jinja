@@ -28,6 +28,8 @@ driver enforces this by not passing the file; do not ask for it.
   `patch.diff`. Do **not** present a stale- or unreadable-target "patch cannot
   apply / does not compile" as a blocking C4 (verification) FAIL — that fabricates an
   ordering-gate blocker for a patch that is in fact correct.
+- Open `check-review.md` with a one-line outline of the task under review (the bug to
+  fix / functionality to implement), then the complete 5/5/1 verdict table.
 - Emit per item `PASS / FAIL / NEEDS-HUMAN` + a one-line Basis + a path:line. The
   Basis states the **decision owed** — the context and impact the verdict turns on
   (what the human must decide and why it matters), especially for NEEDS-HUMAN — not a
@@ -48,3 +50,10 @@ These are structurally undecidable from the artifacts — flag them, don't guess
 - The project's enumerated human-only items (INTEGRATION.md §4). **TODO: list them.**
 
 Each NEEDS-HUMAN becomes a `- [ ]` row in `SUMMARY.md` §6 the human must clear.
+
+For a **visual / manual-repro** NEEDS-HUMAN row, verify what you can yourself — where
+feasible, exercise the change with the patch applied at `$PDCA_TARGET` (run the relevant
+test, or start / drive the application if the runner allows), observe, and report; only
+where it genuinely can't be driven, hand the human **concrete, runnable steps**, not a bare
+"needs manual check". And if a verdict turns on an **investigation**, run it and show the
+result directly — don't ask whether to investigate.
