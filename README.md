@@ -121,6 +121,21 @@ the model-command wiring.
 
 See `template/PCDA/quality-cycle.md` for the model and the maturity ladder.
 
+## Releases
+
+Versions are git tags of the form `vX.Y.0` — a minor bump per release (patch stays `0`);
+each tag is annotated with its release notes (`git show vX.Y.0`). The queue for the next
+release is a single open **GitHub milestone**:
+
+- There is always **one open milestone — the next version to ship** (the highest released
+  tag's minor `+ 1`). It is the live "in work" list.
+- **New issues are filed against that open milestone**, so it shows what's actively being
+  worked toward the next release.
+- **When that version is released** — cut as a `vX.Y.0` tag — its milestone is **closed and a
+  new milestone one minor higher is opened**. New issues then go there. Repeat.
+
+Each change ships as its own pull request with a linked issue (one logical change per PR).
+
 ## License
 
 Copyright © 2026 Eduard Ralph.
