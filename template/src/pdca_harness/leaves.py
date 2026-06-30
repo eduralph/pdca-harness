@@ -308,9 +308,45 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
     for iid in ids or []:
         sources.seed(cfg, cfg.bundle(iid))  # seed notes.json + sources/ per bundle (#65/#102)
     if cfg.planner.mode == "command":
+        # On the CSV/default path the planner CHOOSES the ids mid-session, so the per-bundle
+        # seed above never ran for them. Snapshot the existing bundles so we can flag any
+        # briefed THIS session that the seed never reached (#190).
+        before = set() if ids else {d.name for d in cfg.bundle_root.glob("issue_*")}
         _invoke(cfg.planner, cfg.root, _plan_batch_prompt(cfg, csv, ids))
+        if ids is None:
+            _warn_unseeded_briefs(cfg, before)
         return
     _stub_plan_batch(cfg, ids)
+
+
+def _warn_unseeded_briefs(cfg: Config, before: set[str]) -> None:
+    """After a CSV/default batch Plan, flag issues briefed THIS session whose Plan sources were
+    never seeded (#190).
+
+    On the id-seeded path each bundle's notes/sources are fetched first; on the CSV/default
+    path the planner picks the ids *mid-session*, so that per-bundle seed never runs — those
+    briefs rest on the CSV row alone, missing the reporter thread / attached repro. We never
+    auto-run the seeders unattended (a tracker scraper is human-in-the-loop — a browser, a
+    login), so surface it as a VISIBLE sub-step: name the ids and tell the human to seed +
+    refine before the work is driven. No-op when no Plan source is configured (the CSV/docs are
+    then the only source) or every new brief already carries notes.json / a sources/ dir."""
+    if not (cfg.notes_cmd or cfg.plan_sources):
+        return
+    unseeded = sorted(
+        d.name.removeprefix("issue_")
+        for d in cfg.bundle_root.glob("issue_*")
+        if d.name not in before and (d / "brief.md").exists()
+        and not (d / "notes.json").exists() and not (d / "sources").is_dir())
+    if not unseeded:
+        return
+    print(
+        f"\nplan: {len(unseeded)} issue(s) briefed this session WITHOUT seeded tracker notes "
+        f"({', '.join(unseeded)}) — the planner chose them mid-session, so they rest on the CSV "
+        f"row alone (no reporter discussion, attached repro, or 'fixed in' hints). Seed their "
+        f"notes/sources (your configured Plan source is human-in-the-loop — a browser / login) "
+        f"and refine the briefs before driving them; don't let the thin briefs flow on "
+        f"unreviewed (#190).",
+        file=sys.stderr)
 
 
 def _plan_batch_prompt(cfg: Config, csv: str | None, ids: list[str] | None = None) -> str:
