@@ -1075,12 +1075,13 @@ def _publish_prompt(d: Path, cfg: Config) -> str:
         "the contribution as id_pending for the human to fill the id in later. "
         if trailer else ""
     )
-    # Only build the tracker link for a REAL ticket id. A slug bundle (a fork issue, e.g.
-    # `820-build-toolchain-coverage`) or a `--no-issue` / id_pending bundle has no tracker
-    # number, so `issue_url_pattern.format(id=…)` would yield a broken link — omit it then,
-    # mirroring the trailer's id_pending handling (#192). A real id is numeric / uppercase
-    # (a Mantis/GitHub number, or a JIRA-style key); a slug carries lowercase kebab words.
-    real_ticket = bool(issue_id) and not any(ch.islower() for ch in issue_id)
+    # Only build the tracker link for a REAL ticket id — the bare ticket NUMBER (Mantis/GitHub
+    # are numeric). A slug bundle (a fork issue, e.g. `820-build-toolchain-coverage`), a
+    # `--no-issue` / id_pending placeholder (e.g. `PEND`), or any non-numeric id has no real
+    # ticket, so `issue_url_pattern.format(id=…)` would yield a broken link — omit it then,
+    # mirroring the trailer's id_pending handling (#192/#196). A non-numeric tracker simply
+    # won't auto-link: the safe failure (no broken URL; the bare id still shows).
+    real_ticket = issue_id.isdigit()
     issue_url = (cfg.issue_url_pattern.format(id=issue_id)
                  if cfg.issue_url_pattern and real_ticket else "")
     link_clause = (
