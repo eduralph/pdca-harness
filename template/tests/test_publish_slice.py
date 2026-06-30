@@ -95,6 +95,17 @@ class PublishSlice(unittest.TestCase):
         self.assertIn("SUMMARY.md", prompt)
         self.assertIn("§10", prompt)
 
+    def test_publish_prompt_hyperlinks_tracker_when_pattern_set(self) -> None:
+        # #266: with [tracker].issue_url_pattern set, the publish prompt instructs the leaf
+        # to hyperlink the resolved ticket URL (not just the bare id); absent ⇒ no link clause.
+        d = _bundle(self.cfg, "P266", brief_body=_FIX_BRIEF, accepted=True)
+        self.cfg.issue_url_pattern = "https://tracker/view.php?id={id}"
+        prompt = leaves._publish_prompt(d, self.cfg)
+        self.assertIn("https://tracker/view.php?id=P266", prompt)
+        self.assertIn("Hyperlink the tracker ticket", prompt)
+        self.cfg.issue_url_pattern = ""
+        self.assertNotIn("Hyperlink the tracker ticket", leaves._publish_prompt(d, self.cfg))
+
     def test_dry_run_plans_commands_and_writes_artifacts(self) -> None:
         d = _bundle(self.cfg, "PUB", brief_body=_FIX_BRIEF, accepted=True)
         self.assertEqual(state.state(d), state.COMPLETE)

@@ -84,6 +84,10 @@ issue_id_example = "{{ issue_id_example }}"
 # No tracker id yet? Use `pdca publish --no-issue`: it omits the trailer, relaxes
 # T4 to a flag, and records the bundle `id_pending` (no magic "#0000" placeholder).
 issue_trailer = "Fixes #{id}"
+# Optional issue-URL template ({id} = the bug id) so the publisher HYPERLINKS the ticket
+# in the PR body (a Markdown link on the id), not just a bare number — e.g. Mantis
+# "{{ tracker_url }}/view.php?id={id}", GitHub "{{ tracker_url }}/{id}". "" ⇒ no link.
+issue_url_pattern = ""
 # Optional default tracker export the Plan leaf reads the issue row from when `flow`
 # runs without --from-csv (it reads ONLY that issue's row, not a repo scan):
 # export_csv = "path/to/export.csv"
