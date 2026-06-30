@@ -82,6 +82,21 @@ about the environment is what makes a test crash silently.
 This pre-fix/post-fix check is a fast sanity pass (Check's gates re-run the real
 suite), so a single quick run through the wrapper is enough.
 
+### No honest headless test? Flag for the human — never fabricate one
+
+Extracting a load-light unit (above) is the first resort, but it must still drive the
+**production** code the fix changes — not a copy of it. If the behaviour is **irreducibly**
+GUI/display/IO-bound and no headless test can exercise the production path, do **NOT**
+manufacture a workaround: a stand-in, a mock of the behaviour, or a parallel
+re-implementation that passes vacuously. A green test that doesn't run production is *worse*
+than no test — it fakes the very confidence Check exists to establish.
+
+When no honest headless test is possible: ship the `patch.diff`, record in `build-notes.md`
+**why** it isn't headless-testable plus the concrete steps a human can run to validate it,
+and leave the verify honestly unable to prove it (rather than a fabricated pass). That
+surfaces a NEEDS-HUMAN item in SUMMARY §6, so the human validates the fix at sign-off —
+exactly where an irreducibly-manual check belongs. Ask; don't work around.
+
 ## Commit-ready for the target repo
 
 The patch must be **committable to the target repo**, not just gate-green. When the
