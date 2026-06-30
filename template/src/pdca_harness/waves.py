@@ -196,6 +196,90 @@ def compute_waves(cfg: Config, bundles: list[Path]) -> list[list[Path]]:
     return waves
 
 
+def _cycle_members(graph: dict[str, list[str]]) -> set[str]:
+    """Every node that participates in a dependency cycle in ``graph`` (an adjacency map of
+    in-batch prerequisite edges). Unlike :func:`check_dep_graph`, which raises on the first
+    cycle, this collects *all* cycle members so the tolerant resume sweep can drop them."""
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = dict.fromkeys(graph, WHITE)
+    in_cycle: set[str] = set()
+    stack: list[str] = []
+
+    def visit(n: str) -> None:
+        color[n] = GRAY
+        stack.append(n)
+        for m in graph.get(n, ()):
+            if color.get(m) == GRAY:                 # back edge → stack[idx(m):] is a cycle
+                in_cycle.update(stack[stack.index(m):])
+            elif color.get(m) == WHITE:
+                visit(m)
+        stack.pop()
+        color[n] = BLACK
+
+    for n in graph:
+        if color[n] == WHITE:
+            visit(n)
+    return in_cycle
+
+
+def partition_schedulable(cfg: Config, bundles: list[Path]
+                          ) -> tuple[list[Path], dict[str, str]]:
+    """Split ``bundles`` into ``(schedulable, held)`` so one bad bundle can't abort the whole
+    run (#191). Where :func:`check_dep_graph` *raises* on any unschedulable bundle — right for
+    an explicit ``flow <ids>`` / ``pdca waves`` request — the resume sweep (:func:`flow_batch`)
+    pulls in **every** in-flight bundle, so a single stale ``Depends on`` in an unrelated
+    leftover would take the whole batch down with it.
+
+    A bundle is **held** (skipped this run, left in-flight for a later one) when a declared
+    dependency is *unresolvable* — neither in the surviving batch nor an existing COMPLETE
+    bundle on disk (archived ``completed/`` too, #171; ``Stacks on`` against the active bundle)
+    — or when it sits in a dependency cycle. Held-ness propagates to in-batch dependents (a
+    fixpoint: a bundle whose prerequisite is held can't build either). The schedulable
+    remainder is a valid DAG that :func:`compute_waves` levels without raising. ``held`` maps
+    each held bundle name to a one-line reason for the caller to report."""
+    names = {b.name for b in bundles}
+    by_name = {b.name: b for b in bundles}
+    edges: dict[str, list[str]] = {}
+    held: dict[str, str] = {}
+    for b in bundles:
+        bp = b / "brief.md"
+        in_batch: list[str] = []
+        unresolved: list[str] = []
+        stacks = set(brief.stacks_on(bp)) if bp.exists() else set()
+        for dep in (declared_deps(bp) if bp.exists() else []):
+            dn = cfg.bundle(dep).name
+            if dn in names:
+                in_batch.append(dn)
+                continue
+            resolved = cfg.bundle(dep) if dep in stacks else cfg.find_bundle(dep)
+            if state.state(resolved) != state.COMPLETE:
+                unresolved.append(dep)
+        edges[b.name] = in_batch
+        if unresolved:
+            held[b.name] = f"unresolved dependency ({', '.join(unresolved)})"
+
+    # Propagate: a bundle whose in-batch prerequisite is held cannot build either.
+    changed = True
+    while changed:
+        changed = False
+        for name, prereqs in edges.items():
+            if name in held:
+                continue
+            blocked = [p for p in prereqs if p in held]
+            if blocked:
+                held[name] = f"prerequisite held ({', '.join(sorted(blocked))})"
+                changed = True
+
+    # Cycles among the survivors are unschedulable too (leveling can't terminate) — drop them.
+    survivor_edges = {n: [p for p in e if p not in held] for n, e in edges.items()
+                      if n not in held}
+    for name in _cycle_members(survivor_edges):
+        held.setdefault(name, "dependency cycle")
+
+    schedulable = [by_name[n] for n in by_name if n not in held]
+    return schedulable, held
+
+
 _DIFF_GIT_RE = re.compile(r"^diff --git a/(.+) b/(.+)$")
 
 
