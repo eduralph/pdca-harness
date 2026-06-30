@@ -106,6 +106,20 @@ class PublishSlice(unittest.TestCase):
         self.cfg.issue_url_pattern = ""
         self.assertNotIn("Hyperlink the tracker ticket", leaves._publish_prompt(d, self.cfg))
 
+    def test_publish_prompt_omits_link_for_a_slug_or_pending_bundle(self) -> None:
+        # #192: a slug bundle (fork issue) / --no-issue / id_pending bundle has no tracker
+        # number, so the pattern would format a broken link — omit the clause for it even with
+        # issue_url_pattern set (the bare-number trailer is already gated the same way).
+        self.cfg.issue_url_pattern = "https://tracker/view.php?id={id}"
+        slug = _bundle(self.cfg, "820-build-toolchain-coverage",
+                       brief_body=_FIX_BRIEF, accepted=True)
+        prompt = leaves._publish_prompt(slug, self.cfg)
+        self.assertNotIn("Hyperlink the tracker ticket", prompt)         # no link clause
+        self.assertNotIn("view.php?id=820-build-toolchain-coverage", prompt)  # no broken URL
+        # …but a real numeric ticket still gets the link.
+        num = _bundle(self.cfg, "13865", brief_body=_FIX_BRIEF, accepted=True)
+        self.assertIn("https://tracker/view.php?id=13865", leaves._publish_prompt(num, self.cfg))
+
     def test_dry_run_plans_commands_and_writes_artifacts(self) -> None:
         d = _bundle(self.cfg, "PUB", brief_body=_FIX_BRIEF, accepted=True)
         self.assertEqual(state.state(d), state.COMPLETE)
