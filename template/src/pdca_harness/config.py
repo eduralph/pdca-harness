@@ -93,6 +93,10 @@ class Config:
     # prior fork behavior for a config lacking the key.
     base_remote: str = "upstream"
     issue_trailer: str = "Fixes #{id}"  # commit/PR trailer; "" → none enforced
+    # Optional issue-URL template (``.format(id=)``) so the publisher HYPERLINKS the tracker
+    # ticket in the PR body, not just the bare id (e.g. Mantis ".../view.php?id={id}",
+    # GitHub ".../issues/{id}"). "" ⇒ no link (the bare trailer, as today).
+    issue_url_pattern: str = ""
     repo_checkouts: dict[str, str] = field(default_factory=dict)  # repo_spec → local path
     gates_checks: list[dict] = field(default_factory=list)
     # Optional advisory reviewer leaves (issue #64): an OPEN list of extra, role-distinct
@@ -308,6 +312,7 @@ class Config:
             feature_branch_pattern=publisher_cfg.get("feature_branch_pattern", "enhancement/{id}-{slug}"),
             base_remote=publisher_cfg.get("base_remote", "upstream"),
             issue_trailer=tracker.get("issue_trailer", "Fixes #{id}"),
+            issue_url_pattern=tracker.get("issue_url_pattern", ""),
             repo_checkouts=dict(publisher_cfg.get("checkouts", {})),
             gate_target_default=gates.get("target_default", ""),
             gate_target_match=dict(gates.get("target_match", {})),

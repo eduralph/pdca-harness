@@ -1062,6 +1062,12 @@ def _publish_prompt(d: Path, cfg: Config) -> str:
         "the contribution as id_pending for the human to fill the id in later. "
         if trailer else ""
     )
+    issue_url = cfg.issue_url_pattern.format(id=issue_id) if cfg.issue_url_pattern else ""
+    link_clause = (
+        f" Hyperlink the tracker ticket as a Markdown link to {issue_url} (link the id — "
+        "not just the bare number) so a reader can click through to the report."
+        if issue_url else ""
+    )
     return (
         "You are the Publish leaf — the closing work of Check. The fix for issue "
         f"{issue_id} is ACCEPTED; with the human, write TWO contribution artifacts in "
@@ -1074,9 +1080,10 @@ def _publish_prompt(d: Path, cfg: Config) -> str:
         "only commit-msg.txt + pr-description.md) — leave it (#177).\n"
         f"1) {d}/commit-msg.txt — a summary ≤70 chars, then a blank line, then the body "
         f"wrapped ≤80; reference any other commit by its FULL hash. {trailer_line}\n"
-        f"2) {d}/pr-description.md — lead with a plain-language Summary + What to look at "
-        f"(for non-implementors), then Root cause / Fix, then a Verification claim→evidence "
-        f"trail citing path:lines on the target branch; no internal jargon (see {pr_tpl}).\n"
+        f"2) {d}/pr-description.md — open the Summary with the bug's USER-VISIBLE effect "
+        "(what the user experiences), then the one-line change + What to look at (for "
+        f"non-implementors), then Root cause / Fix, then a Verification claim→evidence "
+        f"trail citing path:lines on the target branch; no internal jargon (see {pr_tpl}).{link_clause}\n"
         "Write ONLY those two files. Do NOT push, branch, or open a PR — the driver's "
         "`pdca publish` does the branch/apply/commit/push/draft-PR after you finish."
     )
