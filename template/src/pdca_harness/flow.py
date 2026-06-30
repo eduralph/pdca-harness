@@ -369,17 +369,19 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str]) -> list[Path
 
 
 def _point_at_integration(integ: dict[tuple[str, str], str], runnable: list[Path]) -> None:
-    """Point each runnable bundle's Do worktree + stacked PR at the integration branch for
-    **its own** ``(repo, base)`` target (#187).
+    """Reconcile each runnable bundle's stack base with THIS run's integration state (#187).
 
     ``integ`` maps each integrated target to its run-scoped integration branch. A bundle is
-    pointed at the branch for *its* target only — never a sibling target's, which is absent
-    on that repo or carries unrelated patches. A bundle whose target wasn't integrated (no
-    prior accepted work for it) writes no stack base and builds off its own target base."""
+    pointed at the branch for **its own** ``(repo, base)`` target only — never a sibling
+    target's, which is absent on that repo or carries unrelated patches. A bundle whose target
+    wasn't integrated this run has any **stale** stack base (left by a prior/resumed run)
+    cleared, so it builds off its own target base rather than an old integration branch."""
     for d in runnable:
         branch = integ.get(publish._resolve_target(d)[:2])
         if branch:
             publish.write_stack_base(d, branch)
+        else:
+            publish.clear_stack_base(d)
 
 
 def _audit_wave_overlap(wave: list[Path]) -> None:
@@ -465,10 +467,11 @@ def _drive_and_act(
         runnable = _runnable(cfg, wave, batch_names)
         if not runnable:
             continue
-        # A later wave stacks on the prior waves' folded work — at the integration branch
-        # for each bundle's OWN (repo, base) target, never a sibling target's (#187).
-        if integ:
-            _point_at_integration(integ, runnable)
+        # Reconcile each runnable bundle's stack base with this run's integration state:
+        # point it at its OWN (repo, base) target's branch, or clear a stale marker a
+        # prior/resumed run left so it builds off its own base (#187). Unconditional — the
+        # stale-clear must run even before any wave has folded (integ still empty).
+        _point_at_integration(integ, runnable)
         _drive_wave(cfg, runnable, by=by, today=today, max_passes=max_passes)
         complete = [d for d in sorted(runnable, key=lambda p: p.name)
                     if state.state(d) == state.COMPLETE]

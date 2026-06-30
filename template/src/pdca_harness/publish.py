@@ -442,6 +442,14 @@ def write_stack_base(d: Path, branch: str) -> None:
     (d / STACK_BASE_FILE).write_text(branch + "\n", encoding="utf-8")
 
 
+def clear_stack_base(d: Path) -> None:
+    """Remove any recorded integration stack base so the bundle builds off its own target
+    base. Clears a **stale** marker a prior/resumed run wrote for a target that this run does
+    not integrate — otherwise the bundle would build + open its PR against an old integration
+    branch (read via :func:`_stack_base_branch`) instead of its own base (#187)."""
+    (d / STACK_BASE_FILE).unlink(missing_ok=True)
+
+
 def _read_stack_base(d: Path) -> str:
     """The recorded integration branch for a wave>0 bundle, or "" (absent ⇒ build off base)."""
     p = d / STACK_BASE_FILE

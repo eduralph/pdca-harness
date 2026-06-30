@@ -54,11 +54,17 @@ class FoldDryAndUnit(unittest.TestCase):
             (d / "patch.diff").write_text(patch, encoding="utf-8")
         return d
 
-    def test_integration_branch_name_flattens_base(self) -> None:
+    def test_integration_branch_name_is_injective_per_base(self) -> None:
         self.assertEqual(integrate.integration_branch(self.cfg, "main"),
                          "pdca-integration/main")
+        # `/` → `-`, but existing `-` is doubled first, so two bases that differ only by
+        # `/` vs `-` never collide onto one branch / worktree (#187).
         self.assertEqual(integrate.integration_branch(self.cfg, "release/2.0"),
                          "pdca-integration/release-2.0")
+        self.assertEqual(integrate.integration_branch(self.cfg, "release-2.0"),
+                         "pdca-integration/release--2.0")
+        self.assertNotEqual(integrate.integration_branch(self.cfg, "release/2.0"),
+                            integrate.integration_branch(self.cfg, "release-2.0"))
 
     def test_nothing_to_fold(self) -> None:
         self.assertEqual(integrate.fold(self.cfg, []), {})
@@ -212,6 +218,15 @@ class PointAtIntegration(unittest.TestCase):
         self.assertEqual(publish._read_stack_base(a), "pdca-integration/main")
         self.assertEqual(publish._read_stack_base(b), "pdca-integration/develop")  # not main!
         self.assertEqual(publish._read_stack_base(c), "")   # no integ line → builds off base
+
+    def test_clears_a_stale_stack_base_for_an_un_integrated_target(self) -> None:
+        # A bundle carrying a stack base from a prior/resumed run whose target isn't integrated
+        # this run must have it CLEARED, else it builds against an old integration branch (#187).
+        from pdca_harness import flow, publish
+        d = self._bundle("D", "third/repo @ main")
+        publish.write_stack_base(d, "pdca-integration/stale")     # left by a prior run
+        flow._point_at_integration({("org/repo", "main"): "pdca-integration/main"}, [d])
+        self.assertEqual(publish._read_stack_base(d), "")          # cleared → off its own base
 
 
 if __name__ == "__main__":

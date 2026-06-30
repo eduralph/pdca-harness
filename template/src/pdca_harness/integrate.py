@@ -35,10 +35,21 @@ class IntegrationError(RuntimeError):
 
 
 def integration_branch(cfg: Config, base: str) -> str:
-    """The run-scoped integration branch for a target ``base`` — deterministic, so a
-    resumed run rebuilds the same branch (the ``/`` in a base like ``release/2`` is
-    flattened so the ref is always a single segment under ``pdca-integration/``)."""
-    return "pdca-integration/" + base.replace("/", "-")
+    """The run-scoped integration branch for a target ``base`` — deterministic (a resumed run
+    rebuilds the same branch) and **injective in the base** (#187): the base is flattened to a
+    single ref segment under ``pdca-integration/`` via :func:`_flatten_base`, so two bases that
+    differ only by ``/`` vs ``-`` (``release/2.0`` vs ``release-2.0``) never collide onto one
+    branch and force-push over each other's fold."""
+    return "pdca-integration/" + _flatten_base(base)
+
+
+def _flatten_base(base: str) -> str:
+    """Map a base ref to a single, **injective** branch segment: double every existing ``-``
+    first, then map ``/`` → ``-``. So ``release/2.0`` → ``release-2.0`` while ``release-2.0``
+    → ``release--2.0`` — distinct (a single ``-`` in the output can only come from a ``/``,
+    a ``--`` only from a ``-``), and the result has no ``/`` so there's no branch dir/file
+    conflict either (#187)."""
+    return base.replace("-", "--").replace("/", "-")
 
 
 def _has_patch(d: Path) -> bool:
@@ -55,9 +66,10 @@ def _git(repo: Path, *args: str) -> int:
 
 def _integ_worktree(primary: Path, base: str) -> Path:
     """The dedicated worktree a target's integration branch is assembled in — a sibling of
-    the primary checkout, keyed by ``base`` so two bases on the same repo don't share one
-    worktree (#187), reused (reset) across folds, never the Do/Check lane worktrees."""
-    return primary.parent / (primary.name + ".pdca-integ-" + base.replace("/", "-"))
+    the primary checkout, keyed by ``base`` (injective, like the branch) so two bases on the
+    same repo don't share one worktree (#187), reused (reset) across folds, never the Do/Check
+    lane worktrees."""
+    return primary.parent / (primary.name + ".pdca-integ-" + _flatten_base(base))
 
 
 def _targeted(patched: list[Path]) -> list[tuple[Path, str, str]]:
