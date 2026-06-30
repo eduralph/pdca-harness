@@ -193,6 +193,22 @@ class PartitionSchedulable(unittest.TestCase):
         self.assertEqual(set(held), {"issue_A", "issue_B"})
         self.assertTrue(all("cycle" in held[n] for n in ("issue_A", "issue_B")))
 
+    def test_cycle_hold_propagates_to_downstream_dependents(self) -> None:
+        # A↔B cycle with C depending on A: C must be held too (#197) — otherwise it survives
+        # into a reduced batch where A is gone and compute_waves would raise, defeating the
+        # tolerance. OK is unrelated and still runs.
+        self._brief("A", depends_on="B")
+        self._brief("B", depends_on="A")
+        self._brief("C", depends_on="A")
+        self._brief("OK")
+        sched, held = self._partition("A", "B", "C", "OK")
+        self.assertEqual(sched, ["issue_OK"])
+        self.assertEqual(set(held), {"issue_A", "issue_B", "issue_C"})
+        self.assertIn("prerequisite held", held["issue_C"])   # C held via the cycle member A
+        self.assertEqual([[p.name for p in w]
+                          for w in waves.compute_waves(self.cfg, [self.cfg.bundle("OK")])],
+                         [["issue_OK"]])
+
     def test_schedulable_remainder_levels_without_raising(self) -> None:
         # The partition's remainder must pass compute_waves cleanly (the whole point: the bad
         # bundle is gone, so the strict check no longer aborts).

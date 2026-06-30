@@ -222,6 +222,21 @@ def _cycle_members(graph: dict[str, list[str]]) -> set[str]:
     return in_cycle
 
 
+def _propagate_holds(edges: dict[str, list[str]], held: dict[str, str]) -> None:
+    """Fixpoint: mark any not-yet-held bundle whose in-batch prerequisite is held — it can't
+    build on a base missing that prerequisite's change either. Mutates ``held`` in place."""
+    changed = True
+    while changed:
+        changed = False
+        for name, prereqs in edges.items():
+            if name in held:
+                continue
+            blocked = [p for p in prereqs if p in held]
+            if blocked:
+                held[name] = f"prerequisite held ({', '.join(sorted(blocked))})"
+                changed = True
+
+
 def partition_schedulable(cfg: Config, bundles: list[Path]
                           ) -> tuple[list[Path], dict[str, str]]:
     """Split ``bundles`` into ``(schedulable, held)`` so one bad bundle can't abort the whole
@@ -258,23 +273,19 @@ def partition_schedulable(cfg: Config, bundles: list[Path]
         if unresolved:
             held[b.name] = f"unresolved dependency ({', '.join(unresolved)})"
 
-    # Propagate: a bundle whose in-batch prerequisite is held cannot build either.
-    changed = True
-    while changed:
-        changed = False
-        for name, prereqs in edges.items():
-            if name in held:
-                continue
-            blocked = [p for p in prereqs if p in held]
-            if blocked:
-                held[name] = f"prerequisite held ({', '.join(sorted(blocked))})"
-                changed = True
+    # A bundle whose in-batch prerequisite is held can't build on a base missing that
+    # prerequisite's change either — propagate to a fixpoint.
+    _propagate_holds(edges, held)
 
-    # Cycles among the survivors are unschedulable too (leveling can't terminate) — drop them.
+    # Cycles among the survivors are unschedulable too (leveling can't terminate) — hold their
+    # members, then RE-propagate so a downstream dependent of a cycle member is held as well.
+    # (Without the second pass, a bundle depending on a cycle member survives into a reduced
+    # batch that compute_waves then rejects — defeating the tolerance this adds, #197.)
     survivor_edges = {n: [p for p in e if p not in held] for n, e in edges.items()
                       if n not in held}
     for name in _cycle_members(survivor_edges):
         held.setdefault(name, "dependency cycle")
+    _propagate_holds(edges, held)
 
     schedulable = [by_name[n] for n in by_name if n not in held]
     return schedulable, held
