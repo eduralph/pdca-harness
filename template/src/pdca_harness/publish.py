@@ -160,8 +160,13 @@ def publish(
     # `--base` it for a clean, increment-only stacked PR. Fork (base on a separate upstream a
     # fork contributor can't push to): that branch lives on origin (the fork) and can't be a
     # `--base`, so the PR opens against the upstream base and carries the CUMULATIVE stacked
-    # diff (predecessors + this fix) until the parent merges bottom-up and GitHub auto-reduces
-    # it (#185). The dependent's branch is still cut off the parent branch either way.
+    # diff (predecessors + this fix). It still merges cleanly bottom-up — once a prerequisite
+    # is merged, its identical content re-merges as a no-op — but the displayed diff does NOT
+    # auto-reduce on merge: the fold's `pdca-integrate:*` commits aren't ancestors of the
+    # prereq's PR-merge, so the PR merge-base doesn't advance; the diff clears only when the
+    # dependent is rebuilt off the merged base (a later `pdca flow` run). That visible overlap
+    # is the cost of fork wave-stacking (#185). The dependent's branch is cut off the parent
+    # branch either way.
     own_repo = base_remote == "origin"
     pr_base = stack_branch if (stack_branch and own_repo) else base
     steps = [
