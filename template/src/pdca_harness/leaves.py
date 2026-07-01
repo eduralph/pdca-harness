@@ -931,12 +931,18 @@ def _select_advisory(specs: list[dict], d: Path, cfg: Config) -> list[dict]:
         return specs
     builder_family = _resolved_builder_family(d)
     if builder_family:
+        # A complement must declare a KNOWN family that differs — a leaf with a blank/absent
+        # `family` is an unknown vendor (possibly the builder's own), never a guaranteed
+        # complement, so it falls through to the same-vendor §6 note rather than masquerading
+        # as decorrelated (a #64 config never had to set `family`).
         complement = next(
             (s for s in specs
-             if s.get("family", "").strip().lower() != builder_family.lower()), None)
+             if (fam := s.get("family", "").strip().lower()) and fam != builder_family.lower()),
+            None)
         if complement is not None:
             return [complement]
-        reason = f"the builder ran family '{builder_family}' and every configured advisory shares it"
+        reason = (f"the builder ran family '{builder_family}' and no configured advisory "
+                  "declares a different (non-empty) family")
     else:
         reason = "the builder family that ran is unknown (no loop-telemetry.json)"
     chosen = specs[0]

@@ -83,6 +83,16 @@ class VendorComplement(unittest.TestCase):
         self.assertTrue(note.exists())                            # lapse recorded
         self.assertIn("NEEDS-HUMAN", note.read_text(encoding="utf-8"))
 
+    def test_blank_family_leaf_is_not_a_complement(self) -> None:
+        # A #64 leaf that omits `family` is an unknown vendor, not a guaranteed complement:
+        # it must not be silently reported as decorrelated (bot review on PR #204).
+        no_family = {"id": "review-legacy", "mode": "stub", "role": "cleanups"}
+        cfg = _cfg(self.tmp, pool=[no_family], selection={"mode": "vendor-complement"})
+        d = self._bundle("B", builder_family="codex")
+        leaves.run_advisory_leaves(d, cfg)
+        self.assertTrue(self._ran(d, "review-legacy"))   # still runs (fallback, not skipped)
+        self.assertTrue(self._ran(d, "decorrelation"))   # but the lapse IS recorded
+
     def test_unknown_builder_family_falls_back_with_note(self) -> None:
         # No loop-telemetry.json ⇒ the builder vendor is unknown; run one, flag the lapse.
         cfg = _cfg(self.tmp, pool=[_CLAUDE, _CODEX], selection={"mode": "vendor-complement"})
