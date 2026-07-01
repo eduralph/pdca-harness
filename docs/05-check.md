@@ -130,6 +130,19 @@ evidence and the reviewer's verdict, defaulting to "refuted" when uncertain; the
 `pdca.toml` example gates it on `Difficulty: high` so it runs only on the highest
 blast-radius bundles, where a confirmatory pass is most likely to be fooled.
 
+**Automatic vendor complement (issue #200).** Cross-vendor decorrelation is the ideal, but
+the builder that *actually* runs isn't fixed — an explicit `Do model` (#167), difficulty
+routing (#134), or escalation (#135) can pick Codex for one bundle and Claude for the next,
+which can leave a statically-configured advisory *same-vendor* as the builder. Opt into
+`[leaves.advisory_selection] mode = "vendor-complement"` to let the driver do the pairing:
+it treats the `[[leaves.advisory]]` list as a **vendor pool** and runs the single leaf whose
+`family` differs from the builder that ran — read from the bundle's `loop-telemetry.json`, so
+it holds however the backend was chosen. Declare one leaf per vendor (same `role`, different
+`family`) and a Codex-built bundle gets the Claude advisory while a Claude-built bundle gets
+the Codex one, with no per-brief edits. If no leaf differs from the builder (or the builder
+family is unknown) it falls back to the first applicable leaf — a same-vendor review beats
+none — and files the lapse as a §6 `NEEDS-HUMAN` so you can see decorrelation didn't hold.
+
 ## 3. Assembly — the SUMMARY the human signs
 
 The driver folds brief + gates + review into `SUMMARY.md`, a 10-section document.

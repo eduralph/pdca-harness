@@ -254,6 +254,20 @@ argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
 # family = "claude"
 # argv = ["claude", "-p", "--agent", "adversary", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
 # when = { field = "difficulty", substring = "high" }
+#
+# Advisory-selection policy (issue #64 default vs. issue #200). Unset ⇒ every advisory leaf
+# above whose `when` matches runs. Opt into `vendor-complement` to make cross-vendor
+# decorrelation (INTEGRATION §4) automatic: the driver treats the [[leaves.advisory]] list
+# as a VENDOR POOL and runs the SINGLE leaf whose `family` differs from the builder that
+# actually ran — read from the bundle's loop-telemetry.json, so it holds whether the backend
+# came from `Do model` (#167), difficulty routing (#134) or escalation (#135). So a bundle
+# built with Codex gets a Claude advisory and one built with Claude gets a Codex advisory,
+# with no per-brief edits. Declare one differently-`family` entry per vendor above (same
+# `role`); if none differs from the builder (or the builder family is unknown) it falls back
+# to the first applicable leaf — a same-vendor review beats none — and files the lapse as a
+# §6 NEEDS-HUMAN so you can see decorrelation didn't hold for that bundle.
+# [leaves.advisory_selection]
+# mode = "vendor-complement"
 # Deterministic Check gates (docs 04). Each check runs a shell command; it PASSES
 # iff the command exits 0. `scope = "repo"` runs against the working tree (and is
 # what CI re-runs via `pdca gates --working-tree`); `scope = "bundle"` needs the

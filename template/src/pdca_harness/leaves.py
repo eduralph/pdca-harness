@@ -889,14 +889,72 @@ def _advisory_prompt(spec: dict, leaf_id: str) -> str:
     )
 
 
+def _resolved_builder_family(d: Path) -> str:
+    """The family of the builder that actually ran, read from the last ``loop-telemetry.json``
+    attempt (issue #200 — the entry :func:`_record_loop_attempt` wrote in Do). This is the
+    *resolved* fact, so it holds whichever way the backend was chosen — an explicit
+    ``Do model`` (#167), difficulty routing (#134) or escalation (#135). Best-effort: an
+    absent / garbled file ⇒ ``""`` (unknown), never a crash."""
+    path = d / "loop-telemetry.json"
+    if not path.exists():
+        return ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        attempts = data.get("attempts") if isinstance(data, dict) else None
+        if attempts:
+            return str(attempts[-1].get("family", "") or "")
+    except (ValueError, OSError, AttributeError, IndexError):
+        pass
+    return ""
+
+
+def _decorrelation_note(d: Path, msg: str) -> None:
+    """Record an advisory-selection lapse (issue #200) as a §6 item. Written as a
+    check-advisory-*.md so :func:`assemble.assemble_summary` folds its NEEDS-HUMAN line into
+    §6 like any advisory finding — a human sees that decorrelation didn't hold for the bundle."""
+    advisory_artifact(d, "decorrelation").write_text(
+        "# Advisory review — decorrelation\n\n- NEEDS-HUMAN — " + msg + "\n", encoding="utf-8")
+
+
+def _select_advisory(specs: list[dict], d: Path, cfg: Config) -> list[dict]:
+    """Apply the advisory-selection policy (issue #200) to the already-``when``-filtered
+    ``specs``. Default (``mode`` unset) returns them unchanged — every applicable leaf runs
+    (#64). Under ``mode = "vendor-complement"`` the list is a VENDOR POOL: return the single
+    leaf whose ``family`` differs from the builder that ran, so a Codex-built bundle gets a
+    Claude advisory and vice-versa, automatically. If no different-vendor leaf exists (or the
+    builder family is unknown) fall back to the first applicable leaf rather than skip review
+    — a same-vendor review still beats none — and record the lapse in §6."""
+    if cfg.advisory_selection.get("mode") != "vendor-complement":
+        return specs
+    advisory_artifact(d, "decorrelation").unlink(missing_ok=True)  # a prior attempt's note
+    if not specs:
+        return specs
+    builder_family = _resolved_builder_family(d)
+    if builder_family:
+        complement = next(
+            (s for s in specs
+             if s.get("family", "").strip().lower() != builder_family.lower()), None)
+        if complement is not None:
+            return [complement]
+        reason = f"the builder ran family '{builder_family}' and every configured advisory shares it"
+    else:
+        reason = "the builder family that ran is unknown (no loop-telemetry.json)"
+    chosen = specs[0]
+    _decorrelation_note(
+        d, f"advisory reviewer '{chosen.get('id') or 'advisory'}' could not be decorrelated "
+           f"from the builder — {reason}; it ran same-vendor. Confirm the review's "
+           "independence by hand, or add a different-`family` [[leaves.advisory]] entry.")
+    return [chosen]
+
+
 def run_advisory_leaves(d: Path, cfg: Config) -> None:
-    """Run each configured advisory reviewer that applies (issue #64). Each writes
+    """Run each configured advisory reviewer that applies (issue #64), after the
+    advisory-selection policy narrows the list (issue #200). Each writes
     check-advisory-<id>.md; failures degrade to a §6 NEEDS-HUMAN placeholder, never crash
     the cycle (advisory, like the main reviewer)."""
-    for spec in cfg.advisory_leaves:
+    applicable = [spec for spec in cfg.advisory_leaves if _advisory_applies(spec, d)]
+    for spec in _select_advisory(applicable, d, cfg):
         leaf_id = spec.get("id") or "advisory"
-        if not _advisory_applies(spec, d):
-            continue
         leaf = LeafConfig(mode=spec.get("mode", "stub"), family=spec.get("family", ""),
                           argv=list(spec.get("argv", [])))
         if leaf.mode == "command":
