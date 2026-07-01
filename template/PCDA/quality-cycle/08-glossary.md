@@ -62,7 +62,7 @@ status: active
   a brief may instead pin one by name with **`Do model:`**; a `[[leaves.builder_escalation]]`
   ladder climbs by attempt number so a repeatedly-failing bundle gets a stronger backend.
   Each layer is default-open, so a parallel wave can run different bundles on different
-  backends.
+  backends ([03](03-cycle-automation.md)).
 
 ## The bundle and its artifacts
 
