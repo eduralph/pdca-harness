@@ -107,6 +107,14 @@ class Config:
     # a leaf on a brief field (e.g. a "Review depth" field), the way gate targets do — empty
     # ⇒ always run.
     advisory_leaves: list[dict] = field(default_factory=list)
+    # Advisory-selection policy (issue #200): [leaves.advisory_selection] in pdca.toml.
+    # Empty / ``mode`` unset ⇒ every applicable advisory leaf runs (the #64 default). Under
+    # ``mode = "vendor-complement"`` the advisory list is treated as a VENDOR POOL and the
+    # driver runs the single leaf whose ``family`` differs from the builder that actually ran
+    # (read from loop-telemetry.json), so a Codex-built bundle gets a Claude reviewer and
+    # vice-versa with no per-brief edits — the cross-vendor decorrelation Check relies on
+    # (INTEGRATION §4), made automatic. No different-vendor leaf ⇒ same-vendor fallback + §6.
+    advisory_selection: dict = field(default_factory=dict)
     # Builder escalation ladder (issue #135): an OPEN list of stronger Do backends keyed
     # on the attempt number ([[leaves.builder_escalation]] in pdca.toml). Each:
     # {min_iteration, family, mode, argv}. On iterate, do_build picks the entry with the
@@ -254,6 +262,8 @@ class Config:
             {**spec, "mode": mode_override or spec.get("mode", "stub")}
             for spec in leaves.get("advisory", [])
         ]
+        # Advisory-selection policy (issue #200) — how the driver picks from that list.
+        advisory_selection = dict(leaves.get("advisory_selection", {}))
 
         # Builder escalation ladder (issue #135) — stronger Do backends keyed on attempt
         # number. PDCA_LEAVES_MODE forces their mode too (CI / offline determinism); ""
@@ -326,6 +336,7 @@ class Config:
             author=data.get("project", {}).get("author", ""),
             gates_checks=gates_checks,
             advisory_leaves=advisory_leaves,
+            advisory_selection=advisory_selection,
             builder_escalation=builder_escalation,
             builder_variants=builder_variants,
             gates_runner=gates_runner,
