@@ -259,9 +259,10 @@ status: active
 - **wave_mode (`stack` / `merge`)** — how a wave's work reaches the next base (`[driver].wave_mode`):
   **`stack`** (default, fork-safe) folds onto a push-only integration branch and cuts each
   dependent off it — an own-repo PR is a clean increment-only **stacked PR** `--base`d on the
-  branch, a fork PR opens against the upstream base carrying the *cumulative* diff; **`merge`**
-  (own-repo only, needs merge rights) `gh pr merge`s each non-final wave. The harness never
-  merges either way ([09](09-parallel-lanes.md)).
+  branch, a fork PR opens against the upstream base carrying the *cumulative* diff; in stack
+  mode the harness **never merges** (you merge the PR stack bottom-up). **`merge`** (own-repo /
+  CD only, needs merge rights) instead **`gh pr merge`s each non-final wave** so the next wave
+  builds on the genuinely-merged base ([09](09-parallel-lanes.md)).
 - **Overlap audit** — a post-Do check flagging two same-wave bundles whose patches touch a
   shared file but declared no `Conflicts with` — a likely planner omission ([09](09-parallel-lanes.md)).
 - **regate_between_waves** — opt-in (`[driver].regate_between_waves`): re-run the repo-scoped
