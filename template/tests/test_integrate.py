@@ -57,14 +57,20 @@ class FoldDryAndUnit(unittest.TestCase):
     def test_integration_branch_name_is_injective_per_base(self) -> None:
         self.assertEqual(integrate.integration_branch(self.cfg, "main"),
                          "pdca-integration/main")
-        # `/` → `-`, but existing `-` is doubled first, so two bases that differ only by
-        # `/` vs `-` never collide onto one branch / worktree (#187).
+        # Prefix-free escape (`-`→`-h`, `/`→`-s`): two bases that differ only by `/` vs `-`
+        # never collide onto one branch / worktree (#187).
         self.assertEqual(integrate.integration_branch(self.cfg, "release/2.0"),
-                         "pdca-integration/release-2.0")
+                         "pdca-integration/release-s2.0")
         self.assertEqual(integrate.integration_branch(self.cfg, "release-2.0"),
-                         "pdca-integration/release--2.0")
+                         "pdca-integration/release-h2.0")
         self.assertNotEqual(integrate.integration_branch(self.cfg, "release/2.0"),
                             integrate.integration_branch(self.cfg, "release-2.0"))
+        # Adjacent `-`/`/` stayed injective: the old `-`→`--` / `/`→`-` scheme collapsed both
+        # `-/` and `/-` to a `---` run and aliased these onto one branch/worktree (#199).
+        self.assertNotEqual(integrate.integration_branch(self.cfg, "release-/2"),
+                            integrate.integration_branch(self.cfg, "release/-2"))
+        self.assertNotEqual(integrate.integration_branch(self.cfg, "a-/b"),
+                            integrate.integration_branch(self.cfg, "a/-b"))
 
     def test_nothing_to_fold(self) -> None:
         self.assertEqual(integrate.fold(self.cfg, []), {})
