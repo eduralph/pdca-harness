@@ -15,7 +15,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import (act, brief, doctor, driver, flow, gates, merged, publish, queue,
+from . import (act, brief, doctor, drift, driver, flow, gates, merged, publish, queue,
                revalidate, revert, signoff, state, waves)
 from .config import Config
 
@@ -97,6 +97,13 @@ def main(argv: list[str] | None = None) -> int:
                              help="re-run gates on a COMPLETE bundle vs the current engine; write a dated stamp (never re-decides §9)")
     p_reval.add_argument("issue_id")
     p_reval.add_argument("--date", help="ISO date for the stamp (default: today)")
+
+    # Drift sweep (issue #206) — flag published bundles whose patch no longer applies to the
+    # current upstream base. Report-only; never re-decides §9.
+    p_drift = sub.add_parser("drift",
+                             help="flag COMPLETE-with-open-PR bundles whose patch no longer applies to the current base (#206)")
+    p_drift.add_argument("--no-fetch", action="store_true",
+                         help="skip `git fetch` (check against already-fetched base refs)")
 
     # Act tooling as one command group (#89): `act index` / `act log`.
     p_act = sub.add_parser("act", help="cross-cycle Act tooling (index / log)")
@@ -182,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
         return _gates(cfg, args)
     if args.cmd == "revalidate":
         return _revalidate(cfg, args)
+    if args.cmd == "drift":
+        return _drift(cfg, args)
     if args.cmd == "act":
         return _act(cfg, args)
     if args.cmd == "signoff":
@@ -448,6 +457,26 @@ def _gates_promotions(cfg: Config) -> int:
     for c in cands:
         print(f"  - {c['id']}: {c['label']}  "
               f"(passed ≥ {c['threshold']} most-recent frozen cycles)")
+    return 0
+
+
+def _drift(cfg: Config, args: argparse.Namespace) -> int:
+    """Drift sweep (#206): report published bundles whose patch no longer applies to the
+    current upstream base. Report-only — always exits 0 (never re-decides §9)."""
+    rows = drift.sweep(cfg, fetch=not getattr(args, "no_fetch", False))
+    if not rows:
+        print("drift: no published COMPLETE bundles to check.")
+        return 0
+    stale = [r for r in rows if r["status"] == "needs-rebase"]
+    errors = [r for r in rows if r["status"] == "error"]
+    for r in stale:
+        print(f"  needs-rebase  {r['bundle']}  (vs {r['base']})  {r['pr_url']}")
+        print(f"      {r['detail']}")
+    for r in errors:
+        print(f"  unknown       {r['bundle']}  (vs {r['base']})  {r['detail']}")
+    ok = len(rows) - len(stale) - len(errors)
+    print(f"\ndrift: {len(rows)} checked · {ok} apply-clean · "
+          f"{len(stale)} needs-rebase · {len(errors)} unknown")
     return 0
 
 

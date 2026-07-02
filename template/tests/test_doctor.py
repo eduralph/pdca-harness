@@ -91,6 +91,27 @@ class Doctor(unittest.TestCase):
             self.assertIn(lane, out)              # one row per lane
         self.assertIn("make worktrees LANES=3", out)  # {lanes} substituted
 
+    def test_inherited_command_variant_binary_is_checked(self) -> None:
+        # A [[leaves.builder_variant]] that omits `mode` inherits the command
+        # builder's mode but sets its OWN argv (a different binary). The doctor must
+        # check that binary — else --strict passes and the routed Do attempt dies.
+        (self.tmp / "pdca.toml").write_text(
+            '[project]\ndefault_branch = "main"\n'
+            '[leaves.builder]\nmode = "command"\nfamily = "claude"\nargv = ["claude", "-p"]\n'
+            '[leaves.reviewer]\nmode = "stub"\n'
+            '[[leaves.builder_variant]]\nmodel = "frontier"\n'
+            'argv = ["no-such-variant-cli-xyz"]\n'
+            'when = { field = "difficulty", substring = "high" }\n',
+            encoding="utf-8")
+        saved = os.environ.pop("PDCA_LEAVES_MODE", None)
+        try:
+            cfg = Config.load(self.tmp)
+        finally:
+            if saved is not None:
+                os.environ["PDCA_LEAVES_MODE"] = saved
+        _, out = self._run(cfg)
+        self.assertIn("no-such-variant-cli-xyz", out)  # inherited-command variant checked
+
     def test_per_lane_yields_nothing_when_serial(self) -> None:
         cfg = _load(self.tmp,
                     '[driver]\nlanes = 1\n'
