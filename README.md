@@ -41,6 +41,37 @@ Act review.
   process/act-log.md        # cross-cycle process deltas (Act)
 ```
 
+## Prerequisites
+
+The harness itself has **no runtime dependencies** — the driver is pure Python stdlib — but a
+real cycle shells out to a few host tools. `make install-check` (or `pdca doctor` once
+installed) verifies every one of these and prints the exact fix for anything missing, so you
+don't have to audit this list by hand.
+
+**To render the template**
+- **Python ≥ 3.11** — the driver parses config with stdlib `tomllib` (3.11+).
+- **[Copier](https://copier.readthedocs.io/)** — the template engine; `pipx install copier`
+  (or `pip install copier`).
+
+**To run the offline slice** (`make install`, then `pdca flow TOY`)
+- **git** — per-cycle worktree isolation and publish.
+- **make** — the front-door target runner (on Windows use `scripts/install.ps1` instead).
+- a **pip-capable venv** — `python3-venv` (a clean Debian/Ubuntu lacks `ensurepip`); `make
+  install` installs it via `apt` where it can, else falls back to `get-pip.py` (needs **curl**).
+
+**To contribute for real** (wire live leaves + publish PRs)
+- **[gh](https://github.com/cli/cli)** — draft-PR publish/merge and the tracker scrape; run
+  `gh auth login` after installing.
+- the **leaf-backend CLI(s)** you configure — `claude` and/or `codex` (only when
+  `leaves_mode = "command"`; the stub slice needs none). `make install` fetches the configured
+  ones.
+- your project's **gate toolchain** (e.g. `cargo`, `pytest`, `npm`) — instance-owned via
+  `[install].extra_bootstrap` in `pdca.toml`, never hardcoded in the harness.
+
+Automatic provisioning of the system-package tier (git, gh, `python3-venv`) is **apt +
+Debian/Ubuntu + sudo**; on any other host `make install` prints the exact install command and
+stops rather than guess. Everything else it bootstraps idempotently — see [Use](#use).
+
 ## Use
 
 ### 1. Render the harness into a new project
