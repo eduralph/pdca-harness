@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from . import publish, state
+from . import brief, publish, state
 from .config import Config
 
 
@@ -46,6 +46,24 @@ def _applies_to_base(repo: Path, base_ref: str, patch: Path) -> tuple[str, str]:
             _git(repo, "worktree", "remove", "--force", str(wt))
 
 
+def _resolve_base(cfg: Config, d: Path, base: str) -> tuple[str, str, str]:
+    """``(fetch_remote, fetch_ref, base_ref)`` — the branch the PR was ACTUALLY applied onto,
+    resolved exactly as :mod:`publish` does so drift checks the same base publish committed to:
+      * an ``Onto branch`` (stack-on-an-existing-PR, #54) → ``<remote>/<branch>``;
+      * else the wave / ``Stacks on`` integration branch (#wave-model / #123) on ``origin``;
+      * else the target base ``<base_remote>/<base>``.
+    Checking the brief's target base for a *stacked* PR would report false clean/stale (#211
+    review) — the PR really depends on the branch above, not on upstream ``main``."""
+    onto = brief.onto_branch(d / "brief.md")
+    if onto is not None:
+        remote, branch = onto
+        return remote, branch, f"{remote}/{branch}"
+    stack_branch = publish._stack_base_branch(cfg, d)
+    if stack_branch:
+        return "origin", stack_branch, f"origin/{stack_branch}"
+    return cfg.base_remote, base, f"{cfg.base_remote}/{base}"
+
+
 def check_bundle(cfg: Config, d: Path, *, fetch: bool = True) -> dict | None:
     """Drift status for one bundle, or ``None`` if it isn't a published contribution to
     check (no patch, or accepted-but-unpublished — the latter is #206's part 2, not drift).
@@ -60,13 +78,19 @@ def check_bundle(cfg: Config, d: Path, *, fetch: bool = True) -> dict | None:
     repo_spec, base, _ = publish._resolve_target(d)
     if not repo_spec or not base:
         return None  # no resolvable upstream target
-    base_ref = f"{cfg.base_remote}/{base}"
+    fetch_remote, fetch_ref, base_ref = _resolve_base(cfg, d, base)
     repo = publish._checkout_path(cfg, repo_spec)
     if not (repo / ".git").exists():
         return {"bundle": d.name, "pr_url": pr_url, "base": base_ref,
                 "status": "error", "detail": f"no checkout at {repo}"}
     if fetch:
-        _git(repo, "fetch", cfg.base_remote, base)  # best-effort — refresh the base tip
+        f = _git(repo, "fetch", fetch_remote, fetch_ref)
+        if f.returncode != 0:
+            # A failed fetch (expired creds, deleted/renamed base, network) must NOT fall
+            # through to a stale remote-tracking ref and mis-report apply-clean (#211 review).
+            tail = (f.stderr.strip().splitlines()[-1:] or ["git fetch failed"])[0]
+            return {"bundle": d.name, "pr_url": pr_url, "base": base_ref, "status": "error",
+                    "detail": f"fetch {fetch_remote} {fetch_ref} failed: {tail}"[:200]}
     status, detail = _applies_to_base(repo, base_ref, patch.resolve())
     return {"bundle": d.name, "pr_url": pr_url, "base": base_ref,
             "status": status, "detail": detail}

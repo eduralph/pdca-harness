@@ -111,6 +111,32 @@ class Drift(unittest.TestCase):
         self._bundle("A", pr_url=None)  # accepted but no PR → not a drift case
         self.assertEqual(drift.sweep(self.cfg, fetch=True), [])
 
+    def test_stacked_pr_resolves_its_own_base_not_the_brief_base(self) -> None:
+        # An `Onto branch` bundle's PR is applied onto that branch, not upstream/main; drift
+        # must check the branch the PR really depends on (PR #211 review).
+        d = self._bundle("A")
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Repo + branch target:** org/repo @ main\n"
+            "- **Onto branch:** origin/pr-42\n", encoding="utf-8")
+        self.assertEqual(drift._resolve_base(self.cfg, d, "main"),
+                         ("origin", "pr-42", "origin/pr-42"))
+        # No `Onto branch` → the target base.
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Repo + branch target:** org/repo @ main\n", encoding="utf-8")
+        self.assertEqual(drift._resolve_base(self.cfg, d, "main"),
+                         ("origin", "main", "origin/main"))
+
+    def test_failed_fetch_reports_error_not_stale_clean(self) -> None:
+        # A base branch that doesn't exist upstream → `git fetch` fails → error, never a
+        # false apply-clean against a stale ref (PR #211 review).
+        d = self._bundle("A")
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Repo + branch target:** org/repo @ gone\n", encoding="utf-8")
+        rows = drift.sweep(self.cfg, fetch=True)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "error")
+        self.assertIn("fetch", rows[0]["detail"])
+
     def test_close_no_fix_bundle_is_skipped(self) -> None:
         # No patch to apply — a close disposition ships nothing. Needs the close marker so
         # state() still reads COMPLETE without a patch.diff.
