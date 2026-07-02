@@ -288,8 +288,12 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
             print("flow needs one or more issue ids, or --from-csv to plan a batch from "
                   "a tracker export", file=sys.stderr)
             return 2
-        return _report_batch(flow.flow_batch(
-            cfg, csv=args.from_csv, do_publish=do_publish, do_act=do_act, by=args.by))
+        try:
+            return _report_batch(flow.flow_batch(
+                cfg, csv=args.from_csv, do_publish=do_publish, do_act=do_act, by=args.by))
+        except flow.PreflightError as exc:
+            print(f"flow: {exc}", file=sys.stderr)
+            return 1
 
     if len(ids) == 1:  # single sequential cycle (auto-plans if unbriefed)
         iid = ids[0]
@@ -309,9 +313,13 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
         return 0 if final in (state.COMPLETE, state.AWAITING_SIGNOFF) else 1
 
     # Several ids: batch — auto-plan unbriefed, drive concurrently, cheap-first sign-off.
-    return _report_batch(flow.flow_ids(
-        cfg, ids, plan_missing=True, csv=args.from_csv,
-        do_publish=do_publish, do_act=do_act, by=args.by))
+    try:
+        return _report_batch(flow.flow_ids(
+            cfg, ids, plan_missing=True, csv=args.from_csv,
+            do_publish=do_publish, do_act=do_act, by=args.by))
+    except flow.PreflightError as exc:
+        print(f"flow: {exc}", file=sys.stderr)
+        return 1
 
 
 def _report_batch(results: dict[str, str]) -> int:
