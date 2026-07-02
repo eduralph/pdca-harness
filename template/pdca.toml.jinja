@@ -426,3 +426,25 @@ checks = [
 checks = []
 {% endif %}
 
+# Reverse registry-consistency (issue #205). The FORWARD direction (a source file a patch
+# adds must be registered in a manifest) is a project gate; this is the REVERSE, generic in
+# the harness: every line a patch ADDS to one of these manifest files must reference a path
+# the SAME patch touches. A registry line pointing at a file the patch never touches is
+# cross-bundle / build-tree contamination — the stored patch then fails to apply to its clean
+# publish base, yet passes Check. Name your manifest files here and wire the bundle-scoped
+# `registry-check` gate below; `pattern` (optional) is a regex whose first group extracts the
+# path from a non-bare-path manifest line (e.g. "^include (.+)$" for a MANIFEST.in) — omit for
+# bare-path manifests like POTFILES (the whole line is the path; blank / `#` lines ignored).
+# [gates.registry_consistency]
+# files = ["po/POTFILES.in", "po/POTFILES.skip"]
+# # pattern = "^include (.+)$"
+#
+# Then wire it as a bundle-scoped gate (T2 Shape). `registry-check` reads $PDCA_BUNDLE:
+# [[gates.checks]]
+# id = "T2-registry-reverse"
+# tier = "T2"
+# label = "manifest lines reference only paths the patch touches"
+# cmd = "{{ cli_name }} registry-check"
+# gating = true
+# scope = "bundle"
+
