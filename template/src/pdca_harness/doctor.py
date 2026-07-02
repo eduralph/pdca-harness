@@ -80,20 +80,31 @@ def _auth_probe(family: str) -> tuple[str, str] | None:
 
 def _command_leaves(cfg: Config) -> dict[str, LeafConfig]:
     """Every command-mode leaf by role name, including advisory/variant/escalation
-    specs — the full set of CLIs a real run may spawn."""
+    specs — the full set of CLIs a real run may spawn.
+
+    Variant/escalation specs INHERIT mode/argv/family from ``[leaves.builder]`` when
+    they omit them (``select_builder`` / ``_leaf_from_spec``): a spec that leaves
+    ``mode`` unset is stored as ``""`` yet runs as a *command* if the default builder
+    is one. Resolve the EFFECTIVE values here — otherwise a routed/escalated builder
+    with its own ``argv`` (a different binary) is never checked, so ``--strict`` can
+    pass while the real Do attempt later dies on that missing CLI. Advisory leaves
+    have no builder inheritance (their stored default mode is ``stub``)."""
     named = {"builder": cfg.builder, "reviewer": cfg.reviewer, "planner": cfg.planner,
              "signoff": cfg.signoff, "publisher": cfg.publisher, "act": cfg.act}
     out = {role: leaf for role, leaf in named.items()
            if leaf.mode == "command" and leaf.argv}
-    for kind, specs in (("advisory", cfg.advisory_leaves),
-                        ("variant", cfg.builder_variants),
-                        ("escalation", cfg.builder_escalation)):
+    # (kind, specs, base) — base is the leaf an omitted field inherits from (None ⇒
+    # no inheritance: advisory's own mode/argv/family).
+    for kind, specs, base in (("advisory", cfg.advisory_leaves, None),
+                              ("variant", cfg.builder_variants, cfg.builder),
+                              ("escalation", cfg.builder_escalation, cfg.builder)):
         for i, spec in enumerate(specs):
-            argv = list(spec.get("argv") or [])
-            if spec.get("mode", "") == "command" and argv:
+            mode = spec.get("mode") or (base.mode if base else "stub")
+            argv = list(spec.get("argv") or (base.argv if base else []))
+            family = spec.get("family") or (base.family if base else "")
+            if mode == "command" and argv:
                 label = f"{kind}:{spec.get('id') or spec.get('model') or i}"
-                out[label] = LeafConfig(mode="command",
-                                        family=spec.get("family", ""), argv=argv)
+                out[label] = LeafConfig(mode="command", family=family, argv=argv)
     return out
 
 
