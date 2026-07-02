@@ -68,6 +68,20 @@ def launch(cfg: Config, issue_id: str) -> int:
                   f"{issue_id}`).", file=sys.stderr)
         return 1
 
+    # The per-lane worktree is reset-and-reused across bundles (issue #94): a LATER bundle's
+    # Do hard-resets it and applies its own patch. So "the tree exists and this bundle has a
+    # patch.diff" is not enough — the tree may now hold a different bundle's build. Confirm
+    # this bundle still owns it (the marker `ensure` stamps), else launching would test the
+    # wrong build under this bundle's name.
+    occupant = worktree.owner_of(wt)
+    if occupant != d.name:
+        why = (f"it now holds {occupant}'s build (a later Do reused this lane's worktree)"
+               if occupant else "its owner can't be confirmed (built by an older run)")
+        print(f"the worktree at {wt} is not {d.name}'s build — {why}. Re-run this bundle's "
+              f"Do to reload its patch before testing (`{_prog()} flow {issue_id}`).",
+              file=sys.stderr)
+        return 1
+
     env = {**os.environ,
            "PDCA_WORKTREE": str(wt), "PDCA_BUNDLE": str(d), "PDCA_TARGET": str(wt)}
     slot = lane.current()

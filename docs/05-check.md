@@ -155,8 +155,11 @@ yourself. It runs the project's `[manual_test].cmd` (e.g. `python -m gramps`) fr
 `$PDCA_WORKTREE` with the `PDCA_*` env exported, and imposes no timeout — you quit the app to
 return. It's **advisory**: it decides nothing and mutates nothing (edits you make while
 testing are reset on the next Do); you record what you saw in a Manual-verification note and
-carry it into the §9 sign-off ([step 06](06-signoff.md)). Needs `[driver].worktree` on and a
-configured `[manual_test].cmd`; otherwise it prints a one-line hint and changes nothing.
+carry it into the §9 sign-off ([step 06](06-signoff.md)). It's **bundle-specific**: because a
+lane's worktree is reset-and-reused, if a *later* bundle's Do has taken it over, `pdca try`
+refuses rather than launch the wrong build under this bundle's name — re-run this bundle's Do
+to reload its patch. Needs `[driver].worktree` on and a configured `[manual_test].cmd`;
+otherwise it prints a one-line hint and changes nothing.
 
 ## 3. Assembly — the SUMMARY the human signs
 

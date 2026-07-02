@@ -65,6 +65,26 @@ def _wt_dir(primary: Path) -> Path:
     return primary.parent / (primary.name + suffix)
 
 
+def _owner_file(wt: Path) -> Path:
+    """Sidecar recording which bundle's Do last populated worktree ``wt``.
+
+    A sibling of the worktree (``<name>.pdca-wt.owner``), so it survives the worktree's
+    own ``git clean`` and never shows up as an untracked file inside the tree.
+    """
+    return wt.with_name(wt.name + ".owner")
+
+
+def owner_of(wt: Path) -> str | None:
+    """The bundle dir name (e.g. ``issue_46``) stamped into ``wt`` by :func:`ensure`.
+
+    None if the worktree carries no marker (created by an older run, or ``ensure`` never
+    stamped it). Lets a reader tell whether a reused per-lane worktree still holds *this*
+    bundle's build or a later bundle's (issue #94 worktrees are reset-and-reused).
+    """
+    f = _owner_file(wt)
+    return (f.read_text(encoding="utf-8").strip() or None) if f.exists() else None
+
+
 def path(d: Path, cfg: Config) -> Path | None:
     """The active worktree for this bundle/lane if one exists on disk, else None.
 
@@ -106,14 +126,24 @@ def ensure(d: Path, cfg: Config) -> Path | None:
                 print(f"worktree: could not reset {wt} to {base_ref}; running in place",
                       file=sys.stderr)
                 return None
+            _stamp_owner(wt, d)  # this bundle's Do now owns the reused tree
             return wt
         # Create off the base. --force tolerates the base branch being checked out elsewhere.
         if _git(primary, "worktree", "add", "--force", str(wt), base_ref) != 0:
             print(f"worktree: could not create {wt} off {base_ref}; running in place",
                   file=sys.stderr)
             return None
+        _stamp_owner(wt, d)
         return wt
     except Exception as exc:  # noqa: BLE001 — isolation is best-effort, never fatal
         print(f"worktree: isolation unavailable for {d.name} ({exc}); running in place",
               file=sys.stderr)
         return None
+
+
+def _stamp_owner(wt: Path, d: Path) -> None:
+    """Record that bundle ``d``'s Do now owns ``wt`` (best-effort; never fatal)."""
+    try:
+        _owner_file(wt).write_text(d.name, encoding="utf-8")
+    except OSError:  # a marker we couldn't write just reads back as None (unconfirmed)
+        pass

@@ -124,6 +124,16 @@ class WorktreeRealGit(unittest.TestCase):
         self.assertFalse((wt / "stray.txt").exists())
         self.assertEqual(self._porcelain(wt), "")  # clean
 
+    def test_ensure_stamps_owner_and_reuse_reassigns(self) -> None:
+        # ensure() records which bundle's Do owns the tree; a second bundle reusing the same
+        # per-lane worktree reassigns ownership (so `pdca try <old>` can detect the swap).
+        wt = worktree.ensure(self.d, self.cfg)
+        self.assertEqual(worktree.owner_of(wt), "issue_WT")
+        other = _bundle(self.cfg, "OTHER", target="org/repo @ main")
+        wt2 = worktree.ensure(other, self.cfg)
+        self.assertEqual(wt2, wt)                          # same reused tree…
+        self.assertEqual(worktree.owner_of(wt), "issue_OTHER")  # …now owned by the later bundle
+
     def test_stacked_bundle_bases_off_parent_branch(self) -> None:
         # #123: a `Stacks on:` dependent's worktree bases off the parent's PUBLISHED branch
         # (on origin), not origin/main — so Do builds + verifies on top of the parent's diff.

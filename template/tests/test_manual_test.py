@@ -50,9 +50,11 @@ class ManualTestLaunch(unittest.TestCase):
         (d / "patch.diff").write_text("--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y\n", encoding="utf-8")
         return d
 
-    def _fake_worktree(self) -> Path:
+    def _fake_worktree(self, owner: str | None = "issue_X") -> Path:
         wt = self.tmp / "target.pdca-wt"
         (wt / ".git").mkdir(parents=True)
+        if owner is not None:  # the marker ensure() stamps; None ⇒ unconfirmed
+            wt.with_name(wt.name + ".owner").write_text(owner, encoding="utf-8")
         return wt
 
     def test_happy_path_launches_from_worktree_with_env(self) -> None:
@@ -130,6 +132,26 @@ class ManualTestLaunch(unittest.TestCase):
     def test_no_worktree_exits_1_without_launching(self) -> None:
         self._built_bundle()
         with mock.patch.object(worktree, "path", return_value=None), \
+                mock.patch.object(manual_test.subprocess, "run") as run:
+            self.assertEqual(manual_test.launch(self.cfg, "X"), 1)
+            run.assert_not_called()
+
+    def test_worktree_owned_by_other_bundle_exits_1(self) -> None:
+        # A later bundle's Do reused this lane's worktree — the tree now holds issue_OTHER's
+        # build, so launching would test the wrong build under issue_X's name. Refuse.
+        self._built_bundle()
+        wt = self._fake_worktree(owner="issue_OTHER")
+        with mock.patch.object(worktree, "path", return_value=wt), \
+                mock.patch.object(manual_test.subprocess, "run") as run:
+            self.assertEqual(manual_test.launch(self.cfg, "X"), 1)
+            run.assert_not_called()
+
+    def test_worktree_unmarked_owner_exits_1(self) -> None:
+        # No ownership marker (older run / stamp failed): can't confirm the tree is this
+        # bundle's build → refuse rather than risk signing off the wrong build.
+        self._built_bundle()
+        wt = self._fake_worktree(owner=None)
+        with mock.patch.object(worktree, "path", return_value=wt), \
                 mock.patch.object(manual_test.subprocess, "run") as run:
             self.assertEqual(manual_test.launch(self.cfg, "X"), 1)
             run.assert_not_called()
