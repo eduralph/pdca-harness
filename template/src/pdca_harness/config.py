@@ -109,6 +109,11 @@ class Config:
     issue_url_pattern: str = ""
     repo_checkouts: dict[str, str] = field(default_factory=dict)  # repo_spec → local path
     gates_checks: list[dict] = field(default_factory=list)
+    # Reverse registry-consistency (issue #205): [gates.registry_consistency] naming an
+    # instance's manifest files ({files=[...], pattern="<regex, group 1 = path>"}). The
+    # `registry-check` subcommand (wired as a bundle-scoped gate) fails a patch that adds a
+    # line to one of these files for a path the same patch doesn't touch. Empty ⇒ no check.
+    registry_consistency: dict = field(default_factory=dict)
     # Optional advisory reviewer leaves (issue #64): an OPEN list of extra, role-distinct
     # advisory reviewers ([[leaves.advisory]] in pdca.toml), so an instance adds N of them
     # (e.g. a correctness/cleanup code-review lens) with no driver change. Each:
@@ -253,6 +258,7 @@ class Config:
         gates = data.get("gates", {})
         gates_checks = list(gates.get("checks", []))
         gates_runner = gates.get("runner", "")
+        registry_consistency = dict(gates.get("registry_consistency", {}))
         # Additive target flags: label → {field, substring}. A bare string is shorthand
         # for the "Repo + branch target" field (so flags and the primary axis can share it).
         gate_target_flags = {
@@ -361,6 +367,7 @@ class Config:
             act=leaf("act"),
             author=data.get("project", {}).get("author", ""),
             gates_checks=gates_checks,
+            registry_consistency=registry_consistency,
             advisory_leaves=advisory_leaves,
             advisory_selection=advisory_selection,
             builder_escalation=builder_escalation,

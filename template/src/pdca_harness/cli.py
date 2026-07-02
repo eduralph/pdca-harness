@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from . import (act, brief, doctor, drift, driver, flow, gates, merged, publish, queue,
-               revalidate, revert, signoff, state, waves)
+               registry, revalidate, revert, signoff, state, waves)
 from .config import Config
 
 
@@ -92,6 +92,13 @@ def main(argv: list[str] | None = None) -> int:
     p_gates.add_argument("--working-tree", action="store_true", help="repo-scoped gates only (the CI merge re-gate)")
     p_gates.add_argument("--promotions", action="store_true",
                          help="list advisory checks clean for their promote_after cycles (#156)")
+
+    # Reverse registry-consistency (issue #205) — a bundle-scoped gate cmd. Reads the
+    # bundle from its arg or $PDCA_BUNDLE (set by the gate runner), so a [[gates.checks]]
+    # entry is simply `cmd = "<cli> registry-check"`.
+    p_reg = sub.add_parser("registry-check",
+                           help="fail a patch that adds a manifest line for a path it doesn't touch (#205)")
+    p_reg.add_argument("issue_id", nargs="?")
 
     p_reval = sub.add_parser("revalidate",
                              help="re-run gates on a COMPLETE bundle vs the current engine; write a dated stamp (never re-decides §9)")
@@ -187,6 +194,8 @@ def main(argv: list[str] | None = None) -> int:
         return _queue(cfg)
     if args.cmd == "gates":
         return _gates(cfg, args)
+    if args.cmd == "registry-check":
+        return _registry_check(cfg, args)
     if args.cmd == "revalidate":
         return _revalidate(cfg, args)
     if args.cmd == "drift":
@@ -478,6 +487,31 @@ def _drift(cfg: Config, args: argparse.Namespace) -> int:
     print(f"\ndrift: {len(rows)} checked · {ok} apply-clean · "
           f"{len(stale)} needs-rebase · {len(errors)} unknown")
     return 0
+
+
+def _registry_check(cfg: Config, args: argparse.Namespace) -> int:
+    """Reverse registry-consistency gate (#205): fail iff the bundle's patch adds a line to a
+    configured manifest for a path the patch doesn't touch. The bundle is the ``issue_id``
+    arg or ``$PDCA_BUNDLE`` (set by the gate runner). Not-configured / no-patch ⇒ pass
+    (default-open, like an unconfigured gate)."""
+    files = cfg.registry_consistency.get("files") or []
+    if not files:
+        return 0  # no registry files declared → nothing to enforce
+    if args.issue_id:
+        d = cfg.bundle(args.issue_id)
+    elif os.environ.get("PDCA_BUNDLE"):
+        d = Path(os.environ["PDCA_BUNDLE"])
+    else:
+        print("registry-check needs an issue id or $PDCA_BUNDLE", file=sys.stderr)
+        return 2
+    patch = d / "patch.diff"
+    if not patch.is_file() or not patch.read_text(encoding="utf-8").strip():
+        return 0  # no patch to inspect (close/no-fix bundle)
+    pattern = cfg.registry_consistency.get("pattern", "")
+    violations = registry.find_violations(patch.read_text(encoding="utf-8"), files, pattern)
+    for v in violations:
+        print(v)
+    return 1 if violations else 0
 
 
 def _revalidate(cfg: Config, args: argparse.Namespace) -> int:
