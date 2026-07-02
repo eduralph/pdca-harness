@@ -46,7 +46,11 @@ open('.claude/settings.local.json', 'w'), indent=2)"
 install: .venv/.installed
 	@printf '\nInstalled. Run the cycle with the console script (see pyproject [project.scripts]) on .venv/bin/.\n'
 
-.venv/.installed: pyproject.toml scripts/bootstrap-tools.sh
+# Depend on the config that drives the bootstrap too (pdca.toml — leaf families /
+# [install].extra_bootstrap — and the drop-in hooks), so switching a leaf from stub to
+# command or wiring project bootstrap AFTER the first install re-provisions rather than
+# short-circuiting on a stale sentinel (issue #207 review). Idempotent — a re-run is a no-op.
+.venv/.installed: pyproject.toml scripts/bootstrap-tools.sh pdca.toml $(wildcard scripts/bootstrap-tools.d/*.sh)
 	PYTHON=$(PYTHON) ./scripts/bootstrap-tools.sh
 	@touch $@
 

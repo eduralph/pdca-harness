@@ -27,18 +27,26 @@ _TOML_MISSING = (
     '[leaves.builder]\nmode = "command"\nfamily = "acme-llm"\n'
     'argv = ["acme-llm", "-p"]\n'
 )
+# The default `leaves_mode = "stub"` render: stub leaves that STILL carry a `family` (and a
+# commented example). A grep would wrongly demand those CLIs; honouring `mode` must not.
 _TOML_STUBS = (
     '[project]\ndefault_branch = "main"\n'
-    '[leaves.builder]\nmode = "stub"\n[leaves.reviewer]\nmode = "stub"\n'
+    '[leaves.builder]\nmode = "stub"\nfamily = "claude"\nargv = ["claude", "-p"]\n'
+    '[leaves.reviewer]\nmode = "stub"\nfamily = "codex"\n'
+    '# [[leaves.advisory]]\n# family = "gemini"\n'
 )
 
 
-def _run_check(toml: str) -> subprocess.CompletedProcess:
+def _run_check(toml: str, hook: str | None = None) -> subprocess.CompletedProcess:
     tmp = Path(tempfile.mkdtemp())
     try:
         (tmp / "pdca.toml").write_text(toml, encoding="utf-8")
         (tmp / "scripts").mkdir()
         shutil.copy2(SCRIPT, tmp / "scripts" / "bootstrap-tools.sh")
+        if hook is not None:
+            hd = tmp / "scripts" / "bootstrap-tools.d"
+            hd.mkdir()
+            (hd / "10-project.sh").write_text(hook, encoding="utf-8")
         return subprocess.run(
             ["bash", str(tmp / "scripts" / "bootstrap-tools.sh"), "--check"],
             cwd=tmp, capture_output=True, text=True)
@@ -55,18 +63,32 @@ class BootstrapCheck(unittest.TestCase):
         self.assertIn("MISSING", r.stdout)
         self.assertIn("REQUIRED tools missing", r.stdout)
 
-    def test_stubs_only_render_references_no_backend(self) -> None:
-        # "Only the configured leaf backends are installed" — a claude-only concept must not
-        # leak into a stubs-only render (regardless of git/gh/venv presence in the env).
+    def test_stub_leaves_with_family_need_no_backend(self) -> None:
+        # A stub render carries `family = "claude"`/`codex` (and a commented `gemini`), but
+        # `mode = "stub"` means no command leaf runs — honouring `mode` must not demand those
+        # CLIs (issue #207 review). Parsing TOML (not grep) makes this hold.
         r = _run_check(_TOML_STUBS)
         self.assertNotIn("claude", r.stdout)
         self.assertNotIn("codex", r.stdout)
+        self.assertNotIn("gemini", r.stdout)
         self.assertIn("all leaves are stubs", r.stdout)
 
     def test_reports_the_three_tiers(self) -> None:
         r = _run_check(_TOML_STUBS)
         for tier in ("tier 1", "tier 2", "tier 3"):
             self.assertIn(tier, r.stdout)
+
+    def test_check_runs_project_hooks_and_a_failing_one_fails(self) -> None:
+        # A tier-3 drop-in hook that reports a missing required tool must fail install-check,
+        # not be suppressed (issue #207 review). The hook runs in --check mode (CHECK_ONLY=1).
+        r = _run_check(_TOML_STUBS, hook='echo "checked: CHECK_ONLY=$CHECK_ONLY"; exit 1\n')
+        self.assertIn("checked: CHECK_ONLY=1", r.stdout)  # hook actually ran under --check
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REQUIRED tools missing", r.stdout)
+
+    def test_check_passing_hook_is_reported(self) -> None:
+        r = _run_check(_TOML_STUBS, hook='echo ok; exit 0\n')
+        self.assertIn("10-project.sh", r.stdout)
 
 
 class InstallConfig(unittest.TestCase):

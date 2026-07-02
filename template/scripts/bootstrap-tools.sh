@@ -96,14 +96,48 @@ echo "== tier 2: leaf backends (from pdca.toml) =="
 # variants, escalation). The builder's family is REQUIRED (Do can't run without it); the
 # rest are OPTIONAL (a non-gating advisory leaf never blocks). Only configured backends are
 # installed — a claude-only render never fetches codex.
-leaf_families() {
+# Parse pdca.toml with tomllib (stdlib) so TOML structure, comments, and each leaf's `mode`
+# are honoured — a grep would collect `family=` from STUB leaves and commented examples and
+# then demand model CLIs the offline stub render never runs (issue #207 review). Only a
+# COMMAND-mode leaf's family counts; variants/escalation inherit the builder's mode/family
+# when they omit them (as select_builder does). Emits tab-delimited BUILDER/LEAF/EXTRA lines.
+pdca_config() {
   [ -f "$TOML" ] || return 0
-  grep -oE 'family[[:space:]]*=[[:space:]]*"[^"]+"' "$TOML" | grep -oE '"[^"]+"' | tr -d '"' | sort -u
-}
-builder_family() {
-  [ -f "$TOML" ] || return 0
-  sed -n '/^\[leaves\.builder\]/,/^\[/p' "$TOML" \
-    | grep -oE 'family[[:space:]]*=[[:space:]]*"[^"]+"' | head -1 | grep -oE '"[^"]+"' | tr -d '"'
+  "$PYTHON" - "$TOML" <<'PY' 2>/dev/null || true
+import sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as f:
+        data = tomllib.load(f)
+except Exception:
+    sys.exit(0)
+leaves = data.get("leaves", {})
+leaves = leaves if isinstance(leaves, dict) else {}
+def fam(spec, imode=None, ifam=None):
+    if not isinstance(spec, dict):
+        return None
+    mode = spec.get("mode", imode)
+    family = spec.get("family", ifam) or ""
+    return family if (mode == "command" and family) else None
+builder = leaves.get("builder", {})
+builder = builder if isinstance(builder, dict) else {}
+bmode, bfam = builder.get("mode"), builder.get("family", "")
+print("BUILDER\t" + (fam(builder) or ""))
+for name in ("builder", "reviewer", "planner", "signoff", "publisher", "act"):
+    f = fam(leaves.get(name, {}))
+    if f:
+        print("LEAF\t" + f)
+for spec in leaves.get("advisory", []) or []:      # no builder inheritance
+    f = fam(spec)
+    if f:
+        print("LEAF\t" + f)
+for key in ("builder_variant", "builder_escalation"):
+    for spec in leaves.get(key, []) or []:
+        f = fam(spec, bmode, bfam)
+        if f:
+            print("LEAF\t" + f)
+install = data.get("install", {})
+print("EXTRA\t" + (install.get("extra_bootstrap", "") if isinstance(install, dict) else ""))
+PY
 }
 
 # family → the CLI binary it spawns.
@@ -116,10 +150,14 @@ family_install() {
   esac
 }
 
-BUILDER_FAM="$(builder_family || true)"
-FAMILIES="$(leaf_families || true)"
+if ! have "$PYTHON"; then
+  say WARN "leaf detection" "needs python3 to read pdca.toml (see tier 1)"
+fi
+CONFIG="$(pdca_config || true)"
+BUILDER_FAM="$(printf '%s\n' "$CONFIG" | sed -n 's/^BUILDER\t//p' | head -1)"
+FAMILIES="$(printf '%s\n' "$CONFIG" | sed -n 's/^LEAF\t//p' | awk '!seen[$0]++')"
 if [ -z "$FAMILIES" ]; then
-  say OK "all leaves are stubs" "no model CLI needed (offline mode)"
+  say OK "all leaves are stubs" "no command-mode model CLI needed (offline mode)"
 fi
 for fam in $FAMILIES; do
   bin="$(family_bin "$fam")"
@@ -141,23 +179,22 @@ done
 echo
 echo "== tier 3: project toolchain (instance hook) =="
 ran_hook=0
-# 3a. drop-in dir: scripts/bootstrap-tools.d/*.sh, sourced in order (composable).
+# 3a. drop-in dir: scripts/bootstrap-tools.d/*.sh. Run in BOTH modes, passing CHECK_ONLY —
+# these hooks are the advertised project-prerequisite extension point, so under --check they
+# must probe (and a required-tool miss must fail install-check), not be suppressed (#207
+# review). A hook honours CHECK_ONLY itself; its non-zero exit is a REQUIRED miss.
 if [ -d "$ROOT/scripts/bootstrap-tools.d" ]; then
   for hook in "$ROOT"/scripts/bootstrap-tools.d/*.sh; do
     [ -e "$hook" ] || continue
     ran_hook=1
     say RUN "$(basename "$hook")"
-    [ "$CHECK_ONLY" = 0 ] && CHECK_ONLY="$CHECK_ONLY" PYTHON="$PYTHON" bash "$hook"
+    CHECK_ONLY="$CHECK_ONLY" PYTHON="$PYTHON" bash "$hook" || { say FAILED "$(basename "$hook")" "hook exited non-zero"; miss 1; }
   done
 fi
-# 3b. [install].extra_bootstrap in pdca.toml — one command the instance owns.
-extra_bootstrap() {
-  [ -f "$TOML" ] || return 0
-  sed -n '/^\[install\]/,/^\[/p' "$TOML" \
-    | grep -oE 'extra_bootstrap[[:space:]]*=[[:space:]]*"[^"]*"' | head -1 \
-    | sed -E 's/.*=[[:space:]]*"([^"]*)"/\1/'
-}
-EXTRA="$(extra_bootstrap || true)"
+# 3b. [install].extra_bootstrap (parsed by tomllib above) — one command the instance owns.
+# It is a provisioning command, not CHECK_ONLY-aware, so it runs only on install (never under
+# --check, which must install nothing); under --check it is shown for visibility.
+EXTRA="$(printf '%s\n' "$CONFIG" | sed -n 's/^EXTRA\t//p' | head -1)"
 if [ -n "$EXTRA" ]; then
   ran_hook=1
   say RUN "[install].extra_bootstrap" "$EXTRA"
