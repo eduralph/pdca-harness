@@ -74,6 +74,16 @@ act_cadence = 5
 # to use the built-in default shown here.
 # close_dispositions = ["likely-close", "wontfix", "by-design", "duplicate", "not-reproducible", "manual-verification", "upstream", "external"]
 
+# Install bootstrap (issue #207). `make install` runs scripts/bootstrap-tools.sh, which
+# provisions the harness-universal tools (git, gh, a pip-capable venv) and the leaf backends
+# your [leaves.*].family use. It hardcodes NO project gate toolchain — that is instance-owned.
+# `extra_bootstrap` is one idempotent command the bootstrap runs LAST to provision THIS
+# project's gate toolchain (e.g. rustup for a cargo-xtask gate, or `pip install .[test]` for a
+# Python one); it survives `copier update` (config, not a template file). Empty ⇒ nothing.
+# For multiple concerns, drop composable scripts into scripts/bootstrap-tools.d/*.sh instead.
+[install]
+extra_bootstrap = ""
+
 [tracker]
 system = "{{ tracker_system }}"
 url = "{{ tracker_url }}"

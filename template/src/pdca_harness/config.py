@@ -114,6 +114,11 @@ class Config:
     # `registry-check` subcommand (wired as a bundle-scoped gate) fails a patch that adds a
     # line to one of these files for a path the same patch doesn't touch. Empty ⇒ no check.
     registry_consistency: dict = field(default_factory=dict)
+    # Instance-owned gate-toolchain bootstrap (issue #207): [install].extra_bootstrap in
+    # pdca.toml. One idempotent command scripts/bootstrap-tools.sh runs after the harness-
+    # universal + leaf tiers, so the generic template ships no project toolchain (a Rust
+    # instance drops in rustup here, a Python one its pip extras). "" ⇒ nothing.
+    install_extra_bootstrap: str = ""
     # Optional advisory reviewer leaves (issue #64): an OPEN list of extra, role-distinct
     # advisory reviewers ([[leaves.advisory]] in pdca.toml), so an instance adds N of them
     # (e.g. a correctness/cleanup code-review lens) with no driver change. Each:
@@ -259,6 +264,7 @@ class Config:
         gates_checks = list(gates.get("checks", []))
         gates_runner = gates.get("runner", "")
         registry_consistency = dict(gates.get("registry_consistency", {}))
+        install_extra_bootstrap = data.get("install", {}).get("extra_bootstrap", "")
         # Additive target flags: label → {field, substring}. A bare string is shorthand
         # for the "Repo + branch target" field (so flags and the primary axis can share it).
         gate_target_flags = {
@@ -368,6 +374,7 @@ class Config:
             author=data.get("project", {}).get("author", ""),
             gates_checks=gates_checks,
             registry_consistency=registry_consistency,
+            install_extra_bootstrap=install_extra_bootstrap,
             advisory_leaves=advisory_leaves,
             advisory_selection=advisory_selection,
             builder_escalation=builder_escalation,

@@ -56,6 +56,19 @@ Re-apply template updates later, from inside the rendered project:
 copier update
 ```
 
+Then bootstrap the tools a real cycle needs — `make install` (issue #207) provisions the
+harness-universal tools (git, gh, a pip-capable venv with a get-pip.py fallback) **and** the
+leaf backends your `[leaves.*].family` configures, idempotently, on a host of unknown state:
+
+```bash
+make install         # bootstrap every tool + install the console script (re-run = no-op)
+make install-check   # report each tool's status, install nothing (non-zero iff a REQUIRED one is missing)
+```
+
+The bootstrap hardcodes **no** project gate toolchain — that stays instance-owned via
+`[install].extra_bootstrap` in `pdca.toml` (or `scripts/bootstrap-tools.d/*.sh`), so a Rust
+instance drops in `rustup` there and a Python one its `pip` extras, surviving `copier update`.
+
 ### 2. Drive a contribution cycle
 
 `pdca` is the entry point once the package is installed; otherwise prefix any
