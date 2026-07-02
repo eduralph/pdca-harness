@@ -71,6 +71,31 @@ class LanePreflight(unittest.TestCase):
         self.assertEqual(preflight.lane_preflight(cfg), (True, []))
 
 
+class WavePools(unittest.TestCase):
+    """A wave pools (and so preflights) only when lanes>1 AND >1 RUNNABLE bundle."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_multiple_runnable_bundles_pool(self) -> None:
+        cfg = _cfg(self.tmp, lanes=2)
+        self.assertTrue(flow._wave_pools(cfg, [Path("a"), Path("b")]))
+
+    def test_single_runnable_bundle_does_not_pool(self) -> None:
+        # The PR #215 review case: a wave _runnable filtered down to ONE bundle (e.g. its
+        # sibling is blocked on an unmerged out-of-batch prereq) takes the serial path and
+        # sets no $PDCA_LANE — it must not trip the preflight.
+        cfg = _cfg(self.tmp, lanes=2)
+        self.assertFalse(flow._wave_pools(cfg, [Path("a")]))
+
+    def test_serial_lanes_never_pool(self) -> None:
+        cfg = _cfg(self.tmp, lanes=1)
+        self.assertFalse(flow._wave_pools(cfg, [Path("a"), Path("b")]))
+
+
 class DriveAndActPreflight(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
@@ -78,18 +103,19 @@ class DriveAndActPreflight(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _bundles(self, n: int) -> list[Path]:
-        out = []
-        for i in range(n):
-            d = self.tmp / "results" / f"issue_{i}"
-            d.mkdir(parents=True)
-            out.append(d)
-        return out
+    def _bundle(self, iid: str) -> Path:
+        d = self.tmp / "results" / f"issue_{iid}"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(f"- **Slug:** s{iid}\n", encoding="utf-8")
+        return d
 
-    def test_batch_aborts_before_driving_on_failed_preflight(self) -> None:
+    def test_pooling_batch_aborts_before_driving_on_failed_preflight(self) -> None:
+        # Two independent issues → one wave, both runnable → it pools → preflight gates
+        # before the wave is driven.
         cfg = _cfg(self.tmp, lanes=2, lane_preflight="exit 1")
+        bundles = [self._bundle("0"), self._bundle("1")]
         with self.assertRaises(flow.PreflightError):
-            flow._drive_and_act(cfg, self._bundles(2), do_publish=False, do_act=False,
+            flow._drive_and_act(cfg, bundles, do_publish=False, do_act=False,
                                 by="t", today="2026-07-02")
 
 
