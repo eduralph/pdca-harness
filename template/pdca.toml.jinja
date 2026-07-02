@@ -227,6 +227,38 @@ family = "claude"
 interactive = true
 argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
 
+# FAMILY PROFILES (vendor neutrality). Every vendor-CLI-specific behavior is DATA
+# (pdca_harness.families): how to stream, how to grant an extra read dir, how a role
+# prompt is injected, whether the CLI must run from the harness root, whether it has
+# its own STOP-discipline hook. Built-ins ship for claude / codex / gemini / generic;
+# any UNKNOWN family name falls back to generic (prompt on stdin, no vendor flags),
+# and a non-claude BUILDER automatically gets the driver's `gh` PATH-shim guard —
+# the same builder_guard.py rules as claude's PreToolUse hook, vendor-neutrally.
+# Override or extend per instance; adding a vendor is config, not a driver change:
+# [families.mycli]
+# grounding_flag = "--include-directories"   # "" ⇒ env-only ($PDCA_TARGET/$PDCA_WORKTREE)
+# role_injection = "inline"                  # "flag" | "inline" | "none"
+# stream_argv = []                           # flags for a live tool-use stream, if any
+# cwd_discovery = false                      # true ⇒ run from harness root (claude-style)
+# native_guard = false                       # true ⇒ skip the driver's gh PATH shim
+#
+# Any leaf may also carry, mapped through its family's profile (explicit argv wins):
+#   agent  = "reviewer"   # role prompt .claude/agents/<name>.md — claude passes
+#                         # `--agent <name>`; inline families get the body prepended
+#                         # to the task prompt (frontmatter stripped)
+#   model  = "<id>"       # → the profile's model_flag (claude --model, codex/gemini -m)
+#   effort = "high"       # → the profile's effort_argv mapping
+#
+# Example: a Gemini CLI advisory reviewer (grounded via --include-directories, role
+# prompt inlined — no claude machinery needed):
+# [[leaves.advisory]]
+# id = "gemini"
+# role = "correctness bugs introduced by the patch"
+# mode = "command"
+# family = "gemini"
+# agent = "code-review"
+# argv = ["gemini", "--yolo"]
+
 # Optional advisory reviewer leaves (issue #64) — an OPEN list. The `reviewer` leaf above
 # judges fix ADEQUACY (causal adequacy, scope, validation); add role-distinct ADVISORY
 # reviewers here for other lenses (e.g. correctness bugs the patch introduces + reuse /
@@ -268,6 +300,16 @@ argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
 # §6 NEEDS-HUMAN so you can see decorrelation didn't hold for that bundle.
 # [leaves.advisory_selection]
 # mode = "vendor-complement"
+# Doctor rows (`pdca doctor`) — optional. The doctor derives its main checks from
+# this file (every command leaf's CLI + auth, gh, bundle root, notes_cmd); declare
+# INSTANCE-specific prerequisites here as data, the same pattern as [[gates.checks]].
+# Each cmd runs from the project root; exit 0 = OK. `required = true` fails the doctor.
+# [[doctor.checks]]
+# id = "docker"
+# cmd = "docker info"
+# hint = "https://docs.docker.com/engine/install/ — the gates run in a container"
+# required = false
+
 # Deterministic Check gates (docs 04). Each check runs a shell command; it PASSES
 # iff the command exits 0. `scope = "repo"` runs against the working tree (and is
 # what CI re-runs via `pdca gates --working-tree`); `scope = "bundle"` needs the

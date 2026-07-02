@@ -301,6 +301,7 @@ def _run_beat_round_pooled(
                 while not conflicts[d.name].isdisjoint(inflight):
                     cond.wait()
                 inflight.add(d.name)
+            changed = False  # if _advance_one raises, the finally must not UnboundLocalError
             try:
                 changed = _advance_one(cfg, d)
             finally:
