@@ -119,6 +119,13 @@ class Config:
     # universal + leaf tiers, so the generic template ships no project toolchain (a Rust
     # instance drops in rustup here, a Python one its pip extras). "" ⇒ nothing.
     install_extra_bootstrap: str = ""
+    # Manual-test launch command ([manual_test].cmd): the shell command `pdca try <id>`
+    # runs to launch the PATCHED build from a bundle's per-cycle worktree, so a human can
+    # hands-on test it during Check (the GUI/visual/validation §6 rows the gates + headless
+    # reviewer can't decide). Run from $PDCA_WORKTREE with the PDCA_* env exported, terminal
+    # inherited, no timeout. "" ⇒ `pdca try` errors with a configure-me hint. Instance-owned
+    # data (project-specific, like a gate cmd) — e.g. "python -m gramps".
+    manual_test_cmd: str = ""
     # Optional advisory reviewer leaves (issue #64): an OPEN list of extra, role-distinct
     # advisory reviewers ([[leaves.advisory]] in pdca.toml), so an instance adds N of them
     # (e.g. a correctness/cleanup code-review lens) with no driver change. Each:
@@ -271,6 +278,8 @@ class Config:
         gates_runner = gates.get("runner", "")
         registry_consistency = dict(gates.get("registry_consistency", {}))
         install_extra_bootstrap = data.get("install", {}).get("extra_bootstrap", "")
+        # `pdca try <id>` launch command (project-specific); "" ⇒ the command errors with a hint.
+        manual_test_cmd = data.get("manual_test", {}).get("cmd", "")
         # Additive target flags: label → {field, substring}. A bare string is shorthand
         # for the "Repo + branch target" field (so flags and the primary axis can share it).
         gate_target_flags = {
@@ -382,6 +391,7 @@ class Config:
             gates_checks=gates_checks,
             registry_consistency=registry_consistency,
             install_extra_bootstrap=install_extra_bootstrap,
+            manual_test_cmd=manual_test_cmd,
             advisory_leaves=advisory_leaves,
             advisory_selection=advisory_selection,
             builder_escalation=builder_escalation,

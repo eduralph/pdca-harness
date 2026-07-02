@@ -39,6 +39,13 @@ abandon a bundle with §6 still open. Add `--by "Name"` to set attribution and
 
 ## The simple case — accept
 
+Before you accept a bundle whose §6 carries a **visual / GUI / validation** row, run the
+fix by hand: `pdca try <id>` launches the patched build from the bundle's worktree
+([step 05](05-check.md#trying-the-build-by-hand--pdca-try-id)) so you can drive the app and
+confirm the fix does the right thing — the one check no gate and no headless reviewer can
+make for you. Record the outcome in a Manual-verification note, tick the §6 item, then sign
+off. (Needs `[manual_test].cmd` set; a docs-only or headless-testable fix won't need it.)
+
 For issue 11589 ([steps 03–05](03-plan.md)), the gates proved correctness and the
 four §6 items were all cleared, so the maintainer accepted. The real
 `results/issue_11589/SUMMARY.md` §9:

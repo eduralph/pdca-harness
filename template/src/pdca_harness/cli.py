@@ -15,8 +15,8 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import (act, brief, doctor, drift, driver, flow, gates, merged, publish, queue,
-               registry, revalidate, revert, signoff, state, waves)
+from . import (act, brief, doctor, drift, driver, flow, gates, manual_test, merged, publish,
+               queue, registry, revalidate, revert, signoff, state, waves)
 from .config import Config
 
 
@@ -104,6 +104,13 @@ def main(argv: list[str] | None = None) -> int:
                              help="re-run gates on a COMPLETE bundle vs the current engine; write a dated stamp (never re-decides §9)")
     p_reval.add_argument("issue_id")
     p_reval.add_argument("--date", help="ISO date for the stamp (default: today)")
+
+    # Manual-test launch — `pdca try <id>` launches the patched build from the bundle's
+    # worktree so a human can hands-on test it during Check (the visual/GUI §6 rows the
+    # gates + headless reviewer can't decide). Runs [manual_test].cmd; advisory.
+    p_try = sub.add_parser("try",
+                           help="launch the patched build from the bundle's worktree for hands-on Check")
+    p_try.add_argument("issue_id")
 
     # Drift sweep (issue #206) — flag published bundles whose patch no longer applies to the
     # current upstream base. Report-only; never re-decides §9.
@@ -198,6 +205,8 @@ def main(argv: list[str] | None = None) -> int:
         return _registry_check(cfg, args)
     if args.cmd == "revalidate":
         return _revalidate(cfg, args)
+    if args.cmd == "try":
+        return manual_test.launch(cfg, args.issue_id)
     if args.cmd == "drift":
         return _drift(cfg, args)
     if args.cmd == "act":
