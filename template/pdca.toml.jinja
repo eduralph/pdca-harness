@@ -35,6 +35,17 @@ lanes = 1
 # `$PDCA_WORKTREE` too (see the gate examples below). On by default; best-effort (a target
 # that isn't a worktree-capable git checkout falls back to in-place). Set false to disable.
 worktree = true
+# Per-lane resource preflight (issue #213). A `lanes > 1` batch pins each bundle to a lane
+# slot and exports `$PDCA_LANE`; the instance's gate commands map that to a per-lane resource
+# (a worktree, a container, a port). This verifies those resources exist ONCE, before the
+# fan-out, and aborts the run (before any lane spawns) if they don't — so a batch never runs
+# against missing lanes and produces a pile of false-red bundles. Two ways, either or both:
+#   * the REQUIRED `per_lane` [[doctor.checks]] are run automatically (no new config);
+#   * `lane_preflight` is a generic command run once ({lanes} interpolated) — the escape hatch
+#     for a resource not expressed as a doctor row; a non-zero exit aborts. Serial (lanes<=1)
+#     runs never preflight; empty ⇒ only the doctor rows (or nothing). It only VERIFIES —
+#     provisioning stays the instance's job (e.g. `make worktrees LANES={lanes}`).
+# lane_preflight = "test -e ../repo-lane{lanes}/.git || { echo 'run: make worktrees LANES={lanes}'; exit 1; }"
 # Wave-based batch sequencing (#wave-model). When `pdca flow` is given several ids it runs
 # them as an ordered sequence of dependency waves (computed from each brief's `Depends on`
 # / `Conflicts with`): a wave's bundles build in parallel, then its accepted work reaches

@@ -168,6 +168,12 @@ class Config:
     # checkout directly, as before). Best-effort: a target that isn't a worktree-capable
     # git checkout silently falls back to in-place.
     worktree: bool = True
+    # Per-lane resource preflight (issue #213): [driver].lane_preflight, a shell command run
+    # ONCE before a lanes>1 fan-out ({lanes} interpolated); a non-zero exit aborts the run
+    # before any lane spawns, so a batch never runs against missing per-lane resources (and
+    # the REQUIRED per_lane [[doctor.checks]] are also run). "" ⇒ only the doctor rows (or
+    # nothing). Serial (lanes<=1) runs never preflight.
+    lane_preflight: str = ""
     # Wave-based batch sequencing (#wave-model). A batch handed to `flow` runs as an
     # ordered sequence of dependency waves; `wave_mode` selects how each wave's accepted
     # work reaches the next: "stack" (default) folds it onto a run-scoped integration
@@ -328,6 +334,7 @@ class Config:
             lanes = int(os.environ["PDCA_LANES"])
         lanes = max(1, lanes)
         worktree = bool(driver_cfg.get("worktree", True))  # issue #94; on by default
+        lane_preflight = driver_cfg.get("lane_preflight", "")  # issue #213
         wave_mode = driver_cfg.get("wave_mode", "stack")  # #wave-model: stack | merge
         merge_method = driver_cfg.get("merge_method", "merge")  # merge | squash | rebase
         regate_between_waves = bool(driver_cfg.get("regate_between_waves", False))
@@ -375,6 +382,7 @@ class Config:
             gates_runner=gates_runner,
             lanes=lanes,
             worktree=worktree,
+            lane_preflight=lane_preflight,
             wave_mode=wave_mode,
             merge_method=merge_method,
             regate_between_waves=regate_between_waves,

@@ -25,8 +25,14 @@ import threading
 from pathlib import Path
 
 from . import (act, brief, driver, gates, integrate, lane, leaves, merge, merged,
-               publish, queue, signoff, state, waves)
+               preflight, publish, queue, signoff, state, waves)
 from .config import Config
+
+
+class PreflightError(RuntimeError):
+    """A ``lanes > 1`` fan-out was refused because a declared per-lane preflight failed
+    (issue #213) — the resources a lane's gates need aren't present, so the batch is not
+    driven (it would only produce false-red bundles)."""
 
 
 def _isolate(d: Path, what: str, fn):
@@ -458,6 +464,19 @@ def _drive_and_act(
     ``--no-publish`` (``do_publish=False``) drives every wave to COMPLETE but sequences
     nothing — no publish, no fold — so a later wave builds on the unchanged base.
     """
+    # Per-lane resource preflight (issue #213): before a lanes>1 fan-out (only when the
+    # batch actually pools — >1 bundle), verify the instance's declared per-lane resources
+    # exist; abort before driving ANY bundle rather than fan out onto missing lanes and
+    # produce a pile of false-red results. No-op when nothing is declared / lanes<=1.
+    if cfg.lanes > 1 and len(bundles) > 1:
+        ok, msgs = preflight.lane_preflight(cfg)
+        if not ok:
+            for m in msgs:
+                print(f"  {m}", file=sys.stderr)
+            raise PreflightError(
+                f"lane preflight failed for a lanes={cfg.lanes} batch — not fanning out "
+                "(fix the per-lane resources above, then re-run)")
+
     wave_list = waves.compute_waves(cfg, bundles)  # validates (raises) + levels the batch
     last = len(wave_list) - 1
     batch_names = {b.name for b in bundles}  # in-batch prereqs ride the fold; #186 gates the rest
