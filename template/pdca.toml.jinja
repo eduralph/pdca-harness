@@ -300,6 +300,16 @@ argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
 # §6 NEEDS-HUMAN so you can see decorrelation didn't hold for that bundle.
 # [leaves.advisory_selection]
 # mode = "vendor-complement"
+# Doctor rows (`pdca doctor`) — optional. The doctor derives its main checks from
+# this file (every command leaf's CLI + auth, gh, bundle root, notes_cmd); declare
+# INSTANCE-specific prerequisites here as data, the same pattern as [[gates.checks]].
+# Each cmd runs from the project root; exit 0 = OK. `required = true` fails the doctor.
+# [[doctor.checks]]
+# id = "docker"
+# cmd = "docker info"
+# hint = "https://docs.docker.com/engine/install/ — the gates run in a container"
+# required = false
+
 # Deterministic Check gates (docs 04). Each check runs a shell command; it PASSES
 # iff the command exits 0. `scope = "repo"` runs against the working tree (and is
 # what CI re-runs via `pdca gates --working-tree`); `scope = "bundle"` needs the

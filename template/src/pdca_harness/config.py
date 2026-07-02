@@ -194,6 +194,10 @@ class Config:
     # capabilities as data — see pdca_harness.families. Raw tables; resolved lazily
     # via :meth:`profile` so built-ins apply and unknown names fall back to generic.
     families: dict[str, dict] = field(default_factory=dict)
+    # Instance-declared doctor rows ([[doctor.checks]]): {id, cmd, hint, required}.
+    # `pdca doctor` runs each cmd (exit 0 = OK) after its config-derived checks, the
+    # same declare-in-config pattern as [[gates.checks]].
+    doctor_checks: list[dict] = field(default_factory=list)
 
     def profile(self, leaf: LeafConfig):
         """The resolved :class:`~pdca_harness.families.FamilyProfile` for ``leaf``."""
@@ -371,6 +375,7 @@ class Config:
             close_dispositions=close_dispositions,
             families={k.strip().lower(): dict(v)
                       for k, v in data.get("families", {}).items()},
+            doctor_checks=list(data.get("doctor", {}).get("checks", [])),
         )
 
 
