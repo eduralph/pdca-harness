@@ -116,6 +116,7 @@ pdca flow A B C          # several ids → batch fan-out + cheap-first sign-off 
 pdca status              # all bundle states (cheap-first); bare `pdca` does the same
 pdca queue               # the cheap-first sign-off burn-down
 pdca gates TOY           # the deterministic gates (CI runs `pdca gates --working-tree`)
+pdca try TOY             # launch the patched build from its worktree for hands-on manual testing
 pdca signoff TOY --accept --by you   # standalone accept (publishes on accept; --no-publish to skip), refused while §6 NEEDS-HUMAN is open (C6)
 ```
 

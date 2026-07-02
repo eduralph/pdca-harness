@@ -92,6 +92,7 @@ Run the cycle through `{{ cli_name }}` (the console script). `make` is bootstrap
 | `{{ cli_name }} status` / `queue` | List bundle states / the cheap-first sign-off burn-down. |
 | `{{ cli_name }} publish <id> [--dry-run]` | Re-publish an accepted bundle as a draft PR (the flow does this on accept). |
 | `{{ cli_name }} signoff <id> --accept` | Record the human Check sign-off (refused while §6 NEEDS-HUMAN is open). |
+| `{{ cli_name }} try <id>` | Launch the patched build from the bundle's worktree so you can hands-on test it during Check (needs `[manual_test].cmd` + `[driver].worktree`). |
 | `{{ cli_name }} act index` / `act log --date <d>` | Cross-cycle Act tooling. |
 | `make` / `make check` | Self-test (full / fast offline). |
 | `make install` / `make setup` | Bootstrap: console script in `.venv/` / Claude read-permissions. |
