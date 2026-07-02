@@ -9,10 +9,20 @@ tracker ``notes_cmd``'s tool must resolve. Instance-specific prerequisites
 as data in ``pdca.toml``::
 
     [[doctor.checks]]
+    group = "engine"      # optional section header to print the row under
     id = "docker"
-    cmd = "docker info"
+    cmd = "docker info"   # run with cwd = project root; exit 0 ⇒ OK
     hint = "https://docs.docker.com/engine/install/ — the gates run in a container"
-    required = false
+    level = "WARN"        # status when it FAILS (default MISSING); WARN for optional
+    required = false      # a failing required row makes the doctor exit non-zero
+
+    [[doctor.checks]]     # per_lane: one row per [driver].lane, {lane}/{lanes} filled
+    group = "workspace"
+    id = "lane worktrees lane{lane}"
+    cmd = "test -e ../repo-lane{lane}/.git"
+    hint = "make worktrees LANES={lanes}"
+    per_lane = true       # expands 0..lanes-1; nothing when lanes ≤ 1 (serial)
+    level = "WARN"
 
 Output contract (shared with any instance wrapper script): one row per check,
 ``OK | MISSING | UNAUTH | WARN`` plus a fix hint; exit 0 iff every REQUIRED
@@ -87,6 +97,37 @@ def _command_leaves(cfg: Config) -> dict[str, LeafConfig]:
     return out
 
 
+def _expand_checks(specs: list[dict], lanes: int) -> list[dict]:
+    """Materialize the [[doctor.checks]] rows to run, in declared order.
+
+    A row with ``per_lane = true`` is a TEMPLATE expanded once per driver lane —
+    ``{lane}`` → 0..lanes-1 and ``{lanes}`` → the count — so ``[driver].lanes``
+    drives the lane-worktree checks without the instance hardcoding a count (and
+    it yields NOTHING when lanes ≤ 1, matching serial mode's base-only worktrees).
+    ``{lanes}`` is substituted in every row (e.g. a hint's ``LANES={lanes}``).
+    A row needs a non-empty ``cmd``; ``id`` defaults to the cmd."""
+    def _sub(value, lane):
+        if not isinstance(value, str):
+            return value
+        value = value.replace("{lanes}", str(lanes))
+        return value.replace("{lane}", str(lane)) if lane is not None else value
+
+    def _row(spec: dict, lane) -> dict:
+        out = {k: _sub(v, lane) for k, v in spec.items()}
+        out.setdefault("id", out.get("cmd", "?"))
+        return out
+
+    rows: list[dict] = []
+    for spec in specs:
+        if not spec.get("cmd"):
+            continue
+        if spec.get("per_lane"):
+            rows.extend(_row(spec, k) for k in range(max(0, lanes) if lanes > 1 else 0))
+        else:
+            rows.append(_row(spec, None))
+    return rows
+
+
 def run(cfg: Config, *, strict: bool = False) -> int:
     r = _Report()
 
@@ -94,6 +135,15 @@ def run(cfg: Config, *, strict: bool = False) -> int:
     v = sys.version_info
     r.row(OK if v >= (3, 11) else MISSING, "python >= 3.11",
           f"{v[0]}.{v[1]}.{v[2]}", required=True)
+    try:
+        import ensurepip  # noqa: F401 — probe THIS interpreter, pre-venv (clean Ubuntu lacks it)
+        r.row(OK, "python venv (ensurepip)")
+    except ModuleNotFoundError:
+        r.row(MISSING, "python venv (ensurepip)",
+              "sudo apt-get install -y python3-venv", required=True)
+    r.row(OK if _have("make") else MISSING, "make",
+          "" if _have("make") else "install make (the front-door target runner)",
+          required=True)
     if _have("git"):
         name = subprocess.run(["git", "config", "--get", "user.name"],
                               capture_output=True, text=True).stdout.strip()
@@ -151,20 +201,21 @@ def run(cfg: Config, *, strict: bool = False) -> int:
         r.row(OK if found else WARN, f"notes_cmd tool ({tool})",
               "" if found else "the Plan beat's tracker fetch will fail without it")
 
-    checks = getattr(cfg, "doctor_checks", [])
-    if checks:
-        print()
-        print("== project checks ([[doctor.checks]]) ==")
-        for spec in checks:
-            cid = spec.get("id") or spec.get("cmd", "?")
-            cmd = spec.get("cmd", "")
-            required = bool(spec.get("required", False))
-            if not cmd:
-                continue
-            rc = subprocess.run(cmd, shell=True, capture_output=True,
+    rows = _expand_checks(getattr(cfg, "doctor_checks", []), cfg.lanes)
+    if rows:
+        last_group = None
+        for row in rows:
+            group = row.get("group") or "project checks ([[doctor.checks]])"
+            if group != last_group:
+                print()
+                print(f"== {group} ==")
+                last_group = group
+            rc = subprocess.run(row["cmd"], shell=True, capture_output=True,
                                 cwd=cfg.root).returncode
-            r.row(OK if rc == 0 else MISSING, cid,
-                  "" if rc == 0 else spec.get("hint", ""), required=required)
+            fail_status = row.get("level", MISSING)  # WARN for optional rows
+            r.row(OK if rc == 0 else fail_status, row["id"],
+                  "" if rc == 0 else row.get("hint", ""),
+                  required=bool(row.get("required", False)))
 
     print()
     if r.required_failed:

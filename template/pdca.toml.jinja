@@ -303,12 +303,26 @@ argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
 # Doctor rows (`pdca doctor`) — optional. The doctor derives its main checks from
 # this file (every command leaf's CLI + auth, gh, bundle root, notes_cmd); declare
 # INSTANCE-specific prerequisites here as data, the same pattern as [[gates.checks]].
-# Each cmd runs from the project root; exit 0 = OK. `required = true` fails the doctor.
+# Each cmd runs from the project root; exit 0 = OK. Fields:
+#   group     optional section header the row prints under (e.g. "engine")
+#   level     status when the cmd FAILS — "WARN" for optional, default "MISSING"
+#   required  a failing required row makes the doctor exit non-zero
+#   per_lane  expand the row once per [driver].lane: {lane} → 0..lanes-1,
+#             {lanes} → the count (nothing when lanes ≤ 1). {lanes} substitutes
+#             in every row, so a hint can read "make worktrees LANES={lanes}".
 # [[doctor.checks]]
+# group = "engine"
 # id = "docker"
 # cmd = "docker info"
 # hint = "https://docs.docker.com/engine/install/ — the gates run in a container"
-# required = false
+# level = "WARN"
+# [[doctor.checks]]
+# group = "workspace"
+# id = "lane worktrees lane{lane}"
+# cmd = "test -e ../repo-lane{lane}/.git"
+# hint = "make worktrees LANES={lanes}"
+# per_lane = true
+# level = "WARN"
 
 # Deterministic Check gates (docs 04). Each check runs a shell command; it PASSES
 # iff the command exits 0. `scope = "repo"` runs against the working tree (and is
