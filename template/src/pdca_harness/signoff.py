@@ -65,7 +65,12 @@ def iteration_delta(summary_path: Path) -> str:
 
 
 def open_needs_human(summary_path: Path) -> list[str]:
-    """Unchecked ``- [ ]`` items under §6 NEEDS-HUMAN (must be empty before accept)."""
+    """Unchecked ``- [ ]`` items under §6 NEEDS-HUMAN (must be empty before accept).
+
+    An absent ``SUMMARY.md`` is "no open items", not a crash — every bundle file
+    is possibly-absent (testbed issue #3), same contract as :func:`outcome_token`."""
+    if not summary_path.exists():
+        return []
     section = _section(summary_path.read_text(encoding="utf-8"), "6. NEEDS-HUMAN")
     return [
         line.strip()

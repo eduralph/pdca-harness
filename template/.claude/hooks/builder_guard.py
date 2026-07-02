@@ -27,6 +27,21 @@ BLOCKED = [
 ]
 _SEPARATORS = re.compile(r"&&|\|\||;|\|&|\||&|\n")
 _WRAPPERS = ("timeout", "time", "nice", "nohup", "stdbuf", "env")
+# A `gh pr` invocation carrying command substitution can't be statically verified —
+# the substituted text could expand to `ready`/`merge` (e.g. `gh pr $(echo ready)`).
+# Deny it outright rather than trying to evaluate shell.
+_GH_PR = re.compile(r"\bgh\s+pr\b")
+_SUBSTITUTION = re.compile(r"\$\(|`")
+
+_BLOCK_MSG = (
+    "Blocked by the builder STOP discipline: the Do beat must not "
+    "mark a PR ready or merge it. Push and open a DRAFT PR instead; "
+    "the ready-mark happens at human Check sign-off (docs 03 §Do)."
+)
+_SUBST_MSG = (
+    "Blocked by the builder STOP discipline: `gh pr` with command substitution "
+    "cannot be statically verified — write the gh arguments literally."
+)
 
 
 def _segments(command: str) -> list[str]:
@@ -43,6 +58,18 @@ def _strip_wrappers(seg: str) -> str:
     return " ".join(parts)
 
 
+def block_reason(command: str) -> str:
+    """The STOP-discipline violation in ``command``, or "" if it passes."""
+    for seg in _segments(command):
+        normalized = _strip_wrappers(seg)
+        for pat in BLOCKED:
+            if pat.search(normalized):
+                return _BLOCK_MSG
+        if _GH_PR.search(normalized) and _SUBSTITUTION.search(normalized):
+            return _SUBST_MSG
+    return ""
+
+
 def main() -> int:
     try:
         data = json.load(sys.stdin)
@@ -51,17 +78,10 @@ def main() -> int:
     command = (data.get("tool_input") or {}).get("command", "")
     if not command:
         return 0
-    for seg in _segments(command):
-        normalized = _strip_wrappers(seg)
-        for pat in BLOCKED:
-            if pat.search(normalized):
-                print(
-                    "Blocked by the builder STOP discipline: the Do beat must not "
-                    "mark a PR ready or merge it. Push and open a DRAFT PR instead; "
-                    "the ready-mark happens at human Check sign-off (docs 03 §Do).",
-                    file=sys.stderr,
-                )
-                return 2
+    reason = block_reason(command)
+    if reason:
+        print(reason, file=sys.stderr)
+        return 2
     return 0
 
 
