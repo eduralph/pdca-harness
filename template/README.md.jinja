@@ -12,9 +12,21 @@ code); a model is invoked only at the five **leaves**. See
 
 ## Prerequisites
 
-- The **Claude CLI** (`claude`) installed and authenticated (for a live `flow`).
-- Python 3.11+.
-- Whatever tools your gates need (see `pdca.toml` `[[gates.checks]]`).
+`make install-check` (or `{{ cli_name }} doctor` once installed) verifies every one of these
+and prints the exact fix for anything missing — you don't have to audit this by hand.
+
+- **Python 3.11+** — the driver is stdlib-only (`tomllib`).
+- **git** and **make** — per-cycle worktree isolation, and the bootstrap / front-door target
+  runner (on Windows use `scripts/install.ps1` instead of `make`).
+- a **pip-capable venv** (`python3-venv`; a clean Debian/Ubuntu lacks `ensurepip`) — `make
+  install` provisions it via `apt`, or falls back to `get-pip.py` (needs `curl`).
+- **[gh](https://github.com/cli/cli)**, authenticated (`gh auth login`) — draft-PR
+  publish/merge and the tracker scrape.
+- the **leaf-backend CLI(s)** you wire in `pdca.toml` `[leaves.*]` — e.g. `claude` and/or
+  `codex` — for a *live* `flow`; the `--rehearse` / stub slice needs none. `make install`
+  fetches the configured ones.
+- whatever your **gates** shell out to (`pdca.toml` `[[gates.checks]]`) — provision it via
+  `[install].extra_bootstrap` so it survives `copier update`.
 
 ## Install + run
 
