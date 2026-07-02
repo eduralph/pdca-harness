@@ -45,8 +45,9 @@ Act review.
 
 The harness itself has **no runtime dependencies** — the driver is pure Python stdlib — but a
 real cycle shells out to a few host tools. `make install-check` (or `pdca doctor` once
-installed) verifies every one of these and prints the exact fix for anything missing, so you
-don't have to audit this list by hand.
+installed) reports the harness-universal tools and the configured leaf CLIs and prints the
+exact fix for anything missing. (Your project **gate toolchain** is only checked if you
+declare it — see the last bullet.)
 
 **To render the template**
 - **Python ≥ 3.11** — the driver parses config with stdlib `tomllib` (3.11+).
@@ -63,10 +64,13 @@ don't have to audit this list by hand.
 - **[gh](https://github.com/cli/cli)** — draft-PR publish/merge and the tracker scrape; run
   `gh auth login` after installing.
 - the **leaf-backend CLI(s)** you configure — `claude` and/or `codex` (only when
-  `leaves_mode = "command"`; the stub slice needs none). `make install` fetches the configured
-  ones.
-- your project's **gate toolchain** (e.g. `cargo`, `pytest`, `npm`) — instance-owned via
-  `[install].extra_bootstrap` in `pdca.toml`, never hardcoded in the harness.
+  `leaves_mode = "command"`; the stub slice needs none). `make install` auto-installs a backend
+  that has an official installer (currently `claude`); for others (e.g. `codex`) it reports the
+  CLI as missing with an install hint — you install it yourself.
+- your project's **gate toolchain** (e.g. `cargo`, `pytest`, `npm`) — instance-owned, never
+  hardcoded in the harness. `[install].extra_bootstrap` in `pdca.toml` provisions it, but
+  `make install-check` doesn't run that command; declare the tools as `[[doctor.checks]]` rows
+  (which `pdca doctor` runs) to have them verified too.
 
 Automatic provisioning of the system-package tier (git, gh, `python3-venv`) is **apt +
 Debian/Ubuntu + sudo**; on any other host `make install` prints the exact install command and

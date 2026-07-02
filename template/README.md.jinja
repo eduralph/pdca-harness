@@ -12,8 +12,9 @@ code); a model is invoked only at the five **leaves**. See
 
 ## Prerequisites
 
-`make install-check` (or `{{ cli_name }} doctor` once installed) verifies every one of these
-and prints the exact fix for anything missing — you don't have to audit this by hand.
+`make install-check` (or `{{ cli_name }} doctor` once installed) reports the harness-universal
+tools and the configured leaf CLIs and prints the exact fix for anything missing. (Your gate
+toolchain is only checked if you declare it — see the last bullet.)
 
 - **Python 3.11+** — the driver is stdlib-only (`tomllib`).
 - **git** and **make** — per-cycle worktree isolation, and the bootstrap / front-door target
@@ -24,9 +25,11 @@ and prints the exact fix for anything missing — you don't have to audit this b
   publish/merge and the tracker scrape.
 - the **leaf-backend CLI(s)** you wire in `pdca.toml` `[leaves.*]` — e.g. `claude` and/or
   `codex` — for a *live* `flow`; the `--rehearse` / stub slice needs none. `make install`
-  fetches the configured ones.
+  auto-installs a backend with an official installer (currently `claude`); for others (e.g.
+  `codex`) it reports the CLI as missing with a hint, and you install it yourself.
 - whatever your **gates** shell out to (`pdca.toml` `[[gates.checks]]`) — provision it via
-  `[install].extra_bootstrap` so it survives `copier update`.
+  `[install].extra_bootstrap` (survives `copier update`). Note `make install-check` doesn't run
+  that command; declare the tools as `[[doctor.checks]]` rows so `{{ cli_name }} doctor` verifies them.
 
 ## Install + run
 
