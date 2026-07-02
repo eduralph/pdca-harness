@@ -11,6 +11,10 @@ Protocol (Claude Code hooks): read the tool call as JSON on stdin; exit 0 to
 allow, exit 2 to block (stderr is shown to the model). Compound commands are
 split on shell operators and every segment must pass — matching how Claude Code
 itself evaluates Bash permission rules.
+
+Second protocol (vendor-neutral, used by pdca_harness.guard's `gh` PATH shim so
+non-claude builders get the SAME single-sourced rules):
+``builder_guard.py --command "<command line>"`` — exit 0 to allow, 2 to block.
 """
 
 from __future__ import annotations
@@ -70,7 +74,20 @@ def block_reason(command: str) -> str:
     return ""
 
 
+def _verdict(command: str) -> int:
+    reason = block_reason(command)
+    if reason:
+        print(reason, file=sys.stderr)
+        return 2
+    return 0
+
+
 def main() -> int:
+    argv = sys.argv[1:]
+    if argv and argv[0] == "--command":
+        # Vendor-neutral CLI mode (the guard.py PATH shim): the command line is
+        # an argument, no JSON envelope.
+        return _verdict(argv[1] if len(argv) > 1 else "")
     try:
         data = json.load(sys.stdin)
     except Exception:
@@ -78,11 +95,7 @@ def main() -> int:
     command = (data.get("tool_input") or {}).get("command", "")
     if not command:
         return 0
-    reason = block_reason(command)
-    if reason:
-        print(reason, file=sys.stderr)
-        return 2
-    return 0
+    return _verdict(command)
 
 
 if __name__ == "__main__":

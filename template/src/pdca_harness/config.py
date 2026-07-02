@@ -43,12 +43,22 @@ class LeafConfig:
     ``mode == "command"`` runs ``argv`` as a subprocess in the bundle directory.
     ``interactive`` hands the terminal to the human (a seeded REPL, no ``-p``); a
     headless leaf (``interactive == False``) runs autonomously and writes a doc.
+
+    ``agent`` (optional) names the role-prompt file (``.claude/agents/<agent>.md``);
+    how it reaches the model is the family profile's ``role_injection`` — the
+    claude family passes ``--agent <name>``, inline families get the file's body
+    prepended to the task prompt. ``model`` / ``effort`` (optional) are mapped
+    through the profile's ``model_flag`` / ``effort_argv``; flags already present
+    in ``argv`` remain the explicit escape hatch and always win.
     """
 
     mode: str = "stub"
     family: str = ""
     argv: list[str] = field(default_factory=list)
     interactive: bool = False
+    agent: str = ""
+    model: str = ""
+    effort: str = ""
 
 
 # ----------------------------------------------------------------------------
@@ -180,6 +190,15 @@ class Config:
     # built-in default covers the common tracker vocabulary.
     close_dispositions: list[str] = field(
         default_factory=lambda: list(DEFAULT_CLOSE_DISPOSITIONS))
+    # Family-profile overrides ([families.<name>] in pdca.toml): per-vendor CLI
+    # capabilities as data — see pdca_harness.families. Raw tables; resolved lazily
+    # via :meth:`profile` so built-ins apply and unknown names fall back to generic.
+    families: dict[str, dict] = field(default_factory=dict)
+
+    def profile(self, leaf: LeafConfig):
+        """The resolved :class:`~pdca_harness.families.FamilyProfile` for ``leaf``."""
+        from . import families as _families  # local import: keep config import-light
+        return _families.resolve(leaf.family, self.families)
 
     def bundle(self, issue_id: str) -> Path:
         """The per-cycle bundle directory for an issue id."""
@@ -254,6 +273,9 @@ class Config:
                 family=d.get("family", ""),
                 argv=list(d.get("argv", [])),
                 interactive=bool(d.get("interactive", False)),
+                agent=d.get("agent", ""),
+                model=d.get("model", ""),
+                effort=d.get("effort", ""),
             )
 
         # Advisory reviewer leaves (issue #64) — an open list under [[leaves.advisory]].
@@ -347,6 +369,8 @@ class Config:
             regate_between_waves=regate_between_waves,
             act_cadence=act_cadence,
             close_dispositions=close_dispositions,
+            families={k.strip().lower(): dict(v)
+                      for k, v in data.get("families", {}).items()},
         )
 
 
