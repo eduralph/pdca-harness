@@ -35,6 +35,15 @@ class PreflightError(RuntimeError):
     driven (it would only produce false-red bundles)."""
 
 
+def _should_preflight(cfg: Config, wave_list: list[list[Path]]) -> bool:
+    """True iff a ``lanes > 1`` run will actually POOL — i.e. some wave holds more than one
+    bundle. A batch that :func:`waves.compute_waves` serialises into one-bundle waves (its
+    ids are ordered by dependencies / conflicts) drives each wave down the serial path and
+    never sets ``$PDCA_LANE``, so preflighting it would falsely gate a run that touches no
+    per-lane resource (issue #213 / PR #214 review)."""
+    return cfg.lanes > 1 and any(len(wave) > 1 for wave in wave_list)
+
+
 def _isolate(d: Path, what: str, fn):
     """Run one bundle's step; contain any error so it can't kill the whole sweep.
 
@@ -464,11 +473,15 @@ def _drive_and_act(
     ``--no-publish`` (``do_publish=False``) drives every wave to COMPLETE but sequences
     nothing — no publish, no fold — so a later wave builds on the unchanged base.
     """
-    # Per-lane resource preflight (issue #213): before a lanes>1 fan-out (only when the
-    # batch actually pools — >1 bundle), verify the instance's declared per-lane resources
-    # exist; abort before driving ANY bundle rather than fan out onto missing lanes and
-    # produce a pile of false-red results. No-op when nothing is declared / lanes<=1.
-    if cfg.lanes > 1 and len(bundles) > 1:
+    wave_list = waves.compute_waves(cfg, bundles)  # validates (raises) + levels the batch
+
+    # Per-lane resource preflight (issue #213): verify the instance's declared per-lane
+    # resources exist before a fan-out, and abort before driving ANY bundle rather than fan
+    # out onto missing lanes and produce a pile of false-red results. Gate on whether a wave
+    # will ACTUALLY pool (lanes>1 AND some wave holds >1 bundle) — a batch that compute_waves
+    # serialises into one-bundle waves (dependencies / conflicts) never sets $PDCA_LANE, so
+    # preflighting it would falsely gate a run that uses no lane resources (PR #214 review).
+    if _should_preflight(cfg, wave_list):
         ok, msgs = preflight.lane_preflight(cfg)
         if not ok:
             for m in msgs:
@@ -477,7 +490,6 @@ def _drive_and_act(
                 f"lane preflight failed for a lanes={cfg.lanes} batch — not fanning out "
                 "(fix the per-lane resources above, then re-run)")
 
-    wave_list = waves.compute_waves(cfg, bundles)  # validates (raises) + levels the batch
     last = len(wave_list) - 1
     batch_names = {b.name for b in bundles}  # in-batch prereqs ride the fold; #186 gates the rest
     published: set[str] = set()

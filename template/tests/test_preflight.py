@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdca_harness import flow, preflight
+from pdca_harness import flow, preflight, waves
 from pdca_harness.config import Config, LeafConfig
 
 
@@ -71,6 +71,30 @@ class LanePreflight(unittest.TestCase):
         self.assertEqual(preflight.lane_preflight(cfg), (True, []))
 
 
+class ShouldPreflight(unittest.TestCase):
+    """A run preflights only when it will ACTUALLY pool — some wave holds >1 bundle."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_multi_bundle_wave_pools(self) -> None:
+        cfg = _cfg(self.tmp, lanes=2)
+        self.assertTrue(flow._should_preflight(cfg, [[Path("a"), Path("b")]]))
+
+    def test_serialised_one_bundle_waves_do_not_pool(self) -> None:
+        # A dependency-/conflict-serialised batch → one-bundle waves → never fans out (the
+        # PR #214 review case): must not be gated even though total bundles > 1.
+        cfg = _cfg(self.tmp, lanes=2)
+        self.assertFalse(flow._should_preflight(cfg, [[Path("a")], [Path("b")]]))
+
+    def test_serial_lanes_never_pool(self) -> None:
+        cfg = _cfg(self.tmp, lanes=1)
+        self.assertFalse(flow._should_preflight(cfg, [[Path("a"), Path("b")]]))
+
+
 class DriveAndActPreflight(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
@@ -78,19 +102,30 @@ class DriveAndActPreflight(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _bundles(self, n: int) -> list[Path]:
-        out = []
-        for i in range(n):
-            d = self.tmp / "results" / f"issue_{i}"
-            d.mkdir(parents=True)
-            out.append(d)
-        return out
+    def _bundle(self, iid: str, *, depends: str | None = None) -> Path:
+        d = self.tmp / "results" / f"issue_{iid}"
+        d.mkdir(parents=True)
+        body = f"- **Slug:** s{iid}\n"
+        if depends:
+            body += f"- **Depends on:** {depends}\n"
+        (d / "brief.md").write_text(body, encoding="utf-8")
+        return d
 
-    def test_batch_aborts_before_driving_on_failed_preflight(self) -> None:
+    def test_pooling_batch_aborts_before_driving_on_failed_preflight(self) -> None:
+        # Two independent issues → one 2-bundle wave → it pools → preflight gates.
         cfg = _cfg(self.tmp, lanes=2, lane_preflight="exit 1")
+        bundles = [self._bundle("0"), self._bundle("1")]
         with self.assertRaises(flow.PreflightError):
-            flow._drive_and_act(cfg, self._bundles(2), do_publish=False, do_act=False,
+            flow._drive_and_act(cfg, bundles, do_publish=False, do_act=False,
                                 by="t", today="2026-07-02")
+
+    def test_serialised_batch_is_not_preflighted(self) -> None:
+        # issue_1 depends on issue_0 → compute_waves splits into two one-bundle waves → no
+        # fan-out → no preflight, even with a failing lane_preflight (PR #214 review).
+        cfg = _cfg(self.tmp, lanes=2, lane_preflight="exit 1")
+        a, b = self._bundle("0"), self._bundle("1", depends="0")
+        wave_list = waves.compute_waves(cfg, [a, b])
+        self.assertFalse(flow._should_preflight(cfg, wave_list))
 
 
 if __name__ == "__main__":
