@@ -35,13 +35,14 @@ class PreflightError(RuntimeError):
     driven (it would only produce false-red bundles)."""
 
 
-def _should_preflight(cfg: Config, wave_list: list[list[Path]]) -> bool:
-    """True iff a ``lanes > 1`` run will actually POOL — i.e. some wave holds more than one
-    bundle. A batch that :func:`waves.compute_waves` serialises into one-bundle waves (its
-    ids are ordered by dependencies / conflicts) drives each wave down the serial path and
-    never sets ``$PDCA_LANE``, so preflighting it would falsely gate a run that touches no
-    per-lane resource (issue #213 / PR #214 review)."""
-    return cfg.lanes > 1 and any(len(wave) > 1 for wave in wave_list)
+def _wave_pools(cfg: Config, runnable: list[Path]) -> bool:
+    """True iff driving this wave's ``runnable`` bundles fans out across lanes — ``lanes > 1``
+    AND more than one runnable bundle (``_beat_sweep`` takes the serial path, setting no
+    ``$PDCA_LANE``, for a single bundle). Keyed on the RESOLVED runnable set, not the raw
+    wave: a wave ``_runnable`` filters down to one bundle (e.g. one blocked on an unmerged
+    out-of-batch prereq) never pools, so it must not trip the preflight (issue #213 / PR #214
+    / PR #215 reviews)."""
+    return cfg.lanes > 1 and len(runnable) > 1
 
 
 def _isolate(d: Path, what: str, fn):
@@ -474,31 +475,32 @@ def _drive_and_act(
     nothing — no publish, no fold — so a later wave builds on the unchanged base.
     """
     wave_list = waves.compute_waves(cfg, bundles)  # validates (raises) + levels the batch
-
-    # Per-lane resource preflight (issue #213): verify the instance's declared per-lane
-    # resources exist before a fan-out, and abort before driving ANY bundle rather than fan
-    # out onto missing lanes and produce a pile of false-red results. Gate on whether a wave
-    # will ACTUALLY pool (lanes>1 AND some wave holds >1 bundle) — a batch that compute_waves
-    # serialises into one-bundle waves (dependencies / conflicts) never sets $PDCA_LANE, so
-    # preflighting it would falsely gate a run that uses no lane resources (PR #214 review).
-    if _should_preflight(cfg, wave_list):
-        ok, msgs = preflight.lane_preflight(cfg)
-        if not ok:
-            for m in msgs:
-                print(f"  {m}", file=sys.stderr)
-            raise PreflightError(
-                f"lane preflight failed for a lanes={cfg.lanes} batch — not fanning out "
-                "(fix the per-lane resources above, then re-run)")
-
     last = len(wave_list) - 1
     batch_names = {b.name for b in bundles}  # in-batch prereqs ride the fold; #186 gates the rest
     published: set[str] = set()
     accepted: list[Path] = []        # cumulative COMPLETE bundles, wave then name order
     integ: dict[tuple[str, str], str] = {}  # per-target (repo, base) → integration branch (#187)
+    preflighted = False              # per-lane preflight runs at most once, before the first pool
     for k, wave in enumerate(wave_list):
         runnable = _runnable(cfg, wave, batch_names)
         if not runnable:
             continue
+        # Per-lane resource preflight (issue #213): the FIRST wave that will actually pool —
+        # lanes>1 AND >1 *runnable* bundle (a wave _runnable filters down to one bundle, e.g.
+        # one blocked on an unmerged out-of-batch prereq, takes the serial path and sets no
+        # $PDCA_LANE) — verifies the instance's declared per-lane resources before it fans
+        # out, and aborts the run if they're missing rather than produce false-red bundles.
+        # Gating on the resolved runnable set (not the raw wave) avoids false-gating a wave
+        # that never pools (PR #214 / #215 reviews); runs at most once.
+        if not preflighted and _wave_pools(cfg, runnable):
+            preflighted = True
+            ok, msgs = preflight.lane_preflight(cfg)
+            if not ok:
+                for m in msgs:
+                    print(f"  {m}", file=sys.stderr)
+                raise PreflightError(
+                    f"lane preflight failed for a lanes={cfg.lanes} batch — not fanning out "
+                    "(fix the per-lane resources above, then re-run)")
         # Reconcile each runnable bundle's stack base with this run's integration state:
         # point it at its OWN (repo, base) target's branch, or clear a stale marker a
         # prior/resumed run left so it builds off its own base (#187). Unconditional — the
