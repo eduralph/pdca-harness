@@ -19,7 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from pdca_harness import gates, leaves, publish, signoff, state
+from pdca_harness import cli, gates, leaves, publish, signoff, state
 from pdca_harness.config import Config, LeafConfig
 
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
@@ -442,6 +442,68 @@ class PublishSlice(unittest.TestCase):
         self.assertEqual(publish._checkout_path(self.cfg, "org/foo"),
                          (self.cfg.root / "../custom-foo").resolve())
 
+    # --- deterministic tracker hyperlink in the PR body (publish auto-links) ---
+
+    def test_link_tracker_id_rewrites_bare_trailer(self) -> None:
+        # A weak model copies the template's bare `Fixes #<id>`; publish deterministically
+        # turns the id into a Markdown link to the configured tracker URL — no model needed.
+        d = _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)
+        self.cfg.issue_url_pattern = "https://tracker/view.php?id={id}"
+        (d / "pr-description.md").write_text(
+            "## Summary\n**User impact:** users saw X.\n\nFixes #266\n", encoding="utf-8")
+        publish._link_tracker_id(self.cfg, d, "266")
+        self.assertIn("Fixes [#266](https://tracker/view.php?id=266)",
+                      (d / "pr-description.md").read_text(encoding="utf-8"))
+
+    def test_link_tracker_id_noop_without_pattern(self) -> None:
+        d = _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)
+        self.cfg.issue_url_pattern = ""     # no URL configured ⇒ bare id stays
+        (d / "pr-description.md").write_text("Fixes #266\n", encoding="utf-8")
+        publish._link_tracker_id(self.cfg, d, "266")
+        body = (d / "pr-description.md").read_text(encoding="utf-8")
+        self.assertEqual(body, "Fixes #266\n")
+        self.assertNotIn("[", body)
+
+    def test_link_tracker_id_noop_for_nonnumeric_id(self) -> None:
+        # A slug / pending id has no real ticket NUMBER, so the pattern would format a broken
+        # link — leave the bare reference (mirrors the prompt's real_ticket handling).
+        d = _bundle(self.cfg, "820-build", brief_body=_FIX_BRIEF, accepted=True)
+        self.cfg.issue_url_pattern = "https://tracker/view.php?id={id}"
+        (d / "pr-description.md").write_text("Fixes #ABC\n", encoding="utf-8")
+        publish._link_tracker_id(self.cfg, d, "820-build")
+        self.assertEqual((d / "pr-description.md").read_text(encoding="utf-8"), "Fixes #ABC\n")
+
+    def test_link_tracker_id_is_idempotent(self) -> None:
+        # A re-publish (or a model that already linked) must not double-wrap the id.
+        d = _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)
+        self.cfg.issue_url_pattern = "https://tracker/view.php?id={id}"
+        linked = "Fixes [#266](https://tracker/view.php?id=266)\n"
+        (d / "pr-description.md").write_text(linked, encoding="utf-8")
+        publish._link_tracker_id(self.cfg, d, "266")
+        self.assertEqual((d / "pr-description.md").read_text(encoding="utf-8"), linked)
+
+    def test_link_tracker_id_only_touches_the_trailer_line(self) -> None:
+        # A bare `#<id>` in prose isn't a trailer — only the trailer-verb line is linked.
+        d = _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)
+        self.cfg.issue_url_pattern = "https://tracker/view.php?id={id}"
+        (d / "pr-description.md").write_text(
+            "see issue #266 for context\n\nFixes #266\n", encoding="utf-8")
+        publish._link_tracker_id(self.cfg, d, "266")
+        body = (d / "pr-description.md").read_text(encoding="utf-8")
+        self.assertIn("see issue #266 for context\n", body)          # prose untouched
+        self.assertIn("Fixes [#266](https://tracker/view.php?id=266)", body)  # trailer linked
+
+    def test_publish_links_tracker_id_in_body_end_to_end(self) -> None:
+        # The call site: a real publish run (dry) auto-links the stub's bare trailer in the
+        # on-disk PR body when issue_url_pattern is set and the id is a real ticket number.
+        self.cfg.issue_url_pattern = "https://mantis.example.com/view.php?id={id}"
+        d = _bundle(self.cfg, "13865", brief_body=_FIX_BRIEF, accepted=True)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(publish.publish(self.cfg, "13865", dry_run=True), 0)
+        body = (d / "pr-description.md").read_text(encoding="utf-8")
+        self.assertIn("Fixes [#13865](https://mantis.example.com/view.php?id=13865)", body)
+        self.assertNotIn("Fixes #13865\n", body)   # the bare trailer was rewritten
+
     # --- stack mode (issue #54): commit onto an existing PR branch ---
 
     def test_stack_dry_run_plans_commit_onto_pr_branch(self) -> None:
@@ -576,6 +638,97 @@ class ContributionTemplates(unittest.TestCase):
         self.assertIn("declared-ticketless", pr_tpl)
         # The accessibility lead (#106): a plain-language Summary precedes the internals.
         self.assertLess(pr_tpl.index("## Summary"), pr_tpl.index("## Root cause"))
+        # The user-visible effect leads as an explicit, copy-able label, before Root cause.
+        self.assertIn("**User impact:**", pr_tpl)
+        self.assertLess(pr_tpl.index("**User impact:**"), pr_tpl.index("## Root cause"))
+
+
+_GOOD_PR = ("## Summary\n**User impact:** users saw a crash on save.\n\n"
+            "One-line change.\n\n## Root cause\nx.\n\n## Fix\nx.\n\nFixes #266\n")
+_GOOD_COMMIT = "Fix the save crash\n\nBody under eighty.\n\nFixes #266\n"
+
+
+class ContribCheck(unittest.TestCase):
+    """The T4 contribution gate (`pdca contribcheck`): the PR body must open with a
+    `**User impact:**` line (before Root cause) and both artifacts must carry the tracker
+    id — enforced even when a weak publisher model drops them."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _cfg(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _bundle_with(self, iid: str, pr_body: str, commit: str = _GOOD_COMMIT) -> Path:
+        d = _bundle(self.cfg, iid, brief_body=_FIX_BRIEF, accepted=True)  # writes patch.diff
+        (d / "pr-description.md").write_text(pr_body, encoding="utf-8")
+        (d / "commit-msg.txt").write_text(commit, encoding="utf-8")
+        return d
+
+    def _run(self, iid: str, *, no_issue: bool = False) -> tuple[int, str]:
+        args = SimpleNamespace(issue_id=iid, no_issue=no_issue)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = cli._contribcheck(self.cfg, args)
+        return rc, err.getvalue()
+
+    def test_passes_on_well_formed_contribution(self) -> None:
+        self._bundle_with("266", _GOOD_PR)
+        self.assertEqual(self._run("266"), (0, ""))
+
+    def test_fails_without_user_impact_opener(self) -> None:
+        self._bundle_with("266", "## Summary\nsome change.\n\n## Root cause\nx.\n\nFixes #266\n")
+        rc, err = self._run("266")
+        self.assertEqual(rc, 1)
+        self.assertIn("User impact", err)
+
+    def test_fails_when_user_impact_falls_after_root_cause(self) -> None:
+        self._bundle_with("266", "## Summary\nx.\n\n## Root cause\nx.\n\n"
+                                 "**User impact:** late.\n\nFixes #266\n")
+        rc, err = self._run("266")
+        self.assertEqual(rc, 1)
+        self.assertIn("before", err.lower())
+
+    def test_fails_when_id_missing_from_commit(self) -> None:
+        self._bundle_with("266", _GOOD_PR, commit="Fix the crash\n\nNo trailer here.\n")
+        rc, err = self._run("266")
+        self.assertEqual(rc, 1)
+        self.assertIn("commit-msg.txt", err)
+
+    def test_fails_when_id_missing_from_pr_body(self) -> None:
+        self._bundle_with("266", "## Summary\n**User impact:** x.\n\n## Root cause\nx.\n")
+        rc, err = self._run("266")
+        self.assertEqual(rc, 1)
+        self.assertIn("pr-description.md", err)
+
+    def test_no_issue_relaxes_the_trailer_requirement(self) -> None:
+        # pending-id: no tracker trailer required, but the user-impact opener still is.
+        self._bundle_with("266", "## Summary\n**User impact:** x.\n\n## Root cause\nx.\n",
+                          commit="Fix the crash\n\nNo trailer.\n")
+        self.assertEqual(self._run("266", no_issue=True)[0], 0)
+
+    def test_slug_bundle_skips_the_trailer_requirement(self) -> None:
+        # A non-numeric (slug) id has no real ticket number → only the opener is enforced.
+        self._bundle_with("820-build", "## Summary\n**User impact:** x.\n\n## Root cause\nx.\n",
+                          commit="Fix\n\nNo trailer.\n")
+        self.assertEqual(self._run("820-build")[0], 0)
+
+    def test_default_open_before_artifacts_are_drafted(self) -> None:
+        # Run as a Check-time bundle gate before publish: no PR body yet ⇒ nothing to lint.
+        _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)
+        self.assertEqual(self._run("266"), (0, ""))
+
+    def test_close_disposition_bundle_passes(self) -> None:
+        d = _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)
+        (d / "patch.diff").write_text("", encoding="utf-8")   # no-fix / close bundle
+        self.assertEqual(self._run("266"), (0, ""))
+
+    def test_offline_stub_artifacts_pass_the_gate(self) -> None:
+        # The stub publisher's output must keep passing the gate (guards the offline path).
+        d = _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)
+        leaves._stub_publish(d, self.cfg)
+        self.assertEqual(self._run("266"), (0, ""))
 
 
 if __name__ == "__main__":

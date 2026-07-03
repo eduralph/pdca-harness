@@ -196,6 +196,10 @@ def publish(
     # against the *base* repo (where the fork branch doesn't exist) and fails with
     # "Head ref must be a branch". The branch lives on origin (the fork).
     head = f"{_fork_owner(repo) or repo_spec.split('/')[0]}:{branch}"
+    # Deterministically hyperlink the tracker id in the PR body (Mantis/GitHub) so the
+    # link never depends on the model complying — done AFTER the T4 gate (which sees the
+    # model's raw output) and just before `--body-file` consumes the file.
+    _link_tracker_id(cfg, d, issue_id)
     pr_cmd = ["gh", "pr", "create", "--draft", "--repo", repo_spec, "--base", pr_base,
               "--head", head, "--title", summary_line,
               "--body-file", str((d / PR_BODY).resolve())]
@@ -604,3 +608,45 @@ def _signoff_by(d: Path) -> str:
         return ""
     m = _BY_RE.search(summary.read_text(encoding="utf-8"))
     return m.group(1).strip() if m else ""
+
+
+# Trailer verbs a `#<id>` reference may hang off of, so the hyperlink lands on the
+# tracker line and not a stray prose mention of the same number.
+_TRAILER_VERB_RE = re.compile(
+    r"(?i)^(fixes|closes|resolves|refs?|references|fix|close|resolve)\b")
+
+
+def _link_tracker_id(cfg: Config, d: Path, issue_id: str) -> None:
+    """Hyperlink the bare tracker id in ``pr-description.md`` to ``issue_url_pattern``.
+
+    A weak publisher model tends to copy the template's literal ``Fixes #<id>`` trailer
+    rather than the Markdown link the prompt asks for, so the link can't rely on model
+    compliance — make it deterministic here. No-op when no URL pattern is configured or
+    the id is not a real (numeric) ticket — a slug / ``--no-issue`` bundle has no valid
+    URL, mirroring the trailer's id_pending handling (leaves ``real_ticket``). Rewrites
+    only the tracker-trailer line (``Fixes #123`` → ``Fixes [#123](…)``), skips a ``#id``
+    already inside a Markdown link, and is idempotent so a re-publish never double-wraps.
+    """
+    if not cfg.issue_url_pattern or not issue_id.isdigit():
+        return
+    body_path = d / PR_BODY
+    if not body_path.is_file():
+        return
+    url = cfg.issue_url_pattern.format(id=issue_id)
+    trailer = cfg.issue_trailer.format(id=issue_id) if cfg.issue_trailer else ""
+    # `#123` not already opened by `[` (so `[#123](…)` is left alone → idempotent), and
+    # `\b` so id 123 never matches inside 1234.
+    token = re.compile(r"(?<!\[)#" + re.escape(issue_id) + r"\b")
+    lines = body_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    changed = False
+    for i, line in enumerate(lines):
+        s = line.strip()
+        is_trailer = s and (s == trailer or _TRAILER_VERB_RE.match(s)) and token.search(line)
+        if not is_trailer:
+            continue
+        new = token.sub(f"[#{issue_id}]({url})", line)
+        if new != line:
+            lines[i] = new
+            changed = True
+    if changed:
+        body_path.write_text("".join(lines), encoding="utf-8")
