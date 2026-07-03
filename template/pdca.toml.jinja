@@ -120,9 +120,10 @@ issue_id_example = "{{ issue_id_example }}"
 # No tracker id yet? Use `pdca publish --no-issue`: it omits the trailer, relaxes
 # T4 to a flag, and records the bundle `id_pending` (no magic "#0000" placeholder).
 issue_trailer = "Fixes #{id}"
-# Optional issue-URL template ({id} = the bug id) so the publisher HYPERLINKS the ticket
-# in the PR body (a Markdown link on the id), not just a bare number — e.g. Mantis
-# "{{ tracker_url }}/view.php?id={id}", GitHub "{{ tracker_url }}/{id}". "" ⇒ no link.
+# Optional issue-URL template ({id} = the bug id). Set it and `pdca publish`
+# DETERMINISTICALLY hyperlinks the ticket id in the PR body (a Markdown link on the id, not
+# a bare number) — it does not depend on the model complying. E.g. Mantis
+# "{{ tracker_url }}/view.php?id={id}", GitHub "{{ tracker_url }}/{id}". "" ⇒ no link (bare id).
 issue_url_pattern = ""
 # Optional default tracker export the Plan leaf reads the issue row from when `flow`
 # runs without --from-csv (it reads ONLY that issue's row, not a repo scan):
@@ -459,7 +460,16 @@ checks = [
   # { id = "T3-suite",  tier = "T3", label = "runtime suite (baseline)", subcmd = "test",   gating = false, scope = "repo" },
 ]
 {% else %}
-checks = []
+checks = [
+  # T4 Contribution — lint the publisher's two artifacts before they are pushed: the PR body
+  # must open with a `**User impact:**` line (the user-visible effect, before Root cause) and
+  # both commit-msg.txt + pr-description.md must carry the tracker id. `contribcheck` reads
+  # $PDCA_BUNDLE and is default-open before the artifacts are drafted (so Check-time gates
+  # pass); `pdca publish` hard-gates T4 after drafting them (relaxed to a flag under
+  # --no-issue). Gating is right here — this audits THIS cycle's own contribution artifacts,
+  # not pre-existing code, so the usual "T4 advisory" caveat (below) does not apply.
+  { id = "T4-contribution", tier = "T4", label = "PR body has a user-impact opener + tracker id in both artifacts", cmd = "{{ cli_name }} contribcheck", gating = true, scope = "bundle" },
+]
 {% endif %}
 
 # Reverse registry-consistency (issue #205). The FORWARD direction (a source file a patch

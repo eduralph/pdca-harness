@@ -11,6 +11,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -99,6 +100,16 @@ def main(argv: list[str] | None = None) -> int:
     p_reg = sub.add_parser("registry-check",
                            help="fail a patch that adds a manifest line for a path it doesn't touch (#205)")
     p_reg.add_argument("issue_id", nargs="?")
+
+    # Contribution conformance — a bundle-scoped T4 gate. Lints the publisher's two
+    # artifacts INDEPENDENTLY: the PR body must open with a user-impact line (before Root
+    # cause) and both files must carry the tracker id. Reads $PDCA_BUNDLE like
+    # registry-check, so a [[gates.checks]] entry is simply `cmd = "<cli> contribcheck"`.
+    p_contrib = sub.add_parser("contribcheck",
+                               help="fail a contribution whose PR body lacks a user-impact opener or the tracker id (T4)")
+    p_contrib.add_argument("issue_id", nargs="?")
+    p_contrib.add_argument("--no-issue", action="store_true",
+                           help="pending-id: don't require the tracker trailer (still require the user-impact opener)")
 
     p_reval = sub.add_parser("revalidate",
                              help="re-run gates on a COMPLETE bundle vs the current engine; write a dated stamp (never re-decides §9)")
@@ -203,6 +214,8 @@ def main(argv: list[str] | None = None) -> int:
         return _gates(cfg, args)
     if args.cmd == "registry-check":
         return _registry_check(cfg, args)
+    if args.cmd == "contribcheck":
+        return _contribcheck(cfg, args)
     if args.cmd == "revalidate":
         return _revalidate(cfg, args)
     if args.cmd == "try":
@@ -529,6 +542,55 @@ def _registry_check(cfg: Config, args: argparse.Namespace) -> int:
     for v in violations:
         print(v)
     return 1 if violations else 0
+
+
+def _contribcheck(cfg: Config, args: argparse.Namespace) -> int:
+    """Contribution-conformance gate (T4): lint the publisher's PR body + commit message so
+    a weak model's output is caught before publish. Fails when the PR body has no non-empty
+    ``**User impact:**`` opener (or it falls AFTER Root cause), or — for a real numeric
+    ticket — the tracker id is absent from either ``commit-msg.txt`` or ``pr-description.md``
+    (the two are linted INDEPENDENTLY, so a ticketed fix needs the id in BOTH). The bundle is
+    the ``issue_id`` arg or ``$PDCA_BUNDLE`` (set by the gate runner). No patch (close/no-fix)
+    ⇒ pass (default-open, like an unconfigured gate)."""
+    if args.issue_id:
+        d = cfg.bundle(args.issue_id)
+    elif os.environ.get("PDCA_BUNDLE"):
+        d = Path(os.environ["PDCA_BUNDLE"])
+    else:
+        print("contribcheck needs an issue id or $PDCA_BUNDLE", file=sys.stderr)
+        return 2
+    patch = d / "patch.diff"
+    if not patch.is_file() or not patch.read_text(encoding="utf-8").strip():
+        return 0  # close / no-fix bundle: nothing contributed
+    pr_path = d / publish.PR_BODY
+    if not pr_path.is_file():
+        return 0  # artifacts not drafted yet (Check-time gate, pre-publish) — nothing to lint
+    issue_id = d.name.removeprefix("issue_")
+    commit_path = d / publish.COMMIT_MSG
+    pr_text = pr_path.read_text(encoding="utf-8")
+    problems: list[str] = []
+    # 1) A non-empty `**User impact:**` opener that PRECEDES Root cause — the user-visible
+    #    effect must lead (what a weak model tends to drop).
+    impact = re.search(r"(?im)^[ \t>]*\*\*User impact:\*\*[ \t]*(\S.*)$", pr_text)
+    if not impact:
+        problems.append("PR body must open with a non-empty `**User impact:**` line "
+                        "(the user-visible effect, before Root cause)")
+    else:
+        root = re.search(r"(?im)^#+[ \t]*Root cause\b", pr_text)
+        if root and impact.start() > root.start():
+            problems.append("`**User impact:**` must come BEFORE `## Root cause`")
+    # 2) The tracker id in BOTH artifacts — only for a real numeric ticket; a slug /
+    #    --no-issue (pending-id) bundle legitimately carries no trailer.
+    if issue_id.isdigit() and not args.no_issue:
+        needle = re.compile(r"#" + re.escape(issue_id) + r"\b")
+        commit_text = commit_path.read_text(encoding="utf-8") if commit_path.is_file() else ""
+        if not needle.search(pr_text):
+            problems.append(f"{publish.PR_BODY} does not reference the tracker id #{issue_id}")
+        if not needle.search(commit_text):
+            problems.append(f"{publish.COMMIT_MSG} does not reference the tracker id #{issue_id}")
+    for p in problems:
+        print(f"contribcheck: {p}", file=sys.stderr)
+    return 1 if problems else 0
 
 
 def _revalidate(cfg: Config, args: argparse.Namespace) -> int:

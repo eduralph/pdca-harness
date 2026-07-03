@@ -1286,10 +1286,11 @@ def _publish_prompt(d: Path, cfg: Config) -> str:
         "only commit-msg.txt + pr-description.md) — leave it (#177).\n"
         f"1) {d}/commit-msg.txt — a summary ≤70 chars, then a blank line, then the body "
         f"wrapped ≤80; reference any other commit by its FULL hash. {trailer_line}\n"
-        f"2) {d}/pr-description.md — open the Summary with the bug's USER-VISIBLE effect "
-        "(what the user experiences), then the one-line change + What to look at (for "
-        f"non-implementors), then Root cause / Fix, then a Verification claim→evidence "
-        f"trail citing path:lines on the target branch; no internal jargon (see {pr_tpl}).{link_clause}\n"
+        f"2) {d}/pr-description.md — the Summary MUST open with a `**User impact:**` line "
+        "stating the bug's USER-VISIBLE effect (what the user experiences) BEFORE Root "
+        "cause, then the one-line change + What to look at (for non-implementors), then "
+        f"Root cause / Fix, then a Verification claim→evidence trail citing path:lines on "
+        f"the target branch; no internal jargon (see {pr_tpl}).{link_clause}\n"
         "Write ONLY those two files. Do NOT push, branch, or open a PR — the driver's "
         "`pdca publish` does the branch/apply/commit/push/draft-PR after you finish."
     )
@@ -1310,10 +1311,15 @@ def _stub_publish(d: Path, cfg: Config) -> None:
     if trailer:
         body += f"\n{trailer}\n"
     (d / "commit-msg.txt").write_text(body, encoding="utf-8")
+    # PR body mirrors pr-description.md.tpl: a `**User impact:**` opener BEFORE Root cause
+    # and the issue-trailer form last, so the offline path keeps passing the T4
+    # contribution gate (contribcheck).
+    pr_trailer = trailer if trailer else f"References #{issue_id}"
     (d / "pr-description.md").write_text(
-        "## Summary\nstub.\n\n## What to look at\nstub.\n\n## Root cause\nstub.\n\n"
+        "## Summary\n**User impact:** stub user-visible effect.\n\nstub one-line change.\n\n"
+        "## What to look at\nstub.\n\n## Root cause\nstub.\n\n"
         "## Fix\nstub.\n\n## Verification\n- Claim: stub.\n- Checked: path:1 — stub.\n"
         "- Test: path:1 — stub regression test, fails pre-fix / passes post-fix.\n\n"
-        f"References #{issue_id}\n",
+        f"{pr_trailer}\n",
         encoding="utf-8",
     )
