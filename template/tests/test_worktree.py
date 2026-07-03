@@ -134,6 +134,54 @@ class WorktreeRealGit(unittest.TestCase):
         self.assertEqual(wt2, wt)                          # same reused tree…
         self.assertEqual(worktree.owner_of(wt), "issue_OTHER")  # …now owned by the later bundle
 
+    _PATCH = (
+        "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n"
+        "@@ -1 +1,2 @@\n base\n+patched\n"
+    )
+
+    def test_resync_heals_a_foreign_owned_worktree(self) -> None:
+        # #224: a shared lane worktree still holds a DIFFERENT bundle's net-new orphan when
+        # this bundle's gate reads it. resync must reset+clean the orphan, re-apply THIS
+        # bundle's patch, and take ownership — so the gate sees only this bundle's change.
+        other = _bundle(self.cfg, "OTHER", target="org/repo @ main")
+        wt = worktree.ensure(other, self.cfg)                       # lane tree owned by OTHER
+        (wt / "orphan.rs").write_text("stray net-new from OTHER\n", encoding="utf-8")
+        (self.d / "patch.diff").write_text(self._PATCH, encoding="utf-8")
+        healed = worktree.resync(self.d, self.cfg)
+        self.assertEqual(healed, wt)
+        self.assertFalse((wt / "orphan.rs").exists())               # foreign orphan swept
+        self.assertEqual((wt / "file.txt").read_text(encoding="utf-8"), "base\npatched\n")  # our patch
+        self.assertEqual(worktree.owner_of(wt), "issue_WT")         # ownership taken
+
+    def test_resync_is_a_noop_for_its_own_worktree(self) -> None:
+        # The normal Do→Check path: the tree is already this bundle's, so resync leaves Do's
+        # in-place edits intact (it must NOT reset the tree Check is meant to test).
+        wt = worktree.ensure(self.d, self.cfg)                      # owned by WT, Do edits it
+        (wt / "file.txt").write_text("base\ndo edit\n", encoding="utf-8")
+        (wt / "built.rs").write_text("new file from Do\n", encoding="utf-8")
+        (self.d / "patch.diff").write_text(self._PATCH, encoding="utf-8")
+        same = worktree.resync(self.d, self.cfg)
+        self.assertEqual(same, wt)
+        self.assertEqual((wt / "file.txt").read_text(encoding="utf-8"), "base\ndo edit\n")
+        self.assertTrue((wt / "built.rs").exists())                 # Do's tree untouched
+
+    def test_resync_none_when_no_worktree_on_disk(self) -> None:
+        # No worktree yet (isolation on, but Do hasn't run) → None, gate falls back in place.
+        self.assertIsNone(worktree.resync(self.d, self.cfg))
+
+    def test_resync_falls_back_when_patch_does_not_apply(self) -> None:
+        # #225 review (P1): if this bundle's patch no longer applies to the base, resync must
+        # NOT present the clean-base tree as this bundle's build, and must NOT claim ownership
+        # — else a later resync matches the stamp, skips re-applying, and silently greens a
+        # clean base. It returns None (gate runs in place) and clears the stamp.
+        other = _bundle(self.cfg, "OTHER", target="org/repo @ main")
+        wt = worktree.ensure(other, self.cfg)                       # foreign-owned lane tree
+        (self.d / "patch.diff").write_text(                          # context that isn't on base
+            "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n"
+            "@@ -1 +1 @@\n-not the base line\n+changed\n", encoding="utf-8")
+        self.assertIsNone(worktree.resync(self.d, self.cfg))        # not used for the gate
+        self.assertIsNone(worktree.owner_of(wt))                    # stamp cleared → re-attempted
+
     def test_stacked_bundle_bases_off_parent_branch(self) -> None:
         # #123: a `Stacks on:` dependent's worktree bases off the parent's PUBLISHED branch
         # (on origin), not origin/main — so Do builds + verifies on top of the parent's diff.
