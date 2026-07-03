@@ -54,11 +54,17 @@ test, not the full suite.
 | T4 contribution | TODO | fork hooks / PR CI | TODO | [planned] |
 | T5 judgment | reviewer contract below | Check reviewer + sign-off | (model) | [planned] |
 
-- **Reviewer family (cross-vendor, ≠ builder):** {{ reviewer_family }} — config `AGENTS.md`
-  (decorrelated path); `.claude/agents/reviewer.md` is a same-vendor fallback with
-  execute-only tool scope (no write to the fix).
-- **Builder family:** {{ builder_family }} — `.claude/agents/builder.md` [built], with the
-  ready-mark block enforced by the `.claude/hooks/builder_guard.py` PreToolUse hook.
+- **Reviewer family (cross-vendor, ≠ builder):** {{ reviewer_family }} — canonical role body
+  `agents/reviewer.md`; config `AGENTS.md` (decorrelated path). A same-vendor Claude fallback
+  is packaged at `.claude/agents/reviewer.md` **only when the reviewer family is claude**.
+- **Builder family:** {{ builder_family }} — canonical role body `agents/builder.md`; the
+  Claude wrapper `.claude/agents/builder.md` (with the ready-mark block enforced by the
+  `.claude/hooks/builder_guard.py` PreToolUse hook) is materialized only when the builder
+  family is claude.
+- **Role prompts (vendor-neutral source):** each leaf's instructions live once in
+  `agents/<name>.md`. Claude leaves also get `.claude/agents/<name>.md` (frontmatter wrapper
+  that includes that body, so `--agent` resolves); non-Claude (inline) leaves read the
+  `agents/` body directly. Only Claude leaves carry a `.claude/agents/` file.
 - **Vendor profiles:** every family-specific behavior (streaming, extra-dir grounding,
   role-prompt injection, STOP-guard mechanism) is data in `pdca_harness.families`,
   overridable via `pdca.toml [families.<name>]` — swapping or adding a vendor is a
@@ -103,8 +109,8 @@ List every project-specific script the cycle invokes (role → path + invocation
 | Driver | `src/pdca_harness/` | `{{ cli_name }} run <id>` | [built — stub leaves] |
 | Act tooling (L4) | `src/pdca_harness/act.py` | `{{ cli_name }} act index`, `{{ cli_name }} act log --date <d>` | [built] |
 | Gates (single-sourced) | `pdca.toml` `[[gates.checks]]` | `{{ cli_name }} gates [<id>] [--working-tree]` | [built — stub fallback; fill checks] |
-| Reviewer config | `AGENTS.md` + `.claude/agents/reviewer.md` | (model leaf) | [built — contract; wire command mode] |
-| Builder subagent | `.claude/agents/builder.md` + `.claude/hooks/builder_guard.py` | (model leaf) | [built — ready-mark blocked] |
+| Reviewer role prompt | `agents/reviewer.md` (canonical body); `AGENTS.md` / `.claude/agents/reviewer.md` are the per-vendor packaging | (model leaf) | [built — contract; wire command mode] |
+| Builder role prompt | `agents/builder.md` (canonical body); `.claude/agents/builder.md` (Claude wrapper) + `.claude/hooks/builder_guard.py` | (model leaf) | [built — ready-mark blocked] |
 
 ## 10. Maintainer and governance
 - **Who reviews:** {{ author_name or "TODO" }}

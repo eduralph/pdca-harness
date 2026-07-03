@@ -32,6 +32,13 @@ _exclude:
   # matches nothing. Globs cover the source name with or without the .jinja suffix.
   - "{% if not ship_ci_workflow %}.github/workflows/check-gates.yml*{% endif %}"
   - "{% if not ship_merge_guard %}.claude/hooks/builder_guard.py*{% endif %}"
+  # Role prompts: the canonical vendor-neutral body is agents/<name>.md (always rendered);
+  # .claude/agents/<name>.md is Claude-only packaging, materialized ONLY when the leaf's
+  # family is claude. Non-claude (inline) leaves read the body from agents/ directly. The
+  # four interactive leaves are hard-claude, so their .claude/agents files always render;
+  # only the answer-driven builder/reviewer are omitted when their family isn't claude.
+  - "{% if builder_family != 'claude' %}.claude/agents/builder.md*{% endif %}"
+  - "{% if reviewer_family != 'claude' %}.claude/agents/reviewer.md*{% endif %}"
 # Keep the default answers filename (.copier-answers.yml) so `copier update`
 # finds it with no extra flag. The answers-file template is shipped at
 # template/{{ _copier_conf.answers_file }}.jinja.

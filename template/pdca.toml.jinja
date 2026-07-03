@@ -280,9 +280,10 @@ argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
 # native_guard = false                       # true ⇒ skip the driver's gh PATH shim
 #
 # Any leaf may also carry, mapped through its family's profile (explicit argv wins):
-#   agent  = "reviewer"   # role prompt .claude/agents/<name>.md — claude passes
-#                         # `--agent <name>`; inline families get the body prepended
-#                         # to the task prompt (frontmatter stripped)
+#   agent  = "reviewer"   # role prompt: canonical body is agents/<name>.md. Claude passes
+#                         # `--agent <name>` (reads .claude/agents/<name>.md, the frontmatter
+#                         # wrapper generated from that body); inline families read the
+#                         # agents/<name>.md body and prepend it to the task prompt
 #   model  = "<id>"       # → the profile's model_flag (claude --model, codex/gemini -m)
 #   effort = "high"       # → the profile's effort_argv mapping
 #

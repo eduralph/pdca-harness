@@ -103,7 +103,14 @@ def _role_injection(
             return [profile.agent_flag, leaf.agent], ""
         return [], ""
     if profile.role_injection == "inline":
-        path = cfg.root / ".claude" / "agents" / f"{leaf.agent}.md"
+        # The role prompt's canonical, vendor-neutral source of truth is `agents/<name>.md`;
+        # `.claude/agents/<name>.md` is Claude-only packaging (frontmatter + the same body)
+        # generated from it, and is omitted for non-claude leaves. Prefer the canonical file;
+        # fall back to the legacy `.claude/agents/` location for an instance rendered before
+        # the split. strip_frontmatter is a no-op on the frontmatter-less canonical body and
+        # still correct on the legacy fallback.
+        canonical = cfg.root / "agents" / f"{leaf.agent}.md"
+        path = canonical if canonical.is_file() else cfg.root / ".claude" / "agents" / f"{leaf.agent}.md"
         try:
             body = families.strip_frontmatter(path.read_text(encoding="utf-8")).strip()
         except OSError as exc:

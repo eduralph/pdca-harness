@@ -101,10 +101,17 @@ class RoleInjection(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.cfg = _cfg(self.tmp)
-        agents = self.tmp / ".claude" / "agents"
+        # The canonical, vendor-neutral body (source of truth) — no frontmatter.
+        agents = self.tmp / "agents"
         agents.mkdir(parents=True)
-        (agents / "reviewer.md").write_text(
-            "---\nname: reviewer\n---\nROLE-SENTINEL body.\n", encoding="utf-8")
+        (agents / "reviewer.md").write_text("ROLE-SENTINEL body.\n", encoding="utf-8")
+
+    def _legacy(self, text: str) -> None:
+        """Write the legacy Claude-packaged file (frontmatter + body) an instance rendered
+        before the canonical-body split would carry at .claude/agents/<name>.md."""
+        legacy = self.tmp / ".claude" / "agents"
+        legacy.mkdir(parents=True, exist_ok=True)
+        (legacy / "reviewer.md").write_text(text, encoding="utf-8")
 
     def test_flag_family_gets_agent_argv(self) -> None:
         leaf = LeafConfig(family="claude", agent="reviewer", argv=["claude", "-p"])
@@ -118,12 +125,29 @@ class RoleInjection(unittest.TestCase):
         argv, _ = leaves._role_injection(self.cfg, leaf, families.resolve("claude"))
         self.assertEqual(argv, [])
 
-    def test_inline_family_gets_prompt_prefix_without_frontmatter(self) -> None:
+    def test_inline_family_gets_prompt_prefix_from_canonical_body(self) -> None:
         leaf = LeafConfig(family="codex", agent="reviewer", argv=["codex", "exec"])
         argv, prefix = leaves._role_injection(self.cfg, leaf, families.resolve("codex"))
         self.assertEqual(argv, [])
+        self.assertIn("ROLE-SENTINEL", prefix)       # the agents/<name>.md body, inlined
+
+    def test_inline_prefers_canonical_over_legacy(self) -> None:
+        # Both present (a not-yet-cleaned instance): the canonical agents/ body wins.
+        self._legacy("---\nname: reviewer\n---\nLEGACY-SENTINEL body.\n")
+        leaf = LeafConfig(family="codex", agent="reviewer", argv=["codex", "exec"])
+        _, prefix = leaves._role_injection(self.cfg, leaf, families.resolve("codex"))
         self.assertIn("ROLE-SENTINEL", prefix)
-        self.assertNotIn("name: reviewer", prefix)  # frontmatter stripped
+        self.assertNotIn("LEGACY-SENTINEL", prefix)
+
+    def test_inline_falls_back_to_legacy_claude_agents(self) -> None:
+        # Back-compat: an instance rendered before the split has only .claude/agents/<name>.md;
+        # inline injection reads it and strips the frontmatter.
+        (self.tmp / "agents" / "reviewer.md").unlink()
+        self._legacy("---\nname: reviewer\n---\nLEGACY-SENTINEL body.\n")
+        leaf = LeafConfig(family="codex", agent="reviewer", argv=["codex", "exec"])
+        _, prefix = leaves._role_injection(self.cfg, leaf, families.resolve("codex"))
+        self.assertIn("LEGACY-SENTINEL", prefix)
+        self.assertNotIn("name: reviewer", prefix)   # frontmatter stripped
 
     def test_no_agent_or_missing_file_degrades_to_nothing(self) -> None:
         no_agent = LeafConfig(family="codex", argv=["codex"])
@@ -163,10 +187,10 @@ class FakeVendorCliEndToEnd(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.cfg = _cfg(self.tmp)
-        agents = self.tmp / ".claude" / "agents"
+        agents = self.tmp / "agents"                 # canonical body (source of truth)
         agents.mkdir(parents=True)
         (agents / "reviewer.md").write_text(
-            "---\nname: reviewer\n---\nROLE-SENTINEL: judge the patch.\n", encoding="utf-8")
+            "ROLE-SENTINEL: judge the patch.\n", encoding="utf-8")
         self.cli = self.tmp / "fake-vendor-cli.sh"
         self.cli.write_text(
             "#!/bin/sh\n"
