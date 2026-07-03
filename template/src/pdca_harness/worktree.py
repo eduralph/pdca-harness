@@ -101,6 +101,49 @@ def path(d: Path, cfg: Config) -> Path | None:
     return wt if (wt / ".git").exists() else None
 
 
+def resync(d: Path, cfg: Config) -> Path | None:
+    """The worktree for this bundle/lane, guaranteed to reflect *this* bundle — for a gate.
+
+    The per-lane worktree is reset-and-reused across bundles but swept only before each Do
+    (:func:`ensure`). So a gate that reads it OUTSIDE the Do→Check cadence — a standalone
+    ``pdca gates`` re-run, or the next bundle's gate before its own Do in a shared lane —
+    can see a *different* bundle's leftover net-new edits and false-red on an orphan file
+    that this bundle never touched (issue #224). This heals that window: when the tree is
+    owned by another bundle (or is unstamped, from an older run), reset it to the base,
+    clean it, re-apply THIS bundle's ``patch.diff``, and take ownership — so the gate sees
+    exactly this bundle's change over a clean base, never a foreign orphan.
+
+    When the tree is already this bundle's (the normal Do→Check path, owner stamped by
+    :func:`ensure`), it is returned untouched so Check still tests the tree Do built. Like
+    :func:`path`, best-effort: isolation off / unresolved target / no worktree on disk / a
+    git failure returns None, and the gate falls back to the primary checkout as it does
+    when isolation is off. No fetch — the base ref is already present from Do's ensure.
+    """
+    if not cfg.worktree:
+        return None
+    tgt = _target(d, cfg)
+    if tgt is None:
+        return None
+    primary, base_ref = tgt
+    wt = _wt_dir(primary)
+    if not (wt / ".git").exists():
+        return None
+    if owner_of(wt) == d.name:
+        return wt  # already this bundle's build (normal Do→Check) — leave Do's tree intact
+    # A foreign / unstamped tree: heal it to THIS bundle's state before the gate reads it.
+    if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-fdq") != 0:
+        print(f"worktree: could not resync {wt} to {base_ref} for {d.name}; the gate "
+              "falls back to the primary checkout", file=sys.stderr)
+        return None
+    patch = d / "patch.diff"
+    if patch.is_file() and patch.read_text(encoding="utf-8").strip():
+        if _git(wt, "apply", str(patch.resolve())) != 0:
+            print(f"worktree: {d.name}'s patch.diff did not apply onto {base_ref} in {wt}; "
+                  "the gate runs against the clean base", file=sys.stderr)
+    _stamp_owner(wt, d)  # this bundle now owns the healed tree
+    return wt
+
+
 def ensure(d: Path, cfg: Config) -> Path | None:
     """Create or reset the per-cycle worktree off the target base; return its path.
 

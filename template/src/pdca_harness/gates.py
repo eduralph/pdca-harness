@@ -266,8 +266,10 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
     # tree — expose it as $PDCA_WORKTREE so a gate cmd targets it, not the host checkout.
     # ``worktree_override`` (the wave integration re-gate, #wave-model) points the
     # repo-scoped gates at an explicit tree (the folded integration tip) instead.
+    # `resync` (not `path`) heals a lane worktree still holding a DIFFERENT bundle's edits
+    # before the gate reads it, so a stale orphan can't false-red this bundle (issue #224).
     wt = worktree_override if worktree_override is not None else (
-        worktree.path(bundle, cfg) if bundle is not None else None)
+        worktree.resync(bundle, cfg) if bundle is not None else None)
     configured: list[dict] = []
     for chk in cfg.gates_checks:
         if not _applies(chk, scopes, labels):
