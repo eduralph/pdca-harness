@@ -2,17 +2,27 @@
 
 > Attachment referenced by SUMMARY.md §8. One logical fix per PR.
 
-## Summary
-**User impact:** <in plain language, what the user experiences / sees go wrong — the
-symptom and who it hits. This leads the PR and MUST come before Root cause; a reader
-who does not live in this file should grasp WHY from this line alone. No internal
-jargon.>
+<!-- TWO TIERS. Summary + What to look at are for ANY reader (a triager, a user, a
+     reviewer of another area) — plain, everyday language. Root cause / Fix / Verification
+     below are for the maintainer — internals and `path:line` belong there, not above. -->
 
-<then the one-line change: WHAT this PR does about it.>
+## Summary
+**User impact:** <in plain, everyday language, what the user experiences / sees go wrong —
+the symptom and who it hits. This leads the PR and MUST come before Root cause; a reader
+who has never opened this file must grasp WHY from this line alone. NO code /
+implementation jargon (no type/tag/attribute names, no `path:line`) — defer the mechanism
+to Root cause below.>
+
+<then the one-line change: WHAT this PR does about it, still in plain terms.>
+
+<close the Summary with a link to the tracker issue, in the [tracker].issue_url_pattern
+form — e.g. `Reported in [#<id>](<tracker-url>).` — so the report is one click away from
+the top of the PR, not only via the closing trailer below.>
 
 ## What to look at
-<orient the reviewer: the key file(s)/function(s) and the crux of the change, and how
-to exercise or reproduce it. Lower the barrier to a first pass.>
+<the crux of the change in plain terms, plus a concrete way to try / reproduce it — enough
+for a non-implementor to decide whether to engage. Keep `path:line` and internals OUT of
+here; they live in Root cause / Fix / Verification.>
 
 ## Root cause
 <two sentences — for the reviewer who wants the internals>

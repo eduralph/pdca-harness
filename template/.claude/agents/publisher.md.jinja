@@ -46,22 +46,26 @@ not push, branch, or open a PR yourself.**
      than invent a placeholder like `#0000` — `pdca publish --no-issue` relaxes T4 to a
      flag and records the contribution `id_pending` for the human to fill the id in.
 
-2. **`pr-description.md`** — the PR body (see `templates/pr-description.md.tpl`).
-   Write for the PR's **actual audience** — a maintainer triaging, a reviewer of the
-   touched area, a non-implementor deciding whether to engage — not implementor-to-
-   implementor:
-   - **Lead in plain language.** Open with **Summary**: the user-facing symptom/impact,
-     then the one-line change — so a reader who does not live in this file grasps *what*
-     and *why* before any internals. **Root cause / Fix** follow for the deep reviewer.
-   - **Orient the reviewer.** A short **What to look at**: the key file(s)/function(s)
-     and how to exercise/reproduce, so a first pass is cheap.
-   - **Verification as a review trail.** Make **Verification** a skimmable claim→evidence
-     mapping (the claim, where it was checked with `path:lines` on the **target branch**,
-     and the regression test failing pre-fix / passing post-fix), so the review the
-     change already passed is *visible*, not implied.
-   - **No internal jargon.** Do **not** leak PDCA/process vocabulary (beat names, §6/§9,
-     leaf/bundle terms) into an upstream PR body — the rigor should be evident from the
-     content, never narrated as process.
+2. **`pr-description.md`** — the PR body (see `templates/pr-description.md.tpl`). It has
+   **two tiers, written for two audiences**; mixing them is the most common failure.
+   - **Summary + What to look at — for a NON-implementor** (a triager, a user, a reviewer
+     of another area). **Summary** opens with the bolded **`**User impact:**`** line: the
+     symptom in plain, everyday language — what the user sees go wrong and who it hits —
+     then the one-line change. **What to look at** is the crux of the change in plain terms
+     plus a concrete way to try/reproduce it. In BOTH, **no code / implementation jargon**
+     — no type/tag/attribute names, no class internals, no `path:line` citations; a reader
+     who has never opened the file must grasp *what* broke and *why* from these alone. The
+     mechanism is deferred below. **Close the Summary with a link to the tracker issue** in
+     the `[tracker].issue_url_pattern` form (e.g. `Reported in [#<id>](<tracker-url>).`), so
+     the report is one click away from the top — not only via the closing trailer.
+   - **Root cause / Fix / Verification — for the maintainer.** Here the internals belong:
+     the exact `path:lines` on the **target branch**, the mechanism, and the review trail.
+     Make **Verification** a skimmable claim→evidence mapping (the claim, where it was
+     checked with `path:lines`, and the regression test failing pre-fix / passing
+     post-fix), so the review the change already passed is *visible*, not implied.
+   - **No internal jargon anywhere.** Do **not** leak PDCA/process vocabulary (beat names,
+     §6/§9, leaf/bundle terms) into an upstream PR body — the rigor should be evident from
+     the content, never narrated as process.
    Keep the template's trailing **tracker-reference line** (the same `[tracker].issue_trailer`
    form as the commit, e.g. `Fixes #<id>`): the contribution gate lints commit-msg.txt and
    the PR body **independently**, so a ticketed fix needs the id in BOTH — the commit
