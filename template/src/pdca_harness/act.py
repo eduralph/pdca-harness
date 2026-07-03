@@ -281,7 +281,7 @@ def scaffold_entry(entries: list[ActEntry], pats: dict[str, list[str]], date: st
         "- Spec template: <field added/clarified/removed>            (path)",
         "- Ruleset: <rule added/retired/relaxed/tightened>           (path:line)",
         "- Gates: <check added/promoted/moved>                       (path:line)",
-        "- Agent skills: <SKILL.md / AGENTS.md adjustment>           (path:line)",
+        "- Agent role prompts: <agents/*.md / skill adjustment>      (path:line)",
         "",
         "## How effectiveness will be judged",
         "- The next Do phases should not recreate <specific issue>. Watch the next K cycles.",

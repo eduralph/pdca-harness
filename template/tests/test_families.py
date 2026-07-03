@@ -42,13 +42,22 @@ class Registry(unittest.TestCase):
         self.assertTrue(p.cwd_discovery)
         self.assertTrue(p.native_guard)
 
-    def test_codex_and_empty_families_are_stdin_no_flags(self) -> None:
-        for name in ("codex", "", "generic"):
+    def test_empty_and_generic_families_are_stdin_no_flags(self) -> None:
+        for name in ("", "generic"):
             p = families.resolve(name)
             self.assertEqual(p.stream_argv, (), name)
             self.assertEqual(p.grounding_flag, "", name)
             self.assertFalse(p.cwd_discovery, name)
             self.assertFalse(p.native_guard, name)
+
+    def test_codex_streams_via_json_and_confines_by_cwd(self) -> None:
+        p = families.resolve("codex")
+        self.assertEqual(p.stream_argv, ("--json",))          # `codex exec --json`
+        self.assertEqual(p.stream_format, "codex-stream-json")
+        self.assertEqual(p.model_flag, "-m")
+        self.assertEqual(p.grounding_flag, "--add-dir")       # writable $PDCA_TARGET grant
+        self.assertFalse(p.cwd_discovery)                     # confined to the worktree cwd
+        self.assertFalse(p.native_guard)                      # driver `gh` shim, not a hook
 
     def test_unknown_family_falls_back_to_generic(self) -> None:
         # The ad-hoc families tests/instances already use ("local", "mid", "frontier")

@@ -75,6 +75,10 @@ BUILTIN: dict[str, FamilyProfile] = {
     ),
     "codex": FamilyProfile(
         name="codex",
+        stream_argv=("--json",),           # `codex exec --json` — JSONL event stream
+        stream_format="codex-stream-json",  # parsed by progress.py for live tool-use
+        grounding_flag="--add-dir",         # grant the sandboxed reviewer read+write to
+                                            # $PDCA_TARGET (git stash/unstash, re-run tests)
         model_flag="-m",
         effort_argv=("-c", "model_reasoning_effort={effort}"),
     ),

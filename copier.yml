@@ -34,11 +34,17 @@ _exclude:
   - "{% if not ship_merge_guard %}.claude/hooks/builder_guard.py*{% endif %}"
   # Role prompts: the canonical vendor-neutral body is agents/<name>.md (always rendered);
   # .claude/agents/<name>.md is Claude-only packaging, materialized ONLY when the leaf's
-  # family is claude. Non-claude (inline) leaves read the body from agents/ directly. The
-  # four interactive leaves are hard-claude, so their .claude/agents files always render;
-  # only the answer-driven builder/reviewer are omitted when their family isn't claude.
+  # family is claude. Non-claude (inline) leaves read the body from agents/ directly.
   - "{% if builder_family != 'claude' %}.claude/agents/builder.md*{% endif %}"
   - "{% if reviewer_family != 'claude' %}.claude/agents/reviewer.md*{% endif %}"
+  # The four interactive leaves share `interactive_family`; omit their Claude packaging when
+  # it isn't claude (the canonical agents/<name>.md bodies still render and are inlined).
+  - "{% if interactive_family != 'claude' %}.claude/agents/planner.md*{% endif %}"
+  - "{% if interactive_family != 'claude' %}.claude/agents/signoff.md*{% endif %}"
+  - "{% if interactive_family != 'claude' %}.claude/agents/act.md*{% endif %}"
+  - "{% if interactive_family != 'claude' %}.claude/agents/publisher.md*{% endif %}"
+  # AGENTS.md is codex project context — render it only when some leaf runs codex.
+  - "{% if 'codex' not in [builder_family, reviewer_family, interactive_family] %}AGENTS.md*{% endif %}"
 # Keep the default answers filename (.copier-answers.yml) so `copier update`
 # finds it with no extra flag. The answers-file template is shipped at
 # template/{{ _copier_conf.answers_file }}.jinja.
@@ -169,6 +175,7 @@ builder_family:
   help: Model family for the Do leaf (the builder)
   choices:
     Claude (claude -p): claude
+    Codex (codex exec): codex
     Other / not yet wired: other
   default: claude
 
@@ -177,8 +184,19 @@ reviewer_family:
   help: Cross-vendor model family for the Check reviewer leaf (MUST differ from builder)
   choices:
     Codex (codex exec): codex
+    Claude (claude -p): claude
     Other / not yet wired: other
   default: codex
+
+interactive_family:
+  type: str
+  help: >-
+    Model family for the interactive human-in-the-loop leaves (Plan, Sign-off, Publish,
+    Act) — a seeded REPL/TUI you drive
+  choices:
+    Claude (claude REPL): claude
+    Codex (codex TUI): codex
+  default: claude
 
 leaves_mode:
   type: str

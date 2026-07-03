@@ -179,16 +179,15 @@ def _invoke(
     # Headless: feed the prompt on stdin (a trailing positional would be swallowed
     # by a variadic --allowedTools) and tick a heartbeat, since `claude -p` prints
     # nothing until it finishes (minutes) and would otherwise look hung.
-    # progress.py's stream reader speaks only the claude stream-json format today;
-    # a family declaring a different stream_format runs stream-less until a parser
-    # for it registers (the profile field reserves the slot).
+    # progress.py's stream reader dispatches on the family's stream_format; a family
+    # declaring a format it doesn't recognize runs stream-less (heartbeat Tiers 1+2).
     use_stream = (stream_json and bool(profile.stream_argv)
-                  and profile.stream_format == "claude-stream-json")
+                  and profile.stream_format in progress.STREAM_FORMATS)
     if use_stream:
         argv += list(profile.stream_argv)
     rc, output, produced = progress.run_with_heartbeat(
         argv, cwd=workdir, input_text=prompt, label=label, status=status,
-        stream_json=use_stream, env=run_env)
+        stream_json=use_stream, stream_format=profile.stream_format, env=run_env)
     if rc != 0:
         # Only the stream path gives a real "did a session start" signal. Without it
         # (a stream-less family) we cannot tell invocation-death from a substantive
@@ -1247,7 +1246,13 @@ def _stub_act(cfg: Config, date: str) -> None:
 # ----------------------------------------------------------------------------
 def run_publish(d: Path, cfg: Config) -> None:
     if cfg.publisher.mode == "command":
-        _invoke(cfg.publisher, cfg.root, _publish_prompt(d, cfg), cfg=cfg)
+        # A non-claude publisher has no PreToolUse STOP hook, so give it the same `gh` PATH
+        # shim the builder gets (guard.py) — else a codex/other publisher could `gh pr ready`
+        # / `merge` itself, which is the human's Check sign-off, not the model's (best-effort;
+        # a no-op for claude, whose native hook already enforces this).
+        profile = families.resolve(cfg.publisher.family, cfg.families)
+        env = None if profile.native_guard else guard.shim_env(cfg, None)
+        _invoke(cfg.publisher, cfg.root, _publish_prompt(d, cfg), env=env, cfg=cfg)
         return
     _stub_publish(d, cfg)
 
