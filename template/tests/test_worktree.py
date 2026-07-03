@@ -169,6 +169,19 @@ class WorktreeRealGit(unittest.TestCase):
         # No worktree yet (isolation on, but Do hasn't run) → None, gate falls back in place.
         self.assertIsNone(worktree.resync(self.d, self.cfg))
 
+    def test_resync_falls_back_when_patch_does_not_apply(self) -> None:
+        # #225 review (P1): if this bundle's patch no longer applies to the base, resync must
+        # NOT present the clean-base tree as this bundle's build, and must NOT claim ownership
+        # — else a later resync matches the stamp, skips re-applying, and silently greens a
+        # clean base. It returns None (gate runs in place) and clears the stamp.
+        other = _bundle(self.cfg, "OTHER", target="org/repo @ main")
+        wt = worktree.ensure(other, self.cfg)                       # foreign-owned lane tree
+        (self.d / "patch.diff").write_text(                          # context that isn't on base
+            "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n"
+            "@@ -1 +1 @@\n-not the base line\n+changed\n", encoding="utf-8")
+        self.assertIsNone(worktree.resync(self.d, self.cfg))        # not used for the gate
+        self.assertIsNone(worktree.owner_of(wt))                    # stamp cleared → re-attempted
+
     def test_stacked_bundle_bases_off_parent_branch(self) -> None:
         # #123: a `Stacks on:` dependent's worktree bases off the parent's PUBLISHED branch
         # (on origin), not origin/main — so Do builds + verifies on top of the parent's diff.

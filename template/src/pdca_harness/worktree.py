@@ -117,7 +117,10 @@ def resync(d: Path, cfg: Config) -> Path | None:
     :func:`ensure`), it is returned untouched so Check still tests the tree Do built. Like
     :func:`path`, best-effort: isolation off / unresolved target / no worktree on disk / a
     git failure returns None, and the gate falls back to the primary checkout as it does
-    when isolation is off. No fetch — the base ref is already present from Do's ensure.
+    when isolation is off. If this bundle's ``patch.diff`` no longer applies to the base,
+    the tree can't be reconstructed as this bundle's build, so it clears the stamp and
+    returns None rather than present a clean base as if it were patched. No fetch — the base
+    ref is already present from Do's ensure.
     """
     if not cfg.worktree:
         return None
@@ -138,8 +141,15 @@ def resync(d: Path, cfg: Config) -> Path | None:
     patch = d / "patch.diff"
     if patch.is_file() and patch.read_text(encoding="utf-8").strip():
         if _git(wt, "apply", str(patch.resolve())) != 0:
+            # The patch no longer applies to the base (it drifted since Do, or is corrupt):
+            # the tree is now clean base, NOT this bundle's build. Do NOT hand it to the gate
+            # (it would test an unpatched tree and could pass), and do NOT claim ownership —
+            # a later resync would then match the stamp and skip re-applying, silently
+            # greening a clean base. Clear the stamp and fall back to in-place (best-effort).
             print(f"worktree: {d.name}'s patch.diff did not apply onto {base_ref} in {wt}; "
-                  "the gate runs against the clean base", file=sys.stderr)
+                  "not using the worktree (gates run in place)", file=sys.stderr)
+            _owner_file(wt).unlink(missing_ok=True)
+            return None
     _stamp_owner(wt, d)  # this bundle now owns the healed tree
     return wt
 
