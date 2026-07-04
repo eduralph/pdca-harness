@@ -266,20 +266,31 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
     # tree — expose it as $PDCA_WORKTREE so a gate cmd targets it, not the host checkout.
     # ``worktree_override`` (the wave integration re-gate, #wave-model) points the
     # repo-scoped gates at an explicit tree (the folded integration tip) instead.
-    # `resync` (not `path`) heals a lane worktree still holding a DIFFERENT bundle's edits
-    # before the gate reads it, so a stale orphan can't false-red this bundle (issue #224).
-    wt = worktree_override if worktree_override is not None else (
-        worktree.resync(bundle, cfg) if bundle is not None else None)
+    # Resolve the tree the gates read. `for_gate` (issue #226) returns the CACHED lane warm
+    # when this bundle owns it (the normal Do→Check path); when a DIFFERENT bundle owns it, it
+    # either spills to an ephemeral OVERFLOW tree (when `[driver].overflow` > 0) or heals the
+    # lane in place (`resync`, issue #224) so a stale orphan can't false-red this bundle. An
+    # overflow tree (`ovf_primary` not None) is torn down in the finally once the gates run.
+    if worktree_override is not None:
+        wt, ovf_primary = worktree_override, None
+    elif bundle is not None:
+        wt, ovf_primary = worktree.for_gate(bundle, cfg)
+    else:
+        wt, ovf_primary = None, None
     configured: list[dict] = []
-    for chk in cfg.gates_checks:
-        if not _applies(chk, scopes, labels):
-            if chk.get("scope", "repo") in scopes and chk.get("target") and labels is not None:
-                print(f"  · gate {chk.get('id', '')} skipped "
-                      f"(target={chk.get('target')}, bundle labels {set(labels)})",
-                      file=sys.stderr, flush=True)
-            continue
-        configured.append(_run_one(chk, cwd=cwd, bundle=bundle, runner=cfg.gates_runner,
-                                   worktree_path=wt))
+    try:
+        for chk in cfg.gates_checks:
+            if not _applies(chk, scopes, labels):
+                if chk.get("scope", "repo") in scopes and chk.get("target") and labels is not None:
+                    print(f"  · gate {chk.get('id', '')} skipped "
+                          f"(target={chk.get('target')}, bundle labels {set(labels)})",
+                          file=sys.stderr, flush=True)
+                continue
+            configured.append(_run_one(chk, cwd=cwd, bundle=bundle, runner=cfg.gates_runner,
+                                       worktree_path=wt))
+    finally:
+        if ovf_primary is not None and wt is not None:
+            worktree.overflow_remove(ovf_primary, wt)
     # Overlay the configured gate results onto the complete 5/5/1 matrix.
     return _assemble_matrix(configured, stub=False)
 
