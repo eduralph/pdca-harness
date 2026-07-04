@@ -33,12 +33,14 @@ _exclude:
   - "{% if not ship_ci_workflow %}.github/workflows/check-gates.yml*{% endif %}"
   - "{% if not ship_merge_guard %}.claude/hooks/builder_guard.py*{% endif %}"
   # Role prompts: the canonical vendor-neutral body is agents/<name>.md (always rendered);
-  # .claude/agents/<name>.md is Claude-only packaging, materialized ONLY when the leaf's
-  # family is claude. Non-claude (inline) leaves read the body from agents/ directly. The
-  # four interactive leaves are hard-claude, so their .claude/agents files always render;
-  # only the answer-driven builder/reviewer are omitted when their family isn't claude.
-  - "{% if builder_family != 'claude' %}.claude/agents/builder.md*{% endif %}"
-  - "{% if reviewer_family != 'claude' %}.claude/agents/reviewer.md*{% endif %}"
+  # inline (non-claude) leaves read it directly. .claude/agents/<name>.md is Claude-only
+  # packaging (frontmatter + the same body), ALWAYS rendered for every leaf — including the
+  # answer-driven builder/reviewer — even when the default family isn't claude: a claude
+  # backend can be (re)introduced after render via a [[leaves.builder_variant]] /
+  # [[leaves.builder_escalation]] using `claude -p --agent builder`, or the documented
+  # same-vendor reviewer fallback (`--agent reviewer`). Those use flag injection, which needs
+  # the wrapper to exist; the template can't see runtime pdca.toml variants, and the two extra
+  # files are cheap, so shipping them unconditionally is the fail-open choice (issue #228).
 # Keep the default answers filename (.copier-answers.yml) so `copier update`
 # finds it with no extra flag. The answers-file template is shipped at
 # template/{{ _copier_conf.answers_file }}.jinja.

@@ -5,10 +5,12 @@ end-to-end (stdlib unittest, no model CLIs, no network).
 
 from __future__ import annotations
 
+import io
 import shutil
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 from pdca_harness import families, leaves
@@ -138,6 +140,30 @@ class RoleInjection(unittest.TestCase):
         _, prefix = leaves._role_injection(self.cfg, leaf, families.resolve("codex"))
         self.assertIn("ROLE-SENTINEL", prefix)
         self.assertNotIn("LEGACY-SENTINEL", prefix)
+
+    def test_divergent_legacy_warns_it_is_shadowed(self) -> None:
+        # #228: a pre-split instance customized the legacy .claude/agents file; the canonical
+        # body now wins and would silently drop those edits. A divergent legacy must WARN so
+        # the human migrates the customization rather than losing it unnoticed.
+        self._legacy("---\nname: reviewer\n---\nCUSTOMIZED-BY-USER body.\n")
+        leaf = LeafConfig(family="codex", agent="reviewer", argv=["codex", "exec"])
+        err = io.StringIO()
+        with redirect_stderr(err):
+            _, prefix = leaves._role_injection(self.cfg, leaf, families.resolve("codex"))
+        self.assertIn("ROLE-SENTINEL", prefix)                  # canonical still used
+        self.assertIn("being ignored", err.getvalue())         # warned it's shadowed
+        self.assertIn("migrate", err.getvalue())               # …and to migrate the edits
+        self.assertIn("agents/reviewer.md", err.getvalue())
+
+    def test_matching_legacy_is_silent(self) -> None:
+        # A legacy file whose body MATCHES the canonical (the normal fresh-render case where
+        # both are shipped) must NOT warn — nothing was customized, nothing is being lost.
+        self._legacy("---\nname: reviewer\n---\nROLE-SENTINEL body.\n")
+        leaf = LeafConfig(family="codex", agent="reviewer", argv=["codex", "exec"])
+        err = io.StringIO()
+        with redirect_stderr(err):
+            leaves._role_injection(self.cfg, leaf, families.resolve("codex"))
+        self.assertEqual(err.getvalue(), "")
 
     def test_inline_falls_back_to_legacy_claude_agents(self) -> None:
         # Back-compat: an instance rendered before the split has only .claude/agents/<name>.md;
