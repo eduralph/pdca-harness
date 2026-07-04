@@ -434,6 +434,20 @@ class PublishSlice(unittest.TestCase):
         self.assertEqual(publish._resolve_target(d),
                          ("addons-source", "maintenance/gramps60", "my-fix"))
 
+    def test_resolve_target_parenthetical_base_takes_the_named_base(self) -> None:
+        """#235: a base written `main (feature branch \\`feat/x\\`)` names the base `main`;
+        the backticked span is a parenthetical aside about a *different* branch. Taking it
+        resolved a nonexistent ref → worktree isolation silently ran in the primary checkout.
+        `_clean_ref` honors a backtick span only when it STARTS the field, else the 1st token."""
+        d = self.cfg.bundle("PAR")
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(
+            "- **Slug:** m4\n"
+            "- **Repo + branch target:** example-org/example-repo @ "
+            "main (feature branch `feat/m4-production-metadata-backend`)\n", encoding="utf-8")
+        self.assertEqual(publish._resolve_target(d),
+                         ("example-org/example-repo", "main", "m4"))
+
     def test_checkout_path_map_and_sibling_fallback(self) -> None:
         # sibling fallback: <root>/../<repo-last-segment>
         self.assertEqual(publish._checkout_path(self.cfg, "org/foo"),

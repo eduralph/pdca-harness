@@ -396,11 +396,17 @@ def _existing_pr(pr_list_cmd: list[str], branch: str, owner: str) -> str:
 # ----------------------------------------------------------------------------
 def _clean_ref(raw: str) -> str:
     """Isolate a git ref / repo spec from a brief field side, tolerating markdown
-    backticks and trailing prose. A ref / ``owner/repo`` has no spaces, so prefer a
-    backtick-quoted span, else the first whitespace token; strip stray backticks and
-    trailing sentence punctuation."""
+    backticks and trailing prose. A ref / ``owner/repo`` has no spaces, so a
+    fully-backtick-quoted ref (``\\`main\\``` / ``\\`owner/repo\\```) wins, else the first
+    whitespace token; strip stray backticks and trailing sentence punctuation.
+
+    The backtick span is honored only when it is the START of the field (``re.match``),
+    NOT anywhere in it (#235): a base written ``main (feature branch \\`feat/x\\`)`` names
+    the base ``main`` — the backticked span is a parenthetical aside about a *different*
+    branch, and taking it silently resolves the wrong base (whose ref doesn't exist →
+    worktree isolation was falling back to mutating the operator's checkout in place)."""
     raw = raw.strip()
-    m = re.search(r"`([^`]+)`", raw)              # markdown code span wins
+    m = re.match(r"`([^`]+)`", raw)               # a fully-backtick-quoted ref at the start wins
     token = m.group(1) if m else (raw.split()[0] if raw.split() else "")
     return token.strip("`").rstrip(",.;:")
 

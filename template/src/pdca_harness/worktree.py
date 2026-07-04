@@ -25,6 +25,14 @@ from . import lane
 from .config import Config
 
 
+class WorktreeError(Exception):
+    """Isolation was requested against a real git checkout but its base can't be
+    materialized (issue #235). Raised instead of silently falling back to in-place, which
+    would run Do/Check in the operator's primary checkout and violate never-mutate. The
+    driver aborts the beat; the operator fixes the brief's base (or fetches it) and retries.
+    """
+
+
 def _git(repo: Path, *args: str) -> int:
     """Run ``git -C repo args``, quietly; return the exit code (no raise)."""
     return subprocess.run(["git", "-C", str(repo), *args],
@@ -211,9 +219,12 @@ def ensure(d: Path, cfg: Config) -> Path | None:
     """Create or reset the per-cycle worktree off the target base; return its path.
 
     Reset-and-reused: an existing worktree is hard-reset to the base and cleaned; a new
-    one is added off the base. Best-effort — disabled, unresolved target, non-git
-    checkout, or any git failure returns None (the cycle then runs in place, unchanged).
-    The primary checkout is never modified (worktrees are separate working trees).
+    one is added off the base. Best-effort for the cases where isolation legitimately can't
+    apply — disabled, unresolved / non-git target — which return None (the cycle then runs
+    in place, unchanged). But a real git checkout whose **base ref can't be resolved** is
+    NOT one of those: it raises :class:`WorktreeError` rather than fall back to in-place
+    (issue #235), because running Do/Check in the operator's primary checkout would violate
+    never-mutate. The primary checkout is never modified (worktrees are separate trees).
     """
     if not cfg.worktree:
         return None
@@ -226,6 +237,16 @@ def ensure(d: Path, cfg: Config) -> Path | None:
         _git(primary, "fetch", cfg.base_remote)  # refresh the base; best-effort
         if base_ref.startswith("origin/") and cfg.base_remote != "origin":
             _git(primary, "fetch", "origin")  # stacked base lives on origin (#123)
+        # Fail closed (#235): the target IS a git checkout, so if its intended base doesn't
+        # resolve (a mis-parsed / nonexistent base), refuse — never silently run in place and
+        # mutate the primary. A resolvable base that then fails to check out is a rarer infra
+        # hiccup left as best-effort below.
+        if _git(primary, "rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}") != 0:
+            raise WorktreeError(
+                f"{d.name}: base ref '{base_ref}' does not resolve in {primary}. Worktree "
+                "isolation refuses to run Do/Check in the operator's primary checkout "
+                "(never-mutate). Fix the brief's 'Repo + branch target' base (or fetch it), "
+                "then retry.")
         if (wt / ".git").exists():
             # Reuse: drop the prior cycle's edits, return to a clean base.
             if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-fdq") != 0:
@@ -241,6 +262,8 @@ def ensure(d: Path, cfg: Config) -> Path | None:
             return None
         _stamp_owner(wt, d)
         return wt
+    except WorktreeError:
+        raise  # fail closed (#235) — do NOT degrade an unresolvable base to in-place
     except Exception as exc:  # noqa: BLE001 — isolation is best-effort, never fatal
         print(f"worktree: isolation unavailable for {d.name} ({exc}); running in place",
               file=sys.stderr)
