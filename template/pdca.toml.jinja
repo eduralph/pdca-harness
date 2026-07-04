@@ -197,9 +197,11 @@ agent = "builder"
 {% if builder_family == "claude" -%}
 argv = ["claude", "-p", "--agent", "builder", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob"]
 {% elif builder_family == "codex" -%}
-# `codex exec` writes patch.diff / the test / build-notes.md in the worktree cwd;
-# `--sandbox workspace-write` lets it run the build+test unattended (verified: no approval
-# prompt). The harness confines cwd to the worktree (#136) and adds the `gh` STOP-shim.
+# `codex exec` edits the target source in the worktree (its cwd) and writes patch.diff /
+# the test / build-notes.md in the bundle dir; `--sandbox workspace-write` lets it run the
+# build+test unattended (verified: no approval prompt). The harness confines cwd to the
+# worktree (#136), grants the bundle dir as an extra writable root so those artifacts land
+# despite the sandbox (#230), and adds the `gh` STOP-shim.
 argv = ["codex", "exec", "--sandbox", "workspace-write"]
 {% else -%}
 argv = []

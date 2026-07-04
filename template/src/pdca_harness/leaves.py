@@ -618,7 +618,14 @@ def do_build(d: Path, cfg: Config) -> None:
             # machinery, so CONFINE them by running *in* the worktree (cwd): otherwise the
             # leaf is launched from the harness root with nothing stopping it from writing
             # the host checkout or a sibling repo, breaking one-bundle-one-diff (issue #136).
-            workdir, env, extra = wt, {"PDCA_WORKTREE": str(wt)}, None
+            # But the builder must ALSO read brief.md and write its artifacts (patch.diff /
+            # the test / build-notes.md) in the BUNDLE dir, which is outside that cwd — and a
+            # sandboxing family (codex `--sandbox workspace-write`) can only write cwd + roots
+            # granted with its grounding flag. So grant the bundle dir as an extra writable
+            # root (#230); a family with no grounding flag (generic) is unsandboxed and reaches
+            # it anyway. cwd stays the worktree, so #136 still confines source edits.
+            workdir, env = wt, {"PDCA_WORKTREE": str(wt)}
+            extra = [profile.grounding_flag, str(d)] if profile.grounding_flag else None
         else:
             workdir, env, extra = cfg.root, None, None  # best-effort: edit in place, as before
         if not profile.native_guard:
