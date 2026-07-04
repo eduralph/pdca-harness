@@ -182,6 +182,44 @@ class WorktreeRealGit(unittest.TestCase):
         self.assertIsNone(worktree.resync(self.d, self.cfg))        # not used for the gate
         self.assertIsNone(worktree.owner_of(wt))                    # stamp cleared → re-attempted
 
+    def test_stage_creates_tree_from_patch_when_absent(self) -> None:
+        # `pdca try` on a batch: no per-cycle worktree exists yet (all Do already done, tree
+        # reset-reused). stage() CREATES it off the base and applies THIS bundle's patch.diff,
+        # so any parked bundle is launchable — not only the last one Do populated.
+        (self.d / "patch.diff").write_text(self._PATCH, encoding="utf-8")
+        self.assertIsNone(worktree.path(self.d, self.cfg))          # nothing on disk yet
+        wt = worktree.stage(self.d, self.cfg)
+        self.assertEqual(wt, self.tmp / "checkout.pdca-wt")
+        self.assertTrue((wt / ".git").exists())
+        self.assertEqual((wt / "file.txt").read_text(encoding="utf-8"), "base\npatched\n")
+        self.assertEqual(worktree.owner_of(wt), "issue_WT")
+        self.assertEqual(self._porcelain(self.primary), "")         # primary untouched
+
+    def test_stage_reconstructs_over_a_foreign_owned_tree(self) -> None:
+        # The batch-then-review fix: the shared tree holds a LATER bundle's build. stage()
+        # resets it and rebuilds THIS bundle from patch.diff (replacing the old owner-mismatch
+        # refusal), so `pdca try <earlier-id>` works instead of erroring.
+        other = _bundle(self.cfg, "OTHER", target="org/repo @ main")
+        wt = worktree.ensure(other, self.cfg)                       # tree owned by OTHER
+        (wt / "orphan.txt").write_text("from OTHER\n", encoding="utf-8")
+        (self.d / "patch.diff").write_text(self._PATCH, encoding="utf-8")
+        staged = worktree.stage(self.d, self.cfg)
+        self.assertEqual(staged, wt)
+        self.assertFalse((wt / "orphan.txt").exists())              # OTHER's build swept
+        self.assertEqual((wt / "file.txt").read_text(encoding="utf-8"), "base\npatched\n")
+        self.assertEqual(worktree.owner_of(wt), "issue_WT")         # now ours
+
+    def test_stage_none_when_patch_does_not_apply(self) -> None:
+        (self.d / "patch.diff").write_text(
+            "diff --git a/nope.txt b/nope.txt\n--- a/nope.txt\n+++ b/nope.txt\n"
+            "@@ -1 +1 @@\n-absent\n+x\n", encoding="utf-8")
+        self.assertIsNone(worktree.stage(self.d, self.cfg))
+
+    def test_stage_none_when_isolation_off(self) -> None:
+        self.cfg.worktree = False
+        (self.d / "patch.diff").write_text(self._PATCH, encoding="utf-8")
+        self.assertIsNone(worktree.stage(self.d, self.cfg))
+
     def test_stacked_bundle_bases_off_parent_branch(self) -> None:
         # #123: a `Stacks on:` dependent's worktree bases off the parent's PUBLISHED branch
         # (on origin), not origin/main — so Do builds + verifies on top of the parent's diff.
