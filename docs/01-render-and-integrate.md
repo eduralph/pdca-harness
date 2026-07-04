@@ -158,8 +158,11 @@ argv = ["claude", "--agent", "signoff", "--permission-mode", "acceptEdits"]
 
 The interactive leaves (planner, signoff, publisher, act) open Claude in your
 terminal because they're the human touch points. The headless ones (builder,
-reviewer) run unattended. The agent definitions themselves live under
-`.claude/agents/<name>.md`.
+reviewer) run unattended. Each agent's role prompt lives in a canonical,
+vendor-neutral body at `agents/<name>.md`; Claude leaves additionally get
+`.claude/agents/<name>.md` (a frontmatter wrapper that includes that body, so
+`--agent` resolves), materialized only when the leaf's family is `claude`.
+Non-Claude leaves read the `agents/<name>.md` body directly.
 
 > **Decorrelate the reviewer.** The model recommends the Check reviewer be a
 > *different* family from the builder (the template default is `codex`), so the

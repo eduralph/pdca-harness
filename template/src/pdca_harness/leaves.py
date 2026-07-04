@@ -103,13 +103,34 @@ def _role_injection(
             return [profile.agent_flag, leaf.agent], ""
         return [], ""
     if profile.role_injection == "inline":
-        path = cfg.root / ".claude" / "agents" / f"{leaf.agent}.md"
+        # The role prompt's canonical, vendor-neutral source of truth is `agents/<name>.md`;
+        # `.claude/agents/<name>.md` is Claude-only packaging (frontmatter + the same body)
+        # generated from it. Prefer the canonical file; fall back to the legacy
+        # `.claude/agents/` location for an instance rendered before the split. strip_frontmatter
+        # is a no-op on the frontmatter-less canonical body and still correct on the legacy one.
+        canonical = cfg.root / "agents" / f"{leaf.agent}.md"
+        legacy = cfg.root / ".claude" / "agents" / f"{leaf.agent}.md"
+        path = canonical if canonical.is_file() else legacy
         try:
             body = families.strip_frontmatter(path.read_text(encoding="utf-8")).strip()
         except OSError as exc:
             print(f"leaves: role prompt {path} unreadable ({exc}) — proceeding "
                   "without it", file=sys.stderr)
             return [], ""
+        # Migration guard (#228): a pre-split instance kept its role prompt ONLY in the legacy
+        # `.claude/agents/<name>.md` and may have CUSTOMIZED it. Now that the canonical file
+        # wins, those edits would be silently shadowed. If a legacy file exists and its body
+        # diverges from the canonical one we're using, say so — the fix is to migrate the edits
+        # into `agents/<name>.md` (the vendor-neutral source), not to leave them stranded.
+        if path == canonical and legacy.is_file():
+            try:
+                legacy_body = families.strip_frontmatter(legacy.read_text(encoding="utf-8")).strip()
+            except OSError:
+                legacy_body = body
+            if legacy_body != body:
+                print(f"leaves: {legacy} diverges from the canonical {canonical} and is being "
+                      f"ignored — migrate any customizations into agents/{leaf.agent}.md "
+                      "(the vendor-neutral role-prompt source).", file=sys.stderr)
         return [], (body + "\n\n---\n\n") if body else ""
     return [], ""
 
@@ -172,16 +193,15 @@ def _invoke(
     # Headless: feed the prompt on stdin (a trailing positional would be swallowed
     # by a variadic --allowedTools) and tick a heartbeat, since `claude -p` prints
     # nothing until it finishes (minutes) and would otherwise look hung.
-    # progress.py's stream reader speaks only the claude stream-json format today;
-    # a family declaring a different stream_format runs stream-less until a parser
-    # for it registers (the profile field reserves the slot).
+    # progress.py's stream reader dispatches on the family's stream_format; a family
+    # declaring a format it doesn't recognize runs stream-less (heartbeat Tiers 1+2).
     use_stream = (stream_json and bool(profile.stream_argv)
-                  and profile.stream_format == "claude-stream-json")
+                  and profile.stream_format in progress.STREAM_FORMATS)
     if use_stream:
         argv += list(profile.stream_argv)
     rc, output, produced = progress.run_with_heartbeat(
         argv, cwd=workdir, input_text=prompt, label=label, status=status,
-        stream_json=use_stream, env=run_env)
+        stream_json=use_stream, stream_format=profile.stream_format, env=run_env)
     if rc != 0:
         # Only the stream path gives a real "did a session start" signal. Without it
         # (a stream-less family) we cannot tell invocation-death from a substantive
@@ -612,7 +632,14 @@ def do_build(d: Path, cfg: Config) -> None:
             # machinery, so CONFINE them by running *in* the worktree (cwd): otherwise the
             # leaf is launched from the harness root with nothing stopping it from writing
             # the host checkout or a sibling repo, breaking one-bundle-one-diff (issue #136).
-            workdir, env, extra = wt, {"PDCA_WORKTREE": str(wt)}, None
+            # But the builder must ALSO read brief.md and write its artifacts (patch.diff /
+            # the test / build-notes.md) in the BUNDLE dir, which is outside that cwd — and a
+            # sandboxing family (codex `--sandbox workspace-write`) can only write cwd + roots
+            # granted with its grounding flag. So grant the bundle dir as an extra writable
+            # root (#230); a family with no grounding flag (generic) is unsandboxed and reaches
+            # it anyway. cwd stays the worktree, so #136 still confines source edits.
+            workdir, env = wt, {"PDCA_WORKTREE": str(wt)}
+            extra = [profile.grounding_flag, str(d)] if profile.grounding_flag else None
         else:
             workdir, env, extra = cfg.root, None, None  # best-effort: edit in place, as before
         if not profile.native_guard:
@@ -1240,7 +1267,13 @@ def _stub_act(cfg: Config, date: str) -> None:
 # ----------------------------------------------------------------------------
 def run_publish(d: Path, cfg: Config) -> None:
     if cfg.publisher.mode == "command":
-        _invoke(cfg.publisher, cfg.root, _publish_prompt(d, cfg), cfg=cfg)
+        # A non-claude publisher has no PreToolUse STOP hook, so give it the same `gh` PATH
+        # shim the builder gets (guard.py) — else a codex/other publisher could `gh pr ready`
+        # / `merge` itself, which is the human's Check sign-off, not the model's (best-effort;
+        # a no-op for claude, whose native hook already enforces this).
+        profile = families.resolve(cfg.publisher.family, cfg.families)
+        env = None if profile.native_guard else guard.shim_env(cfg, None)
+        _invoke(cfg.publisher, cfg.root, _publish_prompt(d, cfg), env=env, cfg=cfg)
         return
     _stub_publish(d, cfg)
 

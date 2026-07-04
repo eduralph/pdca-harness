@@ -17,7 +17,7 @@
 - Spec template: <field added/clarified/removed>            (path)
 - Ruleset: <rule added/retired/relaxed/tightened>           (path:line)
 - Gates: <check added/promoted/moved>                       (path:line)
-- Agent skills: <SKILL.md / AGENTS.md adjustment>           (path:line)
+- Agent role prompts: <agents/*.md / skill adjustment>      (path:line)
 
 ## Follow-ups routed (not process deltas — work handed to an owner)
 - Another bug (project/component): filed <tracker> #NNNN    (link)

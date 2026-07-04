@@ -5,10 +5,12 @@ end-to-end (stdlib unittest, no model CLIs, no network).
 
 from __future__ import annotations
 
+import io
 import shutil
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 from pdca_harness import families, leaves
@@ -42,13 +44,22 @@ class Registry(unittest.TestCase):
         self.assertTrue(p.cwd_discovery)
         self.assertTrue(p.native_guard)
 
-    def test_codex_and_empty_families_are_stdin_no_flags(self) -> None:
-        for name in ("codex", "", "generic"):
+    def test_empty_and_generic_families_are_stdin_no_flags(self) -> None:
+        for name in ("", "generic"):
             p = families.resolve(name)
             self.assertEqual(p.stream_argv, (), name)
             self.assertEqual(p.grounding_flag, "", name)
             self.assertFalse(p.cwd_discovery, name)
             self.assertFalse(p.native_guard, name)
+
+    def test_codex_streams_via_json_and_confines_by_cwd(self) -> None:
+        p = families.resolve("codex")
+        self.assertEqual(p.stream_argv, ("--json",))          # `codex exec --json`
+        self.assertEqual(p.stream_format, "codex-stream-json")
+        self.assertEqual(p.model_flag, "-m")
+        self.assertEqual(p.grounding_flag, "--add-dir")       # writable $PDCA_TARGET grant
+        self.assertFalse(p.cwd_discovery)                     # confined to the worktree cwd
+        self.assertFalse(p.native_guard)                      # driver `gh` shim, not a hook
 
     def test_unknown_family_falls_back_to_generic(self) -> None:
         # The ad-hoc families tests/instances already use ("local", "mid", "frontier")
@@ -101,10 +112,17 @@ class RoleInjection(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.cfg = _cfg(self.tmp)
-        agents = self.tmp / ".claude" / "agents"
+        # The canonical, vendor-neutral body (source of truth) — no frontmatter.
+        agents = self.tmp / "agents"
         agents.mkdir(parents=True)
-        (agents / "reviewer.md").write_text(
-            "---\nname: reviewer\n---\nROLE-SENTINEL body.\n", encoding="utf-8")
+        (agents / "reviewer.md").write_text("ROLE-SENTINEL body.\n", encoding="utf-8")
+
+    def _legacy(self, text: str) -> None:
+        """Write the legacy Claude-packaged file (frontmatter + body) an instance rendered
+        before the canonical-body split would carry at .claude/agents/<name>.md."""
+        legacy = self.tmp / ".claude" / "agents"
+        legacy.mkdir(parents=True, exist_ok=True)
+        (legacy / "reviewer.md").write_text(text, encoding="utf-8")
 
     def test_flag_family_gets_agent_argv(self) -> None:
         leaf = LeafConfig(family="claude", agent="reviewer", argv=["claude", "-p"])
@@ -118,12 +136,53 @@ class RoleInjection(unittest.TestCase):
         argv, _ = leaves._role_injection(self.cfg, leaf, families.resolve("claude"))
         self.assertEqual(argv, [])
 
-    def test_inline_family_gets_prompt_prefix_without_frontmatter(self) -> None:
+    def test_inline_family_gets_prompt_prefix_from_canonical_body(self) -> None:
         leaf = LeafConfig(family="codex", agent="reviewer", argv=["codex", "exec"])
         argv, prefix = leaves._role_injection(self.cfg, leaf, families.resolve("codex"))
         self.assertEqual(argv, [])
+        self.assertIn("ROLE-SENTINEL", prefix)       # the agents/<name>.md body, inlined
+
+    def test_inline_prefers_canonical_over_legacy(self) -> None:
+        # Both present (a not-yet-cleaned instance): the canonical agents/ body wins.
+        self._legacy("---\nname: reviewer\n---\nLEGACY-SENTINEL body.\n")
+        leaf = LeafConfig(family="codex", agent="reviewer", argv=["codex", "exec"])
+        _, prefix = leaves._role_injection(self.cfg, leaf, families.resolve("codex"))
         self.assertIn("ROLE-SENTINEL", prefix)
-        self.assertNotIn("name: reviewer", prefix)  # frontmatter stripped
+        self.assertNotIn("LEGACY-SENTINEL", prefix)
+
+    def test_divergent_legacy_warns_it_is_shadowed(self) -> None:
+        # #228: a pre-split instance customized the legacy .claude/agents file; the canonical
+        # body now wins and would silently drop those edits. A divergent legacy must WARN so
+        # the human migrates the customization rather than losing it unnoticed.
+        self._legacy("---\nname: reviewer\n---\nCUSTOMIZED-BY-USER body.\n")
+        leaf = LeafConfig(family="codex", agent="reviewer", argv=["codex", "exec"])
+        err = io.StringIO()
+        with redirect_stderr(err):
+            _, prefix = leaves._role_injection(self.cfg, leaf, families.resolve("codex"))
+        self.assertIn("ROLE-SENTINEL", prefix)                  # canonical still used
+        self.assertIn("being ignored", err.getvalue())         # warned it's shadowed
+        self.assertIn("migrate", err.getvalue())               # …and to migrate the edits
+        self.assertIn("agents/reviewer.md", err.getvalue())
+
+    def test_matching_legacy_is_silent(self) -> None:
+        # A legacy file whose body MATCHES the canonical (the normal fresh-render case where
+        # both are shipped) must NOT warn — nothing was customized, nothing is being lost.
+        self._legacy("---\nname: reviewer\n---\nROLE-SENTINEL body.\n")
+        leaf = LeafConfig(family="codex", agent="reviewer", argv=["codex", "exec"])
+        err = io.StringIO()
+        with redirect_stderr(err):
+            leaves._role_injection(self.cfg, leaf, families.resolve("codex"))
+        self.assertEqual(err.getvalue(), "")
+
+    def test_inline_falls_back_to_legacy_claude_agents(self) -> None:
+        # Back-compat: an instance rendered before the split has only .claude/agents/<name>.md;
+        # inline injection reads it and strips the frontmatter.
+        (self.tmp / "agents" / "reviewer.md").unlink()
+        self._legacy("---\nname: reviewer\n---\nLEGACY-SENTINEL body.\n")
+        leaf = LeafConfig(family="codex", agent="reviewer", argv=["codex", "exec"])
+        _, prefix = leaves._role_injection(self.cfg, leaf, families.resolve("codex"))
+        self.assertIn("LEGACY-SENTINEL", prefix)
+        self.assertNotIn("name: reviewer", prefix)   # frontmatter stripped
 
     def test_no_agent_or_missing_file_degrades_to_nothing(self) -> None:
         no_agent = LeafConfig(family="codex", argv=["codex"])
@@ -163,10 +222,10 @@ class FakeVendorCliEndToEnd(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.cfg = _cfg(self.tmp)
-        agents = self.tmp / ".claude" / "agents"
+        agents = self.tmp / "agents"                 # canonical body (source of truth)
         agents.mkdir(parents=True)
         (agents / "reviewer.md").write_text(
-            "---\nname: reviewer\n---\nROLE-SENTINEL: judge the patch.\n", encoding="utf-8")
+            "ROLE-SENTINEL: judge the patch.\n", encoding="utf-8")
         self.cli = self.tmp / "fake-vendor-cli.sh"
         self.cli.write_text(
             "#!/bin/sh\n"

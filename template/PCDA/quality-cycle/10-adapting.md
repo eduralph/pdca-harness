@@ -159,7 +159,7 @@ Plan turns a tracker item into a `brief.md`. Hand the planner *where work comes 
 
 ## Step 5 — Adapt the agent prompts only where the *engine contract* differs — *[render-time]*
 
-The six agents (`.claude/agents/*.md.jinja`) ship generic and render with your `{{ project_name }}`. You should **not** rewrite them per project — but two classes of edit are legitimately yours, and both are about keeping the prompt **true to your engine**:
+The six agents' role prompts ship generic and render with your `{{ project_name }}`. The **canonical, vendor-neutral body** is `agents/<name>.md.jinja` (the single source of truth, read directly by non-Claude leaves); `.claude/agents/<name>.md.jinja` is a thin Claude wrapper — frontmatter + `{% include %}` of that body — materialized only for leaves whose family is `claude`. Edit the body in `agents/`; the Claude packaging follows. You should **not** rewrite the prompts per project — but two classes of edit are legitimately yours, and both are about keeping the prompt **true to your engine**:
 
 - **Capability facts the runner actually provides.** A leaf's prompt is part of the harness contract: if it claims the test runner gives a display/GUI/bus and yours is headless, a GUI-importing test crashes — and recurs every iterate-do because nothing corrects the belief. The builder prompt now states the runner *may* be headless and to keep the unit-under-test import-light; make such claims match *your* engine.
 - **The `builder_guard.py` hook path must be rooted.** It runs from the bundle dir, so a relative `python3 .claude/hooks/builder_guard.py` resolves there, fails to exist, and (exit 2) blocks **all** Bash for the whole Do session. The template ships it rooted (`$CLAUDE_PROJECT_DIR/...`); keep it that way.
@@ -195,7 +195,7 @@ The full adaptation, every knob → its instance value, as a fill-in-the-blanks 
 | Tracker intake | project-provided | Playwright Mantis scraper → CSV export; planner reads the issue row + notes |
 | Default branch / area rules | render-time + instance | `main`; addon work targets `maintenance/gramps60`, cherry-picked → `gramps61` |
 | Branch convention | instance-only | `fix/bug-{id}-{slug}` / `enhancement/{id}-{slug}` |
-| Builder / reviewer | render-time | `claude` / `codex` by default; **running** config takes the same-vendor `claude` reviewer fallback + sandbox |
+| Builder / reviewer / interactive family | render-time | per-leaf: `builder_family` (`claude`/`codex`), `reviewer_family` (cross-vendor, ≠ builder), `interactive_family` for Plan/Sign-off/Publish/Act. Codex is a full alternative across all leaves. |
 | Gating gate | project-provided | `C4-verify` (bundle, red→green, the one gating check) |
 | Advisory tiers | project-provided | T1/T2/T4 conformance (doc-16), T3 unit/addon-60/addon-61/interface (baseline-diffed) |
 | Ruleset | instance-only | gramps wiki doc 16, cited by section heading, selected by core-vs-addon target |

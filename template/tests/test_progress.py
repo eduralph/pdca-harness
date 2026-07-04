@@ -143,5 +143,44 @@ class StreamToolUse(unittest.TestCase):
         self.assertFalse(produced)  # only a system event → no real work → transient
 
 
+class CodexStream(unittest.TestCase):
+    """The `codex exec --json` event stream (codex-stream-json), dispatched by format."""
+
+    FMT = "codex-stream-json"
+
+    def _line(self, obj: dict) -> str:
+        return json.dumps(obj)
+
+    def test_codex_format_is_registered(self) -> None:
+        self.assertIn("codex-stream-json", progress.STREAM_FORMATS)
+
+    def test_command_execution_label(self) -> None:
+        ev = {"type": "item.started", "item": {
+            "type": "command_execution", "command": "/bin/bash -lc 'pytest -q && ls'"}}
+        self.assertEqual(progress._stream_tool_label(self._line(ev), self.FMT),
+                         "Running pytest -q && ls")   # shell wrapper unwrapped
+
+    def test_file_change_label(self) -> None:
+        ev = {"type": "item.completed", "item": {"type": "file_change",
+              "changes": [{"path": "/w/patch.diff", "kind": "add"}]}}
+        self.assertEqual(progress._stream_tool_label(self._line(ev), self.FMT),
+                         "Adding patch.diff")
+
+    def test_agent_message_has_no_tool_label(self) -> None:
+        ev = {"type": "item.completed", "item": {"type": "agent_message", "text": "Done."}}
+        self.assertEqual(progress._stream_tool_label(self._line(ev), self.FMT), "")
+
+    def test_session_event_distinguishes_work_from_startup(self) -> None:
+        for t in ("item.started", "item.completed", "turn.completed"):
+            self.assertTrue(progress._is_session_event(self._line({"type": t}), self.FMT), t)
+        for t in ("thread.started", "turn.started"):  # startup only, like claude's `system`
+            self.assertFalse(progress._is_session_event(self._line({"type": t}), self.FMT), t)
+
+    def test_claude_parser_is_the_default_format(self) -> None:
+        # Back-compat: the claude parser is used when no format is passed.
+        self.assertTrue(progress._is_session_event(json.dumps({"type": "assistant"})))
+        self.assertFalse(progress._is_session_event(json.dumps({"type": "item.started"})))
+
+
 if __name__ == "__main__":
     unittest.main()

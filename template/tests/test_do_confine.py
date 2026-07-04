@@ -105,6 +105,33 @@ class DoBuildConfinement(unittest.TestCase):
         self.assertEqual(captured["workdir"], cfg.root)                  # agent/hook discovery
         self.assertEqual(captured["extra_argv"], ["--add-dir", str(wt)])  # grounded in the wt
 
+    def test_codex_family_gets_the_bundle_dir_as_a_writable_root(self) -> None:
+        # #230: a sandboxing builder (codex `--sandbox workspace-write`) runs *in* the worktree
+        # (cwd), but must also read brief.md + write patch.diff / build-notes.md / the test in
+        # the BUNDLE dir, which is outside that cwd. do_build must grant the bundle dir as an
+        # extra writable root via the family's grounding flag, else the Do beat can't produce
+        # its artifacts.
+        captured: dict = {}
+
+        def fake_invoke(leaf, workdir, prompt, **kw):
+            captured["workdir"] = workdir
+            captured["extra_argv"] = kw.get("extra_argv")
+
+        builder = LeafConfig(mode="command", family="codex",
+                             argv=["codex", "exec", "--sandbox", "workspace-write"])
+        cfg = _cfg(self.tmp, builder)
+        cfg.repo_checkouts = {"org/repo": str(self.primary)}
+        d = self._bundle(cfg)
+        orig = leaves._invoke
+        leaves._invoke = fake_invoke
+        try:
+            leaves.do_build(d, cfg)
+        finally:
+            leaves._invoke = orig
+        wt = self.tmp / "checkout.pdca-wt"
+        self.assertEqual(captured["workdir"], wt)                        # cwd confined (#136)
+        self.assertEqual(captured["extra_argv"], ["--add-dir", str(d)])  # bundle dir writable
+
 
 if __name__ == "__main__":
     unittest.main()

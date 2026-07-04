@@ -12,6 +12,7 @@ yet, how long since the last write), not just that time passed.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -30,6 +31,7 @@ def run_with_heartbeat(
     input_text: str | None = None,
     capture: bool = False,
     stream_json: bool = False,
+    stream_format: str = "claude-stream-json",
     interval: int = 15,
     label: str = "",
     status: Callable[[], str] | None = None,
@@ -87,9 +89,9 @@ def run_with_heartbeat(
                 if capture:
                     chunks.append(line)
                 if stream_json:
-                    if _is_session_event(line):
-                        produced["session"] = True  # a system/init line does NOT count
-                    lbl = _stream_tool_label(line)
+                    if _is_session_event(line, stream_format):
+                        produced["session"] = True  # a startup/init line does NOT count
+                    lbl = _stream_tool_label(line, stream_format)
                     if lbl:
                         latest_tool["label"] = lbl
         t = threading.Thread(target=_drain, daemon=True)
@@ -145,41 +147,79 @@ def run_with_heartbeat(
 
 
 # ----------------------------------------------------------------------------
-# Tier 3 — parse Claude's --output-format stream-json for the live tool-use.
-# Vendor-specific (Claude's event shape); a leaf opts in only for a claude family,
-# so it is a no-op for a codex/other leaf, which still gets Tiers 1+2.
+# Tier 3 — parse a leaf's JSONL event stream for the live tool-use surfaced on each
+# heartbeat tick. Vendor event shapes differ, so the parsers dispatch on the family's
+# ``stream_format``; a family whose format isn't in ``STREAM_FORMATS`` runs stream-less
+# (Tiers 1+2 only). claude: ``--output-format stream-json``; codex: ``exec --json``.
 # ----------------------------------------------------------------------------
+STREAM_FORMATS = frozenset({"claude-stream-json", "codex-stream-json"})
+
 _SESSION_EVENT_TYPES = frozenset({"assistant", "user", "result"})
+# codex `exec --json`: real work is an item/turn event; thread.started / turn.started
+# are startup-only (like claude's ``system`` init), so they don't count as "produced".
+_CODEX_SESSION_TYPES = frozenset({"item.started", "item.completed", "turn.completed"})
 
 
-def _is_session_event(line: str) -> bool:
-    """True iff a stream-json line is **substantive work** — an assistant/user/result
-    event — as opposed to a ``system`` event (``init`` on startup, ``api_retry`` on a
-    retryable API error) the CLI emits before doing anything. A non-zero exit having
-    produced no such event is the transient-infra signal a retry should target (#138)."""
+def _is_session_event(line: str, fmt: str = "claude-stream-json") -> bool:
+    """True iff a stream line is **substantive work** — not a startup/init event the CLI
+    emits before doing anything. A non-zero exit having produced no such event is the
+    transient-infra signal a retry should target (#138). Best-effort: non-JSON → False."""
     try:
         ev = json.loads(line)
     except (ValueError, TypeError):
         return False
-    return isinstance(ev, dict) and ev.get("type") in _SESSION_EVENT_TYPES
+    if not isinstance(ev, dict):
+        return False
+    if fmt == "codex-stream-json":
+        return ev.get("type") in _CODEX_SESSION_TYPES
+    return ev.get("type") in _SESSION_EVENT_TYPES
 
 
-def _stream_tool_label(line: str) -> str:
-    """A human label for the tool-use in one stream-json line, or "" if none.
-
-    Claude emits newline-delimited events; an ``assistant`` event's message content
-    can hold ``tool_use`` blocks. We surface the **last** one in the line (the tool
-    just invoked). Best-effort: a non-JSON / non-tool line yields ""."""
+def _stream_tool_label(line: str, fmt: str = "claude-stream-json") -> str:
+    """A human label for the tool-use in one stream line, or "" if none.
+    Best-effort: a non-JSON / non-tool line yields ""."""
     try:
         ev = json.loads(line)
     except (ValueError, TypeError):
         return ""
-    if not isinstance(ev, dict) or ev.get("type") != "assistant":
+    if not isinstance(ev, dict):
+        return ""
+    if fmt == "codex-stream-json":
+        return _codex_item_label(ev)
+    # claude: an ``assistant`` event's message content can hold ``tool_use`` blocks;
+    # surface the LAST one in the line (the tool just invoked).
+    if ev.get("type") != "assistant":
         return ""
     content = (ev.get("message") or {}).get("content") or []
     for block in reversed(content):
         if isinstance(block, dict) and block.get("type") == "tool_use":
             return _tool_label(block.get("name", ""), block.get("input") or {})
+    return ""
+
+
+def _codex_item_label(ev: dict) -> str:
+    """Label a codex ``exec --json`` item event (command_execution / file_change), or "".
+
+    Codex emits ``item.started`` / ``item.completed`` with an ``item`` carrying its type;
+    an ``agent_message`` item is prose, not a tool, so it yields ""."""
+    if ev.get("type") not in ("item.started", "item.completed"):
+        return ""
+    item = ev.get("item") or {}
+    kind = item.get("type")
+    if kind == "command_execution":
+        cmd = str(item.get("command") or "")
+        # unwrap a `/bin/bash -lc '<cmd>'` wrapper to the inner command's first line
+        m = re.search(r"-lc?\s+'(.*)'", cmd, re.S)
+        inner = (m.group(1) if m else cmd).strip().splitlines()
+        first = inner[0] if inner else ""
+        return f"Running {first[:48]}" if first else "Running a command"
+    if kind == "file_change":
+        changes = item.get("changes") or []
+        if changes and isinstance(changes[0], dict):
+            path = Path(str(changes[0].get("path") or "")).name
+            verb = {"add": "Adding", "delete": "Removing"}.get(changes[0].get("kind"), "Editing")
+            return f"{verb} {path}" if path else "Editing files"
+        return "Editing files"
     return ""
 
 

@@ -136,7 +136,7 @@ T5 judgment to a deterministically-surfaced one.
 
 Act deltas land in five places: the **spec template** (a brief field), the
 **ruleset** (a written rule), the **gates** (a new/promoted check), the **agent
-files** (`.claude/agents/*.md`), or the **orchestration** (driver/state). Each is
+role prompts** (`agents/*.md`), or the **orchestration** (driver/state). Each is
 a permanent improvement to the baseline every future cycle starts from.
 
 **Closing the loop — the process-delta ledger.** A delta is only worth anything if it
