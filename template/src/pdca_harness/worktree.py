@@ -17,8 +17,12 @@ pointer; each is created in place by ``git worktree add``).
 
 from __future__ import annotations
 
+import itertools
+import os
+import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from . import lane
@@ -276,3 +280,112 @@ def _stamp_owner(wt: Path, d: Path) -> None:
         _owner_file(wt).write_text(d.name, encoding="utf-8")
     except OSError:  # a marker we couldn't write just reads back as None (unconfirmed)
         pass
+
+
+# ----------------------------------------------------------------------------
+# Overflow worktrees (issue #226) — ephemeral spillover for a gate read whose cached
+# lane is owned by a DIFFERENT bundle. Rather than mutate that lane (the resync heal),
+# hand the read its OWN throwaway tree, off the base + this bundle's patch, removed after.
+# Config-gated by ``[driver].overflow`` (0 ⇒ disabled, heal in place as before).
+# ----------------------------------------------------------------------------
+_OVF_SUFFIX = ".pdca-wt-ovf-"
+_ovf_seq = itertools.count()
+_ovf_seq_lock = threading.Lock()   # guards the token counter (name uniqueness)
+# Serializes the overflow cap RESERVATION — the count-check and the create must be atomic so
+# two concurrent Check threads can't both slip past the cap before either dir exists (#241).
+# A separate lock from the counter's so `_overflow_create` → `_overflow_path` never re-enters.
+_ovf_cap_lock = threading.Lock()
+
+
+def _overflow_dirs(primary: Path) -> list[Path]:
+    """Existing overflow trees for ``primary`` (sibling DIRS ``<name>.pdca-wt-ovf-*``)."""
+    return sorted(p for p in primary.parent.glob(primary.name + _OVF_SUFFIX + "*")
+                  if p.is_dir())
+
+
+def _overflow_path(primary: Path) -> Path:
+    """A fresh, unique overflow path — pid + a process-local counter, so concurrent lanes
+    (threads) never collide and a name is never reused within a run."""
+    with _ovf_seq_lock:
+        token = f"{os.getpid()}-{next(_ovf_seq)}"
+    return primary.parent / (primary.name + _OVF_SUFFIX + token)
+
+
+def overflow_remove(primary: Path, ovf: Path) -> None:
+    """Tear down one overflow tree — ``git worktree remove`` then a hard rmtree + prune
+    fallback. Best-effort: teardown must never fail a gate run (issue #226)."""
+    if _git(primary, "worktree", "remove", "--force", str(ovf)) != 0:
+        shutil.rmtree(ovf, ignore_errors=True)
+        _git(primary, "worktree", "prune")
+    _owner_file(ovf).unlink(missing_ok=True)  # drop any owner sidecar too
+
+
+def sweep_overflow(primary: Path) -> None:
+    """Reclaim crash-orphaned overflow trees for ``primary``: prune git's admin entries,
+    then rmtree any leftover ``*-ovf-*`` dirs. Best-effort; safe to call before a run."""
+    _git(primary, "worktree", "prune")
+    for d in _overflow_dirs(primary):
+        overflow_remove(primary, d)
+
+
+def _overflow_create(d: Path, primary: Path, base_ref: str) -> Path | None:
+    """Add a fresh overflow worktree off ``base_ref`` and apply this bundle's patch — the
+    exceptional-read equivalent of :func:`resync`, but on its own tree (never a shared lane).
+    Best-effort: a git-add / patch-apply failure returns None (the caller falls back to the
+    in-place heal) and cleans up any partial tree. No fetch — the lane's Do already refreshed
+    the base."""
+    ovf = _overflow_path(primary)
+    try:
+        _git(primary, "worktree", "prune")  # drop admin entries for any vanished trees first
+        if _git(primary, "worktree", "add", "--force", str(ovf), base_ref) != 0:
+            return None
+        patch = d / "patch.diff"
+        if patch.is_file() and patch.read_text(encoding="utf-8").strip():
+            if _git(ovf, "apply", str(patch.resolve())) != 0:
+                overflow_remove(primary, ovf)  # patch didn't apply → not this bundle's build
+                return None
+        return ovf
+    except Exception:  # noqa: BLE001 — overflow is best-effort; fall back to the heal
+        overflow_remove(primary, ovf)
+        return None
+
+
+def for_gate(d: Path, cfg: Config) -> tuple[Path | None, Path | None]:
+    """Resolve the worktree a gate should read for bundle ``d`` (issue #226).
+
+    Returns ``(worktree_path, overflow_primary)``:
+    * ``worktree_path`` is the tree to run the gate in (or None → run in the primary
+      checkout, as when isolation is off — same fallback :func:`resync` uses); and
+    * ``overflow_primary`` is non-None ONLY when ``worktree_path`` is an ephemeral overflow
+      tree the caller MUST tear down (``overflow_remove(overflow_primary, worktree_path)``)
+      once the gate has run.
+
+    The cached lane (owned by this bundle — the normal Do→Check path) is returned warm and
+    untouched. A lane owned by a DIFFERENT bundle is the exceptional read: with overflow
+    enabled and under the cap it gets its own throwaway tree; otherwise it falls back to the
+    in-place :func:`resync` heal (``overflow_primary`` None)."""
+    if not cfg.worktree:
+        return None, None
+    tgt = _target(d, cfg)
+    if tgt is None:
+        return None, None
+    primary, base_ref = tgt
+    wt = _wt_dir(primary)
+    if not (wt / ".git").exists():
+        return resync(d, cfg), None  # no cached lane yet → resync's own fallback (None here)
+    if owner_of(wt) == d.name:
+        return wt, None  # cached lane, warm — leave Do's tree intact
+    # Foreign / unstamped lane: prefer an overflow tree over mutating a lane another bundle
+    # may still want — but only up to the configured cap; else heal the lane in place. The
+    # count-check and the create are held under one lock so concurrent Check threads can't
+    # both pass the cap before either dir exists (#241); the gate itself runs after this
+    # returns, so gates still execute concurrently — only the brief reservation serializes.
+    if cfg.overflow > 0:
+        with _ovf_cap_lock:
+            ovf = (_overflow_create(d, primary, base_ref)
+                   if len(_overflow_dirs(primary)) < cfg.overflow else None)
+        if ovf is not None:
+            print(f"worktree: {d.name} gate read spilled to an overflow tree {ovf.name} "
+                  f"(lane owned by {owner_of(wt)})", file=sys.stderr)
+            return ovf, primary
+    return resync(d, cfg), None

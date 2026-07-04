@@ -35,6 +35,19 @@ lanes = 1
 # `$PDCA_WORKTREE` too (see the gate examples below). On by default; best-effort (a target
 # that isn't a worktree-capable git checkout falls back to in-place). Set false to disable.
 worktree = true
+# Overflow worktrees (issue #226). The cap on concurrent EPHEMERAL "overflow" worktrees;
+# 0 (default) disables. This reframes `lanes` above as a warm CACHED pool (reset-and-reused,
+# build cache kept warm on the hot Do→Check path) and handles the EXCEPTIONAL read — a gate
+# / re-gate for a bundle whose cached lane is currently owned by a DIFFERENT bundle (an
+# out-of-cadence or contended read) — by spinning up a throwaway worktree off the base +
+# that bundle's patch, running there, and removing it, instead of mutating a lane another
+# bundle may still want. It's correct by construction (a fresh tree can't carry a foreign
+# orphan, the #224 class of bug) but a COLD checkout (no build cache), so it's reserved for
+# that exceptional path; at the cap it falls back to healing the lane in place. Leave at 0
+# unless you actually run out-of-band gate/verify reads against in-flight lanes (the common
+# serial / one-bundle-per-lane flow never contends, so 0 costs nothing). Each overflow is a
+# full checkout — size the cap to your disk headroom; spillover is logged when it happens.
+overflow = 0
 # Per-lane resource preflight (issue #213). A `lanes > 1` batch pins each bundle to a lane
 # slot and exports `$PDCA_LANE`; the instance's gate commands map that to a per-lane resource
 # (a worktree, a container, a port). This verifies those resources exist ONCE, before the
