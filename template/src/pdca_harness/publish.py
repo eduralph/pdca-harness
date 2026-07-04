@@ -196,10 +196,11 @@ def publish(
     # against the *base* repo (where the fork branch doesn't exist) and fails with
     # "Head ref must be a branch". The branch lives on origin (the fork).
     head = f"{_fork_owner(repo) or repo_spec.split('/')[0]}:{branch}"
-    # Deterministically hyperlink the tracker id in the PR body (Mantis/GitHub) so the
-    # link never depends on the model complying — done AFTER the T4 gate (which sees the
-    # model's raw output) and just before `--body-file` consumes the file.
-    _link_tracker_id(cfg, d, issue_id)
+    # Normalize the PR body's tracker refs (#233 + #238 review): bare the closing-keyword
+    # trailer so GitHub auto-closes on merge, and deterministically ensure a clickable
+    # `[#id](url)` reference off that trailer when a URL pattern is configured. Done AFTER
+    # the T4 gate (which sees the model's raw output) and just before `--body-file` reads it.
+    _normalize_tracker_refs(cfg, d, issue_id)
     pr_cmd = ["gh", "pr", "create", "--draft", "--repo", repo_spec, "--base", pr_base,
               "--head", head, "--title", summary_line,
               "--body-file", str((d / PR_BODY).resolve())]
@@ -610,43 +611,72 @@ def _signoff_by(d: Path) -> str:
     return m.group(1).strip() if m else ""
 
 
-# Trailer verbs a `#<id>` reference may hang off of, so the hyperlink lands on the
-# tracker line and not a stray prose mention of the same number.
-_TRAILER_VERB_RE = re.compile(
-    r"(?i)^(fixes|closes|resolves|refs?|references|fix|close|resolve)\b")
+# GitHub's auto-close parser fires only on a BARE `#<id>` right after a closing keyword
+# (`Fixes #123`); a Markdown link (`Fixes [#123](url)`) is NOT recognised, so the issue
+# silently stays open on merge (#233). So the closing trailer must stay bare — and the
+# clickable tracker reference lives on a SEPARATE (non-closing) line.
+_CLOSING_VERB_RE = re.compile(r"(?i)^\s*(fix(e[sd])?|close[sd]?|resolve[sd]?)\b")
+_SUMMARY_RE = re.compile(r"(?i)^\s*#+\s*summary\b")
 
 
-def _link_tracker_id(cfg: Config, d: Path, issue_id: str) -> None:
-    """Hyperlink the bare tracker id in ``pr-description.md`` to ``issue_url_pattern``.
+def _normalize_tracker_refs(cfg: Config, d: Path, issue_id: str) -> None:
+    """Make ``pr-description.md`` auto-close-safe AND keep a deterministic clickable link.
 
-    A weak publisher model tends to copy the template's literal ``Fixes #<id>`` trailer
-    rather than the Markdown link the prompt asks for, so the link can't rely on model
-    compliance — make it deterministic here. No-op when no URL pattern is configured or
-    the id is not a real (numeric) ticket — a slug / ``--no-issue`` bundle has no valid
-    URL, mirroring the trailer's id_pending handling (leaves ``real_ticket``). Rewrites
-    only the tracker-trailer line (``Fixes #123`` → ``Fixes [#123](…)``), skips a ``#id``
-    already inside a Markdown link, and is idempotent so a re-publish never double-wraps.
+    Two guarantees, neither relying on the model complying with the prompt:
+
+    * **Auto-close (#233):** the closing-keyword trailer stays a BARE ``#<id>`` — strip any
+      ``[#<id>](url)`` wrapper off a ``Fixes/Closes/Resolves`` line back to ``#<id>``, since
+      GitHub auto-closes only on the bare form.
+    * **Click-through (#238 review):** when ``issue_url_pattern`` is configured for a real
+      (numeric) ticket, a clickable ``[#<id>](url)`` reference must exist somewhere OTHER
+      than that closing trailer — so a weak/omitting model can't drop it. An existing such
+      link is kept; else a bare non-closing ``#<id>`` (e.g. a Summary ``Reported in #<id>``)
+      is linked; else a ``Reported in [#<id>](url).`` line is inserted at the end of the
+      Summary section (or the top of the body if there is no Summary heading).
+
+    Idempotent; a no-op for a non-numeric (slug / ``--no-issue``) id or a missing body.
     """
-    if not cfg.issue_url_pattern or not issue_id.isdigit():
+    if not issue_id.isdigit():
         return
     body_path = d / PR_BODY
     if not body_path.is_file():
         return
-    url = cfg.issue_url_pattern.format(id=issue_id)
-    trailer = cfg.issue_trailer.format(id=issue_id) if cfg.issue_trailer else ""
-    # `#123` not already opened by `[` (so `[#123](…)` is left alone → idempotent), and
-    # `\b` so id 123 never matches inside 1234.
-    token = re.compile(r"(?<!\[)#" + re.escape(issue_id) + r"\b")
+    linked = re.compile(r"\[#" + re.escape(issue_id) + r"\]\([^)]*\)")   # `[#123](…)`
+    bare = re.compile(r"(?<!\[)#" + re.escape(issue_id) + r"\b")         # bare `#123`
     lines = body_path.read_text(encoding="utf-8").splitlines(keepends=True)
     changed = False
+
+    # (1) Auto-close: bare the closing-keyword trailer (strip any link wrapper).
     for i, line in enumerate(lines):
-        s = line.strip()
-        is_trailer = s and (s == trailer or _TRAILER_VERB_RE.match(s)) and token.search(line)
-        if not is_trailer:
-            continue
-        new = token.sub(f"[#{issue_id}]({url})", line)
-        if new != line:
-            lines[i] = new
-            changed = True
+        if _CLOSING_VERB_RE.match(line) and linked.search(line):
+            new = linked.sub(f"#{issue_id}", line)
+            if new != line:
+                lines[i], changed = new, True
+
+    # (2) Click-through: guarantee a clickable reference off the closing trailer.
+    url = cfg.issue_url_pattern.format(id=issue_id) if cfg.issue_url_pattern else ""
+    if url:
+        def non_closing(i: int) -> bool:
+            return not _CLOSING_VERB_RE.match(lines[i])
+        if not any(non_closing(i) and linked.search(lines[i]) for i in range(len(lines))):
+            # Prefer linking a bare `#id` already in prose (e.g. Summary "Reported in #123").
+            for i in range(len(lines)):
+                if non_closing(i) and bare.search(lines[i]):
+                    lines[i] = bare.sub(f"[#{issue_id}]({url})", lines[i], count=1)
+                    changed = True
+                    break
+            else:
+                # No reference outside the trailer → insert one at the end of the Summary.
+                ref = f"Reported in [#{issue_id}]({url}).\n"
+                s = next((i for i, ln in enumerate(lines) if _SUMMARY_RE.match(ln)), None)
+                if s is not None:
+                    end = next((k for k in range(s + 1, len(lines))
+                                if lines[k].lstrip().startswith("#")), len(lines))
+                    last = max((k for k in range(s + 1, end) if lines[k].strip()), default=s)
+                    lines.insert(last + 1, ref)
+                else:
+                    lines[0:0] = [ref, "\n"]
+                changed = True
+
     if changed:
         body_path.write_text("".join(lines), encoding="utf-8")
