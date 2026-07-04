@@ -196,10 +196,11 @@ def publish(
     # against the *base* repo (where the fork branch doesn't exist) and fails with
     # "Head ref must be a branch". The branch lives on origin (the fork).
     head = f"{_fork_owner(repo) or repo_spec.split('/')[0]}:{branch}"
-    # Keep the closing-keyword trailer bare so GitHub auto-closes the issue on merge (#233):
-    # strip any `Fixes [#id](url)` a model may have written back to `Fixes #id`. Done AFTER
+    # Normalize the PR body's tracker refs (#233 + #238 review): bare the closing-keyword
+    # trailer so GitHub auto-closes on merge, and deterministically ensure a clickable
+    # `[#id](url)` reference off that trailer when a URL pattern is configured. Done AFTER
     # the T4 gate (which sees the model's raw output) and just before `--body-file` reads it.
-    _bare_closing_trailer(d, issue_id)
+    _normalize_tracker_refs(cfg, d, issue_id)
     pr_cmd = ["gh", "pr", "create", "--draft", "--repo", repo_spec, "--base", pr_base,
               "--head", head, "--title", summary_line,
               "--body-file", str((d / PR_BODY).resolve())]
@@ -612,35 +613,70 @@ def _signoff_by(d: Path) -> str:
 
 # GitHub's auto-close parser fires only on a BARE `#<id>` right after a closing keyword
 # (`Fixes #123`); a Markdown link (`Fixes [#123](url)`) is NOT recognised, so the issue
-# silently stays open on merge (#233). The clickable tracker reference belongs on the
-# Summary's `Reported in [#id](url)` line instead — never on the closing trailer.
+# silently stays open on merge (#233). So the closing trailer must stay bare — and the
+# clickable tracker reference lives on a SEPARATE (non-closing) line.
 _CLOSING_VERB_RE = re.compile(r"(?i)^\s*(fix(e[sd])?|close[sd]?|resolve[sd]?)\b")
+_SUMMARY_RE = re.compile(r"(?i)^\s*#+\s*summary\b")
 
 
-def _bare_closing_trailer(d: Path, issue_id: str) -> None:
-    """Keep the PR body's closing-keyword trailer a BARE ``#<id>`` so GitHub auto-closes
-    the issue on merge (#233).
+def _normalize_tracker_refs(cfg: Config, d: Path, issue_id: str) -> None:
+    """Make ``pr-description.md`` auto-close-safe AND keep a deterministic clickable link.
 
-    A model may copy an older/misleading ``Fixes [#N](url)`` example, which defeats
-    auto-close; strip any Markdown-link wrapper off the id on a closing-keyword line back
-    to ``#N``. Deterministic (does not rely on model compliance), idempotent, and a no-op
-    for a non-numeric (slug / ``--no-issue``) id or a body with no such line. Clickability
-    is provided separately by the Summary's ``Reported in [#id](url)`` line, so the trailer
-    never needs to be a link.
+    Two guarantees, neither relying on the model complying with the prompt:
+
+    * **Auto-close (#233):** the closing-keyword trailer stays a BARE ``#<id>`` — strip any
+      ``[#<id>](url)`` wrapper off a ``Fixes/Closes/Resolves`` line back to ``#<id>``, since
+      GitHub auto-closes only on the bare form.
+    * **Click-through (#238 review):** when ``issue_url_pattern`` is configured for a real
+      (numeric) ticket, a clickable ``[#<id>](url)`` reference must exist somewhere OTHER
+      than that closing trailer — so a weak/omitting model can't drop it. An existing such
+      link is kept; else a bare non-closing ``#<id>`` (e.g. a Summary ``Reported in #<id>``)
+      is linked; else a ``Reported in [#<id>](url).`` line is inserted at the end of the
+      Summary section (or the top of the body if there is no Summary heading).
+
+    Idempotent; a no-op for a non-numeric (slug / ``--no-issue``) id or a missing body.
     """
     if not issue_id.isdigit():
         return
     body_path = d / PR_BODY
     if not body_path.is_file():
         return
-    linked = re.compile(r"\[#" + re.escape(issue_id) + r"\]\([^)]*\)")  # `[#123](…)`
+    linked = re.compile(r"\[#" + re.escape(issue_id) + r"\]\([^)]*\)")   # `[#123](…)`
+    bare = re.compile(r"(?<!\[)#" + re.escape(issue_id) + r"\b")         # bare `#123`
     lines = body_path.read_text(encoding="utf-8").splitlines(keepends=True)
     changed = False
+
+    # (1) Auto-close: bare the closing-keyword trailer (strip any link wrapper).
     for i, line in enumerate(lines):
         if _CLOSING_VERB_RE.match(line) and linked.search(line):
             new = linked.sub(f"#{issue_id}", line)
             if new != line:
-                lines[i] = new
+                lines[i], changed = new, True
+
+    # (2) Click-through: guarantee a clickable reference off the closing trailer.
+    url = cfg.issue_url_pattern.format(id=issue_id) if cfg.issue_url_pattern else ""
+    if url:
+        def non_closing(i: int) -> bool:
+            return not _CLOSING_VERB_RE.match(lines[i])
+        if not any(non_closing(i) and linked.search(lines[i]) for i in range(len(lines))):
+            # Prefer linking a bare `#id` already in prose (e.g. Summary "Reported in #123").
+            for i in range(len(lines)):
+                if non_closing(i) and bare.search(lines[i]):
+                    lines[i] = bare.sub(f"[#{issue_id}]({url})", lines[i], count=1)
+                    changed = True
+                    break
+            else:
+                # No reference outside the trailer → insert one at the end of the Summary.
+                ref = f"Reported in [#{issue_id}]({url}).\n"
+                s = next((i for i, ln in enumerate(lines) if _SUMMARY_RE.match(ln)), None)
+                if s is not None:
+                    end = next((k for k in range(s + 1, len(lines))
+                                if lines[k].lstrip().startswith("#")), len(lines))
+                    last = max((k for k in range(s + 1, end) if lines[k].strip()), default=s)
+                    lines.insert(last + 1, ref)
+                else:
+                    lines[0:0] = [ref, "\n"]
                 changed = True
+
     if changed:
         body_path.write_text("".join(lines), encoding="utf-8")

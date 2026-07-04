@@ -443,70 +443,87 @@ class PublishSlice(unittest.TestCase):
         self.assertEqual(publish._checkout_path(self.cfg, "org/foo"),
                          (self.cfg.root / "../custom-foo").resolve())
 
-    # --- closing-keyword trailer stays BARE so GitHub auto-closes on merge (#233) ---
+    # --- tracker refs: bare closing trailer (auto-close, #233) + deterministic link (#238) ---
+    _URL = "https://tracker/view.php?id={id}"
 
-    def test_bare_closing_trailer_leaves_a_bare_fixes_untouched(self) -> None:
-        # The correct form: a bare `Fixes #266` must survive unchanged — GitHub auto-closes
-        # only on a bare id after the keyword.
+    def test_normalize_leaves_a_bare_fixes_untouched(self) -> None:
+        # The correct form: a bare `Fixes #266` must survive — GitHub auto-closes only on a
+        # bare id after the keyword. No URL pattern ⇒ no link work.
         d = _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)
         (d / "pr-description.md").write_text(
             "## Summary\n**User impact:** users saw X.\n\nFixes #266\n", encoding="utf-8")
-        publish._bare_closing_trailer(d, "266")
+        publish._normalize_tracker_refs(self.cfg, d, "266")
         self.assertIn("\nFixes #266\n", (d / "pr-description.md").read_text(encoding="utf-8"))
 
-    def test_bare_closing_trailer_strips_a_linked_fixes(self) -> None:
+    def test_normalize_strips_a_linked_fixes(self) -> None:
         # #233: a model that wrote `Fixes [#266](url)` would silently defeat auto-close; the
-        # guard strips the Markdown link back to a bare `Fixes #266`.
+        # closing trailer is bared back to `Fixes #266`.
         d = _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)
         (d / "pr-description.md").write_text(
             "Fixes [#266](https://tracker/view.php?id=266)\n", encoding="utf-8")
-        publish._bare_closing_trailer(d, "266")
-        body = (d / "pr-description.md").read_text(encoding="utf-8")
-        self.assertEqual(body, "Fixes #266\n")
-        self.assertNotIn("[", body)
-
-    def test_bare_closing_trailer_noop_for_nonnumeric_id(self) -> None:
-        # A slug / pending id is not a real ticket number → nothing to normalize.
-        d = _bundle(self.cfg, "820-build", brief_body=_FIX_BRIEF, accepted=True)
-        (d / "pr-description.md").write_text("Fixes #ABC\n", encoding="utf-8")
-        publish._bare_closing_trailer(d, "820-build")
-        self.assertEqual((d / "pr-description.md").read_text(encoding="utf-8"), "Fixes #ABC\n")
-
-    def test_bare_closing_trailer_is_idempotent(self) -> None:
-        # A re-publish over an already-bare trailer is a no-op.
-        d = _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)
-        (d / "pr-description.md").write_text("Fixes #266\n", encoding="utf-8")
-        publish._bare_closing_trailer(d, "266")
+        publish._normalize_tracker_refs(self.cfg, d, "266")   # no pattern set ⇒ only bare
         self.assertEqual((d / "pr-description.md").read_text(encoding="utf-8"), "Fixes #266\n")
 
-    def test_bare_closing_trailer_leaves_the_summary_link_clickable(self) -> None:
-        # The clickable reference lives on the Summary `Reported in [#id](url)` line — a
-        # NON-closing line — and must be left as a link; only the closing trailer is bared.
+    def test_normalize_noop_for_nonnumeric_id(self) -> None:
+        d = _bundle(self.cfg, "820-build", brief_body=_FIX_BRIEF, accepted=True)
+        (d / "pr-description.md").write_text("Fixes #ABC\n", encoding="utf-8")
+        publish._normalize_tracker_refs(self.cfg, d, "820-build")
+        self.assertEqual((d / "pr-description.md").read_text(encoding="utf-8"), "Fixes #ABC\n")
+
+    def test_normalize_inserts_deterministic_summary_link_when_absent(self) -> None:
+        # #238 review: pattern set but the body has NO clickable ref (a weak/omitting model,
+        # like the stub) → publish must INSERT a `Reported in [#id](url)` line off the trailer,
+        # not leave the PR with no tracker URL. Trailer stays bare.
+        self.cfg.issue_url_pattern = self._URL
         d = _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)
         (d / "pr-description.md").write_text(
-            "Reported in [#266](https://tracker/view.php?id=266).\n\n"
-            "Fixes [#266](https://tracker/view.php?id=266)\n", encoding="utf-8")
-        publish._bare_closing_trailer(d, "266")
+            "## Summary\n**User impact:** X.\n\none-line change.\n\n"
+            "## What to look at\nY.\n\nFixes #266\n", encoding="utf-8")
+        publish._normalize_tracker_refs(self.cfg, d, "266")
         body = (d / "pr-description.md").read_text(encoding="utf-8")
-        self.assertIn("Reported in [#266](https://tracker/view.php?id=266).", body)  # link kept
-        self.assertIn("\nFixes #266\n", body)                                        # trailer bared
+        self.assertIn("Reported in [#266](https://tracker/view.php?id=266).", body)  # inserted
+        self.assertLess(body.index("Reported in"), body.index("## What to look at"))  # in Summary
+        self.assertIn("\nFixes #266\n", body)                                         # trailer bare
         self.assertNotIn("Fixes [#266]", body)
 
-    def test_publish_keeps_closing_trailer_bare_end_to_end(self) -> None:
-        # The call site (#233): a real publish run (dry) leaves the closing `Fixes` trailer a
-        # BARE id in the on-disk PR body — and normalizes a linked one back — so GitHub
-        # auto-closes on merge. Clickability is the Summary line, not the trailer.
+    def test_normalize_links_an_existing_bare_reference(self) -> None:
+        # A bare `#id` already in prose is linked in place (no separate insertion), trailer bare.
+        self.cfg.issue_url_pattern = self._URL
+        d = _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)
+        (d / "pr-description.md").write_text(
+            "## Summary\nX. Reported in #266.\n\nFixes #266\n", encoding="utf-8")
+        publish._normalize_tracker_refs(self.cfg, d, "266")
+        body = (d / "pr-description.md").read_text(encoding="utf-8")
+        self.assertIn("Reported in [#266](https://tracker/view.php?id=266).", body)
+        self.assertEqual(body.count("Reported in"), 1)        # no duplicate line inserted
+        self.assertIn("\nFixes #266\n", body)
+
+    def test_normalize_keeps_an_existing_summary_link_and_bares_trailer(self) -> None:
+        # An already-clickable Summary line is kept as-is (idempotent, no duplicate) while the
+        # linked trailer is bared.
+        self.cfg.issue_url_pattern = self._URL
+        d = _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)
+        (d / "pr-description.md").write_text(
+            "## Summary\nReported in [#266](https://tracker/view.php?id=266).\n\n"
+            "Fixes [#266](https://tracker/view.php?id=266)\n", encoding="utf-8")
+        publish._normalize_tracker_refs(self.cfg, d, "266")
+        body = (d / "pr-description.md").read_text(encoding="utf-8")
+        self.assertEqual(body.count("Reported in [#266]"), 1)   # kept, not duplicated
+        self.assertIn("\nFixes #266\n", body)                   # trailer bared
+        self.assertNotIn("Fixes [#266]", body)
+
+    def test_publish_bares_trailer_and_guarantees_link_end_to_end(self) -> None:
+        # The call site: a real publish run (dry) with a URL pattern set leaves the `Fixes`
+        # trailer BARE (auto-close) AND guarantees a clickable link off it (the stub body
+        # writes no Summary link), so click-through never depends on the model.
         self.cfg.issue_url_pattern = "https://mantis.example.com/view.php?id={id}"
         d = _bundle(self.cfg, "13865", brief_body=_FIX_BRIEF, accepted=True)
-        # Simulate a model that mis-drafted the trailer as a link; publish must bare it.
-        (d / "pr-description.md").write_text(
-            "## Summary\nFix.\n\nFixes [#13865](https://mantis.example.com/view.php?id=13865)\n",
-            encoding="utf-8")
         with redirect_stdout(io.StringIO()):
             self.assertEqual(publish.publish(self.cfg, "13865", dry_run=True), 0)
         body = (d / "pr-description.md").read_text(encoding="utf-8")
         self.assertIn("Fixes #13865", body)                  # bare closing keyword → auto-closes
-        self.assertNotIn("Fixes [#13865]", body)             # the link wrapper was stripped
+        self.assertNotIn("Fixes [#13865]", body)             # never a linked closing trailer
+        self.assertIn("[#13865](https://mantis.example.com/view.php?id=13865)", body)  # link present
 
     # --- stack mode (issue #54): commit onto an existing PR branch ---
 
