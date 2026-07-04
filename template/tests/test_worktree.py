@@ -120,6 +120,16 @@ class WorktreeRealGit(unittest.TestCase):
         # The host's primary checkout was not touched.
         self.assertEqual(self._porcelain(self.primary), "")
 
+    def test_ensure_fails_closed_on_unresolvable_base(self) -> None:
+        # #235: the target IS a git checkout but the specified base doesn't resolve → ABORT
+        # (WorktreeError), never fall back to running Do/Check in the operator's primary
+        # checkout. Nothing is created or mutated.
+        bad = _bundle(self.cfg, "BAD", target="org/repo @ no-such-base")
+        with self.assertRaises(worktree.WorktreeError):
+            worktree.ensure(bad, self.cfg)
+        self.assertEqual(self._porcelain(self.primary), "")             # primary untouched
+        self.assertFalse((self.tmp / "checkout.pdca-wt").exists())      # no worktree created
+
     def test_reused_worktree_is_reset_each_cycle(self) -> None:
         wt = worktree.ensure(self.d, self.cfg)
         # A prior cycle's edits in the worktree…

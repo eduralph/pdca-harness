@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 from . import (act, brief, doctor, drift, driver, flow, gates, manual_test, merged, publish,
-               queue, registry, revalidate, revert, signoff, state, waves)
+               queue, registry, revalidate, revert, signoff, state, waves, worktree)
 from .config import Config
 
 
@@ -200,10 +200,15 @@ def main(argv: list[str] | None = None) -> int:
         return _status(cfg, None)
     if args.cmd == "init-issue":
         return _init_issue(cfg, args.issue_id, args.from_brief)
-    if args.cmd == "run":
-        return _run(cfg, args.issue_id)
-    if args.cmd == "flow":
-        return _flow(cfg, args)
+    if args.cmd in ("run", "flow"):
+        # Fail closed on an unresolvable worktree base (#235): a clean one-line error, not a
+        # traceback. Batch flow isolates this per bundle already; this covers single-bundle
+        # `run` / `flow <id>`, which drive Do (the only WorktreeError-raising beat) directly.
+        try:
+            return _run(cfg, args.issue_id) if args.cmd == "run" else _flow(cfg, args)
+        except worktree.WorktreeError as exc:
+            print(f"pdca: {exc}", file=sys.stderr)
+            return 1
     if args.cmd == "status":
         return _status(cfg, args.issue_id)
     if args.cmd == "waves":
