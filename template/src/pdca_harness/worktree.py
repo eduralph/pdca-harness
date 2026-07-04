@@ -134,7 +134,9 @@ def resync(d: Path, cfg: Config) -> Path | None:
     if owner_of(wt) == d.name:
         return wt  # already this bundle's build (normal Do→Check) — leave Do's tree intact
     # A foreign / unstamped tree: heal it to THIS bundle's state before the gate reads it.
-    if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-fdq") != 0:
+    # ``-x`` also removes IGNORED files, so a prior bundle's ignored build outputs (dist/,
+    # caches, generated assets) can't linger and contaminate this bundle's gate (issue #237).
+    if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-fdxq") != 0:
         print(f"worktree: could not resync {wt} to {base_ref} for {d.name}; the gate "
               "falls back to the primary checkout", file=sys.stderr)
         return None
@@ -186,8 +188,11 @@ def stage(d: Path, cfg: Config) -> Path | None:
             print(f"worktree: could not create {wt} off {base_ref} for {d.name}; nothing to try",
                   file=sys.stderr)
             return None
-    # Reconstruct THIS bundle's build: clean base, then its patch.
-    if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-fdq") != 0:
+    # Reconstruct THIS bundle's build: clean base, then its patch. ``-x`` also removes IGNORED
+    # files, so another bundle's ignored build outputs (dist/, caches, generated assets) can't
+    # survive and get launched alongside this bundle's source patch — which would defeat the
+    # owner check and let a reviewer sign off the wrong build (issue #237).
+    if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-fdxq") != 0:
         print(f"worktree: could not reset {wt} to {base_ref} for {d.name}; nothing to try",
               file=sys.stderr)
         return None
