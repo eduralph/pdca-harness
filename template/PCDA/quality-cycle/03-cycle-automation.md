@@ -97,7 +97,7 @@ Optionally, the human jots §10 Act candidates while at the bundle — these are
 Act does not run inside the per-issue state machine. It is a **separate pass**, on a separate cadence (every N completed cycles, weekly, when a pattern surfaces). Its instrumentation:
 
 - **Bundle index.** A read-only generator that lists frozen bundles since the last Act review, surfaces §6/§7/§9/§10 contents, and highlights recurring patterns (same NEEDS-HUMAN class across cycles, same brief-template field flagged in §10).
-- **Process-baseline diff tools.** Edit-with-history for the spec template, the conformance ruleset, the gate set, the agent files (`.claude/agents/*.md` / `AGENTS.md`), with diff/preview against current.
+- **Process-baseline diff tools.** Edit-with-history for the spec template, the conformance ruleset, the gate set, the agent role prompts (`agents/*.md`, with the Claude wrapper `.claude/agents/*.md` / `AGENTS.md`), with diff/preview against current.
 - **Act log writer.** Appends a dated entry to `process/act-log.md` ([02 - Cycle Artifacts](02-cycle-artifacts.md) §ACT) recording: which bundles were considered, the patterns found, the concrete deltas applied, and a watch-for-recurrence note used by the next Act review.
 - **Process-delta ledger — [built].** `process/act-ledger.json` tracks each recurring signal Act surfaces: `open` when first seen, marked **applied** by `pdca act resolve "<signal>" --location <path:line>` once the fix lands, and re-flagged **ineffective** if the same miss recurs in a cycle frozen *after* the applied date — surfaced as a "⚠ Ineffective deltas" section in `act index` / the `act log` scaffold (issue #150). So Act audits whether its own prescriptions actually worked, instead of writing them and forgetting.
 
@@ -200,7 +200,7 @@ Automating any of these would be automating judgment, which the model says is ir
 
 **The anti-pattern to avoid:** a single agentic skill/loop that "runs the PDCA cycle." It feels like more automation and is less — it re-inserts a model into the control path the design works to keep deterministic (no LLM in the gating path). The cycle is *run by* a script; the model is *invoked by* the script at its leaves. Hold that inversion and the rest follows.
 
-The model leaves are configured as `.claude/agents/*.md` subagents (planner, builder, sign-off, publisher, act); each leaf's instruction file pins its own consistency, so don't share one across leaves. The **reviewer** is the one deliberately decorrelated leaf — a *different vendor* from the builder (Codex via `AGENTS.md`), since independence is a Check property.
+Each model leaf's instructions live in a canonical, vendor-neutral body `agents/<name>.md` (planner, builder, sign-off, publisher, act); Claude leaves are packaged as `.claude/agents/*.md` subagents (frontmatter wrapper + that body) so `--agent` resolves, while non-Claude leaves read the `agents/` body inline. Each leaf's file pins its own consistency, so don't share one across leaves. The **reviewer** is the one deliberately decorrelated leaf — a *different vendor* from the builder (Codex via `AGENTS.md`), since independence is a Check property.
 
 ## Driver skeleton
 

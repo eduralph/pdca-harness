@@ -103,13 +103,34 @@ def _role_injection(
             return [profile.agent_flag, leaf.agent], ""
         return [], ""
     if profile.role_injection == "inline":
-        path = cfg.root / ".claude" / "agents" / f"{leaf.agent}.md"
+        # The role prompt's canonical, vendor-neutral source of truth is `agents/<name>.md`;
+        # `.claude/agents/<name>.md` is Claude-only packaging (frontmatter + the same body)
+        # generated from it. Prefer the canonical file; fall back to the legacy
+        # `.claude/agents/` location for an instance rendered before the split. strip_frontmatter
+        # is a no-op on the frontmatter-less canonical body and still correct on the legacy one.
+        canonical = cfg.root / "agents" / f"{leaf.agent}.md"
+        legacy = cfg.root / ".claude" / "agents" / f"{leaf.agent}.md"
+        path = canonical if canonical.is_file() else legacy
         try:
             body = families.strip_frontmatter(path.read_text(encoding="utf-8")).strip()
         except OSError as exc:
             print(f"leaves: role prompt {path} unreadable ({exc}) — proceeding "
                   "without it", file=sys.stderr)
             return [], ""
+        # Migration guard (#228): a pre-split instance kept its role prompt ONLY in the legacy
+        # `.claude/agents/<name>.md` and may have CUSTOMIZED it. Now that the canonical file
+        # wins, those edits would be silently shadowed. If a legacy file exists and its body
+        # diverges from the canonical one we're using, say so — the fix is to migrate the edits
+        # into `agents/<name>.md` (the vendor-neutral source), not to leave them stranded.
+        if path == canonical and legacy.is_file():
+            try:
+                legacy_body = families.strip_frontmatter(legacy.read_text(encoding="utf-8")).strip()
+            except OSError:
+                legacy_body = body
+            if legacy_body != body:
+                print(f"leaves: {legacy} diverges from the canonical {canonical} and is being "
+                      f"ignored — migrate any customizations into agents/{leaf.agent}.md "
+                      "(the vendor-neutral role-prompt source).", file=sys.stderr)
         return [], (body + "\n\n---\n\n") if body else ""
     return [], ""
 
