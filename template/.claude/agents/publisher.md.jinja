@@ -55,9 +55,13 @@ not push, branch, or open a PR yourself.**
      plus a concrete way to try/reproduce it. In BOTH, **no code / implementation jargon**
      — no type/tag/attribute names, no class internals, no `path:line` citations; a reader
      who has never opened the file must grasp *what* broke and *why* from these alone. The
-     mechanism is deferred below. **Close the Summary with a link to the tracker issue** in
-     the `[tracker].issue_url_pattern` form (e.g. `Reported in [#<id>](<tracker-url>).`), so
-     the report is one click away from the top — not only via the closing trailer.
+     mechanism is deferred below. **When `[tracker].issue_url_pattern` is configured AND the
+     bundle id is a real tracker number**, close the Summary with a link to the tracker issue
+     in that form (e.g. `Reported in [#<id>](<tracker-url>).`), so the report is one click
+     away from the top — not only via the closing trailer. **If the pattern is unset, or the
+     bundle is ticketless (`--no-issue`) or a slug** (no real tracker number), there is no URL
+     to form — OMIT the link (do NOT invent a `#0000`/placeholder) and, if the origin matters,
+     state it in plain words instead.
    - **Root cause / Fix / Verification — for the maintainer.** Here the internals belong:
      the exact `path:lines` on the **target branch**, the mechanism, and the review trail.
      Make **Verification** a skimmable claim→evidence mapping (the claim, where it was
