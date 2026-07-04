@@ -98,11 +98,14 @@ extra_bootstrap = ""
 # Manual-test launch (`pdca try <id>`). Check's validation act and the visual / GUI /
 # manual-repro §6 NEEDS-HUMAN rows are a human call — for a GUI app that means running the
 # PATCHED build by hand. The deterministic gates can't, and the reviewer leaf is headless +
-# sandboxed, so `pdca try <id>` is the on-demand human path: it launches this command from
-# the bundle's per-cycle worktree (the tree Do edited, carrying the patch — needs
-# [driver].worktree on), inheriting your terminal with NO timeout (quit the app to return).
-# The command runs from $PDCA_WORKTREE with $PDCA_BUNDLE / $PDCA_WORKTREE / $PDCA_TARGET
-# (and $PDCA_LANE under concurrency) exported — same convention as a gate cmd. It is
+# sandboxed, so `pdca try <id>` is the on-demand human path: it MATERIALIZES the patched
+# tree from the bundle's patch.diff (reconstructed off the base — needs [driver].worktree on)
+# and launches this command from it, inheriting your terminal with NO timeout (quit to return).
+# Because it rebuilds from patch.diff, it works for ANY parked bundle in a batch, not only the
+# last one Do built. The command runs from cwd=$PDCA_WORKTREE with $PDCA_BUNDLE / $PDCA_WORKTREE
+# / $PDCA_TARGET (and $PDCA_LANE under concurrency) exported — same convention as a gate cmd;
+# reference a repo script by an ABSOLUTE path (e.g. "$PDCA_BUNDLE/../../scripts/foo.sh"), not
+# a bare ./scripts/… (which would resolve against the worktree, not your project). It is
 # ADVISORY: it decides nothing (record what you saw in a Manual-verification note and sign
 # off in §9), and edits made while testing are reset on the next Do. Project-specific data,
 # like a gate command; "" ⇒ `pdca try` errors with a configure-me hint.

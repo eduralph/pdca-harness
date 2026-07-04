@@ -4,16 +4,17 @@ Check's **validation act** ("is this the right thing?") and the visual / GUI /
 manual-repro §6 NEEDS-HUMAN rows are irreducibly a human call — for a GUI app, clearing
 them means the human actually *running the patched build* and driving it. The deterministic
 gates can't, and the reviewer leaf is headless + sandboxed + read-only-grounded (it can't
-hand a human an interactive session). But the patch is already applied on disk: Do runs in
-a per-cycle git **worktree** (:mod:`pdca_harness.worktree`) that carries the edits and
-persists through Check/sign-off (it's only reset on the next Do).
+hand a human an interactive session).
 
-``launch`` runs the instance-configured ``[manual_test].cmd`` from that worktree, inheriting
-the terminal (no capture, no timeout — the human quits the app to return), with the same
-``PDCA_*`` env the gate / reviewer commands get. It NEVER calls :func:`worktree.ensure`
-(which resets the tree to base and would throw the patch away): the launch is read-only over
-the harness's state. Advisory only — it decides nothing; the human records the outcome in a
-Manual-verification note and signs off in §9.
+``launch`` MATERIALIZES the bundle's patched tree on demand from its ``patch.diff``
+(:func:`worktree.stage`) — reconstructed off the target base — so a human reviewing a *batch*
+can ``pdca try <id>`` any parked bundle in turn, not only the last one Do left in the shared,
+reset-reused per-cycle worktree (batch-then-review is the default cadence). It then runs the
+instance-configured ``[manual_test].cmd`` from that tree, inheriting the terminal (no capture,
+no timeout — the human quits the app to return), with the same ``PDCA_*`` env the gate /
+reviewer commands get. It leaves BUNDLE state untouched (advisory): edits made while testing
+are reset the next time a tree is staged; the human records the outcome in a Manual-verification
+note and signs off in §9.
 """
 
 from __future__ import annotations
@@ -54,32 +55,19 @@ def launch(cfg: Config, issue_id: str) -> int:
               file=sys.stderr)
         return 2
 
-    # The patch is physically applied only inside the per-cycle worktree. path() is READ-ONLY
-    # (do NOT call ensure() — it hard-resets the tree to base, discarding the patch).
-    wt = worktree.path(d, cfg)
-    if wt is None:
-        if not cfg.worktree:
-            print("[driver].worktree is off — there is no patched worktree to launch. "
-                  "Enable worktree isolation and re-run this bundle's Do.", file=sys.stderr)
-        else:
-            print(f"no patched worktree on disk for {d.name} — the patch isn't applied "
-                  "anywhere to run. This happens when the target isn't a git checkout or a "
-                  f"later Do reset the tree. Re-run this bundle's Do (`{_prog()} flow "
-                  f"{issue_id}`).", file=sys.stderr)
+    # Materialize this bundle's patched tree from its patch.diff ON DEMAND (worktree.stage),
+    # so a human reviewing a batch can `pdca try` ANY parked bundle in turn — not only the
+    # last one Do left in the shared, reset-reused per-cycle worktree. patch.diff is Do's
+    # canonical output, so the reconstruction is deterministic; it mirrors the gate's resync.
+    if not cfg.worktree:
+        print("[driver].worktree is off — enable worktree isolation ([driver].worktree) so "
+              "`pdca try` can materialize the patched tree from patch.diff.", file=sys.stderr)
         return 1
-
-    # The per-lane worktree is reset-and-reused across bundles (issue #94): a LATER bundle's
-    # Do hard-resets it and applies its own patch. So "the tree exists and this bundle has a
-    # patch.diff" is not enough — the tree may now hold a different bundle's build. Confirm
-    # this bundle still owns it (the marker `ensure` stamps), else launching would test the
-    # wrong build under this bundle's name.
-    occupant = worktree.owner_of(wt)
-    if occupant != d.name:
-        why = (f"it now holds {occupant}'s build (a later Do reused this lane's worktree)"
-               if occupant else "its owner can't be confirmed (built by an older run)")
-        print(f"the worktree at {wt} is not {d.name}'s build — {why}. Re-run this bundle's "
-              f"Do to reload its patch before testing (`{_prog()} flow {issue_id}`).",
-              file=sys.stderr)
+    wt = worktree.stage(d, cfg)
+    if wt is None:
+        print(f"could not materialize {d.name}'s patched tree — its patch.diff may not apply "
+              "onto the target base, or the target isn't a git checkout (see the worktree "
+              "messages above).", file=sys.stderr)
         return 1
 
     env = {**os.environ,

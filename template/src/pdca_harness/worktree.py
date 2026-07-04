@@ -134,7 +134,9 @@ def resync(d: Path, cfg: Config) -> Path | None:
     if owner_of(wt) == d.name:
         return wt  # already this bundle's build (normal Do→Check) — leave Do's tree intact
     # A foreign / unstamped tree: heal it to THIS bundle's state before the gate reads it.
-    if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-fdq") != 0:
+    # ``-x`` also removes IGNORED files, so a prior bundle's ignored build outputs (dist/,
+    # caches, generated assets) can't linger and contaminate this bundle's gate (issue #237).
+    if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-fdxq") != 0:
         print(f"worktree: could not resync {wt} to {base_ref} for {d.name}; the gate "
               "falls back to the primary checkout", file=sys.stderr)
         return None
@@ -151,6 +153,57 @@ def resync(d: Path, cfg: Config) -> Path | None:
             _owner_file(wt).unlink(missing_ok=True)
             return None
     _stamp_owner(wt, d)  # this bundle now owns the healed tree
+    return wt
+
+
+def stage(d: Path, cfg: Config) -> Path | None:
+    """Materialize bundle ``d``'s patched tree from its ``patch.diff`` — for ``pdca try``.
+
+    Unlike :func:`path` (read-only; hands back a tree only if Do already left it there),
+    ``stage`` RECONSTRUCTS the tree on demand: create the per-lane worktree off the base if
+    it doesn't exist, reset + clean an existing one, apply THIS bundle's ``patch.diff``, and
+    take ownership. So a human reviewing a *batch* can ``pdca try <id>`` any built/parked
+    bundle in turn — not just the last one Do populated in the shared, reset-reused per-cycle
+    worktree. Deterministic: ``patch.diff`` is Do's canonical output. Best-effort — isolation
+    off / unresolved target / non-git checkout / a ``patch.diff`` that no longer applies onto
+    the base returns None (``pdca try`` then reports no launchable tree). Mirrors the gate's
+    :func:`resync` reconstruction (issue #224), extended to create the tree when it is absent.
+
+    NB: like Do's :func:`ensure`, it hard-resets the shared per-lane worktree — so it must not
+    run while a lane's Do is mid-build on the same tree (``pdca try`` is a between-cycles,
+    human-paced action; the normal batch-then-review flow has all Do already done).
+    """
+    if not cfg.worktree:
+        return None
+    tgt = _target(d, cfg)
+    if tgt is None:
+        return None
+    primary, base_ref = tgt
+    wt = _wt_dir(primary)
+    if not (wt / ".git").exists():
+        _git(primary, "fetch", cfg.base_remote)  # best-effort refresh of the base
+        if base_ref.startswith("origin/") and cfg.base_remote != "origin":
+            _git(primary, "fetch", "origin")  # a stacked base lives on origin (#123)
+        if _git(primary, "worktree", "add", "--force", str(wt), base_ref) != 0:
+            print(f"worktree: could not create {wt} off {base_ref} for {d.name}; nothing to try",
+                  file=sys.stderr)
+            return None
+    # Reconstruct THIS bundle's build: clean base, then its patch. ``-x`` also removes IGNORED
+    # files, so another bundle's ignored build outputs (dist/, caches, generated assets) can't
+    # survive and get launched alongside this bundle's source patch — which would defeat the
+    # owner check and let a reviewer sign off the wrong build (issue #237).
+    if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-fdxq") != 0:
+        print(f"worktree: could not reset {wt} to {base_ref} for {d.name}; nothing to try",
+              file=sys.stderr)
+        return None
+    patch = d / "patch.diff"
+    if patch.is_file() and patch.read_text(encoding="utf-8").strip():
+        if _git(wt, "apply", str(patch.resolve())) != 0:
+            print(f"worktree: {d.name}'s patch.diff did not apply onto {base_ref} in {wt}; "
+                  "nothing to try", file=sys.stderr)
+            _owner_file(wt).unlink(missing_ok=True)
+            return None
+    _stamp_owner(wt, d)
     return wt
 
 

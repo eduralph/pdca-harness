@@ -1,9 +1,9 @@
 """Offline slice for `pdca try <id>` — the manual-test launch (stdlib unittest, no deps).
 
-Proves the handler resolves the patched worktree and launches [manual_test].cmd from it
-with the PDCA_* env, and fails closed (never spawning anything) on the operator-error paths:
-missing config, missing/unbuilt bundle, no worktree on disk. subprocess.run is mocked so no
-app is ever started.
+Proves the handler MATERIALIZES the patched tree on demand (worktree.stage, reconstructed
+from patch.diff) and launches [manual_test].cmd from it with the PDCA_* env, and fails closed
+(never spawning anything) on the operator-error paths: missing config, missing/unbuilt bundle,
+worktree isolation off, no stageable tree. subprocess.run is mocked so no app is ever started.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ class ManualTestLaunch(unittest.TestCase):
     def test_happy_path_launches_from_worktree_with_env(self) -> None:
         self._built_bundle()
         wt = self._fake_worktree()
-        with mock.patch.object(worktree, "path", return_value=wt), \
+        with mock.patch.object(worktree, "stage", return_value=wt), \
                 mock.patch.object(manual_test.subprocess, "run") as run:
             run.return_value = SimpleNamespace(returncode=0)
             rc = manual_test.launch(self.cfg, "X")
@@ -77,7 +77,7 @@ class ManualTestLaunch(unittest.TestCase):
 
     def test_passes_through_app_exit_code(self) -> None:
         self._built_bundle()
-        with mock.patch.object(worktree, "path", return_value=self._fake_worktree()), \
+        with mock.patch.object(worktree, "stage", return_value=self._fake_worktree()), \
                 mock.patch.object(manual_test.subprocess, "run") as run:
             run.return_value = SimpleNamespace(returncode=3)
             self.assertEqual(manual_test.launch(self.cfg, "X"), 3)
@@ -85,7 +85,7 @@ class ManualTestLaunch(unittest.TestCase):
     def test_lane_exported_when_set(self) -> None:
         self._built_bundle()
         wt = self._fake_worktree()
-        with mock.patch.object(worktree, "path", return_value=wt), \
+        with mock.patch.object(worktree, "stage", return_value=wt), \
                 mock.patch.object(lane, "current", return_value=2), \
                 mock.patch.object(manual_test.subprocess, "run") as run:
             run.return_value = SimpleNamespace(returncode=0)
@@ -94,7 +94,7 @@ class ManualTestLaunch(unittest.TestCase):
 
     def test_lane_absent_when_serial(self) -> None:
         self._built_bundle()
-        with mock.patch.object(worktree, "path", return_value=self._fake_worktree()), \
+        with mock.patch.object(worktree, "stage", return_value=self._fake_worktree()), \
                 mock.patch.object(lane, "current", return_value=None), \
                 mock.patch.object(manual_test.subprocess, "run") as run:
             run.return_value = SimpleNamespace(returncode=0)
@@ -104,7 +104,7 @@ class ManualTestLaunch(unittest.TestCase):
     def test_missing_config_exits_2_without_launching(self) -> None:
         self.cfg.manual_test_cmd = ""
         self._built_bundle()
-        with mock.patch.object(worktree, "path", return_value=self._fake_worktree()), \
+        with mock.patch.object(worktree, "stage", return_value=self._fake_worktree()), \
                 mock.patch.object(manual_test.subprocess, "run") as run:
             self.assertEqual(manual_test.launch(self.cfg, "X"), 2)
             run.assert_not_called()
@@ -131,27 +131,7 @@ class ManualTestLaunch(unittest.TestCase):
 
     def test_no_worktree_exits_1_without_launching(self) -> None:
         self._built_bundle()
-        with mock.patch.object(worktree, "path", return_value=None), \
-                mock.patch.object(manual_test.subprocess, "run") as run:
-            self.assertEqual(manual_test.launch(self.cfg, "X"), 1)
-            run.assert_not_called()
-
-    def test_worktree_owned_by_other_bundle_exits_1(self) -> None:
-        # A later bundle's Do reused this lane's worktree — the tree now holds issue_OTHER's
-        # build, so launching would test the wrong build under issue_X's name. Refuse.
-        self._built_bundle()
-        wt = self._fake_worktree(owner="issue_OTHER")
-        with mock.patch.object(worktree, "path", return_value=wt), \
-                mock.patch.object(manual_test.subprocess, "run") as run:
-            self.assertEqual(manual_test.launch(self.cfg, "X"), 1)
-            run.assert_not_called()
-
-    def test_worktree_unmarked_owner_exits_1(self) -> None:
-        # No ownership marker (older run / stamp failed): can't confirm the tree is this
-        # bundle's build → refuse rather than risk signing off the wrong build.
-        self._built_bundle()
-        wt = self._fake_worktree(owner=None)
-        with mock.patch.object(worktree, "path", return_value=wt), \
+        with mock.patch.object(worktree, "stage", return_value=None), \
                 mock.patch.object(manual_test.subprocess, "run") as run:
             self.assertEqual(manual_test.launch(self.cfg, "X"), 1)
             run.assert_not_called()
@@ -162,7 +142,7 @@ class ManualTestLaunch(unittest.TestCase):
         self._built_bundle()
         wt = self._fake_worktree()
         with mock.patch.object(cli.Config, "load", return_value=self.cfg), \
-                mock.patch.object(worktree, "path", return_value=wt), \
+                mock.patch.object(worktree, "stage", return_value=wt), \
                 mock.patch.object(manual_test.subprocess, "run") as run:
             run.return_value = SimpleNamespace(returncode=0)
             rc = cli.main(["try", "X"])

@@ -148,18 +148,20 @@ none — and files the lapse as a §6 `NEEDS-HUMAN` so you can see decorrelation
 Some §6 rows are irreducibly a **run-it-yourself** call — a GUI/visual repro, or the
 validation act ("is this the right thing?") for a change no headless test can exercise. The
 gates can't decide those, and the reviewer is headless and sandboxed, so it can't hand you a
-live app. `pdca try <id>` closes that gap: it launches the **patched build** from the
-bundle's per-cycle worktree (the tree Do edited, carrying the patch — the same one the gates
-and reviewer used), handing you the terminal so you can drive the app and see the fix for
-yourself. It runs the project's `[manual_test].cmd` (e.g. `python -m gramps`) from
+live app. `pdca try <id>` closes that gap: it **materializes the patched build on demand
+from the bundle's `patch.diff`** — reconstructing the tree off the target base (the same diff
+the gates and reviewer used) — and hands you the terminal so you can drive the app and see the
+fix for yourself. It runs the project's `[manual_test].cmd` (e.g. `python -m gramps`) from
 `$PDCA_WORKTREE` with the `PDCA_*` env exported, and imposes no timeout — you quit the app to
-return. It's **advisory**: it decides nothing and mutates nothing (edits you make while
-testing are reset on the next Do); you record what you saw in a Manual-verification note and
-carry it into the §9 sign-off ([step 06](06-signoff.md)). It's **bundle-specific**: because a
-lane's worktree is reset-and-reused, if a *later* bundle's Do has taken it over, `pdca try`
-refuses rather than launch the wrong build under this bundle's name — re-run this bundle's Do
-to reload its patch. Needs `[driver].worktree` on and a configured `[manual_test].cmd`;
-otherwise it prints a one-line hint and changes nothing.
+return. It's **advisory**: it decides nothing and mutates nothing in the bundle (edits you
+make while testing are reset the next time a tree is staged); you record what you saw in a
+Manual-verification note and carry it into the §9 sign-off ([step 06](06-signoff.md)).
+Because it rebuilds from `patch.diff` rather than reading whatever Do last left in the shared,
+reset-reused worktree, it works for **any built/parked bundle in turn** — exactly the
+batch-then-review cadence, where you `pdca try` each bundle as you sign it off. (One
+constraint: don't `pdca try` while a lane's Do is mid-build on the same worktree — a non-issue
+in batch-then-review, where building is already done.) Needs `[driver].worktree` on and a
+configured `[manual_test].cmd`; otherwise it prints a one-line hint and changes nothing.
 
 ## 3. Assembly — the SUMMARY the human signs
 
