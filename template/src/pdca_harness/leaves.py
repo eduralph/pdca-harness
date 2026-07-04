@@ -1303,8 +1303,10 @@ def _publish_prompt(d: Path, cfg: Config) -> str:
     issue_url = (cfg.issue_url_pattern.format(id=issue_id)
                  if cfg.issue_url_pattern and real_ticket else "")
     link_clause = (
-        f" Hyperlink the tracker ticket as a Markdown link to {issue_url} (link the id — "
-        "not just the bare number) so a reader can click through to the report."
+        f" Put a clickable tracker link on the Summary's `Reported in [#{issue_id}]"
+        f"({issue_url})` line so a reader can click through. Keep the closing `Fixes` "
+        "trailer a BARE `#<id>` (never a Markdown link) — GitHub auto-closes only on a "
+        "bare id after the keyword, so a linked trailer silently fails to close the issue."
         if issue_url else ""
     )
     return (

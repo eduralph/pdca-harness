@@ -196,10 +196,10 @@ def publish(
     # against the *base* repo (where the fork branch doesn't exist) and fails with
     # "Head ref must be a branch". The branch lives on origin (the fork).
     head = f"{_fork_owner(repo) or repo_spec.split('/')[0]}:{branch}"
-    # Deterministically hyperlink the tracker id in the PR body (Mantis/GitHub) so the
-    # link never depends on the model complying — done AFTER the T4 gate (which sees the
-    # model's raw output) and just before `--body-file` consumes the file.
-    _link_tracker_id(cfg, d, issue_id)
+    # Keep the closing-keyword trailer bare so GitHub auto-closes the issue on merge (#233):
+    # strip any `Fixes [#id](url)` a model may have written back to `Fixes #id`. Done AFTER
+    # the T4 gate (which sees the model's raw output) and just before `--body-file` reads it.
+    _bare_closing_trailer(d, issue_id)
     pr_cmd = ["gh", "pr", "create", "--draft", "--repo", repo_spec, "--base", pr_base,
               "--head", head, "--title", summary_line,
               "--body-file", str((d / PR_BODY).resolve())]
@@ -610,43 +610,37 @@ def _signoff_by(d: Path) -> str:
     return m.group(1).strip() if m else ""
 
 
-# Trailer verbs a `#<id>` reference may hang off of, so the hyperlink lands on the
-# tracker line and not a stray prose mention of the same number.
-_TRAILER_VERB_RE = re.compile(
-    r"(?i)^(fixes|closes|resolves|refs?|references|fix|close|resolve)\b")
+# GitHub's auto-close parser fires only on a BARE `#<id>` right after a closing keyword
+# (`Fixes #123`); a Markdown link (`Fixes [#123](url)`) is NOT recognised, so the issue
+# silently stays open on merge (#233). The clickable tracker reference belongs on the
+# Summary's `Reported in [#id](url)` line instead — never on the closing trailer.
+_CLOSING_VERB_RE = re.compile(r"(?i)^\s*(fix(e[sd])?|close[sd]?|resolve[sd]?)\b")
 
 
-def _link_tracker_id(cfg: Config, d: Path, issue_id: str) -> None:
-    """Hyperlink the bare tracker id in ``pr-description.md`` to ``issue_url_pattern``.
+def _bare_closing_trailer(d: Path, issue_id: str) -> None:
+    """Keep the PR body's closing-keyword trailer a BARE ``#<id>`` so GitHub auto-closes
+    the issue on merge (#233).
 
-    A weak publisher model tends to copy the template's literal ``Fixes #<id>`` trailer
-    rather than the Markdown link the prompt asks for, so the link can't rely on model
-    compliance — make it deterministic here. No-op when no URL pattern is configured or
-    the id is not a real (numeric) ticket — a slug / ``--no-issue`` bundle has no valid
-    URL, mirroring the trailer's id_pending handling (leaves ``real_ticket``). Rewrites
-    only the tracker-trailer line (``Fixes #123`` → ``Fixes [#123](…)``), skips a ``#id``
-    already inside a Markdown link, and is idempotent so a re-publish never double-wraps.
+    A model may copy an older/misleading ``Fixes [#N](url)`` example, which defeats
+    auto-close; strip any Markdown-link wrapper off the id on a closing-keyword line back
+    to ``#N``. Deterministic (does not rely on model compliance), idempotent, and a no-op
+    for a non-numeric (slug / ``--no-issue``) id or a body with no such line. Clickability
+    is provided separately by the Summary's ``Reported in [#id](url)`` line, so the trailer
+    never needs to be a link.
     """
-    if not cfg.issue_url_pattern or not issue_id.isdigit():
+    if not issue_id.isdigit():
         return
     body_path = d / PR_BODY
     if not body_path.is_file():
         return
-    url = cfg.issue_url_pattern.format(id=issue_id)
-    trailer = cfg.issue_trailer.format(id=issue_id) if cfg.issue_trailer else ""
-    # `#123` not already opened by `[` (so `[#123](…)` is left alone → idempotent), and
-    # `\b` so id 123 never matches inside 1234.
-    token = re.compile(r"(?<!\[)#" + re.escape(issue_id) + r"\b")
+    linked = re.compile(r"\[#" + re.escape(issue_id) + r"\]\([^)]*\)")  # `[#123](…)`
     lines = body_path.read_text(encoding="utf-8").splitlines(keepends=True)
     changed = False
     for i, line in enumerate(lines):
-        s = line.strip()
-        is_trailer = s and (s == trailer or _TRAILER_VERB_RE.match(s)) and token.search(line)
-        if not is_trailer:
-            continue
-        new = token.sub(f"[#{issue_id}]({url})", line)
-        if new != line:
-            lines[i] = new
-            changed = True
+        if _CLOSING_VERB_RE.match(line) and linked.search(line):
+            new = linked.sub(f"#{issue_id}", line)
+            if new != line:
+                lines[i] = new
+                changed = True
     if changed:
         body_path.write_text("".join(lines), encoding="utf-8")

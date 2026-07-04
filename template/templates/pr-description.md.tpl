@@ -40,10 +40,11 @@ visible, not implied:>
 
 <!-- Tracker reference (optional, mirrors the commit-msg trailer). The contribution
      gate lints commit-msg.txt and this PR body INDEPENDENTLY, so a ticketed fix needs
-     the id in BOTH. For a ticketed fix, keep the line below in the project's
-     [tracker].issue_trailer form (e.g. `Fixes #<id>`); `pdca publish` auto-links the id
-     to [tracker].issue_url_pattern (e.g. `Fixes [#<id>](…/view.php?id=<id>)`) so the
-     reader can click through to the report — you may write the bare form. For a
-     declared-ticketless fix (no tracker id yet / non-core), OMIT it and state the origin
-     in-body instead, e.g. "Reported in <upstream>#<n>; no tracker ticket". -->
+     the id in BOTH. Keep the line below a STRICTLY BARE `Fixes #<id>` (the project's
+     [tracker].issue_trailer form) — never a Markdown link on the id: GitHub auto-closes
+     only on a bare `#<id>` after the keyword, so `Fixes [#<id>](…)` silently fails to
+     close the issue on merge. The clickable reference is the `Reported in [#<id>](url)`
+     line in the Summary above, not this trailer. For a declared-ticketless fix (no
+     tracker id yet / non-core), OMIT it and state the origin in-body instead, e.g.
+     "Reported in <upstream>#<n>; no tracker ticket". -->
 Fixes #<id>
