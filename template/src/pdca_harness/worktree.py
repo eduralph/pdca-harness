@@ -290,7 +290,11 @@ def _stamp_owner(wt: Path, d: Path) -> None:
 # ----------------------------------------------------------------------------
 _OVF_SUFFIX = ".pdca-wt-ovf-"
 _ovf_seq = itertools.count()
-_ovf_lock = threading.Lock()
+_ovf_seq_lock = threading.Lock()   # guards the token counter (name uniqueness)
+# Serializes the overflow cap RESERVATION — the count-check and the create must be atomic so
+# two concurrent Check threads can't both slip past the cap before either dir exists (#241).
+# A separate lock from the counter's so `_overflow_create` → `_overflow_path` never re-enters.
+_ovf_cap_lock = threading.Lock()
 
 
 def _overflow_dirs(primary: Path) -> list[Path]:
@@ -302,7 +306,7 @@ def _overflow_dirs(primary: Path) -> list[Path]:
 def _overflow_path(primary: Path) -> Path:
     """A fresh, unique overflow path — pid + a process-local counter, so concurrent lanes
     (threads) never collide and a name is never reused within a run."""
-    with _ovf_lock:
+    with _ovf_seq_lock:
         token = f"{os.getpid()}-{next(_ovf_seq)}"
     return primary.parent / (primary.name + _OVF_SUFFIX + token)
 
@@ -372,9 +376,14 @@ def for_gate(d: Path, cfg: Config) -> tuple[Path | None, Path | None]:
     if owner_of(wt) == d.name:
         return wt, None  # cached lane, warm — leave Do's tree intact
     # Foreign / unstamped lane: prefer an overflow tree over mutating a lane another bundle
-    # may still want — but only up to the configured cap; else heal the lane in place.
-    if cfg.overflow > 0 and len(_overflow_dirs(primary)) < cfg.overflow:
-        ovf = _overflow_create(d, primary, base_ref)
+    # may still want — but only up to the configured cap; else heal the lane in place. The
+    # count-check and the create are held under one lock so concurrent Check threads can't
+    # both pass the cap before either dir exists (#241); the gate itself runs after this
+    # returns, so gates still execute concurrently — only the brief reservation serializes.
+    if cfg.overflow > 0:
+        with _ovf_cap_lock:
+            ovf = (_overflow_create(d, primary, base_ref)
+                   if len(_overflow_dirs(primary)) < cfg.overflow else None)
         if ovf is not None:
             print(f"worktree: {d.name} gate read spilled to an overflow tree {ovf.name} "
                   f"(lane owned by {owner_of(wt)})", file=sys.stderr)

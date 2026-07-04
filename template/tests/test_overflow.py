@@ -13,8 +13,11 @@ from __future__ import annotations
 import shutil
 import subprocess as sp
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from pdca_harness import gates, worktree
 from pdca_harness.config import Config, LeafConfig
@@ -126,6 +129,44 @@ class Overflow(unittest.TestCase):
         self.assertFalse(wt.exists())
         self.assertEqual(worktree._overflow_dirs(self.primary), [])
         self.assertEqual(self._porcelain(self.primary), "")  # primary untouched throughout
+
+    def test_cap_is_respected_under_concurrent_reads(self) -> None:
+        # #241: the count-check and create must be atomic — concurrent Check threads hitting a
+        # foreign-owned lane must not BOTH slip past the cap. Widen the create window so a
+        # naive (unlocked) check-then-create would over-spill, and confirm the cap holds.
+        other = self._bundle("OTHER")
+        worktree.ensure(other, self.cfg)                   # lane owned by OTHER
+        self.cfg.overflow = 2
+        bundles = [self._bundle(f"B{i}", patch=True) for i in range(6)]
+        real_create = worktree._overflow_create
+
+        def slow_create(d, primary, base_ref):
+            time.sleep(0.03)                               # widen the check→create race window
+            return real_create(d, primary, base_ref)
+
+        results: list = []
+        rlock = threading.Lock()
+
+        def run(d):
+            r = worktree.for_gate(d, self.cfg)
+            with rlock:
+                results.append(r)
+
+        # resync (the non-overflow fallback) mutates the shared lane concurrently — stub it to
+        # isolate the cap logic under test from that unrelated contention.
+        with mock.patch.object(worktree, "_overflow_create", slow_create), \
+                mock.patch.object(worktree, "resync", return_value=self.lane):
+            ts = [threading.Thread(target=run, args=(d,)) for d in bundles]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+
+        overflows = [(wt, ovf) for (wt, ovf) in results if ovf is not None]
+        self.assertLessEqual(len(overflows), 2)                              # cap held
+        self.assertLessEqual(len(worktree._overflow_dirs(self.primary)), 2)  # on disk too
+        for wt, ovf in overflows:
+            worktree.overflow_remove(ovf, wt)
 
     # --- gates end-to-end ----------------------------------------------------
 
