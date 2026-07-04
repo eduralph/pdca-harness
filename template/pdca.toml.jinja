@@ -191,8 +191,18 @@ base_remote = "{{ 'upstream' if contribution_model == 'fork' else 'origin' }}"
 mode = "{{ leaves_mode }}"
 family = "{{ builder_family }}"
 interactive = false
+# Role prompt: canonical body agents/builder.md. Claude resolves it via the baked
+# `--agent builder`; codex (no agent flag) has it inlined into the prompt.
+agent = "builder"
 {% if builder_family == "claude" -%}
 argv = ["claude", "-p", "--agent", "builder", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob"]
+{% elif builder_family == "codex" -%}
+# `codex exec` edits the target source in the worktree (its cwd) and writes patch.diff /
+# the test / build-notes.md in the bundle dir; `--sandbox workspace-write` lets it run the
+# build+test unattended (verified: no approval prompt). The harness confines cwd to the
+# worktree (#136), grants the bundle dir as an extra writable root so those artifacts land
+# despite the sandbox (#230), and adds the `gh` STOP-shim.
+argv = ["codex", "exec", "--sandbox", "workspace-write"]
 {% else -%}
 argv = []
 {% endif %}
@@ -230,39 +240,79 @@ argv = []
 mode = "{{ leaves_mode }}"
 family = "{{ reviewer_family }}"
 interactive = false
+# Role prompt: canonical body agents/reviewer.md, inlined for codex / resolved via
+# `--agent reviewer` for claude. (AGENTS.md now carries general codex project context.)
+agent = "reviewer"
 {% if reviewer_family == "codex" -%}
-argv = ["codex", "exec", "--config", "AGENTS.md"]
+# `codex exec --sandbox workspace-write` — the reviewer re-runs red/green evidence
+# (git stash/unstash) and re-checks path:line on $PDCA_TARGET, which the driver grants as a
+# writable root via the family's --add-dir grounding. The role prompt forbids writing the FIX.
+# --skip-git-repo-check: the reviewer's cwd is a temp SANDBOX (not a git repo), which codex
+# exec otherwise refuses to run in ("Not inside a trusted directory").
+argv = ["codex", "exec", "--sandbox", "workspace-write", "--skip-git-repo-check"]
+{% elif reviewer_family == "claude" -%}
+# Same-family fallback (weakens Check independence — prefer a cross-vendor reviewer).
+argv = ["claude", "-p", "--agent", "reviewer", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
 {% else -%}
 argv = []
 {% endif %}
 # Interactive leaves — the human-in-the-loop touch points (Plan, Sign-off, Publish,
-# Act) hand the terminal to a seeded Claude REPL. Claude by design (a model+human
-# session), independent of the builder/reviewer family above.
+# Act) hand the terminal to a seeded model+human REPL, chosen by `interactive_family`
+# ({{ interactive_family }}). Claude gets a `claude --agent <name>` REPL; codex gets a
+# `codex` TUI (workspace-write, so edits don't each need approval — the human is present)
+# with the role prompt (agents/<name>.md) inlined via the `agent` key. Independent of the
+# builder/reviewer family above.
 [leaves.planner]
 mode = "{{ leaves_mode }}"
-family = "claude"
+family = "{{ interactive_family }}"
 interactive = true
+agent = "planner"
+{% if interactive_family == "claude" -%}
 argv = ["claude", "--agent", "planner", "--permission-mode", "acceptEdits"]
-
+{% elif interactive_family == "codex" -%}
+argv = ["codex", "--sandbox", "workspace-write"]
+{% else -%}
+argv = []
+{% endif %}
 [leaves.signoff]
 mode = "{{ leaves_mode }}"
-family = "claude"
+family = "{{ interactive_family }}"
 interactive = true
+agent = "signoff"
+{% if interactive_family == "claude" -%}
 argv = ["claude", "--agent", "signoff", "--permission-mode", "acceptEdits"]
-
+{% elif interactive_family == "codex" -%}
+argv = ["codex", "--sandbox", "workspace-write"]
+{% else -%}
+argv = []
+{% endif %}
 [leaves.act]
 mode = "{{ leaves_mode }}"
-family = "claude"
+family = "{{ interactive_family }}"
 interactive = true
+agent = "act"
+{% if interactive_family == "claude" -%}
 argv = ["claude", "--agent", "act", "--permission-mode", "acceptEdits"]
-
+{% elif interactive_family == "codex" -%}
+argv = ["codex", "--sandbox", "workspace-write"]
+{% else -%}
+argv = []
+{% endif %}
 # Publisher — Check's closing step: writes commit-msg.txt + pr-description.md (the
-# git/draft-PR mechanics are deterministic code in pdca_harness.publish).
+# git/draft-PR mechanics are deterministic code in pdca_harness.publish). A non-claude
+# publisher gets the driver's `gh` STOP-shim (guard.py) since it has no PreToolUse hook.
 [leaves.publisher]
 mode = "{{ leaves_mode }}"
-family = "claude"
+family = "{{ interactive_family }}"
 interactive = true
+agent = "publisher"
+{% if interactive_family == "claude" -%}
 argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
+{% elif interactive_family == "codex" -%}
+argv = ["codex", "--sandbox", "workspace-write"]
+{% else -%}
+argv = []
+{% endif %}
 
 # FAMILY PROFILES (vendor neutrality). Every vendor-CLI-specific behavior is DATA
 # (pdca_harness.families): how to stream, how to grant an extra read dir, how a role

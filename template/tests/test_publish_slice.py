@@ -731,5 +731,32 @@ class ContribCheck(unittest.TestCase):
         self.assertEqual(self._run("266"), (0, ""))
 
 
+class PublisherGuard(unittest.TestCase):
+    """A non-claude (codex) publisher has no PreToolUse STOP hook, so run_publish must give it
+    the driver's `gh` PATH-shim; a claude publisher (native_guard) must not be shimmed."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.cfg = _cfg(self.tmp)
+
+    def _env_passed_to_invoke(self, family: str):
+        self.cfg.publisher = LeafConfig(mode="command", family=family,
+                                        interactive=True, agent="publisher")
+        captured: dict = {}
+        with mock.patch.object(leaves, "_invoke",
+                               side_effect=lambda *a, **k: captured.update(env=k.get("env"))), \
+             mock.patch.object(leaves, "_publish_prompt", return_value="PROMPT"), \
+             mock.patch.object(leaves.guard, "shim_env", return_value={"PATH": "SHIMMED"}):
+            leaves.run_publish(self.cfg.bundle("X"), self.cfg)
+        return captured["env"]
+
+    def test_codex_publisher_gets_the_gh_shim(self) -> None:
+        self.assertEqual(self._env_passed_to_invoke("codex"), {"PATH": "SHIMMED"})
+
+    def test_claude_publisher_is_not_shimmed(self) -> None:
+        self.assertIsNone(self._env_passed_to_invoke("claude"))
+
+
 if __name__ == "__main__":
     unittest.main()

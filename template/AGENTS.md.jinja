@@ -1,59 +1,28 @@
-# Reviewer contract — {{ project_name }}
+# {{ project_name }} — Codex project context
 
-You are the **cross-vendor Check reviewer** ({{ reviewer_family }}), a *different
-model family* from the builder ({{ builder_family }}) by design — decorrelated
-blind spots are the entire point. You **implement** the judgment cells of Check
-(correctness causal-adequacy, conformance Tier-5 scope, the validation act). You
-do the work; you are not a courtesy second opinion. But you are **advisory in
-effect: you never gate accept.** Deterministic gates block; you annotate.
+This repository is managed with the **PDCA harness**: a Plan→Do→Check→Act cycle whose
+model steps ("leaves") may run as `codex`. Codex reads this file automatically for a
+session at the repo root, so it is **shared project context — not a per-leaf role**. Each
+leaf's specific role (planner / builder / reviewer / publisher / sign-off / act) is
+inlined into that session's prompt from `agents/<name>.md`; follow the role you are given
+there. `agents/<name>.md` is the canonical, vendor-neutral source of truth for each role.
 
-## Your inputs — and the one you never get
+## STOP discipline (every leaf)
 
-You receive `{patch.diff, brief.md, check-gates.json}`. You do **not** receive
-`build-notes.md` — the builder's rationale must not anchor your reading. The
-driver enforces this by not passing the file; do not ask for it.
+You may open a **draft** PR and `git push`, but you MUST NOT mark a PR ready, merge it, or
+approve it — `gh pr ready`, `gh pr merge`, and `gh pr review --approve` are the human's
+Check sign-off, not the model's. This is enforced mechanically too: the driver puts a
+guarded `gh` shim first on `PATH` that refuses those calls (single-sourced from
+`.claude/hooks/builder_guard.py`).
 
-## What you do
+## Boundaries
 
-- Re-run the asserted evidence: stash the fix → confirm red; unstash → confirm
-  green. Re-run the validator / scanners yourself. Trust re-runs, not claims.
-- Re-check that every `path:line` the patch cites resolves on the **target source at
-  `$PDCA_TARGET`** (the driver resolves it from the brief's target). Ground only there —
-  do **not** search other checkouts on the machine; if `$PDCA_TARGET` is unset, ground
-  against `patch.diff` alone. Drop any finding that does not ground. If `$PDCA_TARGET`
-  is **set yet stale or unreadable** — its base lags what the patch was built/verified
-  against (the gates run off the base remote, so a dependent/stacked cycle's base
-  routinely trails its prerequisite until it merges) — that is a *target-state caveat*,
-  **not** a patch defect: note the staleness and ground the affected citations on
-  `patch.diff`. Do **not** present a stale- or unreadable-target "patch cannot
-  apply / does not compile" as a blocking C4 (verification) FAIL — that fabricates an
-  ordering-gate blocker for a patch that is in fact correct.
-- Open `check-review.md` with a one-line outline of the task under review (the bug to
-  fix / functionality to implement), then the complete 5/5/1 verdict table.
-- Emit per item `PASS / FAIL / NEEDS-HUMAN` + a one-line Basis + a path:line. The
-  Basis states the **decision owed** — the context and impact the verdict turns on
-  (what the human must decide and why it matters), especially for NEEDS-HUMAN — not a
-  restatement of the implementation. No free-form prose verdict.
-- You have **execute** access (run tests/validator, git stash/unstash) and **no
-  write access to the fix** — you cannot patch what you judge.
+- Write only the artifacts your role names, into the bundle directory the prompt gives you
+  (e.g. `patch.diff`, `build-notes.md`, `check-review.md`, `commit-msg.txt`,
+  `pr-description.md`). Do **not** branch, push, or open PRs yourself — the deterministic
+  `pdca` steps do the git/PR mechanics after you finish.
+- Ground `path:line` citations on `$PDCA_TARGET` / `$PDCA_WORKTREE` (the driver sets them);
+  do not search unrelated checkouts on the machine.
 
-## Emit NEEDS-HUMAN by design on
-
-These are structurally undecidable from the artifacts — flag them, don't guess:
-
-- Validation fitness-to-purpose ("is this the right thing at all").
-- Symptom-vs-root-cause when the bug's mechanism is contested.
-- Superseded-by: does other open work *semantically* supersede this (e.g. an upstream
-  rewrite PR, or another in-flight change)?
-- Scope-creep / Plan re-entry calls (diff exceeds the brief's scope but looks plausible).
-- Visual sign-off / manual-repro outcomes.
-- The project's enumerated human-only items (INTEGRATION.md §4). **TODO: list them.**
-
-Each NEEDS-HUMAN becomes a `- [ ]` row in `SUMMARY.md` §6 the human must clear.
-
-For a **visual / manual-repro** NEEDS-HUMAN row, verify what you can yourself — where
-feasible, exercise the change with the patch applied at `$PDCA_TARGET` (run the relevant
-test, or start / drive the application if the runner allows), observe, and report; only
-where it genuinely can't be driven, hand the human **concrete, runnable steps**, not a bare
-"needs manual check". And if a verdict turns on an **investigation**, run it and show the
-result directly — don't ask whether to investigate.
+See `docs/INTEGRATION.md` (this repo's concretizations) and `PCDA/quality-cycle.md` (the
+reference model) for the full contract.

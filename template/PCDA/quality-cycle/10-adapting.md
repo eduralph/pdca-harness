@@ -195,7 +195,7 @@ The full adaptation, every knob → its instance value, as a fill-in-the-blanks 
 | Tracker intake | project-provided | Playwright Mantis scraper → CSV export; planner reads the issue row + notes |
 | Default branch / area rules | render-time + instance | `main`; addon work targets `maintenance/gramps60`, cherry-picked → `gramps61` |
 | Branch convention | instance-only | `fix/bug-{id}-{slug}` / `enhancement/{id}-{slug}` |
-| Builder / reviewer | render-time | `claude` / `codex` by default; **running** config takes the same-vendor `claude` reviewer fallback + sandbox |
+| Builder / reviewer / interactive family | render-time | per-leaf: `builder_family` (`claude`/`codex`), `reviewer_family` (cross-vendor, ≠ builder), `interactive_family` for Plan/Sign-off/Publish/Act. Codex is a full alternative across all leaves. |
 | Gating gate | project-provided | `C4-verify` (bundle, red→green, the one gating check) |
 | Advisory tiers | project-provided | T1/T2/T4 conformance (doc-16), T3 unit/addon-60/addon-61/interface (baseline-diffed) |
 | Ruleset | instance-only | gramps wiki doc 16, cited by section heading, selected by core-vs-addon target |

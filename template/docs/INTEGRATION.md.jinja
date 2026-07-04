@@ -55,12 +55,19 @@ test, not the full suite.
 | T5 judgment | reviewer contract below | Check reviewer + sign-off | (model) | [planned] |
 
 - **Reviewer family (cross-vendor, ≠ builder):** {{ reviewer_family }} — canonical role body
-  `agents/reviewer.md`; config `AGENTS.md` (decorrelated path). A same-vendor Claude fallback
-  is packaged at `.claude/agents/reviewer.md` **only when the reviewer family is claude**.
+  `agents/reviewer.md`, inlined for a codex reviewer / resolved via `--agent reviewer` for a
+  claude one (`.claude/agents/reviewer.md` renders only when the reviewer family is claude).
+  `AGENTS.md` now carries general codex **project context** (STOP discipline, boundaries),
+  not the reviewer role.
 - **Builder family:** {{ builder_family }} — canonical role body `agents/builder.md`; the
   Claude wrapper `.claude/agents/builder.md` (with the ready-mark block enforced by the
   `.claude/hooks/builder_guard.py` PreToolUse hook) is materialized only when the builder
-  family is claude.
+  family is claude. A codex builder runs `codex exec --sandbox workspace-write`, confined to
+  the worktree cwd.
+- **Interactive family:** {{ interactive_family }} — the human-in-the-loop leaves (Plan,
+  Sign-off, Publish, Act) run a seeded `claude --agent <name>` REPL or a `codex` TUI, chosen
+  by `interactive_family`. A codex publisher gets the same `gh` STOP-shim the builder does
+  (it has no PreToolUse hook), so it can't `gh pr ready`/`merge`.
 - **Role prompts (vendor-neutral source):** each leaf's instructions live once in
   `agents/<name>.md`. Claude leaves also get `.claude/agents/<name>.md` (frontmatter wrapper
   that includes that body, so `--agent` resolves); non-Claude (inline) leaves read the
@@ -109,7 +116,7 @@ List every project-specific script the cycle invokes (role → path + invocation
 | Driver | `src/pdca_harness/` | `{{ cli_name }} run <id>` | [built — stub leaves] |
 | Act tooling (L4) | `src/pdca_harness/act.py` | `{{ cli_name }} act index`, `{{ cli_name }} act log --date <d>` | [built] |
 | Gates (single-sourced) | `pdca.toml` `[[gates.checks]]` | `{{ cli_name }} gates [<id>] [--working-tree]` | [built — stub fallback; fill checks] |
-| Reviewer role prompt | `agents/reviewer.md` (canonical body); `AGENTS.md` / `.claude/agents/reviewer.md` are the per-vendor packaging | (model leaf) | [built — contract; wire command mode] |
+| Reviewer role prompt | `agents/reviewer.md` (canonical body; inlined for codex, `.claude/agents/reviewer.md` is the Claude packaging) | (model leaf) | [built — contract; wire command mode] |
 | Builder role prompt | `agents/builder.md` (canonical body); `.claude/agents/builder.md` (Claude wrapper) + `.claude/hooks/builder_guard.py` | (model leaf) | [built — ready-mark blocked] |
 
 ## 10. Maintainer and governance
