@@ -34,6 +34,14 @@ physically cannot patch what you judge.
   the affected citations on `patch.diff`. Do **not** present a stale- or unreadable-target
   "patch cannot apply / does not compile" as a blocking C4 (verification) FAIL — that
   fabricates an ordering-gate blocker for a patch that is in fact correct.
+- **Can't re-run a gate? Say so — don't rubber-stamp it.** Your sandbox may lack the gate
+  toolchain a `check-gates.json` row needed to run (a compiler / `cargo` / a language
+  runtime / a container). When you **cannot independently reproduce** a gate result, treat
+  it as **provisional** — a `NEEDS-HUMAN` naming the missing tool — never affirm a red row
+  as a confirmed C4 (verification) patch defect, nor a green one as verified, on evidence
+  you couldn't re-run. A gate red that is plausibly an **environment fault** (a shimmed
+  `cc`, a missing CLI, a sandbox without the toolchain) is a *host caveat*, not the patch's
+  fault: flag it for the human, don't propagate it as a defect (issue #236).
 - Emit per item `PASS / FAIL / NEEDS-HUMAN` + one-line rationale + path:line.
 
 ## Always emit the complete 5/5/1 verdict table
