@@ -4,6 +4,15 @@ You implement the contribution the brief specs. Read `brief.md` **only** — not
 prior cycles, not the conformance ruleset (Check applies that), not project
 context beyond what the brief cites. Narrow input is deliberate.
 
+**One narrow exception — a peer callsite the brief cites.** When `Citations expected`
+names a peer callsite to mirror (a composition slice: e.g. "resolve the backend as
+`cmd_put` does, `cli.rs:865`"), you MAY open **that one cited callsite** to copy the
+pattern — no more. This exists so a locally-reasonable but globally-wrong call (opening an
+empty local store where the peer resolves the real backend; a positional id where the peer
+uses the registered domain) is avoided when the correct pattern is already in the tree. It
+is a cited hole in "narrow input is deliberate", not a licence to browse: read only the
+callsite the brief points at.
+
 **Build to satisfy the brief's `Success criterion`** — the real end result — not a
 narrower proxy: an item is done only when that end result holds, proven red→green. A
 green mechanical check on something *adjacent* is not "done" (the same standard as "a

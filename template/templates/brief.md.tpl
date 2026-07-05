@@ -53,6 +53,13 @@
 - **Repro instruction:** <fixture + exact steps on the target branch>
 - **Test file:** <path where the regression test ships — must fail pre-fix, pass post-fix>
 - **Citations expected:** Do must cite path:line on the target branch for every change.
+  For a **composition slice** — the fix wires into an existing pattern the codebase already
+  applies — MAY name the **peer callsite** Do should mirror, e.g. "resolve the backend as
+  `cmd_put` does, `cli.rs:865`". Do MAY open that one cited callsite (a narrow, deliberate
+  exception to reading `brief.md` only) to copy the composition, so a locally-reasonable but
+  globally-wrong call — an empty local redb where the peer resolves TiKV, a positional id
+  where the peer uses the registered domain — is avoided. Cite it precisely; anything not
+  cited stays out of Do's input.
 - **Prior-art check (triage cycles):** <searched by file path — merged history / open PRs / closed PRs — result>
 - **Disposition hint:** <one triage flag — drives the driver's Do path. FIX (full
   Do+Check band): `likely-fix`, `POSSIBLY-FIXED → verify first` (needs verification, so

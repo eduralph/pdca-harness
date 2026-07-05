@@ -77,6 +77,13 @@ human's to confirm (like scope) — **ask when the order isn't clear.**
   at scope. Write a brief only for work the human confirms. One bundle = one `brief.md`.
 - Name a concrete **test file** the regression will ship at — Do must make it red
   pre-fix, green post-fix.
+- **Composition slice? Cite the peer callsite.** When the fix wires into a pattern the
+  codebase already applies elsewhere (resolve a backend, register a failure-domain, stream
+  vs buffer), name the **peer callsite** in `Citations expected` — `path:line` and how to
+  mirror it, e.g. "resolve the backend as `cmd_put` does, `cli.rs:865`". Do reads `brief.md`
+  only and MAY open that one cited callsite; without the cue it re-derives the composition
+  from scratch and makes a locally-reasonable, globally-wrong call. Cite the peer that
+  already solves it — don't leave Do to find it.
 - **Assess `Difficulty:`** — `low` / `medium` / `high`, defined for its consumer as the
   fix's **blast-radius / cross-file reach**: how many files/call-sites it touches and how
   far its effects propagate — what a diff-reviewer must hold in view. A localized one-site
