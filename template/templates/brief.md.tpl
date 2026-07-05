@@ -11,6 +11,16 @@
   demonstrable by C4-verify (the patch applied in isolation at Check). Do NOT scope this
   to a T3 whole-suite pass or a fork-CI green: those only clear after the fix is merged,
   not at Check. Use them as supplementary evidence only.>
+- **Falsifiability:** <WHERE the binding success criterion can be made to go RED, and on
+  WHICH harness/topology Do is pointed at. Name the environment that can actually exhibit
+  the forbidden failure. This is orthogonal to `Verification posture` (green may be deferred
+  off-Check) and to `Production reach` — here the question is whether RED is even *possible*
+  on the environment Do gets. If no available environment can currently produce the red — a
+  topology that cannot exhibit the forbidden failure (e.g. "exactly-one-winner under real
+  partition" on a single-TiKV-replica stack, which can only go unavailable, never
+  split-brain — the #257/#365 case), or code no gate compiles so RED is only ever asserted
+  by code-reading — that is a **Plan-blocking gap**: provision the environment or narrow the
+  criterion *before* Do runs; don't burn Do cycles on a criterion that cannot fail.>
 - **Invariant to restore:** <the property the fix must make true, stated over the
   defect CATEGORY, not the repro file. NOT a mechanism. Cite its source (language spec /
   framework docs / internal rule) per `docs/principles.md` §3–§6. SELF-TEST: could Do
