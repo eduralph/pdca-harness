@@ -136,6 +136,14 @@ your **own** initiative — the human should never have to ask for it:
    ambiguity Do could resolve the wrong way, or a part of the success criterion nothing
    would test. Close each gap in the brief; where it is genuinely the human's call (scope,
    ordering), surface it explicitly and ask — never ship it silent.
+3. **Check the criterion can actually go RED — fill `Falsifiability`.** For the binding
+   success criterion, name WHERE it can be made to fail and on WHICH harness/topology Do is
+   pointed at. If no available environment can currently produce the red — a topology that
+   cannot exhibit the forbidden failure (the single-replica-can't-split-brain case), or code
+   no gate compiles so RED is only ever asserted by code-reading — that is a
+   **Plan-blocking gap**, not a detail for Do to discover after three cycles: surface it to
+   the human and provision the environment or narrow the criterion *before* the brief hands
+   off. Don't ship a criterion that cannot fail on the environment Do gets.
 
 Conclude with one line stating you ran this pass and what it changed (or "verified, no
 gaps"). It is unconditional and applies to **every** brief — distinct from the
