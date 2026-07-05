@@ -75,6 +75,28 @@ and leave the verify honestly unable to prove it (rather than a fabricated pass)
 surfaces a NEEDS-HUMAN item in SUMMARY §6, so the human validates the fix at sign-off —
 exactly where an irreducibly-manual check belongs. Ask; don't work around.
 
+## Before you declare done — refute your own test (forced, recorded)
+
+A green test only counts if it would have gone **red** without your fix and it drives the
+**real** thing. This is where hollow evidence keeps slipping through — a Jepsen leg that
+injects no nemesis, a fixture hand-built to exclude the failing node, a test driving a
+stand-in instead of the production backend — each caught only downstream by the adversary,
+at the cost of an iteration. So before you declare done, **answer these three questions and
+record the answers in `build-notes.md`** (not just "yes" — the concrete evidence for each):
+
+- **(a) Genuine red?** Does the test still pass with your fix **reverted**? Actually revert
+  it and re-run: if it stays green, the test does not bind the objective — it is not done.
+- **(b) Production path, or a stand-in?** Does the test drive the **production** code the
+  fix changes, or a copy / mock / re-implementation of it? A green run against a stand-in is
+  worse than no test.
+- **(c) Fixture includes the fault?** Does the fixture **include the failing element** — the
+  killed node, the real backend, an actually-injected nemesis — rather than curate it out?
+  A `healthy_fleet` built to exclude the node you killed proves nothing.
+
+If any answer is "no", the item is **not done**: fix the test (or, per the headless caveat
+above, flag it NEEDS-HUMAN) before you hand off. Record the three answers even when they all
+pass — the human reads them at sign-off.
+
 ## Commit-ready for the target repo
 
 The patch must be **committable to the target repo**, not just gate-green. When the
