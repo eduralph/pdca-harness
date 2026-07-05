@@ -1,0 +1,32 @@
+name: render-check
+
+# Renders the template with copier on every pull request, then runs the generated
+# project's own slice — so a broken template (a bad Jinja include path, an undefined
+# variable, a syntax error) is caught before merge, not only when a downstream instance
+# runs `copier update`. Guards the class of bug in #257: the .claude/agents/*.md.jinja
+# wrappers' {% include %} paths must be clone-root-relative (template/agents/…), or a
+# claude-family render/update fails outright — which no CI caught because none ran copier.
+#
+# No paths filter: always runs and reports a status, so it can serve as a required check.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  render-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install copier
+        run: pip install copier
+
+      - name: Render the template (copier) + run the generated slice
+        run: python -m unittest tests.test_render_and_run -v
