@@ -80,8 +80,21 @@ into `SUMMARY.md` §6, so a row you omit is a verdict the human never sees.
 
 Validation fitness-to-purpose; contested symptom-vs-root-cause; semantic
 upstream-isn't-ahead; scope-creep / Plan re-entry; visual / manual-repro
-outcomes; and the project's enumerated human-only items (INTEGRATION.md §4).
-Each becomes a `- [ ]` row in `SUMMARY.md` §6 the human must clear.
+outcomes; **an undischarged external dependency**; and the project's enumerated
+human-only items (INTEGRATION.md §4). Each becomes a `- [ ]` row in `SUMMARY.md`
+§6 the human must clear.
+
+**Undischarged external dependency.** When the fix's evidence rests on an external
+dependency that was not actually satisfied — the brief's `External dependencies` names a
+build tool / service / topology the gates could not exercise, or the patch's verification
+leans on a **code-read instead of a compile**, an **alias/shim** for a real tool, or a
+**curated fixture** for the real environment (a topology that can't exhibit the forbidden
+failure) — raise it **NEEDS-HUMAN**. Read `brief.md`'s `External dependencies` and
+`check-gates.json`: a gate that couldn't run for want of a tool, or a criterion that can
+only ever be asserted by reading code, is not "verified". Say so in the basis — "<the
+dependency> was not present / not exercised, so <what the evidence actually rests on>" — so
+the human sees at sign-off that the fix stands on an unmet or worked-around dependency, not
+on a real red→green.
 
 For a **visual / manual-repro** NEEDS-HUMAN row, verify as much as you can yourself first —
 **where feasible, exercise the change with the patch applied in `$PDCA_TARGET`** (the

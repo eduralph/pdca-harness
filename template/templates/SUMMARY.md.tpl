@@ -29,6 +29,11 @@
 
 ## 6. NEEDS-HUMAN — items the human must clear before sign-off
 - [ ] <decision only the human can make, and why a gate/reviewer couldn't>
+<!-- Undischarged external dependencies land here too: a build tool / service / topology the
+     fix's evidence rests on that was NOT actually present or exercised — so a gate ran on a
+     code-read, an alias/shim, or a curated fixture instead of the real thing. Do declares
+     these in build-notes.md; the reviewer raises them NEEDS-HUMAN; both route into §6 so the
+     human sees the evidence gap at sign-off. -->
 
 ## 7. Proven / not proven
 - Proven by which oracle:

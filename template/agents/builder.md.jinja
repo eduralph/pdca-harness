@@ -84,6 +84,19 @@ and leave the verify honestly unable to prove it (rather than a fabricated pass)
 surfaces a NEEDS-HUMAN item in SUMMARY §6, so the human validates the fix at sign-off —
 exactly where an irreducibly-manual check belongs. Ask; don't work around.
 
+### Hit an external dependency Plan didn't name? Declare it — never work around it silently
+
+If you cannot build or exercise the fix without something the brief's `External dependencies`
+did **not** list — a build tool that isn't installed (`protoc`), a runtime service that
+isn't up (Docker, a live etcd/TiKV), or a **topology** that can't exhibit the fault (a
+single-replica store that can't split-brain) — that missing dependency is a **NEEDS-HUMAN**,
+not a puzzle to route around. Do **NOT** silently substitute a **code-read** for a compile,
+an **alias/shim** for the real tool, or a **curated fixture** for the real environment: that
+fakes the evidence Check depends on and buries the gap for iterations. Declare it in
+`build-notes.md` — name the dependency, what it blocks, and what evidence you *couldn't*
+produce because of it — and leave the criterion honestly unverified so it surfaces at
+sign-off. Plan should have listed it; one it missed is exactly what you must raise.
+
 ## Before you declare done — refute your own test (forced, recorded)
 
 A green test only counts if it would have gone **red** without your fix and it drives the
