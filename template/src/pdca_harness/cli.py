@@ -49,6 +49,71 @@ _STATE_ORDER = [
 ]
 
 
+def _suspend_inhibitor_argv(argv: list[str], env: dict) -> list[str] | None:
+    """The keep-awake wrapper for a ``pdca flow`` run, or ``None`` to run unwrapped (#244).
+
+    A ``pdca flow`` — a batch, or a high-difficulty bundle on a strong Do model — can run
+    for **hours, unattended**. If the host auto-suspends on idle, suspend pauses every
+    process and cuts the cycle off mid-run. Hold a suspend inhibitor for the command's
+    lifetime by re-exec'ing under the platform inhibitor; it releases automatically at exit.
+
+    Returns the argv to exec (inhibitor + the command that re-invokes this run), or ``None``
+    when no wrapping applies: already wrapped (``PDCA_FLOW_INHIBITED``), opted out
+    (``--no-inhibit`` / ``PDCA_NO_INHIBIT``), or no inhibitor binary is available. Pure
+    decision — no exec — so it is unit-testable. Advisory by design: it inhibits only idle
+    sleep, never shutdown, so an operator can still deliberately power off.
+    """
+    if env.get("PDCA_FLOW_INHIBITED"):            # already re-exec'd under an inhibitor
+        return None
+    if env.get("PDCA_NO_INHIBIT") or "--no-inhibit" in argv:  # opted out (CI / containers)
+        return None
+    cmd = _reexec_command(argv)
+    if shutil.which("systemd-inhibit"):           # Linux
+        return ["systemd-inhibit", "--what=idle:sleep", "--why=pdca flow", *cmd]
+    if shutil.which("caffeinate"):                # macOS
+        # -i asserts against IDLE system sleep (valid on battery too); -s only holds on AC
+        # power, so -i is the load-bearing flag for an unattended laptop run. Include both to
+        # mirror systemd's idle:sleep. (`caffeinate -s` alone would silently no-op on battery.)
+        return ["caffeinate", "-i", "-s", *cmd]
+    return None                                   # no inhibitor available
+
+
+def _reexec_command(argv: list[str]) -> list[str]:
+    """The command that re-invokes this run, for the inhibitor to exec.
+
+    The inhibitor (``systemd-inhibit`` / ``caffeinate``) execs its command argument directly,
+    so it must be something the OS can exec. An installed console script (``pdca`` /
+    ``pdca-<name>``) is — forward ``argv`` as-is. But the documented source-checkout entry
+    ``python -m pdca_harness.cli flow …`` has ``argv[0]`` = the ``cli.py`` file path, which
+    has no shebang/execute bit; exec'ing it directly fails. Detect that (argv[0] is a ``.py``
+    file or ``__main__``) and rebuild via the current interpreter so ``-m`` is preserved.
+    """
+    prog = Path(argv[0]).name if argv and argv[0] else ""
+    if not prog or prog.endswith(".py") or prog == "__main__":
+        return [sys.executable, "-m", "pdca_harness.cli", *argv[1:]]
+    return list(argv)
+
+
+def _inhibit_suspend_and_reexec() -> None:
+    """Re-exec ``pdca flow`` under a suspend inhibitor (#244), or return to run unwrapped.
+
+    Replaces the current process (``os.execvpe``) so the inhibitor owns the run's whole
+    lifetime. Returns only when no wrapping applies; warns once on stderr when the reason is
+    "no inhibitor available" (not when opted out or already wrapped) so a long run isn't
+    silently left unprotected.
+    """
+    wrapped = _suspend_inhibitor_argv(sys.argv, dict(os.environ))
+    if wrapped is None:
+        opted_out = bool(os.environ.get("PDCA_NO_INHIBIT")) or "--no-inhibit" in sys.argv
+        already = bool(os.environ.get("PDCA_FLOW_INHIBITED"))
+        if not opted_out and not already:  # the only remaining reason is "no inhibitor found"
+            print("pdca flow: no systemd-inhibit/caffeinate found — running WITHOUT "
+                  "keep-awake; disable host auto-suspend manually for long unattended runs.",
+                  file=sys.stderr)
+        return
+    os.execvpe(wrapped[0], wrapped, {**os.environ, "PDCA_FLOW_INHIBITED": "1"})
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog=_prog_name(), description="PDCA quality-cycle driver")
     # No subcommand → status (the bundle dashboard), the most-reached-for view (#88).
@@ -77,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     p_flow.add_argument("--no-act", action="store_true", help="skip the Act leaf (Act runs by default after COMPLETE)")
     p_flow.add_argument("--by", default="", help="who signed off (recorded in §9)")
     p_flow.add_argument("--lanes", type=int, help="unattended Do+Check worker-pool size (docs 09; overrides [driver].lanes / PDCA_LANES)")
+    p_flow.add_argument("--no-inhibit", action="store_true", help="don't hold a suspend inhibitor for the run (also PDCA_NO_INHIBIT=1) — for CI/containers where it's unavailable or unwanted (#244)")
 
     p_status = sub.add_parser("status", help="list bundle states (cheap-first queue)")
     p_status.add_argument("issue_id", nargs="?")
@@ -185,6 +251,13 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.setdefault("PDCA_LEAVES_MODE", "stub")
         os.environ.setdefault("PDCA_GATES_MODE", "stub")
         os.environ.setdefault("PDCA_BUNDLE_ROOT", ".rehearse")
+    # Keep a long unattended `pdca flow` alive across host idle-suspend (#244): re-exec the
+    # run under a platform suspend inhibitor before any real work. No-op when already
+    # wrapped, opted out, or no inhibitor is available; execs (never returns) otherwise.
+    # Only on the real CLI entry (argv is None → sys.argv): a programmatic main([...]) call
+    # (tests, embedding) owns its own process and must not be replaced via sys.argv.
+    if args.cmd == "flow" and argv is None:
+        _inhibit_suspend_and_reexec()
     # Surface config problems as a clean one-line error, not a traceback (issue #92):
     # running outside a rendered project (no pdca.toml) is operator error, not a crash.
     try:
