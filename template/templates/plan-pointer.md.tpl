@@ -16,6 +16,11 @@
   as authoritative; cite it.>
 - **Defect / goal:** <one line: what this realizes — the observable problem or capability>
 - **Success criterion:** <the observable condition that means it works — what the shipped test asserts>
+- **Falsifiability:** <WHERE the binding success criterion can be made to go RED, and on
+  WHICH harness/topology Do is pointed at. If no available environment can currently produce
+  the red — a topology that can't exhibit the forbidden failure, or code no gate compiles —
+  that is a Plan-blocking gap: provision the environment or narrow the criterion before Do
+  runs. See `brief.md.tpl` for the worked example.>
 - **Repo + branch target:** <owner/repo> @ <branch>   (resolve here at Plan — do not leave to Do)
 - **Onto branch:** <remote>/<existing-pr-branch>   (optional — stack onto an open PR's branch; docs 03)
 - **Depends on:** <id>[, <id>…]   (optional — ids only, any trailing note is ignored; scheduling waits until these are COMPLETE; docs 09)

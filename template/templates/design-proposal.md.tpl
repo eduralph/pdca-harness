@@ -16,6 +16,11 @@
 - **Kind:** enhancement (design proposal)
 - **Goal:** <the capability this adds — the observable new behaviour>
 - **Success criterion:** <the observable condition that means it works — what the shipped test asserts>
+- **Falsifiability:** <WHERE the binding success criterion can be made to go RED, and on
+  WHICH harness/topology Do is pointed at. If no available environment can currently produce
+  the red — a topology that can't exhibit the forbidden failure, or code no gate compiles —
+  that is a Plan-blocking gap: provision the environment or narrow the criterion before Do
+  runs. See `brief.md.tpl` for the worked example.>
 - **Repo + branch target:** <repo @ branch — resolved here per INTEGRATION §2, not left to Do>
 - **Scope:** <the one feature, in one logical change> / out of scope: <what is explicitly excluded>
 - **Difficulty:** <`low` | `medium` | `high` — the change's **blast-radius / cross-file
