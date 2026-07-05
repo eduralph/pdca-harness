@@ -57,21 +57,41 @@ def _suspend_inhibitor_argv(argv: list[str], env: dict) -> list[str] | None:
     process and cuts the cycle off mid-run. Hold a suspend inhibitor for the command's
     lifetime by re-exec'ing under the platform inhibitor; it releases automatically at exit.
 
-    Returns the argv to exec (inhibitor + the original ``argv``), or ``None`` when no
-    wrapping applies: already wrapped (``PDCA_FLOW_INHIBITED``), opted out (``--no-inhibit``
-    / ``PDCA_NO_INHIBIT``), or no inhibitor binary is available. Pure decision — no exec — so
-    it is unit-testable. Advisory by design: it inhibits only ``idle:sleep``, never
-    ``shutdown`` / ``handle-*``, so an operator can still deliberately power off.
+    Returns the argv to exec (inhibitor + the command that re-invokes this run), or ``None``
+    when no wrapping applies: already wrapped (``PDCA_FLOW_INHIBITED``), opted out
+    (``--no-inhibit`` / ``PDCA_NO_INHIBIT``), or no inhibitor binary is available. Pure
+    decision — no exec — so it is unit-testable. Advisory by design: it inhibits only idle
+    sleep, never shutdown, so an operator can still deliberately power off.
     """
     if env.get("PDCA_FLOW_INHIBITED"):            # already re-exec'd under an inhibitor
         return None
     if env.get("PDCA_NO_INHIBIT") or "--no-inhibit" in argv:  # opted out (CI / containers)
         return None
+    cmd = _reexec_command(argv)
     if shutil.which("systemd-inhibit"):           # Linux
-        return ["systemd-inhibit", "--what=idle:sleep", "--why=pdca flow", *argv]
+        return ["systemd-inhibit", "--what=idle:sleep", "--why=pdca flow", *cmd]
     if shutil.which("caffeinate"):                # macOS
-        return ["caffeinate", "-s", *argv]
+        # -i asserts against IDLE system sleep (valid on battery too); -s only holds on AC
+        # power, so -i is the load-bearing flag for an unattended laptop run. Include both to
+        # mirror systemd's idle:sleep. (`caffeinate -s` alone would silently no-op on battery.)
+        return ["caffeinate", "-i", "-s", *cmd]
     return None                                   # no inhibitor available
+
+
+def _reexec_command(argv: list[str]) -> list[str]:
+    """The command that re-invokes this run, for the inhibitor to exec.
+
+    The inhibitor (``systemd-inhibit`` / ``caffeinate``) execs its command argument directly,
+    so it must be something the OS can exec. An installed console script (``pdca`` /
+    ``pdca-<name>``) is — forward ``argv`` as-is. But the documented source-checkout entry
+    ``python -m pdca_harness.cli flow …`` has ``argv[0]`` = the ``cli.py`` file path, which
+    has no shebang/execute bit; exec'ing it directly fails. Detect that (argv[0] is a ``.py``
+    file or ``__main__``) and rebuild via the current interpreter so ``-m`` is preserved.
+    """
+    prog = Path(argv[0]).name if argv and argv[0] else ""
+    if not prog or prog.endswith(".py") or prog == "__main__":
+        return [sys.executable, "-m", "pdca_harness.cli", *argv[1:]]
+    return list(argv)
 
 
 def _inhibit_suspend_and_reexec() -> None:
