@@ -31,9 +31,11 @@
 - [ ] <decision only the human can make, and why a gate/reviewer couldn't>
 <!-- Undischarged external dependencies land here too: a build tool / service / topology the
      fix's evidence rests on that was NOT actually present or exercised — so a gate ran on a
-     code-read, an alias/shim, or a curated fixture instead of the real thing. Do declares
-     these in build-notes.md; the reviewer raises them NEEDS-HUMAN; both route into §6 so the
-     human sees the evidence gap at sign-off. -->
+     code-read, an alias/shim, or a curated fixture instead of the real thing. Two channels
+     both route into §6: the reviewer raises a NEEDS-HUMAN for a brief-declared / gate-visible
+     one, AND assemble scans build-notes.md for the builder's
+     `NEEDS-HUMAN external dependency: …` marker (build-notes is otherwise withheld from the
+     reviewer) — so a Do-discovered dependency reaches the human even with no covering gate. -->
 
 ## 7. Proven / not proven
 - Proven by which oracle:

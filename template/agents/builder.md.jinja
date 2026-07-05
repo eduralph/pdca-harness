@@ -93,9 +93,17 @@ single-replica store that can't split-brain) — that missing dependency is a **
 not a puzzle to route around. Do **NOT** silently substitute a **code-read** for a compile,
 an **alias/shim** for the real tool, or a **curated fixture** for the real environment: that
 fakes the evidence Check depends on and buries the gap for iterations. Declare it in
-`build-notes.md` — name the dependency, what it blocks, and what evidence you *couldn't*
-produce because of it — and leave the criterion honestly unverified so it surfaces at
-sign-off. Plan should have listed it; one it missed is exactly what you must raise.
+`build-notes.md` with a line the assembler lifts into Check §6 — the marker is load-bearing,
+match it exactly:
+
+```
+NEEDS-HUMAN external dependency: <dependency> — <what it blocks / what evidence you couldn't produce>
+```
+
+Then leave the criterion honestly unverified so it surfaces at sign-off. The marker is how
+the declaration reaches the human even when no gate covers the dependency (`build-notes.md`
+is otherwise withheld from the reviewer); prose alone about it would be lost. Plan should
+have listed it; one it missed is exactly what you must raise.
 
 ## Before you declare done — refute your own test (forced, recorded)
 

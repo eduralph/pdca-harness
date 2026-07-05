@@ -41,6 +41,13 @@ def assemble_summary(d: Path, cfg: Config) -> None:
         needs_human += _needs_human(atext)
     needs_human += _unverifiable_items(gates)
     needs_human += _failed_gating_items(gates)
+    # A builder-declared external dependency Do hit that Plan didn't list (#250): the reviewer
+    # can't see it (build-notes.md is withheld by the independence contract) and no gate need
+    # cover it (a stub or unrelated-gate config), so scan build-notes.md for the marker and
+    # route it here deterministically — otherwise the declaration never reaches the human.
+    build_notes = d / "build-notes.md"
+    if build_notes.exists():
+        needs_human += _declared_external_deps(build_notes.read_text(encoding="utf-8"))
 
     advisory_block = "\n".join(
         f"\n### Advisory — {p.stem.removeprefix('check-advisory-')}\n\n{t.strip()}"
@@ -174,6 +181,30 @@ def _needs_human(review_text: str) -> list[str]:
             label = cells[0] if cells else ""
             basis = cells[vi + 1] if vi + 1 < len(cells) else ""
             add(f"{label} — {basis}" if basis else label)
+    return items
+
+
+def _declared_external_deps(build_notes_text: str) -> list[str]:
+    """Builder-declared external dependencies (#250) → §6 items.
+
+    ``build-notes.md`` is withheld from the reviewer (the independence contract) and is not
+    otherwise read into ``SUMMARY.md``, so an external dependency Do hit that Plan didn't
+    list — and that no gate happens to cover (a stub or unrelated-gate config) — would never
+    reach the human. The builder marks each with a line
+    ``NEEDS-HUMAN external dependency: <dep> — <what it blocks>`` (see agents/builder.md);
+    this lifts them into §6 deterministically, independent of the reviewer and the gate set.
+    Match is bullet- and case-insensitive; the remainder after the marker becomes the item.
+    """
+    items: list[str] = []
+    seen: set[str] = set()
+    for line in build_notes_text.splitlines():
+        s = line.strip().lstrip("-*").strip()
+        low = s.lower()
+        if low.startswith("needs-human") and "external dependency" in low:
+            item = s[len("needs-human"):].lstrip(" —:-").strip()
+            if item and item.lower() not in seen:
+                seen.add(item.lower())
+                items.append(item)
     return items
 
 
