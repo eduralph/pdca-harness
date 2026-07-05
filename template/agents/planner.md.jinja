@@ -84,6 +84,15 @@ human's to confirm (like scope) — **ask when the order isn't clear.**
   only and MAY open that one cited callsite; without the cue it re-derives the composition
   from scratch and makes a locally-reasonable, globally-wrong call. Cite the peer that
   already solves it — don't leave Do to find it.
+- **Enumerate the slice's external dependencies** in the brief's `External dependencies`
+  field: build tools (`protoc`), runtime services (Docker, a live etcd/TiKV), and the
+  topology/environment shape (a ≥N-replica cluster) the slice needs to build AND to make the
+  criterion go red→green. Seed them into the render's `[[doctor.checks]]` / verification
+  posture where you can, so they preflight rather than fail mid-cycle. An external dependency
+  discovered only at Do is a cycle burned — and the builder tends to *silently work around*
+  an unmet one (a code-read instead of a compile, a curated fixture instead of the real
+  environment), which fakes the evidence; catch it here. `none` when the base toolchain
+  suffices.
 - **Assess `Difficulty:`** — `low` / `medium` / `high`, defined for its consumer as the
   fix's **blast-radius / cross-file reach**: how many files/call-sites it touches and how
   far its effects propagate — what a diff-reviewer must hold in view. A localized one-site

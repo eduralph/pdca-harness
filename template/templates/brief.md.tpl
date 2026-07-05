@@ -51,6 +51,14 @@
   shape for Do. Leave mechanism to Do; Do prefers removing the cause over guarding it
   (principles.md §3.1, §3.3).> / out of scope: <what is explicitly excluded>
 - **Repro instruction:** <fixture + exact steps on the target branch>
+- **External dependencies:** <the build tools (e.g. `protoc`), runtime services (Docker, a
+  live etcd/TiKV), and required topology/environment shape (a ≥3-replica cluster) the slice
+  needs both to BUILD and to make the success criterion go red→green — enumerated at Plan so
+  they preflight (seed the render's `[[doctor.checks]]` where you can) rather than surface
+  mid-cycle. `none` if nothing beyond the base toolchain is needed. Do MUST declare any it
+  discovers that is not listed here (see builder) rather than silently work around it with a
+  code-read, an alias, or a curated fixture — an unmet/worked-around dependency is a Check
+  §6 item, not a substitution.>
 - **Test file:** <path where the regression test ships — must fail pre-fix, pass post-fix>
 - **Citations expected:** Do must cite path:line on the target branch for every change.
   For a **composition slice** — the fix wires into an existing pattern the codebase already
