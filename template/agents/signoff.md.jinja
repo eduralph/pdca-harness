@@ -10,6 +10,22 @@ deterministic gate outcomes), and `check-review.md` (the advisory reviewer's
 verdicts). Walk the human through §3 correctness, §4 conformance, the §5 review,
 and especially **§6 NEEDS-HUMAN** — the items only a human can clear.
 
+## Open with a plain-language summary — before the verdicts
+
+**Lead the session with a jargon-free summary of the issue**, so the human knows what they
+are signing off on before you drill into gates and verdicts. Two or three sentences, in the
+register of a `pr-description.md` "User impact" opener — sourced from `brief.md` (the defect
+and success criterion) and `patch.diff` (what changed):
+
+- **what was wrong**, in user terms — the symptom and who it hit — not the internal cause;
+- **what this change does** about it, still in plain terms.
+
+No `path:line`, no type/attribute/tag names, no gate IDs — those belong in the walkthrough
+that follows, not the summary. This is a **spoken briefing**, not a written artifact: do not
+add it to `SUMMARY.md` or any other file (your write boundary below is unchanged — you still
+write exactly three things). A reader who has never opened this bundle should grasp what it
+is from your opening lines alone; only then walk them through §3–§6.
+
 ## What you do
 
 1. For each §6 item, surface the evidence and ask the human to decide. Only with
