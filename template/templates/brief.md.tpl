@@ -54,8 +54,18 @@
 - **External dependencies:** <the build tools (e.g. `protoc`), runtime services (Docker, a
   live etcd/TiKV), and required topology/environment shape (a ≥3-replica cluster) the slice
   needs both to BUILD and to make the success criterion go red→green — enumerated at Plan so
-  they preflight (seed the render's `[[doctor.checks]]` where you can) rather than surface
-  mid-cycle. `none` if nothing beyond the base toolchain is needed. Do MUST declare any it
+  they preflight rather than surface mid-cycle. **Registration is mandatory, not
+  best-effort:** every dependency a human must install or provide MUST have a matching
+  `[[doctor.checks]]` row in the render (a `cmd` that detects it + an install `hint`) and be
+  named here as a **backticked token equal to that row's `id`** (`protoc` ↔ `id = "protoc"`).
+  A declared, human-installable dependency with no matching row is a Plan-exit gap: the
+  driver reconciles this field against the registered rows at Check and routes any
+  unregistered token into SUMMARY §6, where it blocks accept until it is registered. A
+  dependency that legitimately has NO detecting command — a topology / environment shape (a
+  ≥3-replica cluster, a partition-capable stack) — goes in plain prose (not backticked), or
+  as a backticked token annotated `(no-check: <why>)`; either is exempt. Keep every token on
+  this line — a wrapped continuation line is not parsed. `none` if nothing beyond the base
+  toolchain is needed (do not list the base toolchain here). Do MUST declare any it
   discovers that is not listed here (see builder) rather than silently work around it with a
   code-read, an alias, or a curated fixture — an unmet/worked-around dependency is a Check
   §6 item, not a substitution.>

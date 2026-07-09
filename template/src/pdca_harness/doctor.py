@@ -139,6 +139,25 @@ def _expand_checks(specs: list[dict], lanes: int) -> list[dict]:
     return rows
 
 
+def registered_ids(cfg: Config) -> set[str]:
+    """Lower-cased ids of ``[[doctor.checks]]`` rows that would actually **run** (issue #263).
+
+    A row registers a dependency only if it can DETECT it. ``_expand_checks`` skips any row
+    without a non-empty ``cmd``, so ``[[doctor.checks]] id = "protoc"`` alone runs no check —
+    it must not be allowed to silence the unregistered-dependency §6 blocker while no
+    preflight ever exists (PR #269 review). ``id`` defaults to ``cmd``, matching
+    ``_expand_checks``'s own default.
+
+    Rows are read from disk, not from the ``Config`` snapshot, so a row registered *during*
+    the run (by the Plan beat, or by the human pasting the builder's proposal) counts.
+    """
+    return {
+        str(row.get("id") or row["cmd"]).strip().lower()
+        for row in cfg.current_doctor_checks()
+        if str(row.get("cmd") or "").strip()
+    }
+
+
 def run(cfg: Config, *, strict: bool = False) -> int:
     r = _Report()
 

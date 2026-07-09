@@ -158,6 +158,46 @@ def stacks_on(brief_path: Path) -> list[str]:
     return _id_list(field(brief_path, "stacks on", "stacks_on"))
 
 
+# A backticked dependency token, plus any immediately-following parenthetical annotation:
+#   `protoc` (build)                 → checkable, id must be "protoc"
+#   `partition-cluster` (no-check: …) → exempt, nothing can detect it
+_DEP_TOKEN_RE = re.compile(r"`([^`]+)`\s*(\([^)]*\))?")
+
+# Annotations that mark a declared dependency as having no possible detect command.
+_NO_CHECK_MARKERS = ("no-check", "topology")
+
+
+def external_dependency_tokens(brief_path: Path) -> list[str]:
+    """Backticked tokens in ``External dependencies`` that MUST each name a registered
+    ``[[doctor.checks]]`` row ``id`` (issue #263).
+
+    Registration is a forcing function, not best-effort: a dependency a human installs or
+    provides is written as a **backticked token equal to that row's id** (`` `protoc` `` ↔
+    ``id = "protoc"``), and the driver reconciles the two at Check. A dependency with no
+    possible detect command — a topology / environment shape (a ≥3-replica cluster, a
+    partition-capable stack) — is written in plain prose, or annotated ``(no-check: <why>)``
+    / ``(topology …)``; either is exempt and yields no token. ``none``, and an unfilled
+    ``<…>`` placeholder (``field`` reads it as absent), yield ``[]``.
+
+    Deliberately conservative: only an explicitly-backticked token is checkable, so free
+    prose can never manufacture a false "unregistered dependency". Like every brief field
+    this reads the label's own line, so a token on a wrapped continuation line is missed —
+    a false NEGATIVE, never a false positive.
+    """
+    raw = field(brief_path, "external dependencies", "external deps")
+    if not raw or raw.strip().lower().rstrip(".") == "none":
+        return []
+    tokens: list[str] = []
+    for token, annotation in _DEP_TOKEN_RE.findall(raw):
+        note = (annotation or "").lower()
+        if any(marker in note for marker in _NO_CHECK_MARKERS):
+            continue
+        token = token.strip()
+        if token and token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
 def onto_branch(brief_path: Path) -> tuple[str, str] | None:
     """``(remote, branch)`` of an existing PR's head to stack a commit onto, or ``None``.
 
