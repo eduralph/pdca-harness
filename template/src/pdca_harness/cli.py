@@ -13,7 +13,9 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from . import (act, brief, doctor, drift, driver, flow, gates, manual_test, merged, publish,
@@ -49,7 +51,34 @@ _STATE_ORDER = [
 ]
 
 
-def _suspend_inhibitor_argv(argv: list[str], env: dict) -> list[str] | None:
+# (binary, argv prefix) in preference order: Linux first, then macOS.
+# -i asserts against IDLE system sleep (valid on battery too); -s only holds on AC power,
+# so -i is the load-bearing flag for an unattended laptop run. Include both to mirror
+# systemd's idle:sleep. (`caffeinate -s` alone would silently no-op on battery.)
+_INHIBITORS = [
+    ("systemd-inhibit", ["systemd-inhibit", "--what=idle:sleep", "--why=pdca flow"]),
+    ("caffeinate", ["caffeinate", "-i", "-s"]),
+]
+
+
+def _inhibitor_works(prefix: list[str]) -> bool:
+    """Does this inhibitor prefix actually exec its command argument? (#259)
+
+    Presence of the binary is not evidence the inhibitor works. On a container / CI host
+    where ``/usr/bin/systemd-inhibit`` is installed but no systemd bus is reachable, it
+    exits 1 with ``Failed to connect to … bus`` and **never execs the wrapped command** —
+    so re-exec'ing under it kills the run before it starts. Probe by wrapping ``true``:
+    exit 0 means the inhibitor took its lock and ran the command.
+    """
+    try:
+        return subprocess.run([*prefix, "true"], capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):  # missing, unexecutable, or hung
+        return False
+
+
+def _suspend_inhibitor_argv(argv: list[str], env: dict, *,
+                            probe: Callable[[list[str]], bool] = _inhibitor_works,
+                            ) -> list[str] | None:
     """The keep-awake wrapper for a ``pdca flow`` run, or ``None`` to run unwrapped (#244).
 
     A ``pdca flow`` — a batch, or a high-difficulty bundle on a strong Do model — can run
@@ -59,23 +88,25 @@ def _suspend_inhibitor_argv(argv: list[str], env: dict) -> list[str] | None:
 
     Returns the argv to exec (inhibitor + the command that re-invokes this run), or ``None``
     when no wrapping applies: already wrapped (``PDCA_FLOW_INHIBITED``), opted out
-    (``--no-inhibit`` / ``PDCA_NO_INHIBIT``), or no inhibitor binary is available. Pure
-    decision — no exec — so it is unit-testable. Advisory by design: it inhibits only idle
-    sleep, never shutdown, so an operator can still deliberately power off.
+    (``--no-inhibit`` / ``PDCA_NO_INHIBIT``), or no inhibitor is available **and working**.
+    A binary that is present but broken (no systemd bus) is skipped, not returned: this
+    fails OPEN — an un-inhibited run — rather than closed, because a flow that runs without
+    keep-awake beats a flow that cannot start at all (#259).
+
+    Pure decision — no exec — so it is unit-testable; ``probe`` is injected for the same
+    reason. The opt-out / already-wrapped short-circuits come first, so the common paths
+    never pay for a probe. Advisory by design: it inhibits only idle sleep, never shutdown,
+    so an operator can still deliberately power off.
     """
     if env.get("PDCA_FLOW_INHIBITED"):            # already re-exec'd under an inhibitor
         return None
     if env.get("PDCA_NO_INHIBIT") or "--no-inhibit" in argv:  # opted out (CI / containers)
         return None
     cmd = _reexec_command(argv)
-    if shutil.which("systemd-inhibit"):           # Linux
-        return ["systemd-inhibit", "--what=idle:sleep", "--why=pdca flow", *cmd]
-    if shutil.which("caffeinate"):                # macOS
-        # -i asserts against IDLE system sleep (valid on battery too); -s only holds on AC
-        # power, so -i is the load-bearing flag for an unattended laptop run. Include both to
-        # mirror systemd's idle:sleep. (`caffeinate -s` alone would silently no-op on battery.)
-        return ["caffeinate", "-i", "-s", *cmd]
-    return None                                   # no inhibitor available
+    for binary, prefix in _INHIBITORS:
+        if shutil.which(binary) and probe(prefix):
+            return [*prefix, *cmd]
+    return None                                   # none available, or all present-but-broken
 
 
 def _reexec_command(argv: list[str]) -> list[str]:
@@ -99,17 +130,17 @@ def _inhibit_suspend_and_reexec() -> None:
 
     Replaces the current process (``os.execvpe``) so the inhibitor owns the run's whole
     lifetime. Returns only when no wrapping applies; warns once on stderr when the reason is
-    "no inhibitor available" (not when opted out or already wrapped) so a long run isn't
+    "no working inhibitor" (not when opted out or already wrapped) so a long run isn't
     silently left unprotected.
     """
     wrapped = _suspend_inhibitor_argv(sys.argv, dict(os.environ))
     if wrapped is None:
         opted_out = bool(os.environ.get("PDCA_NO_INHIBIT")) or "--no-inhibit" in sys.argv
         already = bool(os.environ.get("PDCA_FLOW_INHIBITED"))
-        if not opted_out and not already:  # the only remaining reason is "no inhibitor found"
-            print("pdca flow: no systemd-inhibit/caffeinate found — running WITHOUT "
-                  "keep-awake; disable host auto-suspend manually for long unattended runs.",
-                  file=sys.stderr)
+        if not opted_out and not already:  # missing, or present-but-broken (#259)
+            print("pdca flow: no working systemd-inhibit/caffeinate (missing, or no systemd "
+                  "bus) — running WITHOUT keep-awake; disable host auto-suspend manually for "
+                  "long unattended runs.", file=sys.stderr)
         return
     os.execvpe(wrapped[0], wrapped, {**os.environ, "PDCA_FLOW_INHIBITED": "1"})
 
