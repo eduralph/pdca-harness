@@ -100,6 +100,18 @@ match it exactly:
 NEEDS-HUMAN external dependency: <dependency> — <what it blocks / what evidence you couldn't produce>
 ```
 
+And because Plan should have **registered** it, propose the `[[doctor.checks]]` row that
+would have caught it before the cycle burned — so the human can paste it straight into
+`pdca.toml`. Put it in a fenced block right after the marker:
+
+```toml
+[[doctor.checks]]
+id    = "<dependency>"   # the token Plan should have put in `External dependencies`
+cmd   = "<a shell test that exits 0 iff it is present>"   # e.g. "protoc --version"
+hint  = "<how a human installs or provides it>"
+level = "MISSING"        # or "WARN" if the slice degrades but still builds without it
+```
+
 Then leave the criterion honestly unverified so it surfaces at sign-off. The marker is how
 the declaration reaches the human even when no gate covers the dependency (`build-notes.md`
 is otherwise withheld from the reviewer); prose alone about it would be lost. Plan should

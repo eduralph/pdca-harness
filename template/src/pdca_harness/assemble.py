@@ -48,6 +48,10 @@ def assemble_summary(d: Path, cfg: Config) -> None:
     build_notes = d / "build-notes.md"
     if build_notes.exists():
         needs_human += _declared_external_deps(build_notes.read_text(encoding="utf-8"))
+    # …and the Plan-side twin (#263): a dependency the brief DECLARES but that no
+    # [[doctor.checks]] row detects. Registration is a forcing function — an unregistered
+    # dependency blocks accept here rather than surfacing later as a cryptic build failure.
+    needs_human += _unregistered_dependency_items(d / "brief.md", cfg)
 
     advisory_block = "\n".join(
         f"\n### Advisory — {p.stem.removeprefix('check-advisory-')}\n\n{t.strip()}"
@@ -206,6 +210,33 @@ def _declared_external_deps(build_notes_text: str) -> list[str]:
                 seen.add(item.lower())
                 items.append(item)
     return items
+
+
+def _unregistered_dependency_items(brief_path: Path, cfg: Config) -> list[str]:
+    """A brief-declared external dependency with no registered ``[[doctor.checks]]`` row (#263).
+
+    The principle: when a change needs something a human must install or provide, the system
+    must REGISTER it — a doctor row with a detect ``cmd`` and an install ``hint`` — rather
+    than let it surface mid-cycle as a cryptic build failure. Registration has to be a
+    forcing function, so an unregistered declaration becomes a §6 item and the C6 guard
+    blocks accept until the row exists (or the human clears it as a false positive).
+
+    This cannot be the reviewer's job: its sandbox holds only ``REVIEWER_INPUTS``, so it
+    never sees ``pdca.toml`` and cannot know which rows are registered. Nor is it a judgment
+    call — it is set membership — so the driver decides it deterministically here. ``id``
+    falls back to ``cmd``, matching ``doctor._expand_checks``'s own default.
+    """
+    registered = {
+        str(check.get("id") or check.get("cmd") or "").strip().lower()
+        for check in getattr(cfg, "doctor_checks", [])
+    }
+    return [
+        f"external dependency `{token}` is declared in the brief but has no matching "
+        f"[[doctor.checks]] row — register a detect cmd + install hint in pdca.toml, or "
+        f"annotate it `(no-check: …)` if nothing can detect it"
+        for token in brief.external_dependency_tokens(brief_path)
+        if token.strip().lower() not in registered
+    ]
 
 
 def _needs_human_block(items: list[str]) -> str:
