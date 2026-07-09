@@ -138,12 +138,27 @@ isolated bundle root.
   end-to-end with **stubbed** Do/gates/reviewer leaves so the loop runs offline.
 - **Single-sourced gates** — defined once in `pdca.toml` `[[gates.checks]]`, run by
   both the driver and CI via one `pdca gates` command (stub fallback until filled).
+- **Registered dependencies, not cryptic build failures** — a brief's `External
+  dependencies` are reconciled against the render's `[[doctor.checks]]` rows at Check.
+  If a declared dependency has no row that detects it, that becomes a §6 item and the
+  accept-guard holds until the row exists — so `pdca doctor` prompts you with its install
+  hint up front, rather than the dependency surfacing mid-cycle as a build failure. A
+  topology nothing can detect is exempt (doc 05).
 - **Publish on accept** — an accepted bundle opens a draft PR on the target branch as
   the closing step of Check; `pdca flow` and a standalone `pdca signoff --accept` do
   this by default (`--no-publish` to skip), and `pdca status` shows each COMPLETE
   bundle's publish state (doc 07).
 - **Batch fan-out + sign-off queue** — `pdca flow A B C` over N issues, `pdca queue`
-  cheap-first burn-down.
+  cheap-first burn-down. A run's pass budget is `[driver].max_passes` (`PDCA_MAX_PASSES` /
+  `pdca flow --max-passes N`); a bundle still iterating when it runs out is named with a
+  `pdca flow <id>` resume hint, never silently dropped.
+- **Auto-iterate on implementation-only findings** — `[driver].auto_iterate`
+  (`PDCA_AUTO_ITERATE` / `pdca flow --auto-iterate`, **off by default**) lets the driver
+  record `iterate-do` and rebuild unattended when *every* open §6 item is a `gate` cell of
+  the 5/5/1 (C2/C4/T1–T4) — the bugs a builder can fix. A judgment cell (C5 causal
+  adequacy, T5, validation), a gate that couldn't run, an external dependency, or anything
+  it can't classify still stops for you. It never auto-accepts, and it's bounded by
+  `[driver].max_auto_iters` rounds per bundle (doc 06).
 - **In-driver lane concurrency** — `[driver].lanes = N` (`PDCA_LANES` /
   `pdca flow --lanes N`) fans the unattended Do + Check band across N workers in
   one workspace; each gate sees its worker slot as `$PDCA_LANE` to keep checkouts /
