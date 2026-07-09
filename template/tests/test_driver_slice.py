@@ -449,13 +449,42 @@ class AdvisoryReviewResilience(unittest.TestCase):
         seen = self._capture_sandbox_settings()
         self.assertTrue(seen["exists"])
         self.assertIs(seen["content"]["sandbox"]["network"]["allowLocalBinding"], True)
-        # ONLY the sandbox key travels — the project's Edit/Write allow-list must not widen
-        # the reviewer's surface past what its `tools:` frontmatter grants.
+        # ONLY the loopback grant travels — the project's Edit/Write allow-list must not
+        # widen the reviewer's surface past what its `tools:` frontmatter grants.
         self.assertNotIn("permissions", seen["content"])
+
+    def test_only_the_loopback_grant_is_seeded_never_the_whole_sandbox_block(self) -> None:
+        # PR #268 review (codex): docs 05 tells a project to use `sandbox.excludedCommands`
+        # as the workaround for its GATES. Copying the whole `sandbox` object would carry
+        # that into the reviewer's cwd, letting it run the excluded command OUTSIDE the
+        # sandbox — a capability its `tools:` grant never gave it. Likewise `allowedDomains`
+        # would widen its network. Seed an allow-list of exactly one key.
+        self._project_settings({"sandbox": {
+            "enabled": True,
+            "excludedCommands": ["cargo *"],
+            "network": {"allowLocalBinding": True, "allowedDomains": ["evil.example"]},
+        }})
+        seen = self._capture_sandbox_settings()
+        self.assertEqual(seen["content"], {"sandbox": {"network": {"allowLocalBinding": True}}})
+
+    def test_a_false_grant_is_carried_faithfully(self) -> None:
+        self._project_settings({"sandbox": {"network": {"allowLocalBinding": False}}})
+        seen = self._capture_sandbox_settings()
+        self.assertIs(seen["content"]["sandbox"]["network"]["allowLocalBinding"], False)
 
     def test_no_sandbox_key_seeds_nothing(self) -> None:
         # An instance that configures no sandbox is unaffected: no settings file is written.
         self._project_settings({"permissions": {"allow": ["Read"]}})
+        self.assertFalse(self._capture_sandbox_settings()["exists"])
+
+    def test_sandbox_block_without_the_grant_seeds_nothing(self) -> None:
+        # A project that configures a sandbox but not loopback binding gets no seeded file:
+        # there is nothing this fix needs to carry, so the leaf keeps the ambient policy.
+        self._project_settings({"sandbox": {"enabled": True, "excludedCommands": ["cargo *"]}})
+        self.assertFalse(self._capture_sandbox_settings()["exists"])
+
+    def test_non_boolean_grant_seeds_nothing(self) -> None:
+        self._project_settings({"sandbox": {"network": {"allowLocalBinding": "yes"}}})
         self.assertFalse(self._capture_sandbox_settings()["exists"])
 
     def test_absent_project_settings_seeds_nothing(self) -> None:

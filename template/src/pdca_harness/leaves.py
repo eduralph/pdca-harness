@@ -835,7 +835,7 @@ def _seed_sandbox_agents(cfg: Config, sandbox: Path) -> None:
 
 
 def _seed_sandbox_settings(cfg: Config, sandbox: Path) -> None:
-    """Carry the project's ``sandbox`` settings into the leaf sandbox cwd (issue #261).
+    """Grant the leaf sandbox the ONE capability a socket-backed Check needs (issue #261).
 
     Claude Code loads **project** settings from ``.claude/settings.json`` relative to the
     subprocess cwd — the same walk-up that finds ``.claude/agents`` (#161). The reviewer /
@@ -846,15 +846,17 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path) -> None:
     fails ``Operation not permitted``. Every loopback-socket runtime test then panics before
     its assertion, so C2/C4/T3 can only ever be *provisional* at Check.
 
-    The block is copied **verbatim** from the project's own settings, so the leaf sees
-    exactly the sandbox policy it would have seen running in the project root — this adds no
-    merge behaviour of its own, it only restores the project layer the temp cwd removed.
+    **Exactly one key is seeded** — ``sandbox.network.allowLocalBinding`` — never the whole
+    ``sandbox`` object, and never ``permissions``. Each wider block would hand the leaf a
+    capability its ``tools:`` frontmatter does not grant: ``permissions.allow`` carries
+    ``Edit``/``Write``, and ``sandbox.excludedCommands`` — which docs 05 recommends to a
+    project as the workaround for its *gates* — makes the named command bypass the sandbox
+    **entirely**, so a reviewer could run the test runner unconfined. An allow-list of one
+    keeps the seed to the capability this fix is actually about (PR #268 review).
 
-    Only the ``sandbox`` key is carried over — **never** ``permissions``. The project's
-    allow-list includes ``Edit``/``Write``; copying it verbatim would widen the reviewer's
-    surface past what its ``tools:`` frontmatter grants. Absent key ⇒ no file written, so an
-    instance that doesn't configure a sandbox is unaffected. Best-effort, like the agent
-    seeding: any read/parse/write error degrades to a no-op, never an aborted Check.
+    An absent or non-boolean value ⇒ no file written, so an instance that doesn't configure a
+    sandbox is unaffected. Best-effort, like the agent seeding: any read/parse/write error
+    degrades to a no-op, never an aborted Check.
 
     Scope: this covers the reviewer / advisory **leaves**. Gate commands are plain
     subprocesses of ``pdca`` and inherit the operator's ambient sandbox instead (docs 05).
@@ -863,13 +865,17 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path) -> None:
     if not src.is_file():
         return
     try:
-        sandbox_cfg = json.loads(src.read_text(encoding="utf-8")).get("sandbox")
-        if not sandbox_cfg:
+        settings = json.loads(src.read_text(encoding="utf-8"))
+        allow_local_binding = (settings.get("sandbox") or {}).get("network", {}).get(
+            "allowLocalBinding")
+        if not isinstance(allow_local_binding, bool):
             return
         dest = sandbox / ".claude"
         dest.mkdir(parents=True, exist_ok=True)
         (dest / "settings.json").write_text(
-            json.dumps({"sandbox": sandbox_cfg}, indent=2), encoding="utf-8")
+            json.dumps({"sandbox": {"network": {"allowLocalBinding": allow_local_binding}}},
+                       indent=2),
+            encoding="utf-8")
     except (OSError, ValueError, AttributeError) as exc:
         print(f"leaves: could not seed sandbox settings from {src} ({exc}); the leaf runs "
               "under the ambient sandbox policy", file=sys.stderr)

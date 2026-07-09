@@ -130,16 +130,23 @@ The rendered project's `.claude/settings.json` therefore sets:
 { "sandbox": { "network": { "allowLocalBinding": true } } }
 ```
 
-and the driver **seeds that `sandbox` block into the leaf's temp cwd**, because Claude
-Code loads project settings relative to the subprocess cwd — the same walk-up that finds
-`.claude/agents`. Only the `sandbox` key travels; `permissions` deliberately does not, so
-the reviewer's surface stays what its agent `tools:` grants.
+and the driver **seeds that one setting into the leaf's temp cwd**, because Claude Code
+loads project settings relative to the subprocess cwd — the same walk-up that finds
+`.claude/agents`.
+
+Deliberately *only* `sandbox.network.allowLocalBinding` travels. Not `permissions` (whose
+allow-list carries `Edit`/`Write`), and not the rest of the `sandbox` block — in particular
+not `sandbox.excludedCommands`, recommended just below for your **gates**, which makes a
+command bypass the sandbox *entirely*: carrying it into the reviewer's cwd would let the
+reviewer run your test runner unconfined. The reviewer's surface stays exactly what its
+agent `tools:` grants, plus the one capability a socket-backed Check needs.
 
 This covers the **reviewer and advisory leaves**. It does *not* cover the **gates**: gate
 commands are plain subprocesses of `pdca`, so they inherit whatever sandbox the operator's
 own shell already has. If you launch `pdca flow` from inside a sandboxed agent shell, a
 gate that binds loopback still fails. Run `pdca` from an unsandboxed shell, or exempt the
-test runner via `sandbox.excludedCommands` in your own settings.
+test runner via `sandbox.excludedCommands` in your own settings (that exemption stays in
+*your* settings — the driver never seeds it into a leaf).
 
 ### Optional advisory reviewers (a second lens)
 
