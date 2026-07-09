@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import brief
+from . import brief, doctor
 from .config import Config
 
 
@@ -223,13 +223,14 @@ def _unregistered_dependency_items(brief_path: Path, cfg: Config) -> list[str]:
 
     This cannot be the reviewer's job: its sandbox holds only ``REVIEWER_INPUTS``, so it
     never sees ``pdca.toml`` and cannot know which rows are registered. Nor is it a judgment
-    call — it is set membership — so the driver decides it deterministically here. ``id``
-    falls back to ``cmd``, matching ``doctor._expand_checks``'s own default.
+    call — it is set membership — so the driver decides it deterministically here.
+
+    :func:`doctor.registered_ids` owns what "registered" means: a row that would actually
+    RUN (it has a detect ``cmd``), read from ``pdca.toml`` as it stands **now** rather than
+    from the snapshot the run opened with — Plan and Do both add rows mid-cycle (PR #269
+    review).
     """
-    registered = {
-        str(check.get("id") or check.get("cmd") or "").strip().lower()
-        for check in getattr(cfg, "doctor_checks", [])
-    }
+    registered = doctor.registered_ids(cfg)
     return [
         f"external dependency `{token}` is declared in the brief but has no matching "
         f"[[doctor.checks]] row — register a detect cmd + install hint in pdca.toml, or "

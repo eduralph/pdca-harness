@@ -271,6 +271,24 @@ class Config:
                 return cls
         return ""
 
+    def current_doctor_checks(self) -> list[dict]:
+        """The ``[[doctor.checks]]`` rows **as they are on disk right now** (issue #263).
+
+        ``Config`` is loaded once per ``pdca`` invocation, but a `pdca flow` can run for
+        hours and ``pdca.toml`` is edited *during* it: the Plan beat registers a row for a
+        dependency it just enumerated, and the human pastes in the row the builder proposed
+        at Do. A snapshot taken before Plan would then report a correctly-registered
+        dependency as unregistered at Check — a §6 blocker for work already done.
+
+        Falls back to the snapshot when ``pdca.toml`` is absent or unparseable (a test's
+        synthetic ``Config``, a mid-write file), so this never crashes an assemble.
+        """
+        try:
+            data = tomllib.loads((self.root / "pdca.toml").read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            return list(self.doctor_checks)
+        return list(data.get("doctor", {}).get("checks", []))
+
     @classmethod
     def load(cls, root: Path | None = None) -> "Config":
         """Load ``pdca.toml`` from ``root`` (or the nearest ancestor that has one)."""

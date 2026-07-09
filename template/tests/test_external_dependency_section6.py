@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from pdca_harness import assemble, brief, cli, gates, signoff, state
+from pdca_harness import assemble, brief, cli, doctor, gates, signoff, state
 from pdca_harness.config import Config, LeafConfig
 
 _PASS_GATE = {"id": "C4", "tier": "C4", "label": "verify", "scope": "bundle",
@@ -164,8 +164,24 @@ class UnregisteredDependencyForcingFunction(unittest.TestCase):
             assemble._unregistered_dependency_items(
                 self._brief("`protoc --version`"), self.cfg), [])
 
+    def test_row_without_a_cmd_does_not_register(self) -> None:
+        # PR #269 review (codex): `doctor._expand_checks` SKIPS a row with no `cmd`, so
+        # `[[doctor.checks]] id = "protoc"` runs no preflight at all. Treating it as
+        # registered would silence the §6 blocker while nothing ever detects protoc —
+        # defeating the detect-cmd forcing function this issue exists to create.
+        self.cfg.doctor_checks = [{"id": "protoc"}]                             # no cmd
+        self.assertEqual(doctor._expand_checks(self.cfg.doctor_checks, 1), [])  # never runs
+        items = assemble._unregistered_dependency_items(self._brief("`protoc` (build)"), self.cfg)
+        self.assertEqual(len(items), 1, "a cmd-less row must not count as registration")
+        self.assertIn("protoc", items[0])
+
+    def test_blank_cmd_does_not_register(self) -> None:
+        self.cfg.doctor_checks = [{"id": "protoc", "cmd": "   "}]
+        self.assertEqual(len(assemble._unregistered_dependency_items(
+            self._brief("`protoc` (build)"), self.cfg)), 1)
+
     def test_case_insensitive_match(self) -> None:
-        self.cfg.doctor_checks = [{"id": "docker"}]
+        self.cfg.doctor_checks = [{"id": "docker", "cmd": "docker info"}]
         self.assertEqual(
             assemble._unregistered_dependency_items(self._brief("`Docker` (runtime)"), self.cfg), [])
 
@@ -206,6 +222,53 @@ class UnregisteredDependencyForcingFunction(unittest.TestCase):
         p = self.tmp / "old-brief.md"
         p.write_text("- **Slug:** legacy\n", encoding="utf-8")
         self.assertEqual(assemble._unregistered_dependency_items(p, self.cfg), [])
+
+
+class MidCycleRegistration(unittest.TestCase):
+    """PR #269 review (codex): `Config` is loaded ONCE per invocation, but `pdca.toml` is
+    edited *during* a long `pdca flow` — the Plan beat registers a row for the dependency it
+    just enumerated (the planner is now instructed to), and the human pastes in the row the
+    builder proposed at Do. Reconciling against the opening snapshot reports those correctly
+    registered dependencies as unregistered, blocking §6 on work already done."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+        self.brief = self.tmp / "brief.md"
+        self.brief.write_text("- **External dependencies:** `protoc` (build)\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_toml(self, doctor_block: str = "") -> None:
+        (self.tmp / "pdca.toml").write_text(
+            '[project]\ndefault_branch = "main"\n'
+            '[leaves.builder]\nmode = "stub"\n[leaves.reviewer]\nmode = "stub"\n' + doctor_block,
+            encoding="utf-8")
+
+    def test_row_registered_after_config_load_is_seen_at_check(self) -> None:
+        self.cfg.doctor_checks = []          # the snapshot `Config.load()` took before Plan
+        self._write_toml('[[doctor.checks]]\nid = "protoc"\ncmd = "protoc --version"\n'
+                         'hint = "apt install protobuf-compiler"\n')   # Plan registered it
+        self.assertEqual(assemble._unregistered_dependency_items(self.brief, self.cfg), [])
+
+    def test_still_blocks_when_the_row_was_never_written(self) -> None:
+        self.cfg.doctor_checks = [{"id": "protoc", "cmd": "protoc --version"}]  # stale snapshot
+        self._write_toml()                                          # …but pdca.toml has no row
+        items = assemble._unregistered_dependency_items(self.brief, self.cfg)
+        self.assertEqual(len(items), 1, "disk is the truth; a stale snapshot must not excuse it")
+
+    def test_absent_pdca_toml_falls_back_to_the_snapshot(self) -> None:
+        # A synthetic Config (every test above, and `pdca` run outside a project) has no file.
+        self.cfg.doctor_checks = [{"id": "protoc", "cmd": "protoc --version"}]
+        self.assertFalse((self.tmp / "pdca.toml").exists())
+        self.assertEqual(assemble._unregistered_dependency_items(self.brief, self.cfg), [])
+
+    def test_malformed_pdca_toml_falls_back_to_the_snapshot(self) -> None:
+        # A half-written file mid-edit must not crash an assemble.
+        self.cfg.doctor_checks = [{"id": "protoc", "cmd": "protoc --version"}]
+        (self.tmp / "pdca.toml").write_text("[project\nbroken", encoding="utf-8")
+        self.assertEqual(assemble._unregistered_dependency_items(self.brief, self.cfg), [])
 
 
 class ExternalDependencyTokens(unittest.TestCase):
