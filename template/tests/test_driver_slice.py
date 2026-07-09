@@ -8,12 +8,14 @@ plus the C6 accept-gate, the independence contract, and an iterate transition.
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
@@ -409,6 +411,89 @@ class AdvisoryReviewResilience(unittest.TestCase):
             leaves._invoke = orig
         self.assertIn("NOT COMPLETED",
                       (self.d / "check-review.md").read_text(encoding="utf-8"))
+
+    def _project_settings(self, payload: dict) -> None:
+        cdir = self.cfg.root / ".claude"
+        cdir.mkdir(parents=True, exist_ok=True)
+        (cdir / "settings.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    def _capture_sandbox_settings(self) -> dict:
+        """Run the sandboxed reviewer, returning what landed at <sandbox>/.claude/settings.json."""
+        (self.d / "patch.diff").write_text("x\n", encoding="utf-8")
+        (self.d / "check-gates.json").write_text("{}\n", encoding="utf-8")
+        seen: dict = {}
+        orig = leaves._invoke
+
+        def capture(leaf, workdir, prompt, **k):
+            f = Path(workdir) / ".claude" / "settings.json"
+            seen["exists"] = f.exists()
+            seen["content"] = json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+            (Path(workdir) / "check-review.md").write_text("ok\n", encoding="utf-8")
+
+        leaves._invoke = capture
+        try:
+            leaves._run_review_sandboxed(self.d, self.cfg)
+        finally:
+            leaves._invoke = orig
+        return seen
+
+    def test_sandbox_seeds_project_sandbox_settings(self) -> None:
+        # #261: Claude Code loads project settings from `.claude/settings.json` relative to
+        # the subprocess cwd. The reviewer runs in a temp cwd, so the project's sandbox
+        # policy — notably sandbox.network.allowLocalBinding — never applied, and every
+        # loopback-socket runtime test failed to bind before its assertion ran.
+        self._project_settings({
+            "sandbox": {"network": {"allowLocalBinding": True}},
+            "permissions": {"allow": ["Edit", "Write"]},
+        })
+        seen = self._capture_sandbox_settings()
+        self.assertTrue(seen["exists"])
+        self.assertIs(seen["content"]["sandbox"]["network"]["allowLocalBinding"], True)
+        # ONLY the sandbox key travels — the project's Edit/Write allow-list must not widen
+        # the reviewer's surface past what its `tools:` frontmatter grants.
+        self.assertNotIn("permissions", seen["content"])
+
+    def test_no_sandbox_key_seeds_nothing(self) -> None:
+        # An instance that configures no sandbox is unaffected: no settings file is written.
+        self._project_settings({"permissions": {"allow": ["Read"]}})
+        self.assertFalse(self._capture_sandbox_settings()["exists"])
+
+    def test_absent_project_settings_seeds_nothing(self) -> None:
+        self.assertFalse(self._capture_sandbox_settings()["exists"])
+
+    def test_malformed_project_settings_does_not_abort_check(self) -> None:
+        # Best-effort, like the agent seeding: a corrupt settings.json degrades to a no-op.
+        cdir = self.cfg.root / ".claude"
+        cdir.mkdir(parents=True, exist_ok=True)
+        (cdir / "settings.json").write_text("{ not json", encoding="utf-8")
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            seen = self._capture_sandbox_settings()          # must NOT raise
+        self.assertFalse(seen["exists"])
+        self.assertIn("could not seed sandbox settings", buf.getvalue())
+
+    def test_advisory_sandbox_seeds_settings_too(self) -> None:
+        # The advisory leaves hit the same bind wall as the main reviewer (#261 names
+        # advisory explicitly), so they get the same policy.
+        self._project_settings({"sandbox": {"network": {"allowLocalBinding": True}}})
+        (self.d / "patch.diff").write_text("x\n", encoding="utf-8")
+        (self.d / "check-gates.json").write_text("{}\n", encoding="utf-8")
+        seen: dict = {}
+        orig = leaves._invoke
+
+        def capture(leaf, workdir, prompt, **k):
+            f = Path(workdir) / ".claude" / "settings.json"
+            seen["content"] = json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+            (Path(workdir) / "check-advisory-lens.md").write_text("ok\n", encoding="utf-8")
+
+        leaves._invoke = capture
+        try:
+            leaves._run_advisory_sandboxed(
+                self.d, self.cfg, LeafConfig(mode="command", family="claude"),
+                {"id": "lens", "role": "a lens"}, "lens")
+        finally:
+            leaves._invoke = orig
+        self.assertIs(seen["content"]["sandbox"]["network"]["allowLocalBinding"], True)
 
 
 class AdvisoryReviewers(unittest.TestCase):

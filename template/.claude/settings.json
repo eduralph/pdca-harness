@@ -1,4 +1,9 @@
 {
+  "sandbox": {
+    "network": {
+      "allowLocalBinding": true
+    }
+  },
   "permissions": {
     "allow": [
       "Read",

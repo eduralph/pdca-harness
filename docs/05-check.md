@@ -114,6 +114,33 @@ tree). The reviewer grounds every citation there and is told **not** to wander i
 other checkouts on the machine — without this it can't ground, or hunts the filesystem
 for "the target" (issue #75).
 
+#### Runtime tests that bind a loopback socket
+
+That isolation sandbox is a *temp working directory*, not an OS jail. The jail a leaf
+actually runs under is **Claude Code's own** (bubblewrap + seccomp on Linux), and by
+default it refuses `bind()` on a loopback socket — so a runtime test that does
+`TcpListener::bind("127.0.0.1:0")` (a loopback-gRPC server, a test HTTP listener) panics
+with `Operation not permitted` *before its assertion runs*. Compile and non-socket unit
+legs pass; only the socket-backed path fails, so C2/C4/T3 can never earn an automated
+red→green (issue #261).
+
+The rendered project's `.claude/settings.json` therefore sets:
+
+```json
+{ "sandbox": { "network": { "allowLocalBinding": true } } }
+```
+
+and the driver **seeds that `sandbox` block into the leaf's temp cwd**, because Claude
+Code loads project settings relative to the subprocess cwd — the same walk-up that finds
+`.claude/agents`. Only the `sandbox` key travels; `permissions` deliberately does not, so
+the reviewer's surface stays what its agent `tools:` grants.
+
+This covers the **reviewer and advisory leaves**. It does *not* cover the **gates**: gate
+commands are plain subprocesses of `pdca`, so they inherit whatever sandbox the operator's
+own shell already has. If you launch `pdca flow` from inside a sandboxed agent shell, a
+gate that binds loopback still fails. Run `pdca` from an unsandboxed shell, or exempt the
+test runner via `sandbox.excludedCommands` in your own settings.
+
 ### Optional advisory reviewers (a second lens)
 
 The `reviewer` judges fix *adequacy*. For other lenses — correctness bugs the patch

@@ -834,6 +834,47 @@ def _seed_sandbox_agents(cfg: Config, sandbox: Path) -> None:
               "`--agent` may not resolve", file=sys.stderr)
 
 
+def _seed_sandbox_settings(cfg: Config, sandbox: Path) -> None:
+    """Carry the project's ``sandbox`` settings into the leaf sandbox cwd (issue #261).
+
+    Claude Code loads **project** settings from ``.claude/settings.json`` relative to the
+    subprocess cwd — the same walk-up that finds ``.claude/agents`` (#161). The reviewer /
+    advisory leaves run in a temp cwd, so the rendered project's ``.claude/settings.json``
+    is invisible to them and its ``sandbox`` policy silently does not apply. In particular
+    ``sandbox.network.allowLocalBinding``: without it the leaf's Bash tool runs under
+    Claude Code's own bubblewrap+seccomp sandbox, where ``TcpListener::bind("127.0.0.1:0")``
+    fails ``Operation not permitted``. Every loopback-socket runtime test then panics before
+    its assertion, so C2/C4/T3 can only ever be *provisional* at Check.
+
+    The block is copied **verbatim** from the project's own settings, so the leaf sees
+    exactly the sandbox policy it would have seen running in the project root — this adds no
+    merge behaviour of its own, it only restores the project layer the temp cwd removed.
+
+    Only the ``sandbox`` key is carried over — **never** ``permissions``. The project's
+    allow-list includes ``Edit``/``Write``; copying it verbatim would widen the reviewer's
+    surface past what its ``tools:`` frontmatter grants. Absent key ⇒ no file written, so an
+    instance that doesn't configure a sandbox is unaffected. Best-effort, like the agent
+    seeding: any read/parse/write error degrades to a no-op, never an aborted Check.
+
+    Scope: this covers the reviewer / advisory **leaves**. Gate commands are plain
+    subprocesses of ``pdca`` and inherit the operator's ambient sandbox instead (docs 05).
+    """
+    src = cfg.root / ".claude" / "settings.json"
+    if not src.is_file():
+        return
+    try:
+        sandbox_cfg = json.loads(src.read_text(encoding="utf-8")).get("sandbox")
+        if not sandbox_cfg:
+            return
+        dest = sandbox / ".claude"
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "settings.json").write_text(
+            json.dumps({"sandbox": sandbox_cfg}, indent=2), encoding="utf-8")
+    except (OSError, ValueError, AttributeError) as exc:
+        print(f"leaves: could not seed sandbox settings from {src} ({exc}); the leaf runs "
+              "under the ambient sandbox policy", file=sys.stderr)
+
+
 def _run_review_sandboxed(d: Path, cfg: Config) -> None:
     """Run the reviewer in a temp dir holding ONLY the reviewer inputs.
 
@@ -851,6 +892,10 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
         # Seed unconditionally: flag families need it to resolve `--agent` (#161);
         # for inline families it is harmless (role prompts only, never build-notes).
         _seed_sandbox_agents(cfg, sandbox)
+        # …and the project's sandbox policy, which is likewise invisible from a temp cwd
+        # (#261) — without it a loopback-socket runtime test can't bind, so it can never
+        # earn an automated red→green at Check.
+        _seed_sandbox_settings(cfg, sandbox)
         # Ground citations on the brief's target checkout (#75): name it via $PDCA_TARGET
         # so the reviewer doesn't wander into unrelated checkouts, and grant read access
         # via the family's grounding flag (claude: --add-dir). Independence holds — the
@@ -1084,6 +1129,10 @@ def _run_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict, 
         # Seed unconditionally: flag families need it to resolve `--agent` (#161);
         # for inline families it is harmless (role prompts only, never build-notes).
         _seed_sandbox_agents(cfg, sandbox)
+        # …and the project's sandbox policy, which is likewise invisible from a temp cwd
+        # (#261) — without it a loopback-socket runtime test can't bind, so it can never
+        # earn an automated red→green at Check.
+        _seed_sandbox_settings(cfg, sandbox)
         target = _reviewer_target(d, cfg)
         env = {"PDCA_TARGET": str(target)} if target else None
         extra = ([profile.grounding_flag, str(target)]
