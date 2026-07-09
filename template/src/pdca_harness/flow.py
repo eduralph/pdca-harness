@@ -24,8 +24,8 @@ import sys
 import threading
 from pathlib import Path
 
-from . import (act, brief, driver, gates, integrate, lane, leaves, merge, merged,
-               preflight, publish, queue, signoff, state, waves)
+from . import (act, assemble, autoiterate, brief, driver, gates, integrate, lane, leaves,
+               merge, merged, preflight, publish, queue, signoff, state, waves)
 from .config import Config
 
 
@@ -140,6 +140,53 @@ def _signoff_and_apply(
     return _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now)
 
 
+def _maybe_auto_iterate(
+    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool
+) -> bool:
+    """Rebuild without asking, when Check found only implementation defects (issue #264).
+
+    Returns True iff the bundle was routed to ITERATE_DO. Every other outcome — auto-iterate
+    off, the bundle not halted at AWAITING_SIGNOFF, an empty §6, any HUMAN-kind finding, or
+    the per-bundle budget spent — returns False and leaves the bundle exactly where it was,
+    for the human.
+
+    Deliberately routed through the existing ``_apply_decision`` rather than calling
+    ``signoff.record`` directly: §9 then stays authored solely by ``signoff.record``, and the
+    C6 accept-guard stays on the accept path even though this decision can only ever be
+    ``iterate-do``. ``by="auto-iterate"`` attributes §9 to the driver, not to a human who
+    never looked.
+
+    Not in ``driver.advance``: its contract is to STOP at AWAITING_SIGNOFF, it has no
+    ``by``/``today``, and ``_beat_sweep_serial`` loops with no pass cap — an auto-iterate
+    firing from inside a beat would have no budget to bound it.
+    """
+    if not cfg.auto_iterate or state.state(d) != state.AWAITING_SIGNOFF:
+        return False
+    try:
+        items = assemble.collect_needs_human(d, cfg)
+    except (OSError, ValueError) as exc:
+        # An over-reaching leaf can clear a bundle's downstream (a deleted / truncated
+        # check-gates.json). Never let that crash the single-issue flow, which — unlike the
+        # wave sweep — has no `_isolate` around this: decline to auto-iterate and let the
+        # ordinary sign-off path deal with the bundle.
+        print(f"flow: {d.name} — cannot classify Check findings ({type(exc).__name__}: {exc}); "
+              f"not auto-iterating", file=sys.stderr)
+        return False
+    if not autoiterate.eligible(items):
+        return False
+    spent = autoiterate.count(d)
+    if spent >= cfg.max_auto_iters:
+        print(f"flow: {d.name} — auto-iterate budget spent ({spent}/{cfg.max_auto_iters}); "
+              f"handing the implementation findings to the human", file=sys.stderr)
+        return False
+    autoiterate.write_decision(d, items)
+    print(f"flow: {d.name} — auto-iterate {spent + 1}/{cfg.max_auto_iters}: "
+          f"{len(items)} implementation-level finding(s), no human judgment needed",
+          file=sys.stderr)
+    return _apply_decision(cfg, d, by="auto-iterate", today=today,
+                           apply_now=apply_now) == "iterate-do"
+
+
 def _maybe_run_act(cfg: Config, today: str, *, any_complete: bool) -> None:
     """Run the Act beat after a flow only when it's *due* by cadence (issue #109).
 
@@ -201,6 +248,10 @@ def flow(
             break
         if driver.run_issue(d, cfg) != state.AWAITING_SIGNOFF:
             break  # reached COMPLETE, or halted somewhere the human must look at
+        # Implementation-only findings? Rebuild without spending the human's attention
+        # (#264). The `for` bounds this, and so does the per-bundle auto budget.
+        if _maybe_auto_iterate(cfg, d, by=by, today=today, apply_now=True):
+            continue
         if _signoff_and_apply(cfg, d, by=by, today=today) in (None, "blocked"):
             break
         if state.state(d) == state.COMPLETE:
@@ -482,6 +533,15 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
     for _ in range(max_passes):
         before = [state.state(d) for d in wave]
         _build_all(cfg, wave)
+        # Before the human sees the queue, take the bundles whose findings are purely
+        # implementation-level off it (#264): they become ITERATE_DO, drop out of
+        # `awaiting_signoff`, and the next pass's build-all rebuilds them — exactly as a
+        # deferred human `iterate-do` would. Isolated: an auto-iterate that raises must not
+        # kill the sweep.
+        if cfg.auto_iterate:
+            for d in wave:
+                _isolate(d, "auto-iterate", lambda d=d: _maybe_auto_iterate(
+                    cfg, d, by=by, today=today, apply_now=False))
         pending = [e.bundle for e in queue.awaiting_signoff(cfg) if e.bundle.name in names]
         if not pending:
             if [state.state(d) for d in wave] == before:

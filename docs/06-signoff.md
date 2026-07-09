@@ -37,6 +37,32 @@ abandon a bundle with §6 still open. Add `--by "Name"` to set attribution and
 > (handled out-of-band, duplicate, won't-fix) — a deliberate abandon, independent
 > of §6.
 
+### Auto-iterate — when the driver presses `--iterate-do` for you
+
+A big Do usually lands with a few implementation defects the reviewer or the adversary
+catches: a logic slip, a test that wouldn't have gone red, a failing gate. Each one parks
+the bundle here and asks you to press `--iterate-do` — the one decision the driver could
+have made itself. Your judgment is owed to *architectural* questions, not to bugs.
+
+Set `[driver].auto_iterate = true` (or `--auto-iterate` / `PDCA_AUTO_ITERATE=1`) and, when
+**every** open §6 item is implementation-level, the driver records `iterate-do` and rebuilds
+unattended (issue #264). The split is not a new taxonomy — it is the `kind` the 5/5/1
+already carries ([step 05](05-check.md)):
+
+| §6 item | Kind | Who resolves it |
+|---|---|---|
+| `C2` reproduction, `C4` verification, `T1`–`T4` | gate | **the builder** — auto-iterate rebuilds |
+| `C5` causal adequacy, `T5` judgment, validation | judgment | **you** — it halts |
+| `C1` spec, `C3` change | input | **you** — it halts |
+| a gate that could not *run* (`unverifiable`) | — | **you** — a rebuild can't conjure the mechanic |
+| an external dependency, an unregistered doctor row | — | **you** — someone must install it |
+| an advisory bullet without an `[impl]` tag | — | **you** — unmarked means unclassified |
+
+One judgment item disqualifies the whole bundle: you have to look at it anyway, so there is
+nothing to save by rebuilding first. It **never** accepts, **never** ticks a `- [ ]`, and is
+bounded by `max_auto_iters` rounds per bundle — after which the bundle halts here for you,
+exactly as before. Off by default.
+
 ## The simple case — accept
 
 Before you accept a bundle whose §6 carries a **visual / GUI / validation** row, run the

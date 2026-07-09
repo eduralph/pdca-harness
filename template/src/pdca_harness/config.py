@@ -180,6 +180,17 @@ class Config:
     # NAMED on stderr with a resume hint — never silently dropped. ``[driver].max_passes``;
     # ``PDCA_MAX_PASSES`` overrides for one run; ``--max-passes`` overrides both.
     max_passes: int = 20
+    # Auto-iterate (issue #264): when every open SUMMARY §6 item is implementation-level
+    # (a `gate` cell of the 5/5/1 — C2/C4/T1..T4), let the driver record `iterate-do` and
+    # rebuild instead of stopping for a human. A judgment cell (C5/T5/validation), an
+    # unverifiable gate, an external dependency, or an unmarked advisory finding still
+    # halts. It never auto-accepts. OFF by default. ``[driver].auto_iterate``;
+    # ``PDCA_AUTO_ITERATE`` / ``--auto-iterate`` override.
+    auto_iterate: bool = False
+    # The per-bundle cap on those automatic rounds; on exhaustion the bundle halts at
+    # AWAITING_SIGNOFF for the human. Clamped below ``max_passes`` so a wave's pass budget
+    # can't run out mid-auto-iteration (which #260 would then report as abandoned).
+    max_auto_iters: int = 3
     # Worktree isolation (issue #94): run a cycle's Do/Check in a dedicated git worktree
     # off the target's base, so the host's primary checkout is never mutated in place.
     # On by default; ``[driver].worktree = false`` disables (then Do/Check edit the
@@ -387,6 +398,17 @@ class Config:
         if os.environ.get("PDCA_MAX_PASSES"):
             max_passes = int(os.environ["PDCA_MAX_PASSES"])
         max_passes = max(1, max_passes)
+        # Auto-iterate on implementation-only Check findings (issue #264). Opt-in.
+        auto_iterate = bool(driver_cfg.get("auto_iterate", False))
+        if os.environ.get("PDCA_AUTO_ITERATE"):
+            auto_iterate = os.environ["PDCA_AUTO_ITERATE"] not in ("0", "false", "")
+        # Keep the auto budget strictly below the pass budget, so exhausting it always lands
+        # the bundle on a clean AWAITING_SIGNOFF halt rather than leaving it mid-flight at
+        # ITERATE_DO when the wave's passes run out (issue #260's abandonment shape).
+        max_auto_iters = max(1, int(driver_cfg.get("max_auto_iters", 3)))
+        if os.environ.get("PDCA_MAX_AUTO_ITERS"):
+            max_auto_iters = max(1, int(os.environ["PDCA_MAX_AUTO_ITERS"]))
+        max_auto_iters = min(max_auto_iters, max(1, max_passes - 1))
         worktree = bool(driver_cfg.get("worktree", True))  # issue #94; on by default
         overflow = max(0, int(driver_cfg.get("overflow", 0)))  # issue #226; 0 ⇒ heal in place
         lane_preflight = driver_cfg.get("lane_preflight", "")  # issue #213
@@ -439,6 +461,8 @@ class Config:
             gates_runner=gates_runner,
             lanes=lanes,
             max_passes=max_passes,
+            auto_iterate=auto_iterate,
+            max_auto_iters=max_auto_iters,
             worktree=worktree,
             overflow=overflow,
             lane_preflight=lane_preflight,

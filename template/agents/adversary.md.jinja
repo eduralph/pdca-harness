@@ -42,3 +42,13 @@ human must adjudicate, prefix the bullet `- NEEDS-HUMAN — ` (the harness lifts
 `SUMMARY.md` §6). Scope each to **this diff** — don't file pre-existing debt the patch
 didn't touch. If you genuinely cannot refute the fix after a real attempt, say so:
 "attempted to refute X, Y, Z; could not" is a strong signal, not a non-answer.
+
+**Mark the implementation defects (issue #264).** When the refutation lands on something the
+**builder can fix by iterating** — a concrete failing case, a logic slip, a test that
+wouldn't have gone red, a conformance nit — prefix that bullet `- NEEDS-HUMAN [impl] — `
+instead. The driver then routes it straight back to Do without spending the human's
+attention. Keep the plain `- NEEDS-HUMAN — ` form when the finding demands a human
+**architectural / scope / fitness-to-purpose** decision — the fix targets a symptom rather
+than the cause, the brief asked for the wrong thing, the toolchain was unavailable so the
+verdict is provisional. **When in doubt, omit `[impl]`**: an unmarked finding always reaches
+the human, a mismarked one buys a wasted rebuild.

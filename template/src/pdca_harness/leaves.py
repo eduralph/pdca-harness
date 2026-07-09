@@ -1037,7 +1037,13 @@ def _advisory_prompt(spec: dict, leaf_id: str) -> str:
         "cited path:line on the target source at $PDCA_TARGET, never other checkouts. "
         f"Write check-advisory-{leaf_id}.md: a short list of findings, each a Markdown "
         "bullet with a path:line. For any finding a human must adjudicate, prefix the "
-        "bullet '- NEEDS-HUMAN — ' (it becomes a SUMMARY §6 item). You are ADVISORY — you "
+        "bullet '- NEEDS-HUMAN — ' (it becomes a SUMMARY §6 item). If the finding is an "
+        "IMPLEMENTATION defect the builder can fix by iterating — a logic bug, a missed "
+        "case, a weak or incorrect test, a conformance nit — prefix it "
+        "'- NEEDS-HUMAN [impl] — ' instead, so the driver can route it straight back to Do "
+        "without spending the human's attention (issue #264). Keep the plain "
+        "'- NEEDS-HUMAN — ' form for anything needing a human ARCHITECTURAL / scope / "
+        "fitness-to-purpose decision; when in doubt, OMIT '[impl]'. You are ADVISORY — you "
         "never gate; the human decides at sign-off. If you find nothing, say so explicitly."
     )
 
