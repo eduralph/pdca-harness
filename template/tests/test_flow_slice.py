@@ -1558,6 +1558,33 @@ class MaxPassesBudget(unittest.TestCase):
         self.assertTrue((d / "iteration-v2").is_dir())
         self.assertIn("pass budget exhausted after 3 pass(es)", buf.getvalue())
 
+    def test_last_pass_iterate_plan_is_warned_not_silently_reopened(self) -> None:
+        """PR-review catch (codex, #267). `iterate-plan` is applied even under
+        `apply_now=False` — it only archives → UNPLANNED, no rebuild — so on the LAST allowed
+        pass the cap fall-through finds the bundle UNPLANNED. Warning only on
+        ITERATE_*/AWAITING_SIGNOFF missed it entirely, and `flow_batch`'s resume set EXCLUDES
+        UNPLANNED, so the bundle would vanish from the next unattended sweep too: exactly the
+        silent abandonment #260 exists to kill."""
+        def signoff_batch(cfg: Config, bundles: list[Path]) -> None:
+            for d in bundles:
+                (d / leaves.SIGNOFF_DECISION).write_text("iterate-plan\nrespec\n", encoding="utf-8")
+
+        orig = leaves.run_signoff_batch
+        leaves.run_signoff_batch = signoff_batch
+        buf = io.StringIO()
+        try:
+            with redirect_stderr(buf), redirect_stdout(io.StringIO()):
+                results = flow.flow_batch(self.cfg, today="2026-06-04", max_passes=1)
+        finally:
+            leaves.run_signoff_batch = orig
+        err = buf.getvalue()
+
+        self.assertEqual(results["BATCH1"], state.UNPLANNED)          # re-opened, mid-flight
+        self.assertTrue((self.cfg.bundle("BATCH1") / "iteration-v1").is_dir())  # work archived
+        self.assertIn("pass budget exhausted after 1 pass(es)", err)
+        self.assertIn("issue_BATCH1 [UNPLANNED]", err)
+        self.assertIn("`pdca flow BATCH1`", err)   # the hint re-plans it (single-issue auto-plans)
+
     def test_no_progress_exit_also_warns(self) -> None:
         # The other silent return: a pass that advances nothing while a bundle still
         # iterates. Freeze `_build_all` so the ITERATE_DO bundle cannot progress.

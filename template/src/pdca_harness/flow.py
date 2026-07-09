@@ -428,20 +428,33 @@ def _audit_wave_overlap(wave: list[Path]) -> None:
                       f"conflict; review before merge.", file=sys.stderr)
 
 
-# Not-terminal, not-publishable: the driver has stopped driving these but they are neither
-# COMPLETE nor DISCONTINUED. Mid-iteration, or parked on a human.
-_ABANDONABLE = (state.ITERATE_DO, state.ITERATE_PLAN, state.AWAITING_SIGNOFF)
+# Terminal: finished (COMPLETE) or deliberately abandoned (DISCONTINUED). A bundle left in
+# ANY other state when the driver stops driving it is work in flight — it will not be
+# published, and nothing else advances it this run.
+_TERMINAL = (state.COMPLETE, state.DISCONTINUED)
 
 
 def _warn_abandoned(bundles: list[Path], *, why: str) -> None:
     """Name every bundle the driver is walking away from un-terminal (issue #260).
 
     ``_drive_wave`` stops at two points that are NOT "everything finished": the pass budget
-    ran out, and a pass made no progress. A bundle left ``ITERATE_*`` / ``AWAITING_SIGNOFF``
-    at either is never advanced and never published (the caller publishes only COMPLETE),
-    so the run would otherwise report as though it had finished cleanly while a bundle's
-    next Do iteration was silently dropped. Say which, say why, say how to resume."""
-    stranded = [(d, state.state(d)) for d in bundles if state.state(d) in _ABANDONABLE]
+    ran out, and a pass made no progress. A bundle left non-terminal at either is never
+    advanced and never published (the caller publishes only COMPLETE), so the run would
+    otherwise report as though it had finished cleanly while a bundle's next iteration was
+    silently dropped. Say which, say why, say how to resume.
+
+    The predicate is **"not terminal"**, not a hand-listed set of iterate states — that is
+    exactly what the issue asks for, and the difference is load-bearing. ``UNPLANNED`` must be
+    included: an ``iterate-plan`` recorded on the LAST allowed pass is applied immediately
+    even under ``apply_now=False`` (it only archives → UNPLANNED, no rebuild), so the cap
+    fall-through finds that bundle UNPLANNED — and ``flow_batch``'s resume set *excludes*
+    UNPLANNED, so it would silently drop out of the next unattended sweep as well. Inside
+    ``_drive_wave`` an UNPLANNED bundle can only mean "re-opened by iterate-plan": both
+    ``flow_batch`` and ``flow_ids`` filter never-briefed bundles out (loudly) before driving,
+    so this can never mis-flag an issue the planner simply skipped. PLANNED / BUILT / CHECKED
+    likewise mean ``_build_all`` could not advance the bundle — also in flight.
+    """
+    stranded = [(d, state.state(d)) for d in bundles if state.state(d) not in _TERMINAL]
     if not stranded:
         return
     print(f"flow: {why} — {len(stranded)} bundle(s) left un-terminal and NOT published:",
