@@ -36,6 +36,19 @@ lanes = 1
 # this rather than editing source. `PDCA_MAX_PASSES` overrides for one run; `--max-passes`
 # overrides both.
 max_passes = 20
+# Auto-iterate on implementation-only Check findings (issue #264). A big Do typically lands
+# with implementation defects the reviewer or the adversary catches — a logic slip, a weak
+# test, a red gate. Each of those parks the bundle at AWAITING_SIGNOFF and asks you to press
+# "iterate-do", which is the decision the driver could have made itself. With this on, when
+# EVERY open SUMMARY §6 item is implementation-level the driver records `iterate-do` and
+# rebuilds, unattended. Your judgment is still required — and the bundle still halts — for
+# anything architectural: a judgment cell of the 5/5/1 (C5 causal adequacy, T5 judgment, the
+# validation act), a gate that could not run, an external dependency, an unmarked advisory
+# finding, or a §6 item it cannot classify. It NEVER auto-accepts and never ticks a §6 box.
+# Bounded by `max_auto_iters` rounds per bundle (clamped below max_passes); on exhaustion the
+# bundle halts for you as before. `PDCA_AUTO_ITERATE=1` / `--auto-iterate` override.
+auto_iterate = false
+max_auto_iters = 3
 # Worktree isolation (issue #94). A cycle's Do/Check run in a dedicated git worktree off
 # the target's base, so the host's primary checkout is NEVER mutated in place. The harness
 # creates/resets it per cycle (per lane slot) and exposes its path as `$PDCA_WORKTREE` —

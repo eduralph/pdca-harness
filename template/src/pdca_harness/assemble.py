@@ -9,10 +9,87 @@ mirrors ``templates/SUMMARY.md.tpl`` — keep the two in step if you edit either
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
+from typing import NamedTuple
 
 from . import brief, doctor
 from .config import Config
+from .gates import canonical_elements
+
+# The two kinds of §6 item (issue #264).
+#   IMPL  — an implementation defect the BUILDER can fix by iterating Do.
+#   HUMAN — an architectural / fitness-to-purpose / environmental call only the human makes.
+IMPL = "impl"
+HUMAN = "human"
+
+
+class NeedsHumanItem(NamedTuple):
+    """One §6 row: the text the human reads, plus who can resolve it."""
+
+    text: str
+    kind: str
+
+
+# The implementation/architectural split is NOT a new taxonomy — it is the `kind` already
+# carried by the canonical 5/5/1 (gates._FIVE_FIVE_ONE). `gate` cells (C2/C4/T1..T4) are
+# mechanically checkable ⇒ builder-fixable. `judgment` cells (C5 causal adequacy, T5
+# judgment, V validation) and `input` cells (C1 spec, C3 change) are the human's.
+_GATE_ELEMENTS = frozenset(e for e, _label, kind, _oracle in canonical_elements()
+                           if kind == "gate")
+
+# A §6 item's leading 5/5/1 element id, when the reviewer's table row carries one.
+_ELEMENT_RE = re.compile(r"^(C[1-5]|T[1-5]|V)\b")
+
+# An advisory leaf tags a builder-fixable finding `- NEEDS-HUMAN [impl] — …`. Unmarked
+# findings stay HUMAN, so a legacy advisory file can never trigger an auto-iteration.
+_IMPL_MARKER_RE = re.compile(r"^\[impl\]\s*[—:-]*\s*", re.IGNORECASE)
+
+
+def _classify_finding(text: str) -> NeedsHumanItem:
+    """Classify one reviewer / advisory §6 item, stripping any `[impl]` marker.
+
+    Fail safe: an item we cannot map to a gate element — an unmarked advisory bullet, a
+    reviewer row whose Item cell doesn't start with a canonical id, the missing-review
+    placeholder — is HUMAN. Auto-iterate only ever fires on findings we positively know
+    a rebuild can address.
+    """
+    stripped = _IMPL_MARKER_RE.sub("", text, count=1)
+    if stripped != text:
+        return NeedsHumanItem(stripped.strip(), IMPL)
+    m = _ELEMENT_RE.match(text)
+    if m and m.group(1) in _GATE_ELEMENTS:
+        return NeedsHumanItem(text, IMPL)
+    return NeedsHumanItem(text, HUMAN)
+
+
+def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
+    """Every §6 item for this bundle, tagged IMPL / HUMAN, in the order §6 renders them.
+
+    Single source for both the rendered §6 and the auto-iterate decision (issue #264), so
+    the classifier can never disagree with what the C6 accept-guard sees.
+    """
+    gates_json = json.loads((d / "check-gates.json").read_text(encoding="utf-8"))
+    review_path = d / "check-review.md"
+    review_text = (review_path.read_text(encoding="utf-8")
+                   if review_path.exists() else _missing_review_text())
+    advisory_texts = [p.read_text(encoding="utf-8")
+                      for p in sorted(d.glob("check-advisory-*.md"))]
+
+    items = [_classify_finding(t) for t in _needs_human(review_text)]
+    for atext in advisory_texts:
+        items += [_classify_finding(t) for t in _needs_human(atext)]
+    # A gate that COULD NOT RUN is not builder-fixable — rebuilding would spin against the
+    # same missing mechanic — so it is HUMAN regardless of its (gate-kind) element.
+    items += [NeedsHumanItem(t, HUMAN) for t in _unverifiable_items(gates_json)]
+    items += _failed_gating_items(gates_json)
+    build_notes = d / "build-notes.md"
+    if build_notes.exists():
+        items += [NeedsHumanItem(t, HUMAN)
+                  for t in _declared_external_deps(build_notes.read_text(encoding="utf-8"))]
+    items += [NeedsHumanItem(t, HUMAN)
+              for t in _unregistered_dependency_items(d / "brief.md", cfg)]
+    return items
 
 
 def assemble_summary(d: Path, cfg: Config) -> None:
@@ -34,24 +111,12 @@ def assemble_summary(d: Path, cfg: Config) -> None:
     advisory_texts = [p.read_text(encoding="utf-8") for p in advisory_paths]
 
     # §6 is fed by the reviewer's NEEDS-HUMAN verdicts, the advisory reviewers', any gate
-    # that declared itself unverifiable (issue #46), AND any gating gate that hard-FAILED
-    # (issue #166) — all become `- [ ]` items the C6 guard makes the human clear before accept.
-    needs_human = _needs_human(review_text)
-    for atext in advisory_texts:
-        needs_human += _needs_human(atext)
-    needs_human += _unverifiable_items(gates)
-    needs_human += _failed_gating_items(gates)
-    # A builder-declared external dependency Do hit that Plan didn't list (#250): the reviewer
-    # can't see it (build-notes.md is withheld by the independence contract) and no gate need
-    # cover it (a stub or unrelated-gate config), so scan build-notes.md for the marker and
-    # route it here deterministically — otherwise the declaration never reaches the human.
-    build_notes = d / "build-notes.md"
-    if build_notes.exists():
-        needs_human += _declared_external_deps(build_notes.read_text(encoding="utf-8"))
-    # …and the Plan-side twin (#263): a dependency the brief DECLARES but that no
-    # [[doctor.checks]] row detects. Registration is a forcing function — an unregistered
-    # dependency blocks accept here rather than surfacing later as a cryptic build failure.
-    needs_human += _unregistered_dependency_items(d / "brief.md", cfg)
+    # that declared itself unverifiable (issue #46), any gating gate that hard-FAILED
+    # (issue #166), a builder-declared external dependency Plan didn't list (#250), and a
+    # declared dependency with no registered doctor row (#263) — all become `- [ ]` items
+    # the C6 guard makes the human clear before accept. `collect_needs_human` is the single
+    # source (it also tags each item IMPL/HUMAN for the auto-iterate decision, #264).
+    needs_human = [it.text for it in collect_needs_human(d, cfg)]
 
     advisory_block = "\n".join(
         f"\n### Advisory — {p.stem.removeprefix('check-advisory-')}\n\n{t.strip()}"
@@ -132,16 +197,24 @@ def _unverifiable_items(gates: dict) -> list[str]:
     ]
 
 
-def _failed_gating_items(gates: dict) -> list[str]:
+def _failed_gating_items(gates: dict) -> list[NeedsHumanItem]:
     """A **gating** gate that returned a hard FAIL → a §6 NEEDS-HUMAN item (issue #166).
 
     Without this, only ``unverifiable`` rows reached §6; a gating ``fail`` set
     ``overall = fail`` and showed in §5 but added no §6 item — and the C6 accept-guard
     (:func:`signoff.open_needs_human`) only blocks on open §6 ``- [ ]`` items, so a red
     gating gate could be signed off to COMPLETE. Routing it here forces the human to clear
-    it (accept with override, iterate, or discontinue) before sign-off."""
+    it (accept with override, iterate, or discontinue) before sign-off.
+
+    The kind comes from the row's structured ``element`` (issue #264), never from parsing
+    its label — an instance names its own gates, so the label may not start with the id.
+    A blank / unrecognised element is HUMAN (fail safe).
+    """
     return [
-        f"{r['check']} FAILED (gating) — {r['path_line'] or r['oracle'] or 'no reason given'}"
+        NeedsHumanItem(
+            f"{r['check']} FAILED (gating) — {r['path_line'] or r['oracle'] or 'no reason given'}",
+            IMPL if r.get("element") in _GATE_ELEMENTS else HUMAN,
+        )
         for r in gates["rows"]
         if r.get("gating") and r.get("result") == "fail"
     ]
