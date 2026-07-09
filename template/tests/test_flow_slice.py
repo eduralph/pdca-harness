@@ -1488,5 +1488,195 @@ class PlanBatchUnseededWarning(unittest.TestCase):
             self.assertNotIn("WITHOUT seeded tracker notes", self._run_csv_plan())
 
 
+class MaxPassesBudget(unittest.TestCase):
+    """#260: the pass budget is configurable, and exhausting it is never silent.
+
+    A bundle signed off `iterate-do` on the LAST allowed pass records the decision with
+    `apply_now=False`, deferring its rebuild to "the next pass's build-all" — which never
+    comes. It was then left ITERATE_DO while the driver fell out of the loop, published the
+    accepted siblings, and reported as if the run had finished cleanly.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _batch1_always_iterates(cfg: Config, bundles: list[Path]) -> None:
+        """BATCH1 never accepts (the hard bundle); BATCH2 accepts on its first sign-off."""
+        for d in bundles:
+            if d.name == "issue_BATCH1":
+                (d / leaves.SIGNOFF_DECISION).write_text("iterate-do\n", encoding="utf-8")
+                continue
+            summ = d / "SUMMARY.md"
+            summ.write_text(summ.read_text().replace("- [ ]", "- [x]"), encoding="utf-8")
+            (d / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
+
+    def test_cap_exhausted_warns_leaves_iterating_and_still_publishes_sibling(self) -> None:
+        orig = leaves.run_signoff_batch
+        leaves.run_signoff_batch = self._batch1_always_iterates
+        buf = io.StringIO()
+        try:
+            with redirect_stderr(buf), redirect_stdout(io.StringIO()):
+                results = flow.flow_batch(self.cfg, today="2026-06-04", max_passes=1)
+        finally:
+            leaves.run_signoff_batch = orig
+        err = buf.getvalue()
+
+        # the stuck bundle is left iterating — and NAMED, with a resume hint
+        self.assertEqual(results["BATCH1"], state.ITERATE_DO)
+        self.assertIn("pass budget exhausted after 1 pass(es)", err)
+        self.assertIn("issue_BATCH1", err)
+        self.assertIn("`pdca flow BATCH1`", err)
+        self.assertIn("[driver].max_passes", err)          # how to raise it
+
+        # …while the accepted sibling still publishes (accept/publish routing unchanged)
+        self.assertEqual(results["BATCH2"], state.COMPLETE)
+        self.assertTrue((self.cfg.bundle("BATCH2") / "commit-msg.txt").exists())
+        self.assertFalse((self.cfg.bundle("BATCH1") / "commit-msg.txt").exists())
+        # a terminal bundle is never listed as abandoned (stderr also carries beat heartbeats,
+        # so match the abandoned-list line shape, not the bare bundle name)
+        self.assertNotIn("flow:   issue_BATCH2", err)
+
+    def test_higher_budget_lets_the_hard_bundle_keep_iterating(self) -> None:
+        # The same bundle with room to breathe: it keeps iterating instead of being dropped
+        # after one pass. Pass 1 records iterate-do (deferred); passes 2 and 3 each rebuild,
+        # archiving the prior attempt — so two iteration archives, not zero.
+        orig = leaves.run_signoff_batch
+        leaves.run_signoff_batch = self._batch1_always_iterates
+        buf = io.StringIO()
+        try:
+            with redirect_stderr(buf), redirect_stdout(io.StringIO()):
+                flow.flow_batch(self.cfg, today="2026-06-04", max_passes=3)
+        finally:
+            leaves.run_signoff_batch = orig
+        d = self.cfg.bundle("BATCH1")
+        self.assertTrue((d / "iteration-v1").is_dir())
+        self.assertTrue((d / "iteration-v2").is_dir())
+        self.assertIn("pass budget exhausted after 3 pass(es)", buf.getvalue())
+
+    def test_last_pass_iterate_plan_is_warned_not_silently_reopened(self) -> None:
+        """PR-review catch (codex, #267). `iterate-plan` is applied even under
+        `apply_now=False` — it only archives → UNPLANNED, no rebuild — so on the LAST allowed
+        pass the cap fall-through finds the bundle UNPLANNED. Warning only on
+        ITERATE_*/AWAITING_SIGNOFF missed it entirely, and `flow_batch`'s resume set EXCLUDES
+        UNPLANNED, so the bundle would vanish from the next unattended sweep too: exactly the
+        silent abandonment #260 exists to kill."""
+        def signoff_batch(cfg: Config, bundles: list[Path]) -> None:
+            for d in bundles:
+                (d / leaves.SIGNOFF_DECISION).write_text("iterate-plan\nrespec\n", encoding="utf-8")
+
+        orig = leaves.run_signoff_batch
+        leaves.run_signoff_batch = signoff_batch
+        buf = io.StringIO()
+        try:
+            with redirect_stderr(buf), redirect_stdout(io.StringIO()):
+                results = flow.flow_batch(self.cfg, today="2026-06-04", max_passes=1)
+        finally:
+            leaves.run_signoff_batch = orig
+        err = buf.getvalue()
+
+        self.assertEqual(results["BATCH1"], state.UNPLANNED)          # re-opened, mid-flight
+        self.assertTrue((self.cfg.bundle("BATCH1") / "iteration-v1").is_dir())  # work archived
+        self.assertIn("pass budget exhausted after 1 pass(es)", err)
+        self.assertIn("issue_BATCH1 [UNPLANNED]", err)
+        self.assertIn("`pdca flow BATCH1`", err)   # the hint re-plans it (single-issue auto-plans)
+
+    def test_no_progress_exit_also_warns(self) -> None:
+        # The other silent return: a pass that advances nothing while a bundle still
+        # iterates. Freeze `_build_all` so the ITERATE_DO bundle cannot progress.
+        d = self.cfg.bundle("STUCK")
+        self.assertTrue(flow._plan_if_unplanned(self.cfg, d, None))
+        driver.run_issue(d, self.cfg)
+        signoff.record(d / "SUMMARY.md", action="iterate-do", by="t", date="2026-06-04")
+        self.assertEqual(state.state(d), state.ITERATE_DO)
+
+        buf = io.StringIO()
+        with mock.patch.object(flow, "_build_all", lambda cfg, bundles: None):
+            with redirect_stderr(buf):
+                flow._drive_wave(self.cfg, [d], by="t", today="2026-06-04", max_passes=5)
+        err = buf.getvalue()
+        self.assertIn("a full pass made no progress", err)
+        self.assertIn("issue_STUCK", err)
+        self.assertIn("`pdca flow STUCK`", err)
+
+    def test_terminal_wave_exits_quietly(self) -> None:
+        # The all-terminal return must stay silent — no false "abandoned" noise.
+        buf = io.StringIO()
+        with redirect_stderr(buf), redirect_stdout(io.StringIO()):
+            results = flow.flow_batch(self.cfg, today="2026-06-04")
+        self.assertTrue(all(s == state.COMPLETE for s in results.values()))
+        self.assertNotIn("un-terminal", buf.getvalue())
+
+
+class MaxPassesConfig(unittest.TestCase):
+    """#260: the cap was a hardcoded function default — plumb it like `lanes`."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _load(self, extra: str = "") -> Config:
+        (self.tmp / "pdca.toml").write_text(
+            '[project]\ndefault_branch = "main"\n'
+            '[leaves.builder]\nmode = "stub"\n[leaves.reviewer]\nmode = "stub"\n' + extra,
+            encoding="utf-8")
+        return Config.load(self.tmp)
+
+    def test_default_is_twenty(self) -> None:
+        # Raised from the old hardcoded 10: the reported real run needed 11 iterations.
+        self.assertEqual(self._load().max_passes, 20)
+
+    def test_driver_table_sets_it(self) -> None:
+        self.assertEqual(self._load("[driver]\nmax_passes = 40\n").max_passes, 40)
+
+    def test_env_overrides_the_toml(self) -> None:
+        with mock.patch.dict(os.environ, {"PDCA_MAX_PASSES": "7"}):
+            self.assertEqual(self._load("[driver]\nmax_passes = 40\n").max_passes, 7)
+
+    def test_floor_of_one(self) -> None:
+        self.assertEqual(self._load("[driver]\nmax_passes = 0\n").max_passes, 1)
+
+    def _run_cli(self, cfg: Config, *extra: str) -> mock.Mock:
+        """Real parser → dispatch → `_flow`; `main(argv)` skips the inhibitor re-exec.
+        `flow.flow` is stubbed so only the config plumbing is under test."""
+        with mock.patch.object(cli.Config, "load", return_value=cfg), \
+             mock.patch.object(cli.flow, "flow", return_value=state.COMPLETE) as driven, \
+             redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            cli.main(["flow", "ID1", "--no-publish", "--no-act", *extra])
+        return driven
+
+    def test_cli_flag_overrides_config(self) -> None:
+        cfg = _stub_config(self.tmp)
+        cfg.max_passes = 40
+        driven = self._run_cli(cfg, "--max-passes", "3")
+        self.assertTrue(driven.called)
+        self.assertEqual(cfg.max_passes, 3)      # flag beat [driver].max_passes
+
+    def test_cli_flag_absent_leaves_config_value(self) -> None:
+        cfg = _stub_config(self.tmp)
+        cfg.max_passes = 40
+        self._run_cli(cfg)
+        self.assertEqual(cfg.max_passes, 40)
+
+    def test_drive_wave_defaults_to_the_configured_budget(self) -> None:
+        # No explicit max_passes → cfg.max_passes, not a literal.
+        cfg = _stub_config(self.tmp)
+        cfg.max_passes = 2
+        seen = []
+        with mock.patch.object(flow, "_build_all",
+                               side_effect=lambda c, b: seen.append(1)), \
+             redirect_stderr(io.StringIO()):
+            d = cfg.bundle("X")
+            d.mkdir(parents=True)
+            flow._drive_wave(cfg, [d], by="t", today="2026-06-04")
+        self.assertEqual(len(seen), 1)  # UNPLANNED + no progress → returns after one pass
+
+
 if __name__ == "__main__":
     unittest.main()

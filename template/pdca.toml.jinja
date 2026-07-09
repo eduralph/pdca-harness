@@ -28,6 +28,14 @@ templates_dir = "templates"
 # ergonomics actually bite (then prefer this over N separate workspaces).
 [driver]
 lanes = 1
+# Sign-off pass budget for one `pdca flow` run (issue #260): how many build-all → sign-off
+# passes a wave gets (and how many iterations a single issue gets) before the driver stops
+# driving it. A hard bundle can legitimately need many sign-off iterations; when the budget
+# runs out with one still iterating, the run does NOT abandon it silently — it is named on
+# stderr with a `pdca flow <id>` resume hint, and its accepted siblings still publish. Raise
+# this rather than editing source. `PDCA_MAX_PASSES` overrides for one run; `--max-passes`
+# overrides both.
+max_passes = 20
 # Worktree isolation (issue #94). A cycle's Do/Check run in a dedicated git worktree off
 # the target's base, so the host's primary checkout is NEVER mutated in place. The harness
 # creates/resets it per cycle (per lane slot) and exposes its path as `$PDCA_WORKTREE` —

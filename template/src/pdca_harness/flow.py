@@ -184,9 +184,15 @@ def flow(
     do_act: bool = False,
     by: str = "",
     today: str | None = None,
-    max_iters: int = 10,
+    max_iters: int | None = None,
 ) -> str:
-    """Drive one issue through the whole cycle; return its final state."""
+    """Drive one issue through the whole cycle; return its final state.
+
+    ``max_iters`` defaults to ``cfg.max_passes`` (``[driver].max_passes``). Exhausting it
+    with the bundle still iterating is NOT silent (issue #260) — the ``for``/``else`` names
+    it with a resume hint. The ``break`` paths are the ordinary halts (COMPLETE, a human
+    stop, a blocked accept), which report themselves."""
+    max_iters = cfg.max_passes if max_iters is None else max_iters
     d = cfg.bundle(issue_id)
     today = today or datetime.date.today().isoformat()
 
@@ -199,6 +205,9 @@ def flow(
             break
         if state.state(d) == state.COMPLETE:
             break
+    else:  # loop ran to exhaustion — the bundle never reached a halt of its own
+        _warn_abandoned([d], why=f"iteration budget exhausted after {max_iters} iteration(s); "
+                                 f"raise [driver].max_passes / PDCA_MAX_PASSES / --max-passes")
 
     final = state.state(d)
     if do_publish and final == state.COMPLETE:
@@ -419,15 +428,56 @@ def _audit_wave_overlap(wave: list[Path]) -> None:
                       f"conflict; review before merge.", file=sys.stderr)
 
 
+# Terminal: finished (COMPLETE) or deliberately abandoned (DISCONTINUED). A bundle left in
+# ANY other state when the driver stops driving it is work in flight — it will not be
+# published, and nothing else advances it this run.
+_TERMINAL = (state.COMPLETE, state.DISCONTINUED)
+
+
+def _warn_abandoned(bundles: list[Path], *, why: str) -> None:
+    """Name every bundle the driver is walking away from un-terminal (issue #260).
+
+    ``_drive_wave`` stops at two points that are NOT "everything finished": the pass budget
+    ran out, and a pass made no progress. A bundle left non-terminal at either is never
+    advanced and never published (the caller publishes only COMPLETE), so the run would
+    otherwise report as though it had finished cleanly while a bundle's next iteration was
+    silently dropped. Say which, say why, say how to resume.
+
+    The predicate is **"not terminal"**, not a hand-listed set of iterate states — that is
+    exactly what the issue asks for, and the difference is load-bearing. ``UNPLANNED`` must be
+    included: an ``iterate-plan`` recorded on the LAST allowed pass is applied immediately
+    even under ``apply_now=False`` (it only archives → UNPLANNED, no rebuild), so the cap
+    fall-through finds that bundle UNPLANNED — and ``flow_batch``'s resume set *excludes*
+    UNPLANNED, so it would silently drop out of the next unattended sweep as well. Inside
+    ``_drive_wave`` an UNPLANNED bundle can only mean "re-opened by iterate-plan": both
+    ``flow_batch`` and ``flow_ids`` filter never-briefed bundles out (loudly) before driving,
+    so this can never mis-flag an issue the planner simply skipped. PLANNED / BUILT / CHECKED
+    likewise mean ``_build_all`` could not advance the bundle — also in flight.
+    """
+    stranded = [(d, state.state(d)) for d in bundles if state.state(d) not in _TERMINAL]
+    if not stranded:
+        return
+    print(f"flow: {why} — {len(stranded)} bundle(s) left un-terminal and NOT published:",
+          file=sys.stderr)
+    for d, st in stranded:
+        issue_id = d.name.removeprefix("issue_")
+        print(f"flow:   {d.name} [{st}] — resume with `pdca flow {issue_id}`", file=sys.stderr)
+
+
 def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
-                max_passes: int = 10) -> None:
+                max_passes: int | None = None) -> None:
     """Drive ONE wave's bundles to all-terminal (COMPLETE / DISCONTINUED) with iteration,
     then the cheap-first sign-off restricted to the wave. Publishing and folding are the
     caller's. The pass loop mirrors the prior single-batch driver: build-all
     (beat-synchronised, isolated), then a chunked sign-off whose decisions are recorded
     (``apply_now=False``) so an iterate-do doesn't rebuild mid-review — looping until the
     wave makes no progress (an iterate-plan re-open #105 still counts as progress) or every
-    bundle is terminal."""
+    bundle is terminal.
+
+    Neither non-terminal exit is silent (issue #260): a bundle still iterating when the
+    budget runs out, or when a pass stops making progress, is named with a resume hint.
+    ``max_passes`` defaults to ``cfg.max_passes`` (``[driver].max_passes``)."""
+    max_passes = cfg.max_passes if max_passes is None else max_passes
     names = {b.name for b in wave}
     for _ in range(max_passes):
         before = [state.state(d) for d in wave]
@@ -435,7 +485,10 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
         pending = [e.bundle for e in queue.awaiting_signoff(cfg) if e.bundle.name in names]
         if not pending:
             if [state.state(d) for d in wave] == before:
-                return  # genuinely stuck (all terminal / planner declined an UNPLANNED)
+                # Genuinely stuck (all terminal / planner declined an UNPLANNED) — but an
+                # ITERATE_* bundle here is progress the driver can no longer make.
+                _warn_abandoned(wave, why="a full pass made no progress")
+                return
             continue    # progress (e.g. an iterate-plan re-open) — give it another pass
         for chunk in _chunks(pending, SIGNOFF_BATCH_SIZE):
             try:
@@ -449,6 +502,10 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
                     cfg, d, by=by, today=today, apply_now=False))
         if all(state.state(d) in (state.COMPLETE, state.DISCONTINUED) for d in wave):
             return
+    # Budget spent with work still in flight. An `iterate-do` recorded on the last allowed
+    # pass defers its rebuild to "the next pass's build-all" — which never comes.
+    _warn_abandoned(wave, why=f"pass budget exhausted after {max_passes} pass(es); raise "
+                             f"[driver].max_passes / PDCA_MAX_PASSES / --max-passes")
 
 
 def _drive_and_act(
@@ -459,7 +516,7 @@ def _drive_and_act(
     do_act: bool,
     by: str,
     today: str,
-    max_passes: int = 10,
+    max_passes: int | None = None,
 ) -> dict[str, str]:
     """Drive a fixed set of in-flight bundles through the full cycle to Act, in waves.
 
@@ -566,7 +623,7 @@ def flow_batch(
     do_act: bool = False,
     by: str = "",
     today: str | None = None,
-    max_passes: int = 10,
+    max_passes: int | None = None,
 ) -> dict[str, str]:
     """Plan many → drive every in-flight bundle to sign-off → publish → Act once. **Resumable.**
 
@@ -622,7 +679,7 @@ def flow_ids(
     do_act: bool = False,
     by: str = "",
     today: str | None = None,
-    max_passes: int = 10,
+    max_passes: int | None = None,
 ) -> dict[str, str]:
     """Drive specific bundles by id through the FULL cycle to Act.
 
