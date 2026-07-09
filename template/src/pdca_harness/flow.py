@@ -538,13 +538,25 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
         # `awaiting_signoff`, and the next pass's build-all rebuilds them — exactly as a
         # deferred human `iterate-do` would. Isolated: an auto-iterate that raises must not
         # kill the sweep.
+        auto_iterated = False
         if cfg.auto_iterate:
             for d in wave:
-                _isolate(d, "auto-iterate", lambda d=d: _maybe_auto_iterate(
-                    cfg, d, by=by, today=today, apply_now=False))
+                if _isolate(d, "auto-iterate", lambda d=d: _maybe_auto_iterate(
+                        cfg, d, by=by, today=today, apply_now=False)):
+                    auto_iterated = True
         pending = [e.bundle for e in queue.awaiting_signoff(cfg) if e.bundle.name in names]
         if not pending:
-            if [state.state(d) for d in wave] == before:
+            # A fired auto-iterate IS progress, even though it leaves the bundle in the state
+            # the pass began in (PR #270 review). A bundle already ITERATE_DO gets rebuilt by
+            # `_build_all` to AWAITING_SIGNOFF, re-Checked, then routed straight back to
+            # ITERATE_DO — so the before/after snapshots match while a rebuild, a fresh
+            # review, a recorded §9 iteration and one unit of `max_auto_iters` were all spent.
+            # Comparing states alone declared the wave stuck on the SECOND consecutive auto
+            # round and stranded the bundle with budget to spare. Termination still holds:
+            # `max_auto_iters` (clamped below `max_passes`) bounds how many passes this can
+            # consume, after which `_maybe_auto_iterate` declines, the bundle stays
+            # AWAITING_SIGNOFF, and it reaches the human through `pending`.
+            if not auto_iterated and [state.state(d) for d in wave] == before:
                 # Genuinely stuck (all terminal / planner declined an UNPLANNED) — but an
                 # ITERATE_* bundle here is progress the driver can no longer make.
                 _warn_abandoned(wave, why="a full pass made no progress")

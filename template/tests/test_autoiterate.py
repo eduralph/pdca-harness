@@ -366,6 +366,52 @@ class BatchSweep(_Base):
             flow._drive_wave(self.cfg, [d], by="t", today="2026-07-09", max_passes=1)
         self.assertEqual(seen, ["issue_WAVEJ"])   # the human got it, as they must
 
+    def test_repeated_auto_iterations_count_as_progress_not_a_stuck_wave(self) -> None:
+        """PR #270 review (codex). A bundle already ITERATE_DO is rebuilt by `_build_all` to
+        AWAITING_SIGNOFF, re-Checked, then routed straight back to ITERATE_DO — so the
+        before/after state snapshots MATCH. With the sign-off queue empty, the no-progress
+        check fired and the wave returned after only TWO auto rounds, stranding the bundle
+        with both `max_auto_iters` and `max_passes` budget to spare."""
+        self.cfg.max_auto_iters = 3
+        d = self._bundle("WAVELOOP", gate=_FAIL)     # a gate that stays red across rebuilds
+        signed_off: list[str] = []
+
+        def signoff_batch(cfg: Config, bundles: list[Path]) -> None:
+            signed_off.extend(b.name for b in bundles)
+            for b in bundles:                        # the human clears §6 and accepts
+                summ = b / "SUMMARY.md"
+                summ.write_text(summ.read_text().replace("- [ ]", "- [x]"), encoding="utf-8")
+                (b / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
+
+        def clean_review(bundle: Path, cfg: Config) -> None:
+            (bundle / "check-review.md").write_text(_CLEAN_REVIEW, encoding="utf-8")
+
+        buf = io.StringIO()
+        with mock.patch.object(leaves, "run_signoff_batch", signoff_batch), \
+             mock.patch.object(leaves, "run_review", clean_review), \
+             redirect_stderr(buf), redirect_stdout(io.StringIO()):
+            flow._drive_wave(self.cfg, [d], by="t", today="2026-07-10", max_passes=6)
+
+        # the FULL auto budget is spent — not truncated at two by a false stuck-wave verdict
+        self.assertEqual(autoiterate.count(d), 3)
+        self.assertNotIn("a full pass made no progress", buf.getvalue())
+        # …and once it is spent the bundle reaches the human and completes, never abandoned
+        self.assertEqual(signed_off, ["issue_WAVELOOP"])
+        self.assertEqual(state.state(d), state.COMPLETE)
+
+    def test_a_wave_that_truly_stalls_still_warns(self) -> None:
+        # The negative: with the auto budget spent, nothing advances — the no-progress guard
+        # must still fire. `auto_iterated` must never mask a genuine stall.
+        d = self._bundle("WAVESTALL", gate=_FAIL)
+        (d / autoiterate.BUDGET_FILE).write_text('{"count": 99}\n', encoding="utf-8")
+        signoff.record(d / "SUMMARY.md", action="iterate-do", by="t", date="2026-07-10")
+        buf = io.StringIO()
+        with mock.patch.object(flow, "_build_all", lambda cfg, bundles: None), \
+             redirect_stderr(buf), redirect_stdout(io.StringIO()):
+            flow._drive_wave(self.cfg, [d], by="t", today="2026-07-10", max_passes=5)
+        self.assertIn("a full pass made no progress", buf.getvalue())
+        self.assertIn("issue_WAVESTALL", buf.getvalue())
+
     def test_a_raising_auto_iterate_does_not_kill_the_sweep(self) -> None:
         d = self._bundle("WAVEBOOM", gate=_FAIL)
         with mock.patch.object(flow.autoiterate, "write_decision",
