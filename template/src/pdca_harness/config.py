@@ -174,6 +174,12 @@ class Config:
     # Do+Check band. ``1`` (the default) keeps the driver strictly serial. ``[driver].lanes``
     # in pdca.toml; ``PDCA_LANES`` overrides for a single run (like ``PDCA_BUNDLE_ROOT``).
     lanes: int = 1
+    # Sign-off pass budget for one `pdca flow` run (issue #260): how many build-all →
+    # sign-off passes a wave (or iterations a single issue) gets before the driver stops
+    # driving it. A bundle still iterating when the budget runs out is left un-terminal and
+    # NAMED on stderr with a resume hint — never silently dropped. ``[driver].max_passes``;
+    # ``PDCA_MAX_PASSES`` overrides for one run; ``--max-passes`` overrides both.
+    max_passes: int = 20
     # Worktree isolation (issue #94): run a cycle's Do/Check in a dedicated git worktree
     # off the target's base, so the host's primary checkout is never mutated in place.
     # On by default; ``[driver].worktree = false`` disables (then Do/Check edit the
@@ -357,6 +363,12 @@ class Config:
         if os.environ.get("PDCA_LANES"):
             lanes = int(os.environ["PDCA_LANES"])
         lanes = max(1, lanes)
+        # Sign-off pass budget. PDCA_MAX_PASSES overrides [driver].max_passes for one run.
+        # Floor of 1 = a single build-all + sign-off pass (issue #260).
+        max_passes = int(driver_cfg.get("max_passes", 20))
+        if os.environ.get("PDCA_MAX_PASSES"):
+            max_passes = int(os.environ["PDCA_MAX_PASSES"])
+        max_passes = max(1, max_passes)
         worktree = bool(driver_cfg.get("worktree", True))  # issue #94; on by default
         overflow = max(0, int(driver_cfg.get("overflow", 0)))  # issue #226; 0 ⇒ heal in place
         lane_preflight = driver_cfg.get("lane_preflight", "")  # issue #213
@@ -408,6 +420,7 @@ class Config:
             builder_variants=builder_variants,
             gates_runner=gates_runner,
             lanes=lanes,
+            max_passes=max_passes,
             worktree=worktree,
             overflow=overflow,
             lane_preflight=lane_preflight,
