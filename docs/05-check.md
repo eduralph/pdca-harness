@@ -234,6 +234,39 @@ human checks (`T5` judgment, `V` validation) — as a short, specific checklist.
 The human isn't re-reading the whole diff; they're answering four pointed
 questions.
 
+### An unregistered dependency is a §6 item (issue #263)
+
+§6 is also where an **unregistered dependency** surfaces. When a slice needs something a
+human must install or provide — a build tool (`protoc`), a runtime service (Docker, a live
+etcd) — the brief's `External dependencies` names it as a **backticked token equal to the
+`id` of a `[[doctor.checks]]` row** in your `pdca.toml`:
+
+```toml
+[[doctor.checks]]
+id   = "protoc"                          # ← the brief writes `protoc`
+cmd  = "protoc --version"                # how to detect it
+hint = "apt install protobuf-compiler"   # how a human provides it
+```
+
+At Check the driver reconciles the two. A declared dependency with **no row that detects
+it** becomes a §6 item, and the C6 guard below holds `--accept` until the row exists. That
+makes registration a *forcing function* rather than advice: `pdca doctor` prompts you with
+the install hint up front, instead of the dependency surfacing mid-cycle as a cryptic
+build failure.
+
+The reviewer can't do this — its sandbox has no `pdca.toml`, so it cannot know which rows
+exist — and it isn't a judgment call anyway; it's set membership, so the driver decides it
+deterministically. Two consequences worth knowing:
+
+- **A row without a `cmd` registers nothing.** `pdca doctor` skips it, so it would never
+  detect anything; it does not silence the §6 item.
+- **A dependency nothing can detect is exempt.** A required *topology* — a ≥3-replica
+  cluster, a partition-capable stack — goes in plain prose (unbackticked), or as a
+  backticked token annotated `` `x` (no-check: <why>) ``.
+
+Rows are read from `pdca.toml` as it stands when Check runs, so a row that Plan registered
+— or that you pasted in from the builder's proposal at Do — counts within the same cycle.
+
 ## The C6 accept-guard
 
 One rule connects §6 to the next step: **you cannot `--accept` while any §6 item
