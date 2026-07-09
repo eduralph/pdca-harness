@@ -448,6 +448,24 @@ class PublishSlice(unittest.TestCase):
         self.assertEqual(publish._resolve_target(d),
                          ("example-org/example-repo", "main", "m4"))
 
+    def test_resolve_target_backtick_in_trailing_aside_does_not_hijack_base(self) -> None:
+        """#262 (downstream bundle #454): the mirror image of #235 — the base is the bare
+        first token and the backtick span sits in a trailing prose aside naming a *different*
+        branch. Taking the span would resolve `main`, so C4-verify validates the patch
+        against the wrong base (false "patch does not apply — stale") and publish would open
+        the slice PR against the wrong branch. Fixed by #235's `re.match` anchor; this pins
+        the direction #235's own case did not exercise."""
+        d = self.cfg.bundle("ASIDE")
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(
+            "- **Slug:** m4\n"
+            "- **Repo + branch target:** example-org/example-repo @ "
+            "feat/m4-production-metadata-backend   (stacks here, not on `main`)\n",
+            encoding="utf-8")
+        self.assertEqual(
+            publish._resolve_target(d),
+            ("example-org/example-repo", "feat/m4-production-metadata-backend", "m4"))
+
     def test_checkout_path_map_and_sibling_fallback(self) -> None:
         # sibling fallback: <root>/../<repo-last-segment>
         self.assertEqual(publish._checkout_path(self.cfg, "org/foo"),
