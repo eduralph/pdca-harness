@@ -109,7 +109,7 @@ project-specific parts are yours.
 | **The assembled SUMMARY** | brief + gates + review folded into one 10-section verdict, with a §6 NEEDS-HUMAN checklist | [05](05-check.md) |
 | **Sign-off + C6 guard** | Four dispositions; `--accept` is refused while any NEEDS-HUMAN item is open | [06](06-signoff.md) |
 | **Iterate carry-forward** | A rejection archives the attempt and folds the *reason* into the next build | [06](06-signoff.md) |
-| **Draft-PR publish** | Contribute the accepted fix as a *draft* — a human marks it ready, never the harness | [07](07-publish-and-act.md) |
+| **Draft-PR publish** | Contribute the accepted fix as a *draft* — a human marks it ready (except non-final wave PRs under opt-in `wave_mode = "merge"`) | [07](07-publish-and-act.md) |
 | **Cross-cycle Act loop** | Periodic review that turns recurring misses into spec/gate/rule deltas | [07](07-publish-and-act.md) |
 | **Console-script front door** | `pdca flow <id>` orchestrates the whole cycle; `pdca flow <ids…>` batches, bare `pdca` is status; `make` is bootstrap-only | [README](README.md) |
 
