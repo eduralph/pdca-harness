@@ -69,7 +69,13 @@
   discovers that is not listed here (see builder) rather than silently work around it with a
   code-read, an alias, or a curated fixture — an unmet/worked-around dependency is a Check
   §6 item, not a substitution.>
-- **Test file:** <path where the regression test ships — must fail pre-fix, pass post-fix>
+- **Test file:** <path where the regression test ships — must fail pre-fix, pass post-fix.
+  Match the file to the C4 gate you actually have (engine/README.md). The shipped contract
+  reverts the *production* change and keeps the briefed test, so a test appended to an
+  existing suite — or co-located with the code — earns its red fine. But a gate that instead
+  classifies on an **added test file** can only earn a red from a NEW file; under that
+  variant an appended or inline test silently degrades to a green-only check that proves
+  nothing. Check which yours does before naming the path.>
 - **Citations expected:** Do must cite path:line on the target branch for every change.
   For a **composition slice** — the fix wires into an existing pattern the codebase already
   applies — MAY name the **peer callsite** Do should mirror, e.g. "resolve the backend as
