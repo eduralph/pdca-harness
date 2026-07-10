@@ -10,8 +10,17 @@
 #   scope = "bundle"
 #
 # The driver exports $PDCA_BUNDLE = the bundle dir (results/issue_<id>/), which
-# holds patch.diff and the brief that names the test. The contract this script
-# must enforce, exiting 0 iff BOTH hold:
+# holds patch.diff and the brief that names the test. It also exports, when set:
+#   - $PDCA_WORKTREE   — the tree Do edited (worktree isolation, #94); run/reset here.
+#   - $PDCA_VERIFY_BASE — the base to reset to before applying patch.diff (issue #273).
+#       For a wave>0 bundle in a dependency batch, the driver folds prior waves onto a
+#       run-scoped integration branch and sets this to `origin/pdca-integration/<base>`, so
+#       a dependent verifies against base+prereqs — NOT the brief's origin base, which would
+#       false-fail "patch does not apply" or measure red->green against a tree lacking the
+#       prereq. Resolve your reset base as: $PDCA_VERIFY_BASE (if set) > your own override >
+#       the brief's `Repo + branch target` > origin/<default>. Absent for a wave-0 / single
+#       bundle, where the brief base is correct.
+# The contract this script must enforce, exiting 0 iff BOTH hold:
 #   - WITHOUT the fix applied, the bundle's test FAILS (red) — proves the repro.
 #   - WITH the fix (patch.diff) applied, the bundle's test PASSES (green).
 # That validates THIS change, not the whole suite (see engine/README.md).

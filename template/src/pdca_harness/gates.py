@@ -339,6 +339,19 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
         onto = brief.onto_branch(bundle / "brief.md")
         if onto is not None:
             env = {**(env or {}), "PDCA_BASE": f"{onto[0]}/{onto[1]}"}
+    # Wave model (issue #273): a wave>0 bundle's Do worktree is cut off the run-scoped
+    # integration branch (prior waves' folded patches), pushed to origin. A per-fix verifier
+    # that resets to a base must reset to THAT branch, not the brief's origin base — else a
+    # dependent sharing a file with its prereq either false-fails "patch does not apply" or
+    # measures red→green against a tree lacking the prereq. Expose the folded base so the
+    # gate cmd can prefer it. Read the per-bundle marker the wave driver stamped before Check
+    # (lazy import: publish → leaves → gates would cycle). Absent (wave 0 / non-wave run) ⇒
+    # no PDCA_VERIFY_BASE, unchanged.
+    if bundle is not None:
+        from . import publish  # lazy: publish imports leaves→gates; avoid an import cycle
+        stack_base = publish.read_stack_base(bundle)
+        if stack_base:
+            env = {**(env or {}), "PDCA_VERIFY_BASE": f"origin/{stack_base}"}
     # Under in-driver lane concurrency, expose the worker-slot id so a gate command can
     # scope its checkout / container name / port / scratch per lane (docs 09). Absent
     # (serial driver) → no PDCA_LANE, so gates run exactly as before.

@@ -482,6 +482,17 @@ def _read_stack_base(d: Path) -> str:
     return p.read_text(encoding="utf-8").strip() if p.exists() else ""
 
 
+def read_stack_base(d: Path) -> str:
+    """Public accessor for the run-scoped integration branch a wave>0 bundle stacks on, or
+    "" when the bundle builds off its own target base (wave 0, or a non-wave run).
+
+    The wave driver stamps this per bundle (:func:`write_stack_base`) before Check, so a
+    gate that must verify a dependent against the folded base — not the brief's origin base —
+    can read it (issue #273). Lazily imported by ``gates`` to avoid the
+    ``gates → publish → leaves → gates`` import cycle."""
+    return _read_stack_base(d)
+
+
 def _stack_base_branch(cfg: Config, d: Path) -> str | None:
     """The branch a stacked bundle bases off (worktree + ``gh --base``), or None.
 
