@@ -412,6 +412,18 @@ class AdvisoryReviewResilience(unittest.TestCase):
         self.assertIn("NOT COMPLETED",
                       (self.d / "check-review.md").read_text(encoding="utf-8"))
 
+    def _exempt(self, *commands: str) -> None:
+        """Grant a leaf sandbox exemption, on a family that can actually be BOUNDED.
+
+        Only a family with `settings_scope_argv` (claude: `--setting-sources project`) can be
+        confined to the harness's own settings; without that, the operator's user-scope
+        `excludedCommands` concatenate into the leaf and the list is a floor, not a ceiling.
+        So the exemption is claude-only by construction (#288 review) — the default stub
+        reviewer here is codex, which is refused (asserted separately below).
+        """
+        self.cfg.reviewer = LeafConfig(mode="stub", family="claude")
+        self.cfg.leaf_unsandboxed_commands = list(commands)
+
     def _project_settings(self, payload: dict) -> None:
         cdir = self.cfg.root / ".claude"
         cdir.mkdir(parents=True, exist_ok=True)
@@ -428,6 +440,7 @@ class AdvisoryReviewResilience(unittest.TestCase):
             f = Path(workdir) / ".claude" / "settings.json"
             seen["exists"] = f.exists()
             seen["content"] = json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+            seen["extra_argv"] = list(k.get("extra_argv") or [])
             (Path(workdir) / "check-review.md").write_text("ok\n", encoding="utf-8")
 
         leaves._invoke = capture
@@ -513,7 +526,7 @@ class AdvisoryReviewResilience(unittest.TestCase):
         # #276: a Docker-backed conformance gate is denied the docker socket inside the leaf
         # sandbox even on a Docker-capable host, so its evidence always defers to a human.
         # Naming the command exempts THAT COMMAND — not the socket, not the whole leaf.
-        self.cfg.leaf_unsandboxed_commands = ["cargo xtask fdb-conformance"]
+        self._exempt("cargo xtask fdb-conformance")
         self._project_settings({"sandbox": {"network": {"allowLocalBinding": True}}})
         seen = self._capture_sandbox_settings()
         self.assertEqual(seen["content"]["sandbox"]["excludedCommands"],
@@ -534,7 +547,7 @@ class AdvisoryReviewResilience(unittest.TestCase):
 
     def test_the_harness_list_does_not_merge_with_the_project_list(self) -> None:
         # Even when BOTH exist, only the harness-declared commands reach the leaf.
-        self.cfg.leaf_unsandboxed_commands = ["cargo xtask fdb-conformance"]
+        self._exempt("cargo xtask fdb-conformance")
         self._project_settings({"sandbox": {"excludedCommands": ["docker *"]}})
         seen = self._capture_sandbox_settings()
         self.assertEqual(seen["content"]["sandbox"]["excludedCommands"],
@@ -551,7 +564,7 @@ class AdvisoryReviewResilience(unittest.TestCase):
         # not depend on the project having a `.claude/settings.json` at all. Gating it on that
         # file made the documented Docker exemption silently do nothing for an instance
         # without one — the leaf stayed sandboxed and still deferred to a human confirmer.
-        self.cfg.leaf_unsandboxed_commands = ["cargo xtask fdb-conformance"]
+        self._exempt("cargo xtask fdb-conformance")
         self.assertFalse((self.cfg.root / ".claude" / "settings.json").is_file())
         seen = self._capture_sandbox_settings()
         self.assertEqual(seen["content"], {"sandbox": {
@@ -563,7 +576,7 @@ class AdvisoryReviewResilience(unittest.TestCase):
         cdir = self.cfg.root / ".claude"
         cdir.mkdir(parents=True, exist_ok=True)
         (cdir / "settings.json").write_text("{ not json", encoding="utf-8")
-        self.cfg.leaf_unsandboxed_commands = ["cargo xtask fdb-conformance"]
+        self._exempt("cargo xtask fdb-conformance")
         buf = io.StringIO()
         with redirect_stderr(buf):
             seen = self._capture_sandbox_settings()      # must NOT raise
@@ -579,7 +592,7 @@ class AdvisoryReviewResilience(unittest.TestCase):
 
     def test_an_exemption_alone_is_enough_to_seed(self) -> None:
         # No network grant at all, but a named command ⇒ the settings file is still written.
-        self.cfg.leaf_unsandboxed_commands = ["cargo xtask tikv-conformance"]
+        self._exempt("cargo xtask tikv-conformance")
         self._project_settings({"permissions": {"allow": ["Read"]}})
         seen = self._capture_sandbox_settings()
         self.assertEqual(seen["content"], {"sandbox": {
@@ -595,9 +608,45 @@ class AdvisoryReviewResilience(unittest.TestCase):
         outside the sandbox" — which pdca.toml, docs 05 and the seed's own docstring all
         promise — was simply not true. Setting it false makes `dangerouslyDisableSandbox`
         "completely ignored" (the schema's own words), so the list becomes the only way out."""
-        self.cfg.leaf_unsandboxed_commands = ["cargo xtask fdb-conformance"]
+        self._exempt("cargo xtask fdb-conformance")
         seen = self._capture_sandbox_settings()
         self.assertIs(seen["content"]["sandbox"]["allowUnsandboxedCommands"], False)
+
+    def test_an_exempted_leaf_is_confined_to_the_harnesss_own_settings(self) -> None:
+        """PR #288 review (codex), the second hole — and the one no seeded file can close.
+
+        Array-valued settings CONCATENATE across scopes (user → project → local → managed):
+        the CLI folds each scope through a merge customizer that unions any two arrays, and the
+        union is MONOTONIC — no scope can remove what a lower one added. So a maintainer whose
+        own `~/.claude/settings.json` exempts `docker *` for their INTERACTIVE use has that
+        merged straight into the leaf, and the harness's list is a floor, not the promised
+        ceiling. Since nothing we WRITE can subtract, the only fix is to stop the lower scope
+        loading at all: `--setting-sources project`.
+        """
+        self._exempt("cargo xtask fdb-conformance")
+        seen = self._capture_sandbox_settings()
+        argv = seen["extra_argv"]
+        self.assertIn("--setting-sources", argv)
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "project")
+
+    def test_a_leaf_with_no_exemption_is_not_confined(self) -> None:
+        # The confinement rides WITH the exemption. An instance that grants none keeps today's
+        # behaviour — its leaves still see the operator's settings, exactly as before.
+        self.cfg.leaf_unsandboxed_commands = []
+        seen = self._capture_sandbox_settings()
+        self.assertNotIn("--setting-sources", seen["extra_argv"])
+
+    def test_a_family_that_cannot_be_bounded_is_refused_the_exemption(self) -> None:
+        # Fail closed. codex has no way to be confined to the harness's settings (it does not
+        # read them at all), so an exemption there could only ever be unbounded. Refuse it and
+        # say why, rather than grant a boundary that does not hold.
+        self.cfg.reviewer = LeafConfig(mode="stub", family="codex")
+        self.cfg.leaf_unsandboxed_commands = ["cargo xtask fdb-conformance"]
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            seen = self._capture_sandbox_settings()
+        self.assertFalse(seen["exists"])                     # nothing granted at all
+        self.assertIn("NOT granted", buf.getvalue())
 
     def test_a_leaf_with_no_exemption_is_not_silently_hardened(self) -> None:
         # The escape hatch is closed only ALONGSIDE a list. An instance that grants no

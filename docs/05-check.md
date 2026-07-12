@@ -187,14 +187,30 @@ unsandboxed_commands = ["cargo xtask fdb-conformance", "cargo xtask etcd-conform
 Every other Bash line the leaf writes stays fully confined. Empty (the default) means no
 exemption at all, and a Docker-backed leg goes on deferring to a human.
 
-**"Only those" is enforced, not merely intended.** Alongside the list, the harness seeds
-`allowUnsandboxedCommands: false` into the leaf's settings. Claude Code defaults that key to
-**true**, and while it is true the model may retry *any* sandbox-denied command with the
-`dangerouslyDisableSandbox` parameter and have it run unconfined — which would make the named
-list a *floor* rather than a ceiling. With it false, `dangerouslyDisableSandbox` is ignored
-outright and the list becomes the only route out of the leaf's sandbox. The harness seeds this
-only when you grant an exemption: an instance that names no command keeps the ambient default
-rather than having a policy imposed on it.
+**"Only those" is enforced, not merely intended** — and a list of names on its own enforces
+nothing. It takes two things, because there are two ways out of the sandbox that the list
+doesn't cover:
+
+1. **The escape hatch.** The harness seeds `allowUnsandboxedCommands: false` beside the list.
+   Claude Code defaults that key to **true**, and while it is true the model may retry *any*
+   sandbox-denied command with the `dangerouslyDisableSandbox` parameter and have it run
+   unconfined. With it false, that parameter is ignored outright.
+2. **Scope concatenation.** The leaf runs with `--setting-sources project`, so it loads *only*
+   the settings the harness seeds. Array-valued settings **concatenate** across scopes (user →
+   project → local → managed), and the union is **monotonic** — no scope, not even managed
+   policy, can remove what a lower one added. So your own `~/.claude/settings.json`
+   `excludedCommands` (your *interactive* exemptions — a broad `docker *`) would merge straight
+   into the leaf, and nothing the harness writes could subtract them. The list would be a
+   *floor*, not a ceiling. The only fix is to not load that scope.
+
+> **The cost of (2).** The leaf no longer reads your user-scope settings at all. If your **auth**
+> lives there (`apiKeyHelper`, or `env.ANTHROPIC_API_KEY`), move it into the environment or the
+> leaf will fail to start. It fails loudly, and the error lands in the bundle's `*.error.log`.
+
+Both ride *with* the exemption: an instance that names no command keeps today's behaviour
+exactly, rather than having a policy imposed on it. And this is **claude-family only** — a
+family that cannot be confined to the harness's own settings (codex) cannot have a bounded
+exemption, so the harness **refuses** the grant there rather than hand out an unbounded one.
 
 **Why a named command, and not a socket grant.** The sandbox schema *does* offer
 `allowAllUnixSockets`, which would reach the Docker socket too — but it hands **every**
