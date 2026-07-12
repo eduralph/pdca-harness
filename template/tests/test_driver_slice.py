@@ -453,19 +453,61 @@ class AdvisoryReviewResilience(unittest.TestCase):
         # widen the reviewer's surface past what its `tools:` frontmatter grants.
         self.assertNotIn("permissions", seen["content"])
 
-    def test_only_the_loopback_grant_is_seeded_never_the_whole_sandbox_block(self) -> None:
+    def test_never_seeds_excluded_commands_or_the_whole_sandbox_block(self) -> None:
         # PR #268 review (codex): docs 05 tells a project to use `sandbox.excludedCommands`
         # as the workaround for its GATES. Copying the whole `sandbox` object would carry
         # that into the reviewer's cwd, letting it run the excluded command OUTSIDE the
-        # sandbox — a capability its `tools:` grant never gave it. Likewise `allowedDomains`
-        # would widen its network. Seed an allow-list of exactly one key.
+        # sandbox — a capability its `tools:` grant never gave it. The seed is an ALLOW-LIST
+        # of named network keys, so `excludedCommands` / `enabled` can never ride along.
+        #
+        # #277 deliberately ADDED `allowedDomains` to that allow-list (the reviewer's
+        # prior-art check needs api.github.com), so it is now carried — by name, not by a
+        # loosened copy. The exclusions below are the part that must never change.
         self._project_settings({"sandbox": {
             "enabled": True,
             "excludedCommands": ["cargo *"],
-            "network": {"allowLocalBinding": True, "allowedDomains": ["evil.example"]},
+            "network": {"allowLocalBinding": True, "allowedDomains": ["api.github.com"]},
         }})
         seen = self._capture_sandbox_settings()
+        self.assertEqual(seen["content"], {"sandbox": {"network": {
+            "allowLocalBinding": True, "allowedDomains": ["api.github.com"]}}})
+        # the load-bearing exclusions
+        self.assertNotIn("excludedCommands", seen["content"]["sandbox"])
+        self.assertNotIn("enabled", seen["content"]["sandbox"])
+        self.assertNotIn("permissions", seen["content"])
+
+    def test_network_grant_is_seeded_for_the_prior_art_check(self) -> None:
+        # #277: the reviewer's prior-art check needs the closed/rejected-PR corpus via
+        # `gh pr list --state closed` → api.github.com. Without the grant it can never be
+        # settled mechanically and is forced NEEDS-HUMAN on every bundle.
+        self._project_settings({"sandbox": {"network": {
+            "allowedDomains": ["github.com", "api.github.com"]}}})
+        seen = self._capture_sandbox_settings()
+        self.assertEqual(seen["content"]["sandbox"]["network"]["allowedDomains"],
+                         ["github.com", "api.github.com"])
+
+    def test_an_empty_domain_list_is_off_and_seeds_nothing(self) -> None:
+        # This is how the grant ships: documented in settings.json, but OFF. An empty list
+        # must not create a seeded file, or it would look like a configured (empty) policy.
+        self._project_settings({"sandbox": {"network": {"allowedDomains": []}}})
+        self.assertFalse(self._capture_sandbox_settings()["exists"])
+
+    def test_the_shipped_default_seeds_only_the_loopback_grant(self) -> None:
+        # The template's own .claude/settings.json: loopback ON (#261), domains OFF (#277).
+        self._project_settings({"sandbox": {"network": {
+            "allowLocalBinding": True, "allowedDomains": []}}})
+        seen = self._capture_sandbox_settings()
         self.assertEqual(seen["content"], {"sandbox": {"network": {"allowLocalBinding": True}}})
+
+    def test_denied_domains_are_carried(self) -> None:
+        self._project_settings({"sandbox": {"network": {"deniedDomains": ["evil.example"]}}})
+        seen = self._capture_sandbox_settings()
+        self.assertEqual(seen["content"]["sandbox"]["network"]["deniedDomains"],
+                         ["evil.example"])
+
+    def test_a_non_list_domain_grant_seeds_nothing(self) -> None:
+        self._project_settings({"sandbox": {"network": {"allowedDomains": "github.com"}}})
+        self.assertFalse(self._capture_sandbox_settings()["exists"])
 
     def test_a_false_grant_is_carried_faithfully(self) -> None:
         self._project_settings({"sandbox": {"network": {"allowLocalBinding": False}}})
