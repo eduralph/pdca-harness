@@ -165,11 +165,47 @@ your **own** initiative — the human should never have to ask for it:
    **Plan-blocking gap**, not a detail for Do to discover after three cycles: surface it to
    the human and provision the environment or narrow the criterion *before* the brief hands
    off. Don't ship a criterion that cannot fail on the environment Do gets.
+4. **Check the criterion against the HARNESS that will run it, not just the repo.** Steps
+   1–3 verify the brief against the target *repo*; a criterion can pass all three and still
+   be un-evaluable by the *gates* the driver invokes — the brief reads well and demonstrates
+   nothing. Open `pdca.toml`'s `[[gates.checks]]` (note which are `gating = true` vs
+   advisory) and the runner each names, then confirm:
+   - **The `Test file` earns a per-fix RED — on the gate this project actually has.** Read
+     how the C4 gate establishes its red leg. The shipped contract (`engine/README.md`)
+     reverts the *production* change and keeps the briefed test, so an appended or co-located
+     test earns its red fine. But a gate that instead classifies on an **added test file**
+     can only ever go red for a NEW file — under that variant a test inline in a modified
+     production file, or appended to an existing suite, silently degrades to the green-only
+     branch and can never prove the repro. Where the gate exposes a classification hook (e.g.
+     a `--classify` mode on the verify script), **dry-run it on a synthetic patch** listing
+     the files you expect Do to touch, and check the classification it returns. Don't assume
+     either shape — confirm which one you're briefing against.
+   - **The named test executes under the gate's own invocation.** A test gated by a `cfg` /
+     feature / env flag (`#![cfg(madsim)]`, `#[cfg(feature=…)]`) compiles to *nothing* under
+     a bare runner and reports `0 tests … ok` — a vacuous green in *both* phases, so the
+     verifier concludes "passes without the fix". Confirm the gate's command actually
+     compiles and runs the named test.
+   - **The named symbol is reachable from the named test.** A symbol private to a *binary*
+     target is not callable from an integration test; a `#[cfg(feature=…)]` item is not
+     compiled by a gate that never enables the feature.
+   - **The patch will apply on the gate's base.** A bundle-scoped verify applies `patch.diff`
+     to a clean checkout of a base, and the driver names it — exporting **at most one** of
+     `$PDCA_BASE` (the brief's `Onto branch`: the existing PR head publish commits onto) or
+     `$PDCA_VERIFY_BASE` (the wave's folded integration branch, for a wave>0 bundle in a
+     dependency batch). Neither is set for an ordinary single bundle, where the brief's branch
+     target is the base. Confirm the gate's verify script honours that precedence: a verifier
+     that resets to the wrong base false-fails a dependent sharing a file with its prereq
+     ("patch does not apply — stale"), or proves red→green against a tree that LACKS the
+     prereq. Check the batch's file sets against its wave order.
+
+   Fix the **brief** — never paper over it by weakening the criterion. A criterion no gate
+   can evaluate is a Plan-blocking gap of the same class as step 3's.
 
 Conclude with one line stating you ran this pass and what it changed (or "verified, no
 gaps"). It is unconditional and applies to **every** brief — distinct from the
 category-gated Plan-exit gate above, which gates the brief's *shape* for structural
-defects; this gates claim accuracy + completeness. In batch mode, run it per `brief.md`.
+defects; this gates claim accuracy, completeness, **and gate-evaluability**. In batch mode,
+run it per `brief.md`, and run the file-set-vs-wave-order check across the batch as a whole.
 
 ## Ending the session
 
