@@ -910,7 +910,7 @@ def _settings_scope_argv(cfg: Config, profile: families.FamilyProfile) -> list[s
 
 
 def _seed_sandbox_settings(cfg: Config, sandbox: Path,
-                           profile: families.FamilyProfile) -> None:
+                           profile: families.FamilyProfile) -> bool:
     """Carry the sandbox capabilities a Check needs into the leaf sandbox (#261, #277).
 
     Claude Code loads **project** settings from ``.claude/settings.json`` relative to the
@@ -1013,10 +1013,33 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path,
     #    scope at all: the family's `settings_scope_argv` (claude: `--setting-sources
     #    project`), applied by the callers. A family without that flag cannot be bounded, so the
     #    exemption is REFUSED rather than granted unbounded — fail closed, and say why.
+    #
+    # …and a THIRD hole, which swallows the other two whole (#289). When `sandbox.enabled` is
+    # true but the sandbox's own dependencies are missing, Claude Code does NOT fail — it
+    # DISABLES the sandbox, warns, and runs every command unconfined ("Sandbox disabled:
+    # …dependencies are missing: socat not installed · Commands will run WITHOUT sandboxing").
+    # A bounded exemption on top of no sandbox at all is not bounded; it is nothing. So seed
+    # `failIfUnavailable` — "Exit with an error at startup if sandbox.enabled is true but the
+    # sandbox cannot start" (its schema) — and let the leaf REFUSE rather than run unconfined
+    # under a boundary this file, docs 05 and pdca.toml all claim it has. It fails loudly, and
+    # the tail lands in the bundle's `*.error.log` (#280/#286) instead of scrollback. `pdca
+    # doctor` catches the same gap BEFORE a run; this catches the operator who skipped it.
     if cfg.leaf_unsandboxed_commands:
         if profile.settings_scope_argv:
+            # `enabled` FIRST — without it none of the rest means anything, and this seed was
+            # worse than useless (PR #290 review). `sandbox.enabled` defaults to FALSE
+            # (`sandbox?.enabled ?? false`), and `failIfUnavailable` is gated on it
+            # (`enabled && … && failIfUnavailable`). Worse: `--setting-sources project` drops
+            # the user/local scope, which is exactly where an operator's `sandbox.enabled: true`
+            # lives — so BOUNDING the exemption was REMOVING the sandbox it claims to bound. The
+            # leaf ran fully unconfined and the fail-closed guard never fired. Verified: with
+            # these keys but no `enabled`, a leaf starts silently on a socat-less host; with it,
+            # it refuses — "sandbox required but unavailable … refusing to start without a
+            # working sandbox".
+            granted["enabled"] = True
             granted["excludedCommands"] = list(cfg.leaf_unsandboxed_commands)
             granted["allowUnsandboxedCommands"] = False
+            granted["failIfUnavailable"] = True
         else:
             print("leaves: [leaves.sandbox] unsandboxed_commands is set, but the "
                   f"'{profile.name}' family cannot be confined to the harness's own settings, "
@@ -1025,15 +1048,29 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path,
                   file=sys.stderr)
 
     if not granted:
-        return
+        return True   # nothing promised, nothing to seed
     try:
         dest = sandbox / ".claude"
         dest.mkdir(parents=True, exist_ok=True)
         (dest / "settings.json").write_text(
             json.dumps({"sandbox": granted}, indent=2), encoding="utf-8")
     except OSError as exc:
-        print(f"leaves: could not seed sandbox settings into {sandbox} ({exc}); the leaf runs "
-              "under the ambient sandbox policy", file=sys.stderr)
+        # FAIL CLOSED (PR #290 review). This used to warn "the leaf runs under the ambient
+        # sandbox policy" and carry on — the exact OPPOSITE of what happened. The caller still
+        # passed `--setting-sources project`, so the leaf loaded ONLY project scope … which is
+        # this file, which does not exist. No `sandbox.enabled` (it defaults FALSE), and the
+        # operator's own user-scope sandbox dropped along with it: the leaf ran COMPLETELY
+        # unconfined, under a message asserting it was protected.
+        #
+        # False makes the caller WITHHOLD `--setting-sources`, so the leaf keeps the operator's
+        # ambient sandbox. The exemption then simply does not happen and a Docker-backed leg
+        # defers to a human, exactly as when none is configured. Degrade the FEATURE, never the
+        # BOUNDARY.
+        print(f"leaves: could not seed sandbox settings into {sandbox} ({exc}); the exemption "
+              "did NOT take effect — the leaf keeps the operator's ambient sandbox and a "
+              "Docker-backed leg will defer to a human", file=sys.stderr)
+        return False
+    return True
 
 
 def _run_review_sandboxed(d: Path, cfg: Config) -> None:
@@ -1056,7 +1093,7 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
         # …and the project's sandbox policy, which is likewise invisible from a temp cwd
         # (#261) — without it a loopback-socket runtime test can't bind, so it can never
         # earn an automated red→green at Check.
-        _seed_sandbox_settings(cfg, sandbox, profile)
+        seeded = _seed_sandbox_settings(cfg, sandbox, profile)
         # Ground citations on the brief's target checkout (#75): name it via $PDCA_TARGET
         # so the reviewer doesn't wander into unrelated checkouts, and grant read access
         # via the family's grounding flag (claude: --add-dir). Independence holds — the
@@ -1065,7 +1102,11 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
         env = {"PDCA_TARGET": str(target)} if target else None
         extra_argv = ([profile.grounding_flag, str(target)]
                       if target and profile.grounding_flag else [])
-        extra_argv += _settings_scope_argv(cfg, profile)
+        # …only if the seed is actually ON DISK: withholding the flag keeps the
+        # operator's ambient sandbox rather than dropping it for a file that
+        # isn't there (PR #290 review).
+        if seeded:
+            extra_argv += _settings_scope_argv(cfg, profile)
         error_log = d / "check-review.error.log"
         # A transient (no-output) reviewer failure is retried with backoff before it
         # degrades to a §6 placeholder; the failed attempts' stderr lands in error_log.
@@ -1348,12 +1389,13 @@ def _run_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict, 
         # …and the project's sandbox policy, which is likewise invisible from a temp cwd
         # (#261) — without it a loopback-socket runtime test can't bind, so it can never
         # earn an automated red→green at Check.
-        _seed_sandbox_settings(cfg, sandbox, profile)
+        seeded = _seed_sandbox_settings(cfg, sandbox, profile)
         target = _reviewer_target(d, cfg)
         env = {"PDCA_TARGET": str(target)} if target else None
         extra = ([profile.grounding_flag, str(target)]
                  if target and profile.grounding_flag else [])
-        extra += _settings_scope_argv(cfg, profile)
+        if seeded:   # see _run_review_sandboxed — never drop the ambient sandbox
+            extra += _settings_scope_argv(cfg, profile)
         out = sandbox / f"check-advisory-{leaf_id}.md"
         error_log = d / f"check-advisory-{leaf_id}.error.log"
         err = _invoke_leaf_resilient(

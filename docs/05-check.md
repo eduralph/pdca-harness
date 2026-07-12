@@ -188,9 +188,23 @@ Every other Bash line the leaf writes stays fully confined. Empty (the default) 
 exemption at all, and a Docker-backed leg goes on deferring to a human.
 
 **"Only those" is enforced, not merely intended** — and a list of names on its own enforces
-nothing. It takes two things, because there are two ways out of the sandbox that the list
-doesn't cover:
+nothing. It takes three things, because there are three ways the boundary evaporates that the
+list doesn't cover:
 
+0. **No sandbox at all** — two ways, both closed by seeding `enabled: true` *and*
+   `failIfUnavailable: true`.
+
+   `sandbox.enabled` **defaults to false**, and (2) below deliberately drops your *user-scope*
+   settings — which is exactly where an operator's `sandbox.enabled: true` normally lives. So
+   without seeding it, bounding the exemption would **remove the very sandbox it claims to
+   bound**, and every command would escape.
+
+   And the sandbox does not fail closed on its own: if `enabled` is true but its dependencies
+   (`bubblewrap`, `socat`) are missing, Claude Code *disables* it, warns, and runs every command
+   unconfined. `failIfUnavailable` — which has effect **only when `enabled` is true** — makes
+   the leaf **refuse to start** instead. A bounded exemption on top of no sandbox is not
+   bounded; it is nothing. `pdca doctor` checks the same dependencies *before* a run (they are
+   **required** rows); this catches the operator who skipped it.
 1. **The escape hatch.** The harness seeds `allowUnsandboxedCommands: false` beside the list.
    Claude Code defaults that key to **true**, and while it is true the model may retry *any*
    sandbox-denied command with the `dangerouslyDisableSandbox` parameter and have it run
@@ -202,6 +216,15 @@ doesn't cover:
    `excludedCommands` (your *interactive* exemptions — a broad `docker *`) would merge straight
    into the leaf, and nothing the harness writes could subtract them. The list would be a
    *floor*, not a ceiling. The only fix is to not load that scope.
+
+> **The one scope the harness cannot bound: enterprise managed policy.** `--setting-sources`
+> excludes *user* and *local* settings, but Claude Code **always** loads managed policy
+> (`managed-settings.json`) regardless. Since array settings only ever concatenate, a managed
+> policy carrying `sandbox.excludedCommands` widens the leaf's exemption and **nothing the
+> harness can do will narrow it** — the list stays a ceiling with respect to *your* settings,
+> but not with respect to *your organisation's*. That is by design on Claude Code's side:
+> managed policy is meant to outrank everything. If your org sets one, read it before relying
+> on the boundary below. The harness cannot, and does not, override it.
 
 > **The cost of (2).** The leaf no longer reads your user-scope settings at all. If your **auth**
 > lives there (`apiKeyHelper`, or `env.ANTHROPIC_API_KEY`), move it into the environment or the

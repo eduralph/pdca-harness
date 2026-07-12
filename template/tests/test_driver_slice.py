@@ -568,8 +568,10 @@ class AdvisoryReviewResilience(unittest.TestCase):
         self.assertFalse((self.cfg.root / ".claude" / "settings.json").is_file())
         seen = self._capture_sandbox_settings()
         self.assertEqual(seen["content"], {"sandbox": {
+            "enabled": True,
             "excludedCommands": ["cargo xtask fdb-conformance"],
-            "allowUnsandboxedCommands": False}})
+            "allowUnsandboxedCommands": False,
+            "failIfUnavailable": True}})
 
     def test_an_unparseable_settings_file_still_seeds_the_exemption(self) -> None:
         # A corrupt settings.json costs the NETWORK grant and nothing else.
@@ -596,8 +598,10 @@ class AdvisoryReviewResilience(unittest.TestCase):
         self._project_settings({"permissions": {"allow": ["Read"]}})
         seen = self._capture_sandbox_settings()
         self.assertEqual(seen["content"], {"sandbox": {
+            "enabled": True,
             "excludedCommands": ["cargo xtask tikv-conformance"],
-            "allowUnsandboxedCommands": False}})
+            "allowUnsandboxedCommands": False,
+            "failIfUnavailable": True}})
 
     def test_the_exemption_list_is_a_ceiling_not_a_floor(self) -> None:
         """PR #288 review (codex). An exemption LIST does not bound what escapes the sandbox.
@@ -628,6 +632,83 @@ class AdvisoryReviewResilience(unittest.TestCase):
         argv = seen["extra_argv"]
         self.assertIn("--setting-sources", argv)
         self.assertEqual(argv[argv.index("--setting-sources") + 1], "project")
+
+    def test_a_failed_seed_never_leaves_the_leaf_unsandboxed(self) -> None:
+        """PR #290 review (codex). The seed's write is best-effort — but the confinement flag
+        was NOT, so a failed write produced the worst possible outcome.
+
+        `_seed_sandbox_settings` caught the OSError, warned "the leaf runs under the ambient
+        sandbox policy", and carried on. The caller then still passed `--setting-sources
+        project`, so the leaf loaded ONLY project scope — which is the file that had just failed
+        to be written. No `sandbox.enabled` (it defaults FALSE), and the operator's own
+        user-scope sandbox dropped along with it: the leaf ran COMPLETELY unconfined, under a
+        message asserting the exact opposite.
+
+        Now the flag is withheld, so the leaf keeps the operator's ambient sandbox and the
+        exemption simply does not happen. Degrade the FEATURE, never the BOUNDARY.
+        """
+        self._exempt("cargo xtask fdb-conformance")
+        real_write = Path.write_text
+
+        def enospc(self, *a, **k):          # only the SEED's write fails — the fixture's don't
+            if self.name == "settings.json":
+                raise OSError("ENOSPC")
+            return real_write(self, *a, **k)
+
+        buf = io.StringIO()
+        with mock.patch.object(Path, "write_text", enospc), redirect_stderr(buf):
+            seen = self._capture_sandbox_settings()
+        self.assertFalse(seen["exists"])                            # nothing on disk…
+        self.assertNotIn("--setting-sources", seen["extra_argv"])   # …so don't drop the ambient
+        self.assertIn("did NOT take effect", buf.getvalue())
+
+    def test_an_exempted_leaf_actually_has_a_sandbox_to_be_bounded_by(self) -> None:
+        """PR #290 review (codex). Without this key the whole feature was worse than useless.
+
+        `sandbox.enabled` DEFAULTS TO FALSE (`sandbox?.enabled ?? false`), and
+        `failIfUnavailable` is gated on it (`enabled && … && failIfUnavailable`). Worse:
+        `--setting-sources project` (#288) drops the user/local scope — exactly where an
+        operator's `sandbox.enabled: true` lives. So BOUNDING the exemption was REMOVING the
+        sandbox it claims to bound: the leaf ran fully unconfined, every command escaped, and
+        the fail-closed guard never fired — while pdca.toml and docs 05 promised a boundary.
+
+        Verified end-to-end: with these keys but no `enabled`, a leaf starts silently on a
+        socat-less host; with it, it refuses — "sandbox required but unavailable … refusing to
+        start without a working sandbox".
+        """
+        self._exempt("cargo xtask fdb-conformance")
+        seen = self._capture_sandbox_settings()
+        self.assertIs(seen["content"]["sandbox"]["enabled"], True)
+
+    def test_a_leaf_with_no_exemption_gets_no_sandbox_it_never_asked_for(self) -> None:
+        # `enabled` rides WITH the exemption, like the rest: an instance that grants none keeps
+        # whatever ambient sandbox policy it already had.
+        self.cfg.leaf_unsandboxed_commands = []
+        self._project_settings({"sandbox": {"network": {"allowLocalBinding": True}}})
+        seen = self._capture_sandbox_settings()
+        self.assertNotIn("enabled", seen["content"]["sandbox"])
+
+    def test_an_exempted_leaf_refuses_to_run_unsandboxed(self) -> None:
+        """Issue #289 — the hole that swallows the other two whole.
+
+        Claude Code's sandbox does NOT fail closed. With `sandbox.enabled` true and a
+        dependency missing (observed: `socat`), it DISABLES the sandbox, warns, and runs every
+        command unconfined. A bounded exemption on top of no sandbox at all is not bounded — it
+        is nothing, while pdca.toml and docs 05 both promise the leaf is confined to the named
+        commands. `failIfUnavailable` makes the leaf REFUSE to start instead ("Exit with an
+        error at startup if sandbox.enabled is true but the sandbox cannot start").
+        """
+        self._exempt("cargo xtask fdb-conformance")
+        seen = self._capture_sandbox_settings()
+        self.assertIs(seen["content"]["sandbox"]["failIfUnavailable"], True)
+
+    def test_a_leaf_with_no_exemption_is_not_forced_to_fail(self) -> None:
+        # Rides WITH the exemption: an instance granting none keeps the ambient behaviour and
+        # is not made to hard-fail on a sandbox it never asked for.
+        self.cfg.leaf_unsandboxed_commands = []
+        self._project_settings({"sandbox": {"network": {"allowLocalBinding": True}}})
+        seen = self._capture_sandbox_settings()
+        self.assertNotIn("failIfUnavailable", seen["content"]["sandbox"])
 
     def test_a_leaf_with_no_exemption_is_not_confined(self) -> None:
         # The confinement rides WITH the exemption. An instance that grants none keeps today's

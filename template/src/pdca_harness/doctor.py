@@ -4,7 +4,11 @@ Most checks are DERIVED from the parsed config, so they track ``pdca.toml``
 edits automatically: every distinct command-leaf ``argv[0]`` must be on PATH
 (with a per-family auth probe where one exists), ``gh`` must be present and
 authenticated for publish/merge, the bundle root must be writable, and the
-tracker ``notes_cmd``'s tool must resolve. Instance-specific prerequisites
+tracker ``notes_cmd``'s tool must resolve. When the harness will actually seed a
+**bounded leaf sandbox** — a `[leaves.sandbox]` exemption, on a leaf whose family
+can be confined to it — its dependencies are checked too, because a sandbox that
+cannot start does not fail: it silently does not confine (#289).
+Instance-specific prerequisites
 (a Docker engine image, sibling checkouts, a scraper browser, …) are declared
 as data in ``pdca.toml``::
 
@@ -59,6 +63,48 @@ class _Report:
 
 def _have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
+
+
+# What Claude Code's Linux sandbox needs on PATH before it will actually engage. Missing any
+# of these, it does not fail — it disables the sandbox and runs unconfined (#289).
+# binary on PATH -> (what it is, the PACKAGE that provides it). The two differ for bubblewrap:
+# the binary is `bwrap`, the package is `bubblewrap`, and `apt install bwrap` simply fails. On a
+# REQUIRED row that is not a cosmetic slip — an operator who follows the hint stays blocked
+# (PR #290 review). Probe the BINARY, name the PACKAGE.
+_SANDBOX_DEPS = {
+    "bwrap": ("bubblewrap — the leaf sandbox's jail", "bubblewrap"),
+    "socat": ("the leaf sandbox's network proxy", "socat"),
+}
+
+
+def _sandbox_expected(cfg: Config) -> bool:
+    """True iff the harness will actually SEED a bounded sandbox into a leaf — so a missing
+    dependency is a false security claim, not merely an absent feature.
+
+    That is exactly: a `[leaves.sandbox] unsandboxed_commands` exemption is configured, AND at
+    least one **sandboxed** leaf (reviewer / advisory) runs in command mode on a family that can
+    be confined to the harness's own settings (`settings_scope_argv` — claude). Those are the
+    only runs where `leaves._seed_sandbox_settings` writes `sandbox.enabled` and the harness
+    promises "only the named commands escape".
+
+    Two earlier signals were WRONG, and both are gone (PR #290 review):
+
+    * the project's own `.claude/settings.json` `sandbox.enabled` predicted nothing about a
+      leaf. The leaf runs from a **temp cwd**, so it never loads the project's settings at all —
+      only the file the harness seeds there. Reading it told the operator to install bwrap/socat
+      for a leaf sandbox that was never going to exist.
+    * ignoring the family made the rows fire for a **codex** reviewer, whose exemption
+      `_seed_sandbox_settings` REFUSES (it cannot be bounded) and whose sandbox is its own —
+      demanding claude's dependencies for a run that never uses them, as a REQUIRED failure.
+
+    The operator's own ambient sandbox (their user-scope `~/.claude/settings.json`) is theirs,
+    not the harness's claim, so it is not checked here.
+    """
+    if not getattr(cfg, "leaf_unsandboxed_commands", None):
+        return False
+    return any(cfg.profile(leaf).settings_scope_argv
+               for role, leaf in _command_leaves(cfg).items()
+               if role == "reviewer" or role.startswith("advisory:"))
 
 
 def _auth_probe(family: str) -> tuple[str, str] | None:
@@ -230,6 +276,21 @@ def run(cfg: Config, *, strict: bool = False) -> int:
         found = _have(tool) or (cfg.root / tool).exists()  # PATH or a repo-relative script
         r.row(OK if found else WARN, f"notes_cmd tool ({tool})",
               "" if found else "the Plan beat's tracker fetch will fail without it")
+
+    if _sandbox_expected(cfg):
+        print()
+        print("== leaf sandbox ==")
+        # The sandbox does not fail closed on its own: with `sandbox.enabled` true but a
+        # dependency missing, Claude Code DISABLES the sandbox, warns, and runs every command
+        # unconfined. A leaf would then run *everything* outside a sandbox that pdca.toml and
+        # docs 05 both say bounds it to the named commands. So these are REQUIRED — the
+        # consequence of a miss is not a degraded feature, it is a false security claim (#289).
+        for tool, (why, package) in _SANDBOX_DEPS.items():
+            r.row(OK if _have(tool) else MISSING, f"{tool} ({why})",
+                  "" if _have(tool) else
+                  f"sudo apt install {package} — without it the leaf sandbox silently does NOT "
+                  "engage and the bounded exemption does not hold",
+                  required=True)
 
     rows = _expand_checks(getattr(cfg, "doctor_checks", []), cfg.lanes)
     if rows:
