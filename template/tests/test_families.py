@@ -293,6 +293,27 @@ class SandboxConfig(unittest.TestCase):
         # It frees the socket/network layer for EVERY command in the leaf — never a default.
         self.assertIs(self._load("").leaf_network_access, False)
 
+    def test_a_non_boolean_network_access_fails_CLOSED(self) -> None:
+        """PR #292 review (local codex pass). `bool("false")` is True — every non-empty string
+        is — so a quoted `network_access = "false"`, an easy TOML slip, silently handed a codex
+        leaf FULL network/socket access: the exact opposite of what it says. This is a security
+        grant, so it turns on for the boolean `true` and nothing else, and a non-boolean is
+        reported rather than guessed at."""
+        for literal in ('"false"', '"0"', '"no"', '"true"', '0', '1'):
+            with self.subTest(literal=literal):
+                buf = io.StringIO()
+                with redirect_stderr(buf):
+                    cfg = self._load(f'[leaves.sandbox]\nnetwork_access = {literal}\n')
+                self.assertIs(cfg.leaf_network_access, False,
+                              f"network_access = {literal} must NOT open the network")
+                self.assertIn("must be a boolean", buf.getvalue())
+
+    def test_only_the_boolean_true_opens_it(self) -> None:
+        self.assertIs(self._load('[leaves.sandbox]\nnetwork_access = true\n')
+                      .leaf_network_access, True)
+        self.assertIs(self._load('[leaves.sandbox]\nnetwork_access = false\n')
+                      .leaf_network_access, False)
+
     def test_the_two_grants_are_independent_keys(self) -> None:
         # Naming a command must NOT imply the blanket network grant: `unsandboxed_commands`
         # promises "only these commands leave the sandbox", which the network opener would break.

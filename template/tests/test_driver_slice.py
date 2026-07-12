@@ -746,6 +746,22 @@ class AdvisoryReviewResilience(unittest.TestCase):
         self.assertNotIn("sandbox_workspace_write.network_access=true", argv)
         self.assertIn("network_access", buf.getvalue())   # …but the refusal names the fix
 
+    def test_the_refusal_warning_states_the_posture_the_leaf_actually_gets(self) -> None:
+        """PR #292 review (local codex pass). With BOTH keys set on codex, the per-command
+        exemption is correctly refused — but the same run then appends the network grant. The
+        warning still said "The leaf stays fully sandboxed", which was simply false; a warning
+        that misstates the active security posture is worse than no warning at all."""
+        self.cfg.reviewer = LeafConfig(mode="stub", family="codex")
+        self.cfg.leaf_unsandboxed_commands = ["cargo xtask fdb-conformance"]   # refused…
+        self.cfg.leaf_network_access = True                                    # …but this IS on
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            argv = self._capture_sandbox_settings()["extra_argv"]
+        self.assertIn("sandbox_workspace_write.network_access=true", argv)   # the grant is live
+        warning = buf.getvalue()
+        self.assertNotIn("stays fully sandboxed", warning)     # …so it must not claim otherwise
+        self.assertIn("socket/network layer IS open", warning)
+
     def test_claude_does_not_take_the_blanket_network_grant(self) -> None:
         # claude scopes network by DOMAIN (`allowedDomains`, #277), which is strictly better
         # where it exists — so it must not also get codex's blanket opener.

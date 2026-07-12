@@ -8,6 +8,7 @@ stdlib ``tomllib`` so the harness has no runtime dependencies.
 from __future__ import annotations
 
 import os
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -399,7 +400,17 @@ class Config:
             if str(c).strip()
         ]
         # …and the codex-shaped grant: open the leaf's socket/network layer (issue #291).
-        leaf_network_access = bool(leaves.get("sandbox", {}).get("network_access", False))
+        # STRICT, and fail CLOSED. `bool("false")` is True — every non-empty string is — so a
+        # quoted `network_access = "false"` (an easy TOML slip) silently handed a codex leaf full
+        # network/socket access, which is the exact opposite of what it says (PR #292 review,
+        # local pass). This is a security grant: it turns on for the boolean `true` and for
+        # nothing else, and a non-boolean is reported rather than guessed at.
+        _net = leaves.get("sandbox", {}).get("network_access", False)
+        if not isinstance(_net, bool):
+            print(f"config: [leaves.sandbox] network_access must be a boolean, got "
+                  f"{_net!r} — treating it as FALSE (the grant stays closed). Write "
+                  "`network_access = true`, unquoted.", file=sys.stderr)
+        leaf_network_access = _net is True
 
         # Builder escalation ladder (issue #135) — stronger Do backends keyed on attempt
         # number. PDCA_LEAVES_MODE forces their mode too (CI / offline determinism); ""

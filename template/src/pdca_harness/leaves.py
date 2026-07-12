@@ -1080,14 +1080,26 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path,
             granted["allowUnsandboxedCommands"] = False
             granted["failIfUnavailable"] = True
         else:
-            hint = ("  For codex, use `[leaves.sandbox] network_access = true` instead: its "
-                    "sandbox has no per-command escape, and its docker-socket denial is the "
-                    "network layer, not the filesystem (#291)."
-                    if profile.network_argv else "")
+            # The posture line must describe the posture the leaf ACTUALLY gets. With
+            # `network_access` also set, this same run appends the network grant a few lines
+            # later — so "the leaf stays fully sandboxed" was a lie whenever BOTH keys were
+            # configured, and a warning that misstates the active security posture is worse than
+            # no warning at all (PR #292 review, local pass).
+            if cfg.leaf_network_access and profile.network_argv:
+                posture = ("The leaf keeps its FILESYSTEM confinement — but `network_access = "
+                           "true` is set, so its socket/network layer IS open, for every command "
+                           "it runs and not just the named ones.")
+            elif profile.network_argv:
+                posture = ("The leaf stays fully sandboxed. For codex, use `[leaves.sandbox] "
+                           "network_access = true` instead: its sandbox has no per-command "
+                           "escape, and its docker-socket denial is the network layer, not the "
+                           "filesystem (#291).")
+            else:
+                posture = "The leaf stays fully sandboxed."
             print("leaves: [leaves.sandbox] unsandboxed_commands is set, but the "
                   f"'{profile.name}' family cannot be confined to the harness's own settings, "
-                  "so a per-command exemption cannot be bounded — NOT granted. The leaf stays "
-                  f"fully sandboxed.{hint}", file=sys.stderr)
+                  f"so a per-command exemption cannot be bounded — NOT granted. {posture}",
+                  file=sys.stderr)
 
     if not granted:
         return True   # nothing promised, nothing to seed
