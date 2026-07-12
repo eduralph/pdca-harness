@@ -23,7 +23,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from pdca_harness import driver, leaves
+from pdca_harness import driver, leaves, worktree
 from pdca_harness.config import Config, LeafConfig
 
 
@@ -124,6 +124,27 @@ class BuildErrorLog(unittest.TestCase):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             leaves.do_build(self.d, self.cfg)
         self.assertFalse((self.d / leaves.BUILD_ERROR_LOG).exists())
+
+    def test_a_setup_failure_before_the_leaf_launches_is_captured(self) -> None:
+        """PR #286 review (codex). The capture wrapped only `_invoke`, but Do can die in its
+        SETUP — and the likeliest way is `worktree.ensure`, which deliberately RAISES
+        WorktreeError when the target's base ref doesn't resolve (#235, fail-closed: it refuses
+        to run Do in the operator's primary checkout). In a wave batch, an unpushed folded base
+        is exactly that. Such a Do left no bundle-local trace at all — worse than before the
+        log existed, since do_build had already cleared the stale one — so the post-mortem was
+        back to terminal scrollback for the failure mode most likely to hit a WHOLE wave."""
+        self.cfg.worktree = True
+        boom = worktree.WorktreeError(
+            "ERR: base ref 'origin/pdca-integration/main' does not resolve")
+        with mock.patch.object(leaves.worktree, "ensure", side_effect=boom), \
+                mock.patch.object(leaves, "_invoke") as invoked, \
+                redirect_stderr(io.StringIO()):
+            with self.assertRaises(worktree.WorktreeError):
+                leaves.do_build(self.d, self.cfg)
+        invoked.assert_not_called()          # it died in setup — the leaf never launched
+        text = (self.d / leaves.BUILD_ERROR_LOG).read_text(encoding="utf-8")
+        self.assertIn("does not resolve", text)
+        self.assertIn("WorktreeError", text)
 
     def test_capture_never_masks_the_real_failure(self) -> None:
         # If the log itself can't be written, the builder's exception still reaches the flow.
