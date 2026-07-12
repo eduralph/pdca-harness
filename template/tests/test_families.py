@@ -250,5 +250,57 @@ class FakeVendorCliEndToEnd(unittest.TestCase):
             self.assertNotIn(flag, argv)            # stream_json ignored: no stream flags
 
 
+class SandboxGrantShapes(unittest.TestCase):
+    """Issue #291. The two vendors' sandboxes grant along DIFFERENT axes, and neither is
+    strictly tighter — so each family carries only the flag its own sandbox understands."""
+
+    def test_only_codex_has_a_network_opener(self) -> None:
+        # codex `workspace-write` denies the docker socket at the SECCOMP layer (verified: a
+        # relayed socket in a granted writable dir is refused too), so nothing but opening the
+        # network layer reaches it. claude scopes network by domain (`allowedDomains`, #277)
+        # and must NOT get a blanket opener.
+        self.assertEqual(families.resolve("codex", None).network_argv,
+                         ("-c", "sandbox_workspace_write.network_access=true"))
+        for fam in ("claude", "gemini", "generic"):
+            self.assertEqual(families.resolve(fam, None).network_argv, ())
+
+    def test_only_claude_can_be_confined_to_the_harnesss_settings(self) -> None:
+        # The mirror image: only claude reads settings the harness can seed, so only it can
+        # take a BOUNDED per-command exemption (#288).
+        self.assertEqual(families.resolve("claude", None).settings_scope_argv,
+                         ("--setting-sources", "project"))
+        for fam in ("codex", "gemini", "generic"):
+            self.assertEqual(families.resolve(fam, None).settings_scope_argv, ())
+
+
+class SandboxConfig(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _load(self, extra: str) -> Config:
+        (self.tmp / "pdca.toml").write_text(
+            '[project]\ndefault_branch = "main"\n'
+            '[leaves.builder]\nmode = "stub"\n'
+            '[leaves.reviewer]\nmode = "stub"\n' + extra, encoding="utf-8")
+        return Config.load(self.tmp)
+
+    def test_network_access_is_parsed(self) -> None:
+        cfg = self._load('[leaves.sandbox]\nnetwork_access = true\n')
+        self.assertIs(cfg.leaf_network_access, True)
+
+    def test_network_access_is_off_by_default(self) -> None:
+        # It frees the socket/network layer for EVERY command in the leaf — never a default.
+        self.assertIs(self._load("").leaf_network_access, False)
+
+    def test_the_two_grants_are_independent_keys(self) -> None:
+        # Naming a command must NOT imply the blanket network grant: `unsandboxed_commands`
+        # promises "only these commands leave the sandbox", which the network opener would break.
+        cfg = self._load('[leaves.sandbox]\n'
+                         'unsandboxed_commands = ["cargo xtask fdb-conformance"]\n')
+        self.assertEqual(cfg.leaf_unsandboxed_commands, ["cargo xtask fdb-conformance"])
+        self.assertIs(cfg.leaf_network_access, False)
+
+
 if __name__ == "__main__":
     unittest.main()

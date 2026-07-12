@@ -67,6 +67,15 @@ class FamilyProfile:
     # Empty ⇒ the family has no such flag; the exemption is then unbounded and
     # `_seed_sandbox_settings` refuses to grant it.
     settings_scope_argv: tuple[str, ...] = ()
+    # Flags opening the leaf's SOCKET/NETWORK layer, for a family whose sandbox denies it
+    # wholesale rather than by name (codex `--sandbox workspace-write`). Its refusal of the
+    # docker socket is NOT a filesystem denial — a relayed socket in a granted writable dir is
+    # still refused — so no path grant can fix it; the network layer itself must open. Doing so
+    # keeps the FILESYSTEM confined for every command (verified), but frees the socket/network
+    # layer for every command: it cannot be scoped to one command the way claude's
+    # `excludedCommands` can, which is why it rides on its own opt-in (#291). Empty ⇒ the family
+    # has no such flag (claude scopes network by DOMAIN instead — `allowedDomains`, #277).
+    network_argv: tuple[str, ...] = ()
 
 
 BUILTIN: dict[str, FamilyProfile] = {
@@ -93,6 +102,10 @@ BUILTIN: dict[str, FamilyProfile] = {
                                             # $PDCA_TARGET (git stash/unstash, re-run tests)
         model_flag="-m",
         effort_argv=("-c", "model_reasoning_effort={effort}"),
+        # Opens workspace-write's socket/network layer — the ONLY way a codex leaf reaches the
+        # docker socket (its denial is seccomp, not filesystem) or api.github.com. The
+        # filesystem stays confined. Verified on codex-cli 0.142.3 (#291).
+        network_argv=("-c", "sandbox_workspace_write.network_access=true"),
     ),
     "gemini": FamilyProfile(
         name="gemini",

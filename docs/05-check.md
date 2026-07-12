@@ -165,9 +165,10 @@ Opt in by naming the hosts:
 An **empty list seeds nothing** — that is what "off" means here — so this is an explicit
 choice, not a default. Scoped to the hosts you name; `deniedDomains` is carried too.
 
-This is the **claude** family only. A `codex` leaf runs under `codex exec --sandbox
-workspace-write`, which grants no scoped network at all — its prior-art check stays
-NEEDS-HUMAN unless you widen that leaf's own `argv` in `pdca.toml`.
+Domain scoping is **claude** only. A `codex` leaf has no `allowedDomains` equivalent — its
+`--sandbox workspace-write` denies the network wholesale — so it takes the all-or-nothing
+`network_access` grant described under [Docker gates](#docker-backed-conformance-gates-opt-in)
+below, which reaches `api.github.com` too and settles its prior-art check the same way.
 
 #### Docker-backed conformance gates (opt-in)
 
@@ -260,8 +261,42 @@ own `.claude/settings.json` `sandbox.excludedCommands` — that is *your* gate w
 leaf must not silently acquire whatever you exempted for CI. A leaf's exemption is declared
 once, deliberately, in `pdca.toml`.
 
-Claude family only, again: a `codex` leaf's `--sandbox workspace-write` denies the socket too,
-and needs a broader sandbox mode in that leaf's own `argv`.
+#### The codex leaf reaches Docker a different way
+
+Everything above is the **claude** shape. A `codex` leaf's `--sandbox workspace-write` denies
+the Docker socket too, but it cannot take *any* of it: it does not read the settings the
+harness seeds, so it can neither be given a per-command exemption nor be confined to one. The
+harness therefore **refuses** `unsandboxed_commands` on codex rather than hand out an unbounded
+grant, and points you here.
+
+Its denial is **not a filesystem denial** — a relayed socket in a directory codex *can* write
+is refused just the same. It is the seccomp/network layer. So no path grant fixes it, and only
+one thing does:
+
+```toml
+[leaves.sandbox]
+network_access = true       # codex: open the leaf's socket/network layer
+```
+
+The driver then passes `-c sandbox_workspace_write.network_access=true` to codex leaves. That
+reaches the Docker socket **and** `api.github.com`, so it settles the prior-art check
+([above](#letting-the-reviewer-settle-prior-art-mechanically-opt-in)) at the same time.
+
+**The two grants have different shapes, and neither is strictly tighter.** Read them together:
+
+| | what escapes | what stays confined |
+|---|---|---|
+| **claude** — `unsandboxed_commands` | a **named command**, fully (filesystem too) | every *other* command |
+| **codex** — `network_access` | the **socket/network layer**, for *every* command (no per-domain scoping) | the **filesystem**, for every command |
+
+So they are deliberately **separate keys**. `unsandboxed_commands` promises *"only these
+commands leave the sandbox"* — a promise codex's grant would not keep, since it frees the
+network for every command the leaf writes. Naming a command therefore never implies the network
+grant; you opt into each explicitly.
+
+Both are moot against a **root-owned** daemon, mind: anything that can talk to that socket can
+start a container with `-v /:/host`, so the filesystem confinement codex retains buys little
+there. The rootless hardening above is the real answer for either family.
 
 This covers the **reviewer and advisory leaves**. It does *not* cover the **gates**: gate
 commands are plain subprocesses of `pdca`, so they inherit whatever sandbox the operator's

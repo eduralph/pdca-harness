@@ -472,9 +472,9 @@ argv = []
 # there (`apiKeyHelper`, or `env.ANTHROPIC_API_KEY`), move it into the environment or the leaf
 # will fail to start. It fails loudly, and the error lands in the bundle's `*.error.log`.
 #
-# Claude-family leaves only: a family that cannot be confined this way (codex) cannot have a
-# bounded exemption, so the harness REFUSES the grant there rather than hand out an unbounded
-# one — it warns and leaves the leaf fully sandboxed.
+# Claude-family leaves only: codex does not read the settings the harness seeds, so it can be
+# given neither a per-command exemption nor the confinement that bounds one. The harness REFUSES
+# this key there rather than hand out an unbounded grant — use `network_access` below instead.
 #
 # HARDENING: a rootless daemon (podman, or rootless dockerd) makes socket access user-level
 # rather than root-level, which de-fangs the whole class of risk. Prefer it where you can.
@@ -483,6 +483,33 @@ argv = []
 # will skip and defer to a human (today's behaviour).
 # [leaves.sandbox]
 # unsandboxed_commands = ["cargo xtask fdb-conformance", "cargo xtask etcd-conformance"]
+
+# `network_access` — the CODEX-shaped grant, and the only way a codex leaf reaches Docker.
+#
+# codex's `--sandbox workspace-write` has no per-command escape, and its refusal of the docker
+# socket is NOT a filesystem denial: a relayed socket in a directory codex can write is refused
+# just the same. It is the seccomp/network layer. So no path grant fixes it — only opening that
+# layer does. It also reaches api.github.com, settling the reviewer's prior-art check (#277).
+#
+# THE TWO GRANTS HAVE DIFFERENT SHAPES, and neither is strictly tighter — which is exactly why
+# this is a SEPARATE key. Naming a command never implies the network grant:
+#
+#   claude  unsandboxed_commands  a NAMED command leaves the sandbox entirely (filesystem too);
+#                                 every other command stays confined.
+#   codex   network_access        the SOCKET/NETWORK layer opens for EVERY command in the leaf
+#                                 (no per-domain scoping); the FILESYSTEM stays confined for
+#                                 every command.
+#
+# `unsandboxed_commands` promises "ONLY THEY run outside the sandbox" — a promise this grant
+# would not keep, since it frees the network for every command the leaf writes. So opt into each
+# one deliberately. Both are moot against a ROOT-OWNED daemon: anything that can talk to that
+# socket can start a container with `-v /:/host`, so codex's retained filesystem confinement
+# buys little there. Rootless is the real answer for either family.
+#
+# false (the default) ⇒ the codex leaf's network stays closed; a Docker-backed leg skips and
+# defers to a human (today's behaviour).
+# [leaves.sandbox]
+# network_access = true
 
 # Doctor rows (`pdca doctor`) — optional. The doctor derives its main checks from
 # this file (every command leaf's CLI + auth, gh, bundle root, notes_cmd); declare

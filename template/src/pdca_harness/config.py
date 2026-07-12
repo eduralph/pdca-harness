@@ -155,6 +155,23 @@ class Config:
     # declared here, on purpose, in one auditable place. Empty (the default) ⇒ nothing is
     # exempt and the leaf is fully sandboxed.
     leaf_unsandboxed_commands: list[str] = field(default_factory=list)
+    # Open a Check leaf's SOCKET/NETWORK layer ([leaves.sandbox] network_access, issue #291) —
+    # the codex-shaped counterpart of the list above, and deliberately a SEPARATE key because
+    # the two sandboxes grant along different axes and neither is strictly tighter:
+    #
+    #   claude  a NAMED COMMAND leaves the sandbox entirely (filesystem too); every other
+    #           command stays confined.
+    #   codex   `--sandbox workspace-write` has no per-command escape. Its denial of the docker
+    #           socket is not a filesystem denial at all (a relayed socket in a granted writable
+    #           dir is still refused) — it is the seccomp/network layer. Opening it frees the
+    #           socket/network layer for EVERY command in the leaf, while the FILESYSTEM stays
+    #           confined for every command (verified: a write outside the workspace is denied).
+    #
+    # So this must not ride on `unsandboxed_commands`, whose promise is "only these commands
+    # leave the sandbox" — a promise the codex realization would not keep. Named for what it
+    # actually does instead. Also grants codex api.github.com, so the reviewer's prior-art check
+    # (#277) can be settled mechanically too. Empty/False (the default) ⇒ today's behaviour.
+    leaf_network_access: bool = False
     # Builder escalation ladder (issue #135): an OPEN list of stronger Do backends keyed
     # on the attempt number ([[leaves.builder_escalation]] in pdca.toml). Each:
     # {min_iteration, family, mode, argv}. On iterate, do_build picks the entry with the
@@ -381,6 +398,8 @@ class Config:
             str(c) for c in (leaves.get("sandbox", {}).get("unsandboxed_commands") or [])
             if str(c).strip()
         ]
+        # …and the codex-shaped grant: open the leaf's socket/network layer (issue #291).
+        leaf_network_access = bool(leaves.get("sandbox", {}).get("network_access", False))
 
         # Builder escalation ladder (issue #135) — stronger Do backends keyed on attempt
         # number. PDCA_LEAVES_MODE forces their mode too (CI / offline determinism); ""
@@ -476,6 +495,7 @@ class Config:
             manual_test_cmd=manual_test_cmd,
             advisory_leaves=advisory_leaves,
             leaf_unsandboxed_commands=leaf_unsandboxed_commands,
+            leaf_network_access=leaf_network_access,
             advisory_selection=advisory_selection,
             builder_escalation=builder_escalation,
             builder_variants=builder_variants,

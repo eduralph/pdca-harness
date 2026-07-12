@@ -709,6 +709,50 @@ class AdvisoryReviewResilience(unittest.TestCase):
         self._project_settings({"sandbox": {"network": {"allowLocalBinding": True}}})
         seen = self._capture_sandbox_settings()
         self.assertNotIn("failIfUnavailable", seen["content"]["sandbox"])
+    def test_a_codex_leaf_gets_the_network_grant_that_reaches_docker(self) -> None:
+        """Issue #291. #276's whole goal — a Docker-gated conformance leg earning its green at
+        Check — was UNMET for codex, the harness's DEFAULT reviewer and the family whose
+        NEEDS-HUMAN notes #276 quotes. It got a refusal and a docs line saying it was "out of
+        harness scope". Both were wrong: it is one config flag.
+
+        Verified on codex-cli 0.142.3, on a Docker-capable host: `--sandbox workspace-write`
+        alone denies `docker ps`; adding `sandbox_workspace_write.network_access=true` yields
+        `server=29.6.1`. The denial is codex's seccomp/network layer, NOT the filesystem — a
+        relayed socket in a granted writable dir is refused too — so no path grant can fix it.
+        The filesystem stays confined either way (a write outside the workspace is denied).
+        """
+        self.cfg.reviewer = LeafConfig(mode="stub", family="codex")
+        self.cfg.leaf_network_access = True
+        argv = self._capture_sandbox_settings()["extra_argv"]
+        self.assertIn("-c", argv)
+        self.assertIn("sandbox_workspace_write.network_access=true", argv)
+
+    def test_no_network_grant_by_default(self) -> None:
+        # Opt-in: it opens the socket/network layer for EVERY command in the leaf, so it never
+        # rides along with anything else.
+        self.cfg.reviewer = LeafConfig(mode="stub", family="codex")
+        argv = self._capture_sandbox_settings()["extra_argv"]
+        self.assertNotIn("sandbox_workspace_write.network_access=true", argv)
+
+    def test_the_network_grant_does_not_ride_on_the_command_exemption(self) -> None:
+        # THE distinction (#291). `unsandboxed_commands` promises "only these commands leave the
+        # sandbox". codex's grant frees the network for EVERY command, so honouring that key
+        # with this flag would silently break the promise. Separate keys, separate opt-ins.
+        self.cfg.reviewer = LeafConfig(mode="stub", family="codex")
+        self.cfg.leaf_unsandboxed_commands = ["cargo xtask fdb-conformance"]  # NOT network
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            argv = self._capture_sandbox_settings()["extra_argv"]
+        self.assertNotIn("sandbox_workspace_write.network_access=true", argv)
+        self.assertIn("network_access", buf.getvalue())   # …but the refusal names the fix
+
+    def test_claude_does_not_take_the_blanket_network_grant(self) -> None:
+        # claude scopes network by DOMAIN (`allowedDomains`, #277), which is strictly better
+        # where it exists — so it must not also get codex's blanket opener.
+        self.cfg.reviewer = LeafConfig(mode="stub", family="claude")
+        self.cfg.leaf_network_access = True
+        argv = self._capture_sandbox_settings()["extra_argv"]
+        self.assertNotIn("sandbox_workspace_write.network_access=true", argv)
 
     def test_a_leaf_with_no_exemption_is_not_confined(self) -> None:
         # The confinement rides WITH the exemption. An instance that grants none keeps today's
