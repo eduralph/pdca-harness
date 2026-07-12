@@ -44,6 +44,7 @@ import time
 from pathlib import Path
 
 from . import act as act_mod
+from . import assemble
 from . import brief
 from . import families
 from . import gates
@@ -977,7 +978,15 @@ def _review_unavailable(d: Path, reason: str, *, transient: bool = False,
 
 def _unavailable_classification(transient: bool, error_log: Path | None) -> str:
     """Shared classification block for a failed reviewer/advisory placeholder (#138):
-    name the failure class and point at the captured error log when present."""
+    name the failure class and point at the captured error log when present.
+
+    Leads with a machine-readable leaf-status marker (#278). Without it, an empty advisory
+    artifact is ambiguous — "the adversary ran and found nothing" reads exactly like "the
+    adversary never ran", so an infra failure (no Docker, missing binary) presents as a clean
+    adversarial pass and the operator has to hand-annotate "infra, not substance". `assemble`
+    reads the marker and labels the §6 row accordingly."""
+    status = assemble.LEAF_STATUS_INFRA if transient else assemble.LEAF_STATUS_HUMAN
+    marker = f"<!-- pdca:leaf-status {status} -->\n\n"
     if transient:
         kind = ("**transient infra — safe to re-run.** The leaf exited non-zero with no "
                 "output and retries did not recover, so it almost certainly hit a usage/"
@@ -990,7 +999,7 @@ def _unavailable_classification(transient: bool, error_log: Path | None) -> str:
     log_ref = ""
     if error_log is not None and error_log.exists():
         log_ref = f" See `{error_log.name}` in this bundle for the captured error."
-    return f"Failure class: {kind}{log_ref}\n\n"
+    return f"{marker}Failure class: {kind}{log_ref}\n\n"
 
 
 # Stub bases per 5/5/1 element — what a real reviewer would re-derive; the offline
