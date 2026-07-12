@@ -1013,10 +1013,22 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path,
     #    scope at all: the family's `settings_scope_argv` (claude: `--setting-sources
     #    project`), applied by the callers. A family without that flag cannot be bounded, so the
     #    exemption is REFUSED rather than granted unbounded — fail closed, and say why.
+    #
+    # …and a THIRD hole, which swallows the other two whole (#289). When `sandbox.enabled` is
+    # true but the sandbox's own dependencies are missing, Claude Code does NOT fail — it
+    # DISABLES the sandbox, warns, and runs every command unconfined ("Sandbox disabled:
+    # …dependencies are missing: socat not installed · Commands will run WITHOUT sandboxing").
+    # A bounded exemption on top of no sandbox at all is not bounded; it is nothing. So seed
+    # `failIfUnavailable` — "Exit with an error at startup if sandbox.enabled is true but the
+    # sandbox cannot start" (its schema) — and let the leaf REFUSE rather than run unconfined
+    # under a boundary this file, docs 05 and pdca.toml all claim it has. It fails loudly, and
+    # the tail lands in the bundle's `*.error.log` (#280/#286) instead of scrollback. `pdca
+    # doctor` catches the same gap BEFORE a run; this catches the operator who skipped it.
     if cfg.leaf_unsandboxed_commands:
         if profile.settings_scope_argv:
             granted["excludedCommands"] = list(cfg.leaf_unsandboxed_commands)
             granted["allowUnsandboxedCommands"] = False
+            granted["failIfUnavailable"] = True
         else:
             print("leaves: [leaves.sandbox] unsandboxed_commands is set, but the "
                   f"'{profile.name}' family cannot be confined to the harness's own settings, "

@@ -188,9 +188,16 @@ Every other Bash line the leaf writes stays fully confined. Empty (the default) 
 exemption at all, and a Docker-backed leg goes on deferring to a human.
 
 **"Only those" is enforced, not merely intended** — and a list of names on its own enforces
-nothing. It takes two things, because there are two ways out of the sandbox that the list
-doesn't cover:
+nothing. It takes three things, because there are three ways the boundary evaporates that the
+list doesn't cover:
 
+0. **No sandbox at all.** The sandbox does **not** fail closed. If `sandbox.enabled` is true but
+   its dependencies (`bubblewrap`, `socat`) are missing, Claude Code *disables* the sandbox,
+   prints a warning, and runs every command unconfined — a bounded exemption on top of no
+   sandbox is not bounded, it is nothing. So the harness seeds `failIfUnavailable: true` and the
+   leaf **refuses to start** rather than run unconfined under a boundary this page promises it
+   has. `pdca doctor` checks the same dependencies *before* a run (they are **required** rows);
+   this catches the operator who skipped it.
 1. **The escape hatch.** The harness seeds `allowUnsandboxedCommands: false` beside the list.
    Claude Code defaults that key to **true**, and while it is true the model may retry *any*
    sandbox-denied command with the `dangerouslyDisableSandbox` parameter and have it run

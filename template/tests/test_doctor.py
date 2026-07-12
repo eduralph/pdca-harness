@@ -11,6 +11,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from pdca_harness import doctor
 from pdca_harness.config import Config
@@ -118,6 +119,84 @@ class Doctor(unittest.TestCase):
                     '[[doctor.checks]]\nid = "lane{lane}"\ncmd = "false"\nper_lane = true\n')
         _, out = self._run(cfg)
         self.assertNotIn("lane0", out)  # serial mode uses base worktrees, not lanes
+
+
+class SandboxDeps(unittest.TestCase):
+    """Issue #289. Claude Code's sandbox does NOT fail closed: with `sandbox.enabled` true and
+    a dependency missing it DISABLES the sandbox, warns, and runs every command unconfined
+    ("dependencies are missing: socat not installed · Commands will run WITHOUT sandboxing").
+
+    A leaf would then run *everything* outside a sandbox that pdca.toml and docs 05 both say
+    bounds it to the named commands. The harness also *mandates* (brief.md.tpl) that every
+    human-installable dependency have a detecting doctor row — and shipped one of its own with
+    none. These rows are REQUIRED because a miss is not a degraded feature, it is a false
+    security claim.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _run(self, cfg: Config, **kw) -> tuple[int, str]:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = doctor.run(cfg, **kw)
+        return rc, out.getvalue()
+
+    _EXEMPTION = ('[leaves.sandbox]\nunsandboxed_commands = ["cargo xtask fdb-conformance"]\n')
+
+    def _settings(self, payload: str) -> None:
+        cdir = self.tmp / ".claude"
+        cdir.mkdir(parents=True, exist_ok=True)
+        (cdir / "settings.json").write_text(payload, encoding="utf-8")
+
+    def test_an_exemption_makes_the_sandbox_deps_required(self) -> None:
+        cfg = _load(self.tmp, self._EXEMPTION)
+        with mock.patch.object(doctor, "_have", return_value=False):
+            rc, out = self._run(cfg)
+        self.assertIn("leaf sandbox", out)
+        self.assertIn("socat", out)
+        self.assertIn("bwrap", out)
+        self.assertEqual(rc, 1, "a sandbox that cannot start is a REQUIRED failure")
+
+    def test_enabling_the_sandbox_alone_is_enough_to_check(self) -> None:
+        # No exemption — but the project turned the sandbox on, so it believes it is confined.
+        self._settings('{"sandbox": {"enabled": true}}')
+        cfg = _load(self.tmp)
+        with mock.patch.object(doctor, "_have", return_value=False):
+            rc, out = self._run(cfg)
+        self.assertIn("socat", out)
+        self.assertEqual(rc, 1)
+
+    def test_present_deps_pass(self) -> None:
+        cfg = _load(self.tmp, self._EXEMPTION)
+        with mock.patch.object(doctor, "_have", return_value=True):
+            rc, out = self._run(cfg)
+        self.assertIn("leaf sandbox", out)
+        self.assertEqual(rc, 0)
+
+    def test_an_instance_with_no_sandbox_is_not_nagged(self) -> None:
+        # The rows ride WITH the belief in a sandbox. An instance that never asked for one is
+        # not told to install bubblewrap.
+        cfg = _load(self.tmp)
+        with mock.patch.object(doctor, "_have", return_value=False):
+            _, out = self._run(cfg)
+        self.assertNotIn("leaf sandbox", out)
+        self.assertNotIn("socat", out)
+
+    def test_a_disabled_sandbox_setting_is_not_a_belief(self) -> None:
+        self._settings('{"sandbox": {"enabled": false}}')
+        cfg = _load(self.tmp)
+        with mock.patch.object(doctor, "_have", return_value=False):
+            _, out = self._run(cfg)
+        self.assertNotIn("leaf sandbox", out)
+
+    def test_unreadable_settings_never_crash_the_doctor(self) -> None:
+        self._settings("{ not json")
+        cfg = _load(self.tmp)
+        with mock.patch.object(doctor, "_have", return_value=False):
+            _, out = self._run(cfg)          # must not raise
+        self.assertNotIn("leaf sandbox", out)
 
 
 if __name__ == "__main__":

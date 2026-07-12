@@ -4,7 +4,11 @@ Most checks are DERIVED from the parsed config, so they track ``pdca.toml``
 edits automatically: every distinct command-leaf ``argv[0]`` must be on PATH
 (with a per-family auth probe where one exists), ``gh`` must be present and
 authenticated for publish/merge, the bundle root must be writable, and the
-tracker ``notes_cmd``'s tool must resolve. Instance-specific prerequisites
+tracker ``notes_cmd``'s tool must resolve. When the config expects a **leaf
+sandbox** — a bounded `[leaves.sandbox]` exemption, or `sandbox.enabled` in the
+project's `.claude/settings.json` — its dependencies are checked too, because a
+sandbox that cannot start does not fail: it silently does not confine (#289).
+Instance-specific prerequisites
 (a Docker engine image, sibling checkouts, a scraper browser, …) are declared
 as data in ``pdca.toml``::
 
@@ -32,6 +36,7 @@ idempotent — the doctor never installs or changes anything.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -59,6 +64,33 @@ class _Report:
 
 def _have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
+
+
+# What Claude Code's Linux sandbox needs on PATH before it will actually engage. Missing any
+# of these, it does not fail — it disables the sandbox and runs unconfined (#289).
+_SANDBOX_DEPS = {
+    "bwrap": "bubblewrap — the leaf sandbox's jail",
+    "socat": "the leaf sandbox's network proxy",
+}
+
+
+def _sandbox_expected(cfg: Config) -> bool:
+    """True when the operator BELIEVES a leaf sandbox is in force — so a missing dependency is
+    a false security claim, not merely an absent feature.
+
+    Two ways to believe it: the harness grants a bounded exemption (`[leaves.sandbox]
+    unsandboxed_commands`, whose whole premise is that everything *else* stays confined), or
+    the project turns the sandbox on itself (`.claude/settings.json` `sandbox.enabled`).
+    Neither ⇒ no rows: an instance that never asked for a sandbox is not nagged for one.
+    """
+    if getattr(cfg, "leaf_unsandboxed_commands", None):
+        return True
+    try:
+        settings = json.loads(
+            (cfg.root / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        return bool((settings.get("sandbox") or {}).get("enabled"))
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False  # no readable settings ⇒ nothing claims a sandbox
 
 
 def _auth_probe(family: str) -> tuple[str, str] | None:
@@ -230,6 +262,21 @@ def run(cfg: Config, *, strict: bool = False) -> int:
         found = _have(tool) or (cfg.root / tool).exists()  # PATH or a repo-relative script
         r.row(OK if found else WARN, f"notes_cmd tool ({tool})",
               "" if found else "the Plan beat's tracker fetch will fail without it")
+
+    if _sandbox_expected(cfg):
+        print()
+        print("== leaf sandbox ==")
+        # The sandbox does not fail closed on its own: with `sandbox.enabled` true but a
+        # dependency missing, Claude Code DISABLES the sandbox, warns, and runs every command
+        # unconfined. A leaf would then run *everything* outside a sandbox that pdca.toml and
+        # docs 05 both say bounds it to the named commands. So these are REQUIRED — the
+        # consequence of a miss is not a degraded feature, it is a false security claim (#289).
+        for tool, why in _SANDBOX_DEPS.items():
+            r.row(OK if _have(tool) else MISSING, f"{tool} ({why})",
+                  "" if _have(tool) else
+                  f"sudo apt install {tool} — without it the leaf sandbox silently does NOT "
+                  "engage and the bounded exemption does not hold",
+                  required=True)
 
     rows = _expand_checks(getattr(cfg, "doctor_checks", []), cfg.lanes)
     if rows:
