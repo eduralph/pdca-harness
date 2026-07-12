@@ -187,6 +187,15 @@ unsandboxed_commands = ["cargo xtask fdb-conformance", "cargo xtask etcd-conform
 Every other Bash line the leaf writes stays fully confined. Empty (the default) means no
 exemption at all, and a Docker-backed leg goes on deferring to a human.
 
+**"Only those" is enforced, not merely intended.** Alongside the list, the harness seeds
+`allowUnsandboxedCommands: false` into the leaf's settings. Claude Code defaults that key to
+**true**, and while it is true the model may retry *any* sandbox-denied command with the
+`dangerouslyDisableSandbox` parameter and have it run unconfined — which would make the named
+list a *floor* rather than a ceiling. With it false, `dangerouslyDisableSandbox` is ignored
+outright and the list becomes the only route out of the leaf's sandbox. The harness seeds this
+only when you grant an exemption: an instance that names no command keeps the ambient default
+rather than having a policy imposed on it.
+
 **Why a named command, and not a socket grant.** The sandbox schema *does* offer
 `allowAllUnixSockets`, which would reach the Docker socket too — but it hands **every**
 command the leaf runs access to **every** unix socket. And the Docker socket on a root-owned

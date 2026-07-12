@@ -442,6 +442,12 @@ argv = []
 # Match the command you actually gate on, as precisely as you can — this is a capability, so
 # a loose pattern (`docker *`) hands the leaf far more than a specific one.
 #
+# "ONLY THEY" is enforced, not merely intended: the harness seeds `allowUnsandboxedCommands =
+# false` beside this list. Claude Code defaults that to TRUE, and while it is true the model
+# may retry ANY sandbox-denied command with `dangerouslyDisableSandbox` and have it run
+# unconfined — which would make this list a floor rather than a ceiling. With it false that
+# parameter is ignored outright, so this list is the only way out of the leaf's sandbox.
+#
 # HARDENING: a rootless daemon (podman, or rootless dockerd) makes socket access user-level
 # rather than root-level, which de-fangs the whole class of risk. Prefer it where you can.
 #

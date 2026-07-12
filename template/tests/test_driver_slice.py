@@ -555,7 +555,8 @@ class AdvisoryReviewResilience(unittest.TestCase):
         self.assertFalse((self.cfg.root / ".claude" / "settings.json").is_file())
         seen = self._capture_sandbox_settings()
         self.assertEqual(seen["content"], {"sandbox": {
-            "excludedCommands": ["cargo xtask fdb-conformance"]}})
+            "excludedCommands": ["cargo xtask fdb-conformance"],
+            "allowUnsandboxedCommands": False}})
 
     def test_an_unparseable_settings_file_still_seeds_the_exemption(self) -> None:
         # A corrupt settings.json costs the NETWORK grant and nothing else.
@@ -582,7 +583,29 @@ class AdvisoryReviewResilience(unittest.TestCase):
         self._project_settings({"permissions": {"allow": ["Read"]}})
         seen = self._capture_sandbox_settings()
         self.assertEqual(seen["content"], {"sandbox": {
-            "excludedCommands": ["cargo xtask tikv-conformance"]}})
+            "excludedCommands": ["cargo xtask tikv-conformance"],
+            "allowUnsandboxedCommands": False}})
+
+    def test_the_exemption_list_is_a_ceiling_not_a_floor(self) -> None:
+        """PR #288 review (codex). An exemption LIST does not bound what escapes the sandbox.
+        Claude Code's `allowUnsandboxedCommands` defaults to TRUE (settings schema, v2.1.207:
+        `sandbox?.allowUnsandboxedCommands ?? true`), and while true the model may retry ANY
+        sandbox-denied command with `dangerouslyDisableSandbox` and have it run unconfined. So
+        seeding only `excludedCommands` left the named list a floor: "only these commands run
+        outside the sandbox" — which pdca.toml, docs 05 and the seed's own docstring all
+        promise — was simply not true. Setting it false makes `dangerouslyDisableSandbox`
+        "completely ignored" (the schema's own words), so the list becomes the only way out."""
+        self.cfg.leaf_unsandboxed_commands = ["cargo xtask fdb-conformance"]
+        seen = self._capture_sandbox_settings()
+        self.assertIs(seen["content"]["sandbox"]["allowUnsandboxedCommands"], False)
+
+    def test_a_leaf_with_no_exemption_is_not_silently_hardened(self) -> None:
+        # The escape hatch is closed only ALONGSIDE a list. An instance that grants no
+        # exemption keeps the ambient default rather than having policy imposed on it.
+        self.cfg.leaf_unsandboxed_commands = []
+        self._project_settings({"sandbox": {"network": {"allowLocalBinding": True}}})
+        seen = self._capture_sandbox_settings()
+        self.assertNotIn("allowUnsandboxedCommands", seen["content"]["sandbox"])
 
     def test_the_socket_wide_grant_is_never_seeded(self) -> None:
         # We deliberately do NOT ship `allowAllUnixSockets`: it would let ANY command the leaf

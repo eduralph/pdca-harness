@@ -872,7 +872,9 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path) -> None:
     Bash line the leaf writes access to *every* unix socket — and a root-owned docker daemon
     is root-adjacent). It is a **named-command exemption**: ``[leaves.sandbox]
     unsandboxed_commands`` in pdca.toml lists the conformance commands, and only those run
-    outside the sandbox. Everything else the leaf does stays confined.
+    outside the sandbox. Everything else the leaf does stays confined — which holds only
+    because the exemption ships with ``allowUnsandboxedCommands: false`` beside it; the list
+    is a *ceiling*, not a floor (see below).
 
     That list is **harness-owned on purpose**. This function never copies the project's own
     ``sandbox.excludedCommands`` — that is the operator's *gate* workaround, and inheriting it
@@ -929,8 +931,19 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path) -> None:
     # they are the harness's, they must not depend on the project having (or being able to
     # parse) a `.claude/settings.json` AT ALL: gating them on that made the documented Docker
     # exemption silently do nothing for an instance without one (PR #288 review).
+    # An exemption LIST alone does not bound what escapes the sandbox. Claude Code's
+    # `allowUnsandboxedCommands` defaults to TRUE (settings schema, v2.1.207:
+    # `sandbox?.allowUnsandboxedCommands ?? true`), and when true the model may retry ANY
+    # sandbox-denied command with the `dangerouslyDisableSandbox` parameter and have it run
+    # unconfined. So the named list would be a floor, not a ceiling — "only these commands run
+    # outside the sandbox" (this docstring, docs 05, pdca.toml) would simply not be true.
+    # Setting it false makes `dangerouslyDisableSandbox` "completely ignored" (its schema's own
+    # words), leaving `excludedCommands` as the ONLY way out — which is the documented contract
+    # (PR #288 review). Seeded only alongside a non-empty list: an instance that grants no
+    # exemption keeps the ambient default rather than being silently hardened.
     if cfg.leaf_unsandboxed_commands:
         granted["excludedCommands"] = list(cfg.leaf_unsandboxed_commands)
+        granted["allowUnsandboxedCommands"] = False
 
     if not granted:
         return
