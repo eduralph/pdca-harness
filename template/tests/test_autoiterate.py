@@ -248,6 +248,43 @@ class TheStandingValidationRow(_Base):
         self.assertFalse(self._try(d), "a concerns-table objection must halt, not be archived")
         self._assert_halted(d)
 
+    def test_a_concerns_table_with_the_EXACT_label_still_halts(self) -> None:
+        """PR #294, local codex pass. The fourth scoping of the same rule, and the one that
+        finally names the right thing.
+
+        Matching the Item cell was still not enough: a `## Concerns` table can carry the row
+        `| Validation — fitness-to-purpose | NEEDS-HUMAN | patches the wrong layer |` with the
+        **exact** canonical label. The parser had no idea which TABLE a row came from, so that
+        real objection earned STANDING and an unattended rebuild would archive it. My previous
+        test only covered a concerns row with EXTRA text in the cell, so it sailed past this.
+
+        The justification was always "the MANDATED TABLE's Validation row is a constant" — so the
+        parser now identifies that table (≥2 exact canonical Item cells) and only its V row can
+        be standing.
+        """
+        review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                  "| C4 Verification (red→green) | NEEDS-HUMAN | [impl] off-by-one |\n"
+                  "| C5 Causal adequacy | PASS | ok |\n"
+                  f"{_STANDING_ROW}\n"
+                  "\n## Concerns\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                  "| Validation — fitness-to-purpose | NEEDS-HUMAN | patches the wrong layer |\n")
+        d = self._bundle("SV9", review=review)
+        self.assertFalse(self._try(d), "an exact-label concerns row is still a real objection")
+        self._assert_halted(d)
+
+    def test_two_standing_candidates_fail_closed(self) -> None:
+        # The template row is a CONSTANT — it occurs once. If two survive (a duplicated row, a
+        # second verdict-shaped table), at least one is not the constant and we cannot tell
+        # which. Grant STANDING to neither and halt, rather than risk archiving a real objection.
+        review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                  "| C4 Verification (red→green) | NEEDS-HUMAN | [impl] off-by-one |\n"
+                  "| C5 Causal adequacy | PASS | ok |\n"
+                  f"{_STANDING_ROW}\n"
+                  "| Validation — fitness-to-purpose | NEEDS-HUMAN | and again, differently |\n")
+        d = self._bundle("SV10", review=review)
+        self.assertFalse(self._try(d), "ambiguous standing rows must fail closed")
+        self._assert_halted(d)
+
     def test_the_standing_row_is_never_carried_forward_to_the_builder(self) -> None:
         """PR #294 review (codex). STANDING rides along in `items` so it cannot veto the rebuild
         — but it is not a finding, and no builder can act on it. Carrying it into the §9 delta
@@ -621,8 +658,13 @@ class Classification(unittest.TestCase):
         for elem, label, kind, _oracle in gates.canonical_elements():
             if kind not in ("judgment", "input"):
                 continue
-            row = f"| {label} | NEEDS-HUMAN | some basis |\n"
-            [(text, standing)] = assemble._needs_human(row)
+            # A REAL verdict table: the row under test plus another canonical row, which is what
+            # makes it the mandated table rather than a stray one (a lone row cannot nominate
+            # itself as the constant).
+            table = ("| Item | Verdict | Basis |\n|---|---|---|\n"
+                     "| C1 Spec | PASS | ok |\n"
+                     f"| {label} | NEEDS-HUMAN | some basis |\n")
+            [(text, standing)] = assemble._needs_human(table)
             got = assemble._classify_finding(text, standing=standing).kind
             want = assemble.STANDING if elem == "V" else assemble.HUMAN
             self.assertEqual(got, want, f"{elem} ({label})")
@@ -632,17 +674,21 @@ class Classification(unittest.TestCase):
         EXACTLY the canonical label — not the text's prefix, and not merely "it came from a
         table". A prefix test let a real objection wear the template's clothes; a table test let
         a second table do the same. Both are the same mistake, one layer apart."""
-        canonical = "| Validation — fitness-to-purpose | NEEDS-HUMAN | the human's call |\n"
-        objection = ("| Validation — fitness-to-purpose: patches the wrong layer | NEEDS-HUMAN "
-                     "| the criterion cannot be met |\n")
-        bullet = "- NEEDS-HUMAN — Validation — fitness-to-purpose: patches the wrong layer\n"
+        TBL = "| Item | Verdict | Basis |\n|---|---|---|\n| C1 Spec | PASS | ok |\n"
+        canonical = TBL + "| Validation — fitness-to-purpose | NEEDS-HUMAN | the human's call |\n"
+        objection = TBL + ("| Validation — fitness-to-purpose: patches the wrong layer "
+                           "| NEEDS-HUMAN | the criterion cannot be met |\n")
+        bullet = TBL + "- NEEDS-HUMAN — Validation — fitness-to-purpose: patches the wrong layer\n"
+        lone = "| Validation — fitness-to-purpose | NEEDS-HUMAN | the human's call |\n"
 
         [(_t, standing)] = assemble._needs_human(canonical)
-        self.assertTrue(standing, "the canonical row IS the constant")
+        self.assertTrue(standing, "the canonical row of the MANDATED table IS the constant")
         [(_t, standing)] = assemble._needs_human(objection)
         self.assertFalse(standing, "a longer Item cell is a real objection, not the template")
         [(_t, standing)] = assemble._needs_human(bullet)
         self.assertFalse(standing, "free prose is never the template row")
+        [(_t, standing)] = assemble._needs_human(lone)
+        self.assertFalse(standing, "a lone row in a stray table cannot nominate itself")
 
     def test_the_classifier_never_re_derives_standing_from_the_text(self) -> None:
         # Two sources of truth for "is this the constant row" is what produced the bug. The

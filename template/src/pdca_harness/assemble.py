@@ -61,6 +61,10 @@ _IMPL_MARKER_RE = re.compile(r"^\[impl\]\s*[—:-]*\s*", re.IGNORECASE)
 # reviewer's prompt hard-codes to NEEDS-HUMAN on every cycle; C5/T5 are judgment too, but the
 # reviewer raises those only when it has an actual concern, so they stay situational HUMAN.
 _V_LABEL = next(label for e, label, _kind, _oracle in canonical_elements() if e == "V")
+# Every 5/5/1 Item cell, used to recognise the MANDATED verdict table itself — the row alone was
+# never enough (PR #294 review, local pass): a "## Concerns" table can carry the exact same label.
+_CANONICAL_LABELS = frozenset(label.strip().casefold()
+                              for _e, label, _kind, _oracle in canonical_elements())
 
 # Leaf-status marker (issue #278). When a reviewer / advisory leaf could not produce a
 # verdict, `leaves` writes a placeholder carrying one of these as a machine-readable comment.
@@ -330,6 +334,8 @@ def _needs_human(review_text: str) -> list[tuple[str, bool]]:
     """
     items: list[tuple[str, bool]] = []
     seen: set[str] = set()
+    lines = review_text.splitlines()
+    verdict_table = _verdict_table_lines(lines)
 
     def add(text: str, *, standing: bool) -> None:
         text = text.strip()
@@ -337,20 +343,60 @@ def _needs_human(review_text: str) -> list[tuple[str, bool]]:
             seen.add(text.lower())
             items.append((text, standing))
 
-    for line in review_text.splitlines():
+    for i, line in enumerate(lines):
         s = line.strip()
         if s.startswith("- NEEDS-HUMAN"):
             add(s[len("- NEEDS-HUMAN"):].lstrip(" —:-").strip(), standing=False)
         elif s.startswith("|") and "needs-human" in s.lower():
             cells = [c.strip() for c in s.strip("|").split("|")]
-            vi = next((i for i, c in enumerate(cells) if "needs-human" in c.lower()), None)
+            vi = next((j for j, c in enumerate(cells) if "needs-human" in c.lower()), None)
             if vi is None:
                 continue
             label = cells[0] if cells else ""
             basis = cells[vi + 1] if vi + 1 < len(cells) else ""
             add(f"{label} — {basis}" if basis else label,
-                standing=label.strip().casefold() == _V_LABEL.casefold())
+                standing=(i in verdict_table
+                          and label.strip().casefold() == _V_LABEL.casefold()))
+
+    # FAIL CLOSED on ambiguity. The template row is a CONSTANT — it occurs exactly once. If two
+    # survive (a second verdict-shaped table, a duplicated row), at least one of them is not the
+    # constant, and we cannot tell which. Grant STANDING to neither, so the bundle halts for the
+    # human rather than risk archiving a real objection.
+    if sum(1 for _t, standing in items if standing) > 1:
+        return [(t, False) for t, _s in items]
     return items
+
+
+def _verdict_table_lines(lines: list[str]) -> set[int]:
+    """Line indices belonging to the reviewer's MANDATED 5/5/1 verdict table.
+
+    The whole basis for STANDING is that *that* table's Validation row is a constant the prompt
+    emits every cycle. So the parser has to know which table a row came from — and it did not.
+    Matching the Item cell alone let a "## Concerns" table carrying the **exact** canonical label
+    earn the exemption, and an unattended rebuild would archive that real objection (PR #294
+    review, local pass). Keying on the row was the fourth scoping of this same rule; the table is
+    what the justification was always about.
+
+    A contiguous run of ``|``-rows is the verdict table when **two or more** of its Item cells
+    exactly match canonical 5/5/1 labels — the mandated table carries all eleven, while an
+    ad-hoc concerns table carries its own prose. Two, not one, so a lone Validation row in a
+    stray table cannot nominate itself.
+    """
+    out: set[int] = set()
+    i = 0
+    while i < len(lines):
+        if not lines[i].strip().startswith("|"):
+            i += 1
+            continue
+        j = i
+        while j < len(lines) and lines[j].strip().startswith("|"):
+            j += 1
+        block = range(i, j)
+        labels = {lines[k].strip().strip("|").split("|")[0].strip().casefold() for k in block}
+        if len(labels & _CANONICAL_LABELS) >= 2:
+            out.update(block)
+        i = j
+    return out
 
 
 def _declared_external_deps(build_notes_text: str) -> list[str]:
