@@ -92,23 +92,32 @@ def leaf_status(artifact_text: str) -> str:
     return m.group(1) if m else ""
 
 
-def _classify_finding(text: str) -> NeedsHumanItem:
+def _classify_finding(text: str, *, allow_standing: bool = False) -> NeedsHumanItem:
     """Classify one reviewer / advisory §6 item, stripping any `[impl]` marker.
 
-    Three kinds. IMPL — a rebuild can address it. STANDING — the reviewer's `Validation`
-    row, which its prompt emits NEEDS-HUMAN on every cycle whatever it finds, so its presence
-    proves nothing (#293). HUMAN — everything else.
+    Three kinds. IMPL — a rebuild can address it. STANDING — the reviewer's `Validation` row,
+    which its prompt emits NEEDS-HUMAN on every cycle whatever it finds, so its presence proves
+    nothing (#293). HUMAN — everything else.
 
-    Fail safe: an item we cannot map to a gate element — an unmarked advisory bullet, a
-    reviewer row whose Item cell doesn't start with a canonical id, the missing-review
-    placeholder — is HUMAN. Auto-iterate only ever fires on findings we positively know
-    a rebuild can address, and STANDING is never one of them: it does not *cause* a rebuild,
-    it merely declines to veto one.
+    ``allow_standing`` is the PRIMARY REVIEW's privilege, and defaults off. STANDING is earned
+    only by the reviewer's mandated verdict table, where that row is hard-coded and therefore
+    signal-free. An **advisory** leaf has no such table: its `- NEEDS-HUMAN — …` bullets are
+    free-form, and fitness-to-purpose is exactly one of the architectural objections its prompt
+    tells it to raise. Reading such a bullet as STANDING would let a real objection be archived
+    by an unattended rebuild — the very thing auto-iterate must never do (PR #294 review). The
+    justification for STANDING is "this row is a constant", and that is true of the reviewer's
+    table and of nothing else.
+
+    Fail safe throughout: an item we cannot map to a gate element — an unmarked advisory bullet,
+    a reviewer row whose Item cell doesn't start with a canonical id, the missing-review
+    placeholder — is HUMAN. Auto-iterate only ever fires on findings we positively know a
+    rebuild can address, and STANDING is never one of them: it does not *cause* a rebuild, it
+    merely declines to veto one.
     """
     stripped = _IMPL_MARKER_RE.sub("", text, count=1)
     if stripped != text:
         return NeedsHumanItem(stripped.strip(), IMPL)
-    if _STANDING_RE.match(text):
+    if allow_standing and _STANDING_RE.match(text):
         return NeedsHumanItem(text, STANDING)   # emitted every cycle ⇒ carries no signal (#293)
     m = _ELEMENT_RE.match(text)
     if m and m.group(1) in _GATE_ELEMENTS:
@@ -116,15 +125,18 @@ def _classify_finding(text: str) -> NeedsHumanItem:
     return NeedsHumanItem(text, HUMAN)
 
 
-def _items_from_artifact(text: str) -> list[NeedsHumanItem]:
+def _items_from_artifact(text: str, *, allow_standing: bool = False) -> list[NeedsHumanItem]:
     """§6 items from one reviewer / advisory artifact, labelled by its leaf status (#278).
+
+    ``allow_standing`` is passed only for the PRIMARY review (#294 review) — see
+    :func:`_classify_finding`. An advisory leaf's free-form bullets never earn STANDING.
 
     A placeholder (the leaf could not produce a verdict) has its items prefixed with WHY the
     artifact is empty — infra vs substance — so the human doesn't have to hand-annotate it,
     and forced to HUMAN: there is no finding for a rebuild to fix, so an infra-empty must
     never be auto-iterated (#264). A real artifact is unaffected."""
     label = _LEAF_STATUS_LABEL.get(leaf_status(text), "")
-    items = [_classify_finding(t) for t in _needs_human(text)]
+    items = [_classify_finding(t, allow_standing=allow_standing) for t in _needs_human(text)]
     if not label:
         return items
     return [NeedsHumanItem(f"{label} — {it.text}", HUMAN) for it in items]
@@ -143,7 +155,10 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
     advisory_texts = [p.read_text(encoding="utf-8")
                       for p in sorted(d.glob("check-advisory-*.md"))]
 
-    items = _items_from_artifact(review_text)
+    # Only the PRIMARY review may carry a STANDING row: it is the one artifact whose prompt
+    # mandates the Validation row unconditionally, which is the entire basis for treating it as
+    # signal-free. An advisory leaf raising fitness-to-purpose means it FOUND something.
+    items = _items_from_artifact(review_text, allow_standing=True)
     for atext in advisory_texts:
         items += _items_from_artifact(atext)
     # A gate that COULD NOT RUN is not builder-fixable — rebuilding would spin against the

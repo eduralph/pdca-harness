@@ -190,6 +190,26 @@ class TheStandingValidationRow(_Base):
         self.assertFalse(self._try(d), "a real judgment concern must still halt")
         self._assert_halted(d)
 
+    def test_an_advisory_fitness_objection_is_never_standing(self) -> None:
+        """PR #294 review (codex). STANDING is the PRIMARY review's privilege, and nothing
+        else's.
+
+        `collect_needs_human` runs `check-review.md` and every `check-advisory-*.md` through the
+        same classifier. The adversary's prompt tells it to raise architectural / scope /
+        fitness objections as free-form `- NEEDS-HUMAN — …` bullets — so one that happens to
+        begin "Validation — fitness-to-purpose" was being read as the reviewer's signal-free
+        standing row, and an unattended rebuild would ARCHIVE a real objection instead of
+        halting for sign-off. The basis for STANDING is "this row is a constant", which is true
+        of the reviewer's mandated table and of nothing else.
+        """
+        advisory = ("# Adversary\n\n- NEEDS-HUMAN — Validation — fitness-to-purpose: this "
+                    "patches the wrong layer; the success criterion cannot be met by this "
+                    "design\n")
+        d = self._bundle("SV5", review=_review_table("C4 Verification (red→green)"),
+                         advisory=advisory)
+        self.assertFalse(self._try(d), "a real fitness objection must halt, not be archived")
+        self._assert_halted(d)
+
     def test_the_standing_row_still_blocks_accept(self) -> None:
         # The C6 guard is untouched: the human must still clear §6 before accepting. Not
         # vetoing a REBUILD is not the same as not needing a human at SIGN-OFF.
@@ -541,16 +561,25 @@ class Classification(unittest.TestCase):
                 self.assertNotEqual(item.kind, assemble.IMPL, f"{elem} must never be impl")
 
     def test_only_the_validation_row_is_standing(self) -> None:
-        # #293. V is the one row the reviewer's prompt hard-codes to NEEDS-HUMAN every cycle,
-        # so it alone is STANDING (a constant carries no signal). C5/T5 are judgment too, but
-        # the reviewer raises those only on a real concern — they stay situational HUMAN and
-        # still halt the bundle.
+        # #293. In the PRIMARY review, V is the one row the reviewer's prompt hard-codes to
+        # NEEDS-HUMAN every cycle, so it alone is STANDING (a constant carries no signal).
+        # C5/T5 are judgment too, but the reviewer raises those only on a real concern — they
+        # stay situational HUMAN and still halt the bundle.
         for elem, label, kind, _oracle in gates.canonical_elements():
             if kind not in ("judgment", "input"):
                 continue
-            got = assemble._classify_finding(f"{label} — some basis").kind
+            got = assemble._classify_finding(f"{label} — some basis", allow_standing=True).kind
             want = assemble.STANDING if elem == "V" else assemble.HUMAN
             self.assertEqual(got, want, f"{elem} ({label})")
+
+    def test_standing_is_the_primary_reviews_privilege_alone(self) -> None:
+        # PR #294 review (codex). The default is OFF, so an ADVISORY leaf's free-form
+        # fitness objection is HUMAN and still halts — it means the adversary FOUND something.
+        # STANDING is earned only by the reviewer's mandated table, where the row is a constant.
+        text = "Validation — fitness-to-purpose: this patches the wrong layer"
+        self.assertEqual(assemble._classify_finding(text).kind, assemble.HUMAN)
+        self.assertEqual(assemble._classify_finding(text, allow_standing=True).kind,
+                         assemble.STANDING)
 
     def test_impl_marker_is_case_insensitive_and_stripped(self) -> None:
         self.assertEqual(assemble._classify_finding("[IMPL] — bug"),
