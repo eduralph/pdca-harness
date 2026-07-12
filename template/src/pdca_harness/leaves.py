@@ -834,49 +834,71 @@ def _seed_sandbox_agents(cfg: Config, sandbox: Path) -> None:
               "`--agent` may not resolve", file=sys.stderr)
 
 
+# The ONLY `sandbox.network` keys the driver will carry into a leaf's temp cwd, each with the
+# value shape that counts as a real grant (issues #261, #277). An allow-list, not a copy: a
+# key absent from here — above all `sandbox.excludedCommands`, which makes a command bypass
+# the sandbox entirely — is never seeded, however an instance configures it. A grant whose
+# value fails its filter (an empty domain list, a non-boolean) seeds nothing, which is how a
+# knob ships documented-but-OFF.
+_SEEDED_NETWORK_KEYS = {
+    "allowLocalBinding": lambda v: isinstance(v, bool),                    # #261 loopback bind
+    "allowedDomains": lambda v: isinstance(v, list) and bool(v),           # #277 e.g. github
+    "deniedDomains": lambda v: isinstance(v, list) and bool(v),            # its counterpart
+}
+
+
 def _seed_sandbox_settings(cfg: Config, sandbox: Path) -> None:
-    """Grant the leaf sandbox the ONE capability a socket-backed Check needs (issue #261).
+    """Carry the sandbox capabilities a Check needs into the leaf sandbox (#261, #277).
 
     Claude Code loads **project** settings from ``.claude/settings.json`` relative to the
     subprocess cwd — the same walk-up that finds ``.claude/agents`` (#161). The reviewer /
     advisory leaves run in a temp cwd, so the rendered project's ``.claude/settings.json``
-    is invisible to them and its ``sandbox`` policy silently does not apply. In particular
-    ``sandbox.network.allowLocalBinding``: without it the leaf's Bash tool runs under
-    Claude Code's own bubblewrap+seccomp sandbox, where ``TcpListener::bind("127.0.0.1:0")``
-    fails ``Operation not permitted``. Every loopback-socket runtime test then panics before
-    its assertion, so C2/C4/T3 can only ever be *provisional* at Check.
+    is invisible to them and its ``sandbox`` policy silently does not apply. Two capabilities
+    a Check legitimately needs are denied as a result:
 
-    **Exactly one key is seeded** — ``sandbox.network.allowLocalBinding`` — never the whole
-    ``sandbox`` object, and never ``permissions``. Each wider block would hand the leaf a
-    capability its ``tools:`` frontmatter does not grant: ``permissions.allow`` carries
-    ``Edit``/``Write``, and ``sandbox.excludedCommands`` — which docs 05 recommends to a
-    project as the workaround for its *gates* — makes the named command bypass the sandbox
-    **entirely**, so a reviewer could run the test runner unconfined. An allow-list of one
-    keeps the seed to the capability this fix is actually about (PR #268 review).
+    * ``network.allowLocalBinding`` (#261) — without it the leaf's Bash tool runs under
+      Claude Code's bubblewrap+seccomp sandbox where ``TcpListener::bind("127.0.0.1:0")``
+      fails ``Operation not permitted``, so every loopback-socket runtime test panics before
+      its assertion and C2/C4/T3 can only ever be *provisional*.
+    * ``network.allowedDomains`` (#277) — the reviewer's prior-art check needs the
+      closed/rejected-PR corpus (``gh pr list --state closed`` → api.github.com). Blocked, it
+      cannot be settled mechanically and is forced NEEDS-HUMAN on *every* bundle.
 
-    An absent or non-boolean value ⇒ no file written, so an instance that doesn't configure a
-    sandbox is unaffected. Best-effort, like the agent seeding: any read/parse/write error
-    degrades to a no-op, never an aborted Check.
+    **Seeded through an ALLOW-LIST of individual keys** (:data:`_SEEDED_NETWORK_KEYS`), never
+    by copying the ``sandbox`` block, and never ``permissions``. Each wider copy would hand
+    the leaf a capability its ``tools:`` frontmatter does not grant: ``permissions.allow``
+    carries ``Edit``/``Write``, and ``sandbox.excludedCommands`` — which docs 05 recommends to
+    a project as the workaround for its *gates* — makes the named command bypass the sandbox
+    **entirely**, so a reviewer could run the test runner unconfined (PR #268 review). Widening
+    the seed means adding a key here, deliberately — not loosening the copy.
+
+    Each key is **value-filtered**, so a present-but-empty grant seeds nothing: that is how a
+    grant stays OFF by default (the shipped ``allowedDomains: []`` documents the knob without
+    enabling it). No valid grant ⇒ no file written, so an instance that configures no sandbox
+    is unaffected. Best-effort, like the agent seeding: any read/parse/write error degrades to
+    a no-op, never an aborted Check.
 
     Scope: this covers the reviewer / advisory **leaves**. Gate commands are plain
     subprocesses of ``pdca`` and inherit the operator's ambient sandbox instead (docs 05).
+    The **codex** family sandbox (``codex exec --sandbox workspace-write``) is not configured
+    by this file at all — it grants no scoped network, so a codex reviewer's prior-art check
+    stays NEEDS-HUMAN unless the instance widens its own per-leaf ``argv``.
     """
     src = cfg.root / ".claude" / "settings.json"
     if not src.is_file():
         return
     try:
         settings = json.loads(src.read_text(encoding="utf-8"))
-        allow_local_binding = (settings.get("sandbox") or {}).get("network", {}).get(
-            "allowLocalBinding")
-        if not isinstance(allow_local_binding, bool):
+        network = (settings.get("sandbox") or {}).get("network") or {}
+        granted = {key: network[key] for key, valid in _SEEDED_NETWORK_KEYS.items()
+                   if key in network and valid(network[key])}
+        if not granted:
             return
         dest = sandbox / ".claude"
         dest.mkdir(parents=True, exist_ok=True)
         (dest / "settings.json").write_text(
-            json.dumps({"sandbox": {"network": {"allowLocalBinding": allow_local_binding}}},
-                       indent=2),
-            encoding="utf-8")
-    except (OSError, ValueError, AttributeError) as exc:
+            json.dumps({"sandbox": {"network": granted}}, indent=2), encoding="utf-8")
+    except (OSError, ValueError, AttributeError, TypeError) as exc:
         print(f"leaves: could not seed sandbox settings from {src} ({exc}); the leaf runs "
               "under the ambient sandbox policy", file=sys.stderr)
 

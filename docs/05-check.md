@@ -134,12 +134,40 @@ and the driver **seeds that one setting into the leaf's temp cwd**, because Clau
 loads project settings relative to the subprocess cwd — the same walk-up that finds
 `.claude/agents`.
 
-Deliberately *only* `sandbox.network.allowLocalBinding` travels. Not `permissions` (whose
-allow-list carries `Edit`/`Write`), and not the rest of the `sandbox` block — in particular
-not `sandbox.excludedCommands`, recommended just below for your **gates**, which makes a
+What travels is an **allow-list of named `sandbox.network` keys** — never a copy of the
+`sandbox` block, and never `permissions` (whose allow-list carries `Edit`/`Write`). In
+particular `sandbox.excludedCommands`, recommended just below for your **gates**, makes a
 command bypass the sandbox *entirely*: carrying it into the reviewer's cwd would let the
-reviewer run your test runner unconfined. The reviewer's surface stays exactly what its
-agent `tools:` grants, plus the one capability a socket-backed Check needs.
+reviewer run your test runner unconfined, so it is never seeded however you configure it.
+Widening the seed means adding a key to that list, deliberately.
+
+#### Letting the reviewer settle prior art mechanically (opt-in)
+
+The reviewer's prior-art check (`T4` contribution / `T5` judgment) spans merged history *and*
+the **closed/rejected-PR corpus**. Merged history is local (`git log --all -- <paths>`), but
+the closed corpus needs `gh pr list --state closed` → `api.github.com`. The sandbox blocks
+network by default, so that half can't be settled and the check is correctly forced
+NEEDS-HUMAN on **every** bundle — a standing per-bundle tax on a check that could be
+mechanical (issue #277).
+
+The shipped `.claude/settings.json` documents the grant but leaves it **off**:
+
+```json
+{ "sandbox": { "network": { "allowLocalBinding": true, "allowedDomains": [] } } }
+```
+
+Opt in by naming the hosts:
+
+```json
+"allowedDomains": ["github.com", "api.github.com"]
+```
+
+An **empty list seeds nothing** — that is what "off" means here — so this is an explicit
+choice, not a default. Scoped to the hosts you name; `deniedDomains` is carried too.
+
+This is the **claude** family only. A `codex` leaf runs under `codex exec --sandbox
+workspace-write`, which grants no scoped network at all — its prior-art check stays
+NEEDS-HUMAN unless you widen that leaf's own `argv` in `pdca.toml`.
 
 This covers the **reviewer and advisory leaves**. It does *not* cover the **gates**: gate
 commands are plain subprocesses of `pdca`, so they inherit whatever sandbox the operator's

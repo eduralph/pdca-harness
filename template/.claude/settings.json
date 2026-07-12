@@ -1,7 +1,8 @@
 {
   "sandbox": {
     "network": {
-      "allowLocalBinding": true
+      "allowLocalBinding": true,
+      "allowedDomains": []
     }
   },
   "permissions": {
