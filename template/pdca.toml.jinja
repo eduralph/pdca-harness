@@ -425,6 +425,31 @@ argv = []
 # §6 NEEDS-HUMAN so you can see decorrelation didn't hold for that bundle.
 # [leaves.advisory_selection]
 # mode = "vendor-complement"
+
+# Sandbox exemptions for the Check leaves (issue #276). The reviewer / advisory leaves run
+# under Claude Code's sandbox, which denies the DOCKER SOCKET. So a conformance gate that
+# brings up a live cluster (`docker compose` → etcd / TiKV / FDB) is permission-denied inside
+# the leaf EVEN ON A DOCKER-CAPABLE HOST: the runtime leg skips, its evidence can never be
+# earned at Check, and it defers to a human-run confirmer on every bundle — the process turns
+# burdensome exactly where it should be mechanical.
+#
+# List those commands here and ONLY THEY run outside the sandbox. Every other Bash line the
+# leaf writes stays fully confined. This is deliberately NOT a socket-wide grant: opening all
+# unix sockets would let ANY command the leaf runs reach the docker daemon, and a root-owned
+# daemon (the common setup — check `ls -l /var/run/docker.sock`) is effectively root on the
+# host. Name the command; don't open the socket.
+#
+# Match the command you actually gate on, as precisely as you can — this is a capability, so
+# a loose pattern (`docker *`) hands the leaf far more than a specific one.
+#
+# HARDENING: a rootless daemon (podman, or rootless dockerd) makes socket access user-level
+# rather than root-level, which de-fangs the whole class of risk. Prefer it where you can.
+#
+# Empty (the default) ⇒ no exemptions; the leaf is fully sandboxed and a Docker-backed leg
+# will skip and defer to a human (today's behaviour).
+# [leaves.sandbox]
+# unsandboxed_commands = ["cargo xtask fdb-conformance", "cargo xtask etcd-conformance"]
+
 # Doctor rows (`pdca doctor`) — optional. The doctor derives its main checks from
 # this file (every command leaf's CLI + auth, gh, bundle root, notes_cmd); declare
 # INSTANCE-specific prerequisites here as data, the same pattern as [[gates.checks]].

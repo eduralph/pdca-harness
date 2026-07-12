@@ -509,6 +509,92 @@ class AdvisoryReviewResilience(unittest.TestCase):
         self._project_settings({"sandbox": {"network": {"allowedDomains": "github.com"}}})
         self.assertFalse(self._capture_sandbox_settings()["exists"])
 
+    def test_named_conformance_command_is_exempted_from_the_sandbox(self) -> None:
+        # #276: a Docker-backed conformance gate is denied the docker socket inside the leaf
+        # sandbox even on a Docker-capable host, so its evidence always defers to a human.
+        # Naming the command exempts THAT COMMAND — not the socket, not the whole leaf.
+        self.cfg.leaf_unsandboxed_commands = ["cargo xtask fdb-conformance"]
+        self._project_settings({"sandbox": {"network": {"allowLocalBinding": True}}})
+        seen = self._capture_sandbox_settings()
+        self.assertEqual(seen["content"]["sandbox"]["excludedCommands"],
+                         ["cargo xtask fdb-conformance"])
+
+    def test_the_exemption_list_comes_from_pdca_toml_not_the_project_settings(self) -> None:
+        # THE load-bearing distinction (#268 doctrine, preserved). The project's own
+        # `sandbox.excludedCommands` is its GATE workaround — inheriting it would let the leaf
+        # run whatever the operator exempted for CI. A leaf's exemption is declared in
+        # pdca.toml, deliberately, and nowhere else.
+        self.cfg.leaf_unsandboxed_commands = []                       # harness grants nothing
+        self._project_settings({"sandbox": {
+            "excludedCommands": ["docker *", "rm -rf /"],             # the operator's own list
+            "network": {"allowLocalBinding": True},
+        }})
+        seen = self._capture_sandbox_settings()
+        self.assertNotIn("excludedCommands", seen["content"]["sandbox"])
+
+    def test_the_harness_list_does_not_merge_with_the_project_list(self) -> None:
+        # Even when BOTH exist, only the harness-declared commands reach the leaf.
+        self.cfg.leaf_unsandboxed_commands = ["cargo xtask fdb-conformance"]
+        self._project_settings({"sandbox": {"excludedCommands": ["docker *"]}})
+        seen = self._capture_sandbox_settings()
+        self.assertEqual(seen["content"]["sandbox"]["excludedCommands"],
+                         ["cargo xtask fdb-conformance"])
+
+    def test_no_exemptions_by_default(self) -> None:
+        # Off unless declared: an instance that names nothing gets a fully sandboxed leaf.
+        self._project_settings({"sandbox": {"network": {"allowLocalBinding": True}}})
+        seen = self._capture_sandbox_settings()
+        self.assertNotIn("excludedCommands", seen["content"]["sandbox"])
+
+    def test_the_exemption_is_seeded_without_any_project_settings(self) -> None:
+        # PR #288 review (codex). The exemption list is HARNESS-owned (pdca.toml), so it must
+        # not depend on the project having a `.claude/settings.json` at all. Gating it on that
+        # file made the documented Docker exemption silently do nothing for an instance
+        # without one — the leaf stayed sandboxed and still deferred to a human confirmer.
+        self.cfg.leaf_unsandboxed_commands = ["cargo xtask fdb-conformance"]
+        self.assertFalse((self.cfg.root / ".claude" / "settings.json").is_file())
+        seen = self._capture_sandbox_settings()
+        self.assertEqual(seen["content"], {"sandbox": {
+            "excludedCommands": ["cargo xtask fdb-conformance"]}})
+
+    def test_an_unparseable_settings_file_still_seeds_the_exemption(self) -> None:
+        # A corrupt settings.json costs the NETWORK grant and nothing else.
+        cdir = self.cfg.root / ".claude"
+        cdir.mkdir(parents=True, exist_ok=True)
+        (cdir / "settings.json").write_text("{ not json", encoding="utf-8")
+        self.cfg.leaf_unsandboxed_commands = ["cargo xtask fdb-conformance"]
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            seen = self._capture_sandbox_settings()      # must NOT raise
+        self.assertEqual(seen["content"]["sandbox"]["excludedCommands"],
+                         ["cargo xtask fdb-conformance"])
+        self.assertNotIn("network", seen["content"]["sandbox"])   # …but no network grant
+        self.assertIn("no network grant", buf.getvalue())
+
+    def test_nothing_granted_still_seeds_nothing(self) -> None:
+        # The independence must not become "always write a file": no settings, no exemption.
+        self.cfg.leaf_unsandboxed_commands = []
+        self.assertFalse(self._capture_sandbox_settings()["exists"])
+
+    def test_an_exemption_alone_is_enough_to_seed(self) -> None:
+        # No network grant at all, but a named command ⇒ the settings file is still written.
+        self.cfg.leaf_unsandboxed_commands = ["cargo xtask tikv-conformance"]
+        self._project_settings({"permissions": {"allow": ["Read"]}})
+        seen = self._capture_sandbox_settings()
+        self.assertEqual(seen["content"], {"sandbox": {
+            "excludedCommands": ["cargo xtask tikv-conformance"]}})
+
+    def test_the_socket_wide_grant_is_never_seeded(self) -> None:
+        # We deliberately do NOT ship `allowAllUnixSockets`: it would let ANY command the leaf
+        # runs reach the docker socket, and a root-owned daemon (the common setup) is
+        # root-adjacent. It is not in the allow-list, so configuring it cannot reach a leaf.
+        self._project_settings({"sandbox": {
+            "allowAllUnixSockets": True,
+            "network": {"allowLocalBinding": True},
+        }})
+        seen = self._capture_sandbox_settings()
+        self.assertNotIn("allowAllUnixSockets", seen["content"]["sandbox"])
+
     def test_a_false_grant_is_carried_faithfully(self) -> None:
         self._project_settings({"sandbox": {"network": {"allowLocalBinding": False}}})
         seen = self._capture_sandbox_settings()
@@ -534,6 +620,8 @@ class AdvisoryReviewResilience(unittest.TestCase):
 
     def test_malformed_project_settings_does_not_abort_check(self) -> None:
         # Best-effort, like the agent seeding: a corrupt settings.json degrades to a no-op.
+        # (With no pdca.toml exemption declared there is nothing else to grant, so no file is
+        # written at all. The exemption's independence from this file is pinned separately.)
         cdir = self.cfg.root / ".claude"
         cdir.mkdir(parents=True, exist_ok=True)
         (cdir / "settings.json").write_text("{ not json", encoding="utf-8")
@@ -541,7 +629,7 @@ class AdvisoryReviewResilience(unittest.TestCase):
         with redirect_stderr(buf):
             seen = self._capture_sandbox_settings()          # must NOT raise
         self.assertFalse(seen["exists"])
-        self.assertIn("could not seed sandbox settings", buf.getvalue())
+        self.assertIn("could not read sandbox settings", buf.getvalue())
 
     def test_advisory_sandbox_seeds_settings_too(self) -> None:
         # The advisory leaves hit the same bind wall as the main reviewer (#261 names

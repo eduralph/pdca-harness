@@ -864,6 +864,21 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path) -> None:
       closed/rejected-PR corpus (``gh pr list --state closed`` → api.github.com). Blocked, it
       cannot be settled mechanically and is forced NEEDS-HUMAN on *every* bundle.
 
+    Separately, a **Docker-backed conformance gate** (a live etcd/TiKV/FDB cluster via
+    ``docker compose``) is denied the docker socket inside the sandbox even on a Docker-capable
+    host, so its runtime evidence can never be earned at Check and always defers to a
+    human-run confirmer — the process gets burdensome exactly where it should be mechanical
+    (#276). The fix is NOT a socket-wide grant (``allowAllUnixSockets`` would hand *every*
+    Bash line the leaf writes access to *every* unix socket — and a root-owned docker daemon
+    is root-adjacent). It is a **named-command exemption**: ``[leaves.sandbox]
+    unsandboxed_commands`` in pdca.toml lists the conformance commands, and only those run
+    outside the sandbox. Everything else the leaf does stays confined.
+
+    That list is **harness-owned on purpose**. This function never copies the project's own
+    ``sandbox.excludedCommands`` — that is the operator's *gate* workaround, and inheriting it
+    would let the leaf run whatever the operator exempted for CI (PR #268). A leaf's exemption
+    is declared once, deliberately, in pdca.toml.
+
     **Seeded through an ALLOW-LIST of individual keys** (:data:`_SEEDED_NETWORK_KEYS`), never
     by copying the ``sandbox`` block, and never ``permissions``. Each wider copy would hand
     the leaf a capability its ``tools:`` frontmatter does not grant: ``permissions.allow``
@@ -874,9 +889,15 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path) -> None:
 
     Each key is **value-filtered**, so a present-but-empty grant seeds nothing: that is how a
     grant stays OFF by default (the shipped ``allowedDomains: []`` documents the knob without
-    enabling it). No valid grant ⇒ no file written, so an instance that configures no sandbox
-    is unaffected. Best-effort, like the agent seeding: any read/parse/write error degrades to
-    a no-op, never an aborted Check.
+    enabling it). Nothing granted at all ⇒ no file written, so an instance that configures no
+    sandbox is unaffected.
+
+    The two sources are **independent**. The network grants are the project's, read from its
+    ``.claude/settings.json`` best-effort; the command exemptions are the harness's, read from
+    ``pdca.toml``. An absent or unparseable settings file costs the network grant and nothing
+    else — it must never suppress a pdca.toml exemption (PR #288 review). Best-effort
+    throughout, like the agent seeding: any read/parse/write error degrades to a no-op, never
+    an aborted Check.
 
     Scope: this covers the reviewer / advisory **leaves**. Gate commands are plain
     subprocesses of ``pdca`` and inherit the operator's ambient sandbox instead (docs 05).
@@ -885,21 +906,41 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path) -> None:
     stays NEEDS-HUMAN unless the instance widens its own per-leaf ``argv``.
     """
     src = cfg.root / ".claude" / "settings.json"
-    if not src.is_file():
+    granted: dict = {}
+
+    # The NETWORK grants are the project's (claude reads them from its own settings.json), so
+    # they are read from there — best-effort. An absent or unparseable file means no network
+    # grant, and nothing more: it must not suppress the harness-owned exemptions below.
+    if src.is_file():
+        try:
+            settings = json.loads(src.read_text(encoding="utf-8"))
+            network = (settings.get("sandbox") or {}).get("network") or {}
+            net_granted = {key: network[key] for key, valid in _SEEDED_NETWORK_KEYS.items()
+                           if key in network and valid(network[key])}
+            if net_granted:
+                granted["network"] = net_granted
+        except (OSError, ValueError, AttributeError, TypeError) as exc:
+            print(f"leaves: could not read sandbox settings from {src} ({exc}); the leaf gets "
+                  "no network grant", file=sys.stderr)
+
+    # A leaf's sandbox EXEMPTIONS are HARNESS-owned — `[leaves.sandbox] unsandboxed_commands`
+    # in pdca.toml (#276) — and NEVER this settings file's own ``excludedCommands``, which is
+    # the operator's *gate* workaround and must not be inherited by a leaf (#268). Because
+    # they are the harness's, they must not depend on the project having (or being able to
+    # parse) a `.claude/settings.json` AT ALL: gating them on that made the documented Docker
+    # exemption silently do nothing for an instance without one (PR #288 review).
+    if cfg.leaf_unsandboxed_commands:
+        granted["excludedCommands"] = list(cfg.leaf_unsandboxed_commands)
+
+    if not granted:
         return
     try:
-        settings = json.loads(src.read_text(encoding="utf-8"))
-        network = (settings.get("sandbox") or {}).get("network") or {}
-        granted = {key: network[key] for key, valid in _SEEDED_NETWORK_KEYS.items()
-                   if key in network and valid(network[key])}
-        if not granted:
-            return
         dest = sandbox / ".claude"
         dest.mkdir(parents=True, exist_ok=True)
         (dest / "settings.json").write_text(
-            json.dumps({"sandbox": {"network": granted}}, indent=2), encoding="utf-8")
-    except (OSError, ValueError, AttributeError, TypeError) as exc:
-        print(f"leaves: could not seed sandbox settings from {src} ({exc}); the leaf runs "
+            json.dumps({"sandbox": granted}, indent=2), encoding="utf-8")
+    except OSError as exc:
+        print(f"leaves: could not seed sandbox settings into {sandbox} ({exc}); the leaf runs "
               "under the ambient sandbox policy", file=sys.stderr)
 
 

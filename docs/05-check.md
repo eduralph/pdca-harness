@@ -169,6 +169,52 @@ This is the **claude** family only. A `codex` leaf runs under `codex exec --sand
 workspace-write`, which grants no scoped network at all — its prior-art check stays
 NEEDS-HUMAN unless you widen that leaf's own `argv` in `pdca.toml`.
 
+#### Docker-backed conformance gates (opt-in)
+
+A conformance gate that brings up a live cluster (`docker compose` → etcd / TiKV / FDB) is
+**denied the Docker socket inside the leaf sandbox — even on a Docker-capable host**. The
+runtime leg skips, its evidence can never be earned at Check, and it defers to a human-run
+confirmer on *every* bundle. That is the harness failing at its own purpose: the maintainer
+becomes the bottleneck for a check that ought to be mechanical (issue #276).
+
+Name the commands that need Docker, and **only those** run outside the sandbox:
+
+```toml
+[leaves.sandbox]
+unsandboxed_commands = ["cargo xtask fdb-conformance", "cargo xtask etcd-conformance"]
+```
+
+Every other Bash line the leaf writes stays fully confined. Empty (the default) means no
+exemption at all, and a Docker-backed leg goes on deferring to a human.
+
+**Why a named command, and not a socket grant.** The sandbox schema *does* offer
+`allowAllUnixSockets`, which would reach the Docker socket too — but it hands **every**
+command the leaf runs access to **every** unix socket. And the Docker socket on a root-owned
+daemon is effectively root on the host: anything that can talk to it can start a container
+with `-v /:/host`. Check which you have:
+
+```bash
+ls -l /var/run/docker.sock      # root:docker  → the daemon runs as root
+```
+
+The reviewer leaf has `Bash`. Giving it a root-adjacent socket for *any* command it cares to
+write is a far larger grant than letting *one command you wrote* run unconfined. So the
+harness does not seed `allowAllUnixSockets` at all — it is not in the allow-list, and setting
+it has no effect on a leaf.
+
+**Hardening.** A **rootless** daemon (podman, or rootless `dockerd`) makes socket access
+user-level instead of root-level, which de-fangs this entire class of risk. Prefer it where
+you can. Match the command precisely, too — this is a capability, so `docker *` hands the leaf
+far more than `cargo xtask fdb-conformance` does.
+
+**The exemption list is harness-owned, on purpose.** The driver never inherits your project's
+own `.claude/settings.json` `sandbox.excludedCommands` — that is *your* gate workaround, and a
+leaf must not silently acquire whatever you exempted for CI. A leaf's exemption is declared
+once, deliberately, in `pdca.toml`.
+
+Claude family only, again: a `codex` leaf's `--sandbox workspace-write` denies the socket too,
+and needs a broader sandbox mode in that leaf's own `argv`.
+
 This covers the **reviewer and advisory leaves**. It does *not* cover the **gates**: gate
 commands are plain subprocesses of `pdca`, so they inherit whatever sandbox the operator's
 own shell already has. If you launch `pdca flow` from inside a sandboxed agent shell, a
