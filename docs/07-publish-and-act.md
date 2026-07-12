@@ -32,10 +32,13 @@ from INTEGRATION §8. For gramps that's a four-section body (Root cause / Fix /
 Verified against / Test), and — because 11589 touches an addon — an `## Affected
 addon` section that @-mentions the addon's maintainer (INTEGRATION §10).
 
-**STOP discipline holds to the end:** the PR opens as a *draft*. A human marks it
-ready — the harness never does. gramps' governance makes this explicit
-(INTEGRATION §10): *"Eduard opens fork PRs as draft, marks ready himself; builder
-commits and stops — no push/PR-open/ready-mark without explicit instruction."*
+**STOP discipline holds to the end:** the PR opens as a *draft*, and on the normal
+single-cycle and `stack`-mode paths a human marks it ready — the harness never does. gramps'
+governance makes this explicit (INTEGRATION §10): *"Eduard opens fork PRs as draft, marks
+ready himself; builder commits and stops — no push/PR-open/ready-mark without explicit
+instruction."* The one carve-out is the opt-in `wave_mode = "merge"` below, where the driver
+readies and merges each *non-final* wave's PRs to advance the base; even there the **final**
+wave's PR stays a draft for your ready-mark.
 
 This holds for a **batch**, too. A multi-id `pdca flow` runs the batch as dependency
 waves ([09 parallel lanes](../template/PCDA/quality-cycle/09-parallel-lanes.md)); in the

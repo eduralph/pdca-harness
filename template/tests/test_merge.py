@@ -98,16 +98,65 @@ class MergeWave(unittest.TestCase):
     def test_merge_failure_stops(self) -> None:
         b = self._bundle("M5")
 
-        def fail_run(cmd, **kw):
-            return SimpleNamespace(returncode=1, stdout="", stderr="not mergeable")
+        def fail_merge(cmd, **kw):  # ready succeeds; the merge itself fails
+            rc = 1 if cmd[:3] == ["gh", "pr", "merge"] else 0
+            return SimpleNamespace(returncode=rc, stdout="", stderr="not mergeable")
 
-        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fail_run), \
+        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fail_merge), \
                 mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
                 mock.patch.object(merge.merged, "is_merged", return_value=False), \
                 redirect_stderr(io.StringIO()) as err:
             rc = merge.merge_wave(self.cfg, [b])
         self.assertEqual(rc, 1)
         self.assertIn("did not merge", err.getvalue())
+
+    def test_readies_before_merging(self) -> None:
+        # #279: the publisher opens every PR --draft, but `gh pr merge` refuses a draft, so a
+        # non-final wave's PR must be readied first. `gh pr ready` must precede `gh pr merge`.
+        b = self._bundle("M7")
+        runs: list[list[str]] = []
+
+        def fake_run(cmd, **kw):
+            runs.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
+                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
+                mock.patch.object(merge.merged, "is_merged", return_value=False), \
+                redirect_stdout(io.StringIO()):
+            rc = merge.merge_wave(self.cfg, [b], method="merge")
+        self.assertEqual(rc, 0)
+        gh = [c for c in runs if c[:2] == ["gh", "pr"]]
+        self.assertEqual(gh[0], ["gh", "pr", "ready", "https://gh/pr/1"])
+        self.assertEqual(gh[1], ["gh", "pr", "merge", "https://gh/pr/1", "--merge"])
+
+    def test_ready_failure_stops_before_merge(self) -> None:
+        # If a PR can't be readied it can't be merged — fail-closed, and never attempt merge.
+        b = self._bundle("M8")
+        runs: list[list[str]] = []
+
+        def fail_ready(cmd, **kw):
+            runs.append(cmd)
+            rc = 1 if cmd[:3] == ["gh", "pr", "ready"] else 0
+            return SimpleNamespace(returncode=rc, stdout="", stderr="cannot ready")
+
+        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fail_ready), \
+                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
+                mock.patch.object(merge.merged, "is_merged", return_value=False), \
+                redirect_stderr(io.StringIO()) as err:
+            rc = merge.merge_wave(self.cfg, [b])
+        self.assertEqual(rc, 1)
+        self.assertIn("could not be marked ready", err.getvalue())
+        self.assertNotIn(["gh", "pr", "merge", "https://gh/pr/1", "--merge"], runs)
+
+    def test_dry_run_readies_nothing(self) -> None:
+        # A dry-run must shell nothing — not even the new ready step.
+        b = self._bundle("M9")
+        with mock.patch("pdca_harness.merge.subprocess.run") as run, \
+                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
+                redirect_stdout(io.StringIO()):
+            merge.merge_wave(self.cfg, [b], dry_run=True)
+        run.assert_not_called()
 
     def test_already_merged_skipped(self) -> None:
         b = self._bundle("M6")
