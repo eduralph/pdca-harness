@@ -59,6 +59,11 @@ REVIEWER_INPUTS = ["patch.diff", "brief.md", "check-gates.json"]
 # The interactive sign-off leaf writes its decision here; the flow reads it and
 # routes it through the C6-guarded signoff.record (never a model-written §9).
 SIGNOFF_DECISION = "signoff-decision"
+
+# Where a FAILED Do builder leaves its captured error tail (#279) — the Do-side twin of the
+# reviewer/advisory `check-*.error.log` (#138), so a failed batch can be post-mortem'd from
+# the bundle instead of terminal scrollback.
+BUILD_ERROR_LOG = "build.error.log"
 VALID_DECISIONS = frozenset({"accept", "iterate-do", "iterate-plan", "discontinue"})
 
 
@@ -647,13 +652,30 @@ def do_build(d: Path, cfg: Config) -> None:
             # PATH shim — the same builder_guard rules, enforced vendor-neutrally.
             env = guard.shim_env(cfg, env)
         # Watch the bundle d so the heartbeat shows patch.diff / build-notes.md appearing.
-        _invoke(
-            builder, workdir, _build_prompt(d),
-            label=f"Do {d.name}",
-            status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
-            stream_json=True,  # Tier 3: show the builder's live tool-use
-            env=env, extra_argv=extra, cfg=cfg,
-        )
+        #
+        # A failed builder leaves its error tail in the bundle (#279), symmetric with the
+        # reviewer/advisory leaves' `*.error.log` (#138). Without it a failed Do left NO
+        # on-disk trace at all — its stderr was only tee'd to the terminal — so a post-mortem
+        # of a failed batch depended on terminal scrollback. The exception still propagates:
+        # `flow._isolate` contains it and drops just this bundle, exactly as before.
+        error_log = d / BUILD_ERROR_LOG
+        error_log.unlink(missing_ok=True)  # clear a stale tail from a prior cycle run
+        try:
+            _invoke(
+                builder, workdir, _build_prompt(d),
+                label=f"Do {d.name}",
+                status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
+                stream_json=True,  # Tier 3: show the builder's live tool-use
+                env=env, extra_argv=extra, cfg=cfg,
+            )
+        except Exception as exc:  # noqa: BLE001 — capture, then re-raise for the caller
+            try:
+                error_log.write_text(_format_leaf_attempt(exc, 1), encoding="utf-8")
+                print(f"leaves: {d.name} — Do failed; captured the error tail in "
+                      f"{BUILD_ERROR_LOG}", file=sys.stderr)
+            except OSError:
+                pass  # never let error-capture mask the real failure
+            raise
         return
     _stub_build(d, cfg)
 
