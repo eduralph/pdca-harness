@@ -164,8 +164,27 @@ class SandboxDeps(unittest.TestCase):
             doctor, "_have",
             side_effect=lambda cmd: present if cmd in doctor._SANDBOX_DEPS else real(cmd))
 
-    def test_an_exemption_makes_the_sandbox_deps_required(self) -> None:
-        cfg = _load(self.tmp, self._EXEMPTION)
+    def _cfg(self, reviewer: str = 'mode = "stub"\n', extra: str = "") -> Config:
+        """A config whose REVIEWER we control — it is the sandboxed leaf that decides whether a
+        bounded sandbox is ever seeded, so these tests must be able to set its family/mode."""
+        (self.tmp / "pdca.toml").write_text(
+            '[project]\ndefault_branch = "main"\n'
+            '[leaves.builder]\nmode = "stub"\n'
+            '[leaves.reviewer]\n' + reviewer + extra, encoding="utf-8")
+        saved = os.environ.pop("PDCA_LEAVES_MODE", None)
+        try:
+            return Config.load(self.tmp)
+        finally:
+            if saved is not None:
+                os.environ["PDCA_LEAVES_MODE"] = saved
+
+    # A CLAUDE reviewer in COMMAND mode — the only shape that actually receives a seeded,
+    # bounded sandbox, and therefore the only shape whose deps the doctor may demand.
+    _CLAUDE_REVIEWER = 'mode = "command"\nfamily = "claude"\nargv = ["claude", "-p"]\n'
+    _CODEX_REVIEWER = 'mode = "command"\nfamily = "codex"\nargv = ["codex", "exec"]\n'
+
+    def test_an_exemption_on_a_bounded_leaf_makes_the_deps_required(self) -> None:
+        cfg = self._cfg(self._CLAUDE_REVIEWER, self._EXEMPTION)
         with self._deps(False):
             rc, out = self._run(cfg)
         self.assertIn("leaf sandbox", out)
@@ -173,44 +192,54 @@ class SandboxDeps(unittest.TestCase):
         self.assertIn("bwrap", out)
         self.assertEqual(rc, 1, "a sandbox that cannot start is a REQUIRED failure")
 
-    def test_enabling_the_sandbox_alone_is_enough_to_check(self) -> None:
-        # No exemption — but the project turned the sandbox on, so it believes it is confined.
-        self._settings('{"sandbox": {"enabled": true}}')
-        cfg = _load(self.tmp)
-        with self._deps(False):
-            rc, out = self._run(cfg)
-        self.assertIn("socat", out)
-        self.assertEqual(rc, 1)
-
     def test_present_deps_pass(self) -> None:
-        cfg = _load(self.tmp, self._EXEMPTION)
+        cfg = self._cfg(self._CLAUDE_REVIEWER, self._EXEMPTION)
         with self._deps(True):
             rc, out = self._run(cfg)
         self.assertIn("leaf sandbox", out)
         self.assertEqual(rc, 0)
 
+    def test_project_sandbox_enabled_alone_says_nothing_about_a_leaf(self) -> None:
+        """PR #290 review (codex). The old predicate read the PROJECT's `.claude/settings.json`
+        `sandbox.enabled` — which predicts NOTHING about a leaf. The reviewer/advisory leaves run
+        from a **temp cwd**, so they never load the project's settings at all; only the file the
+        harness seeds there. That row told the operator to install bwrap/socat as REQUIRED, for a
+        leaf sandbox that was never going to exist."""
+        self._settings('{"sandbox": {"enabled": true}}')
+        cfg = self._cfg(self._CLAUDE_REVIEWER)           # …but NO exemption
+        with self._deps(False):
+            rc, out = self._run(cfg)
+        self.assertNotIn("leaf sandbox", out)
+        self.assertEqual(rc, 0)
+
+    def test_a_family_that_cannot_be_bounded_needs_none_of_this(self) -> None:
+        """PR #290 review (codex). A codex reviewer's exemption is REFUSED by
+        `_seed_sandbox_settings` (it cannot be confined to the harness's settings) and its
+        sandbox is its own — so demanding claude's bwrap/socat as a REQUIRED failure blocks a
+        run that never uses them."""
+        cfg = self._cfg(self._CODEX_REVIEWER, self._EXEMPTION)
+        with self._deps(False):
+            rc, out = self._run(cfg)
+        self.assertNotIn("leaf sandbox", out)
+        self.assertEqual(rc, 0)
+
+    def test_a_stub_leaf_spawns_nothing_to_sandbox(self) -> None:
+        # An exemption configured, but every leaf is a stub: no leaf runs, so no sandbox is
+        # seeded and no dependency is used.
+        cfg = self._cfg(extra=self._EXEMPTION)   # reviewer stays a stub
+        with self._deps(False):
+            rc, out = self._run(cfg)
+        self.assertNotIn("leaf sandbox", out)
+        self.assertEqual(rc, 0)
+
     def test_an_instance_with_no_sandbox_is_not_nagged(self) -> None:
-        # The rows ride WITH the belief in a sandbox. An instance that never asked for one is
-        # not told to install bubblewrap.
-        cfg = _load(self.tmp)
+        # The rows ride WITH the exemption. An instance that never asked for one is not told to
+        # install bubblewrap.
+        cfg = self._cfg(self._CLAUDE_REVIEWER)
         with self._deps(False):
             _, out = self._run(cfg)
         self.assertNotIn("leaf sandbox", out)
         self.assertNotIn("socat", out)
-
-    def test_a_disabled_sandbox_setting_is_not_a_belief(self) -> None:
-        self._settings('{"sandbox": {"enabled": false}}')
-        cfg = _load(self.tmp)
-        with self._deps(False):
-            _, out = self._run(cfg)
-        self.assertNotIn("leaf sandbox", out)
-
-    def test_unreadable_settings_never_crash_the_doctor(self) -> None:
-        self._settings("{ not json")
-        cfg = _load(self.tmp)
-        with self._deps(False):
-            _, out = self._run(cfg)          # must not raise
-        self.assertNotIn("leaf sandbox", out)
 
 
 if __name__ == "__main__":

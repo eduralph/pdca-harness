@@ -910,7 +910,7 @@ def _settings_scope_argv(cfg: Config, profile: families.FamilyProfile) -> list[s
 
 
 def _seed_sandbox_settings(cfg: Config, sandbox: Path,
-                           profile: families.FamilyProfile) -> None:
+                           profile: families.FamilyProfile) -> bool:
     """Carry the sandbox capabilities a Check needs into the leaf sandbox (#261, #277).
 
     Claude Code loads **project** settings from ``.claude/settings.json`` relative to the
@@ -1048,15 +1048,29 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path,
                   file=sys.stderr)
 
     if not granted:
-        return
+        return True   # nothing promised, nothing to seed
     try:
         dest = sandbox / ".claude"
         dest.mkdir(parents=True, exist_ok=True)
         (dest / "settings.json").write_text(
             json.dumps({"sandbox": granted}, indent=2), encoding="utf-8")
     except OSError as exc:
-        print(f"leaves: could not seed sandbox settings into {sandbox} ({exc}); the leaf runs "
-              "under the ambient sandbox policy", file=sys.stderr)
+        # FAIL CLOSED (PR #290 review). This used to warn "the leaf runs under the ambient
+        # sandbox policy" and carry on — the exact OPPOSITE of what happened. The caller still
+        # passed `--setting-sources project`, so the leaf loaded ONLY project scope … which is
+        # this file, which does not exist. No `sandbox.enabled` (it defaults FALSE), and the
+        # operator's own user-scope sandbox dropped along with it: the leaf ran COMPLETELY
+        # unconfined, under a message asserting it was protected.
+        #
+        # False makes the caller WITHHOLD `--setting-sources`, so the leaf keeps the operator's
+        # ambient sandbox. The exemption then simply does not happen and a Docker-backed leg
+        # defers to a human, exactly as when none is configured. Degrade the FEATURE, never the
+        # BOUNDARY.
+        print(f"leaves: could not seed sandbox settings into {sandbox} ({exc}); the exemption "
+              "did NOT take effect — the leaf keeps the operator's ambient sandbox and a "
+              "Docker-backed leg will defer to a human", file=sys.stderr)
+        return False
+    return True
 
 
 def _run_review_sandboxed(d: Path, cfg: Config) -> None:
@@ -1079,7 +1093,7 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
         # …and the project's sandbox policy, which is likewise invisible from a temp cwd
         # (#261) — without it a loopback-socket runtime test can't bind, so it can never
         # earn an automated red→green at Check.
-        _seed_sandbox_settings(cfg, sandbox, profile)
+        seeded = _seed_sandbox_settings(cfg, sandbox, profile)
         # Ground citations on the brief's target checkout (#75): name it via $PDCA_TARGET
         # so the reviewer doesn't wander into unrelated checkouts, and grant read access
         # via the family's grounding flag (claude: --add-dir). Independence holds — the
@@ -1088,7 +1102,11 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
         env = {"PDCA_TARGET": str(target)} if target else None
         extra_argv = ([profile.grounding_flag, str(target)]
                       if target and profile.grounding_flag else [])
-        extra_argv += _settings_scope_argv(cfg, profile)
+        # …only if the seed is actually ON DISK: withholding the flag keeps the
+        # operator's ambient sandbox rather than dropping it for a file that
+        # isn't there (PR #290 review).
+        if seeded:
+            extra_argv += _settings_scope_argv(cfg, profile)
         error_log = d / "check-review.error.log"
         # A transient (no-output) reviewer failure is retried with backoff before it
         # degrades to a §6 placeholder; the failed attempts' stderr lands in error_log.
@@ -1371,12 +1389,13 @@ def _run_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict, 
         # …and the project's sandbox policy, which is likewise invisible from a temp cwd
         # (#261) — without it a loopback-socket runtime test can't bind, so it can never
         # earn an automated red→green at Check.
-        _seed_sandbox_settings(cfg, sandbox, profile)
+        seeded = _seed_sandbox_settings(cfg, sandbox, profile)
         target = _reviewer_target(d, cfg)
         env = {"PDCA_TARGET": str(target)} if target else None
         extra = ([profile.grounding_flag, str(target)]
                  if target and profile.grounding_flag else [])
-        extra += _settings_scope_argv(cfg, profile)
+        if seeded:   # see _run_review_sandboxed — never drop the ambient sandbox
+            extra += _settings_scope_argv(cfg, profile)
         out = sandbox / f"check-advisory-{leaf_id}.md"
         error_log = d / f"check-advisory-{leaf_id}.error.log"
         err = _invoke_leaf_resilient(

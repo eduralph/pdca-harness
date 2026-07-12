@@ -461,6 +461,13 @@ argv = []
 #      `excludedCommands` (your interactive exemptions) would otherwise merge straight into the
 #      leaf, and this list would be a floor rather than a ceiling.
 #
+# THE ONE SCOPE THE HARNESS CANNOT BOUND: enterprise managed policy. `--setting-sources` excludes
+# user and local settings, but Claude Code ALWAYS loads `managed-settings.json` regardless — and
+# arrays only ever concatenate. So a managed policy carrying `sandbox.excludedCommands` widens the
+# leaf's exemption and NOTHING the harness can do will narrow it. The list is a ceiling with
+# respect to YOUR settings, not your ORGANISATION's. If your org sets one, read it before relying
+# on this boundary.
+#
 # The cost of (2): the leaf no longer reads your user-scope settings at all. If your AUTH lives
 # there (`apiKeyHelper`, or `env.ANTHROPIC_API_KEY`), move it into the environment or the leaf
 # will fail to start. It fails loudly, and the error lands in the bundle's `*.error.log`.

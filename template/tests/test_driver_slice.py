@@ -633,6 +633,35 @@ class AdvisoryReviewResilience(unittest.TestCase):
         self.assertIn("--setting-sources", argv)
         self.assertEqual(argv[argv.index("--setting-sources") + 1], "project")
 
+    def test_a_failed_seed_never_leaves_the_leaf_unsandboxed(self) -> None:
+        """PR #290 review (codex). The seed's write is best-effort — but the confinement flag
+        was NOT, so a failed write produced the worst possible outcome.
+
+        `_seed_sandbox_settings` caught the OSError, warned "the leaf runs under the ambient
+        sandbox policy", and carried on. The caller then still passed `--setting-sources
+        project`, so the leaf loaded ONLY project scope — which is the file that had just failed
+        to be written. No `sandbox.enabled` (it defaults FALSE), and the operator's own
+        user-scope sandbox dropped along with it: the leaf ran COMPLETELY unconfined, under a
+        message asserting the exact opposite.
+
+        Now the flag is withheld, so the leaf keeps the operator's ambient sandbox and the
+        exemption simply does not happen. Degrade the FEATURE, never the BOUNDARY.
+        """
+        self._exempt("cargo xtask fdb-conformance")
+        real_write = Path.write_text
+
+        def enospc(self, *a, **k):          # only the SEED's write fails — the fixture's don't
+            if self.name == "settings.json":
+                raise OSError("ENOSPC")
+            return real_write(self, *a, **k)
+
+        buf = io.StringIO()
+        with mock.patch.object(Path, "write_text", enospc), redirect_stderr(buf):
+            seen = self._capture_sandbox_settings()
+        self.assertFalse(seen["exists"])                            # nothing on disk…
+        self.assertNotIn("--setting-sources", seen["extra_argv"])   # …so don't drop the ambient
+        self.assertIn("did NOT take effect", buf.getvalue())
+
     def test_an_exempted_leaf_actually_has_a_sandbox_to_be_bounded_by(self) -> None:
         """PR #290 review (codex). Without this key the whole feature was worse than useless.
 

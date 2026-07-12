@@ -217,6 +217,15 @@ list doesn't cover:
    into the leaf, and nothing the harness writes could subtract them. The list would be a
    *floor*, not a ceiling. The only fix is to not load that scope.
 
+> **The one scope the harness cannot bound: enterprise managed policy.** `--setting-sources`
+> excludes *user* and *local* settings, but Claude Code **always** loads managed policy
+> (`managed-settings.json`) regardless. Since array settings only ever concatenate, a managed
+> policy carrying `sandbox.excludedCommands` widens the leaf's exemption and **nothing the
+> harness can do will narrow it** — the list stays a ceiling with respect to *your* settings,
+> but not with respect to *your organisation's*. That is by design on Claude Code's side:
+> managed policy is meant to outrank everything. If your org sets one, read it before relying
+> on the boundary below. The harness cannot, and does not, override it.
+
 > **The cost of (2).** The leaf no longer reads your user-scope settings at all. If your **auth**
 > lives there (`apiKeyHelper`, or `env.ANTHROPIC_API_KEY`), move it into the environment or the
 > leaf will fail to start. It fails loudly, and the error lands in the bundle's `*.error.log`.
