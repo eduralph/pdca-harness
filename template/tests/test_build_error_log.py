@@ -17,11 +17,11 @@ import io
 import shutil
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from pdca_harness import leaves
+from pdca_harness import driver, leaves
 from pdca_harness.config import Config, LeafConfig
 
 
@@ -83,6 +83,43 @@ class BuildErrorLog(unittest.TestCase):
         # A prior cycle's failure must not masquerade as this one's.
         (self.d / leaves.BUILD_ERROR_LOG).write_text("stale failure\n", encoding="utf-8")
         with mock.patch.object(leaves, "_invoke", return_value=None):
+            leaves.do_build(self.d, self.cfg)
+        self.assertFalse((self.d / leaves.BUILD_ERROR_LOG).exists())
+
+    def test_the_error_tail_is_archived_with_its_attempt(self) -> None:
+        """PR #286 review (codex). A builder can write patch.diff and THEN die, so the bundle
+        still reaches Check and sign-off, and the human iterates. `_archive_iteration` moved
+        only DOWNSTREAM_OF_BRIEF + the advisory artifacts — leaving build.error.log at the top
+        level, where the next build's clear deletes it. The one on-disk record of why Do failed
+        was destroyed by the very rebuild it exists to explain."""
+        for name in ("patch.diff", "build-notes.md", "check-review.md", "SUMMARY.md",
+                     leaves.BUILD_ERROR_LOG):
+            (self.d / name).write_text("x\n", encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            driver._archive_iteration(self.d, 1, include_brief=False)
+
+        archived = self.d / "iteration-v1" / leaves.BUILD_ERROR_LOG
+        self.assertTrue(archived.exists(), "the failed attempt's error tail must be preserved")
+        self.assertFalse((self.d / leaves.BUILD_ERROR_LOG).exists())  # not left to be deleted
+
+    def test_the_check_leaves_error_tails_are_archived_too(self) -> None:
+        # The same defect, pre-existing, for the reviewer/advisory logs: each is cleared at the
+        # start of the next Check, so one left top-level is likewise destroyed on the rebuild.
+        for name in ("patch.diff", "check-review.error.log",
+                     "check-advisory-adversary.error.log"):
+            (self.d / name).write_text("x\n", encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            driver._archive_iteration(self.d, 1, include_brief=False)
+        arch = self.d / "iteration-v1"
+        self.assertTrue((arch / "check-review.error.log").exists())
+        self.assertTrue((arch / "check-advisory-adversary.error.log").exists())
+
+    def test_a_stale_log_is_cleared_on_a_stub_rebuild_too(self) -> None:
+        # The clear now runs before EITHER backend, so a stub rebuild can't leave a top-level
+        # log describing a failure this build never had.
+        self.cfg.builder = LeafConfig(mode="stub", family="claude")
+        (self.d / leaves.BUILD_ERROR_LOG).write_text("stale failure\n", encoding="utf-8")
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             leaves.do_build(self.d, self.cfg)
         self.assertFalse((self.d / leaves.BUILD_ERROR_LOG).exists())
 

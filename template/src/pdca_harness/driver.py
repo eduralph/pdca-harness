@@ -241,6 +241,12 @@ def _archive_iteration(d: Path, n: int, *, include_brief: bool) -> None:
     arch = d / f"iteration-v{n}"
     names = list(DOWNSTREAM_OF_BRIEF)
     names += [p.name for p in d.glob("check-advisory-*.md")]  # advisory artifacts (#64)
+    # Every leaf's captured error tail belongs to the attempt that produced it (#280 review):
+    # `build.error.log` (Do), `check-review.error.log` / `check-advisory-*.error.log` (Check).
+    # Each is cleared at the start of the NEXT run of its leaf, so a log left at the top level
+    # here is deleted rather than kept — destroying the only on-disk record of why the attempt
+    # failed, which is the whole point of capturing it. Archive them with their attempt.
+    names += [p.name for p in d.glob("*.error.log")]
     if include_brief:
         names.append("brief.md")
     if (d / "brief.md").exists():

@@ -615,6 +615,11 @@ def do_build(d: Path, cfg: Config) -> None:
     # cfg.builder.mode would run a command variant as a stub (or vice versa) (#134).
     n = attempt_no(d)
     builder = select_builder(d, cfg, n)  # escalate-on-iterate (#135); difficulty (#134)
+    # Clear a stale tail from a prior attempt before EITHER backend runs — an iterate-do
+    # archives it with its attempt, but a rebuild that didn't archive (a resumed run, a
+    # backend switched to stub) would otherwise leave a log at the top level that describes
+    # a failure this build never had (#280 review).
+    (d / BUILD_ERROR_LOG).unlink(missing_ok=True)
     if builder.mode == "command":
         _record_loop_attempt(d, n, builder)
         # Isolate Do in a per-cycle worktree off the base (issue #94) so the host's
@@ -659,7 +664,6 @@ def do_build(d: Path, cfg: Config) -> None:
         # of a failed batch depended on terminal scrollback. The exception still propagates:
         # `flow._isolate` contains it and drops just this bundle, exactly as before.
         error_log = d / BUILD_ERROR_LOG
-        error_log.unlink(missing_ok=True)  # clear a stale tail from a prior cycle run
         try:
             _invoke(
                 builder, workdir, _build_prompt(d),
