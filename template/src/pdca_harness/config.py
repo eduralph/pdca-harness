@@ -142,6 +142,19 @@ class Config:
     # vice-versa with no per-brief edits — the cross-vendor decorrelation Check relies on
     # (INTEGRATION §4), made automatic. No different-vendor leaf ⇒ same-vendor fallback + §6.
     advisory_selection: dict = field(default_factory=dict)
+    # Commands a Check leaf may run OUTSIDE its sandbox ([leaves.sandbox]
+    # unsandboxed_commands, issue #276). The reviewer/advisory leaves run under Claude Code's
+    # sandbox, which denies the docker socket — so a Docker-backed conformance gate (a live
+    # etcd/TiKV/FDB cluster via `docker compose`) skips even on a Docker-capable host, and its
+    # runtime evidence can never be earned at Check. Naming that command here exempts THAT
+    # COMMAND, and nothing else: every other Bash line the leaf writes stays sandboxed.
+    #
+    # Deliberately a HARNESS-owned list, not the project's own
+    # `.claude/settings.json` `sandbox.excludedCommands` — that one is the operator's gate
+    # workaround and must never be inherited by a leaf (PR #268). An exemption a leaf gets is
+    # declared here, on purpose, in one auditable place. Empty (the default) ⇒ nothing is
+    # exempt and the leaf is fully sandboxed.
+    leaf_unsandboxed_commands: list[str] = field(default_factory=list)
     # Builder escalation ladder (issue #135): an OPEN list of stronger Do backends keyed
     # on the attempt number ([[leaves.builder_escalation]] in pdca.toml). Each:
     # {min_iteration, family, mode, argv}. On iterate, do_build picks the entry with the
@@ -362,6 +375,13 @@ class Config:
         # Advisory-selection policy (issue #200) — how the driver picks from that list.
         advisory_selection = dict(leaves.get("advisory_selection", {}))
 
+        # Commands a Check leaf may run outside its sandbox (issue #276) — a harness-owned
+        # exemption list, never the project's own settings.json `excludedCommands`.
+        leaf_unsandboxed_commands = [
+            str(c) for c in (leaves.get("sandbox", {}).get("unsandboxed_commands") or [])
+            if str(c).strip()
+        ]
+
         # Builder escalation ladder (issue #135) — stronger Do backends keyed on attempt
         # number. PDCA_LEAVES_MODE forces their mode too (CI / offline determinism); ""
         # leaves it unset so select_builder falls back to the default builder's mode.
@@ -455,6 +475,7 @@ class Config:
             install_extra_bootstrap=install_extra_bootstrap,
             manual_test_cmd=manual_test_cmd,
             advisory_leaves=advisory_leaves,
+            leaf_unsandboxed_commands=leaf_unsandboxed_commands,
             advisory_selection=advisory_selection,
             builder_escalation=builder_escalation,
             builder_variants=builder_variants,

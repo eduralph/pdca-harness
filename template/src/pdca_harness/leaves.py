@@ -890,7 +890,27 @@ _SEEDED_NETWORK_KEYS = {
 }
 
 
-def _seed_sandbox_settings(cfg: Config, sandbox: Path) -> None:
+def _settings_scope_argv(cfg: Config, profile: families.FamilyProfile) -> list[str]:
+    """Flags confining the leaf to the settings the harness SEEDS — nothing of the operator's.
+
+    Only when an exemption is granted, and only for a family that has such a flag (claude:
+    ``--setting-sources project``). Without it the seeded ``sandbox.excludedCommands`` is a
+    floor rather than a ceiling: array settings CONCATENATE across scopes and the union is
+    monotonic, so the operator's own ``~/.claude/settings.json`` exemptions merge into the
+    leaf and nothing can remove them (PR #288 review). Dropping the user scope also stops the
+    operator's ``permissions`` and ``allowedDomains`` riding in the same way.
+
+    The cost is that the leaf no longer sees user-scope settings at all, so an instance whose
+    **auth** lives there (``apiKeyHelper``, ``env.ANTHROPIC_API_KEY``) must move it into the
+    environment. That fails loudly at leaf start — and now lands in ``check-*.error.log``.
+    """
+    if cfg.leaf_unsandboxed_commands and profile.settings_scope_argv:
+        return list(profile.settings_scope_argv)
+    return []
+
+
+def _seed_sandbox_settings(cfg: Config, sandbox: Path,
+                           profile: families.FamilyProfile) -> None:
     """Carry the sandbox capabilities a Check needs into the leaf sandbox (#261, #277).
 
     Claude Code loads **project** settings from ``.claude/settings.json`` relative to the
@@ -907,6 +927,23 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path) -> None:
       closed/rejected-PR corpus (``gh pr list --state closed`` → api.github.com). Blocked, it
       cannot be settled mechanically and is forced NEEDS-HUMAN on *every* bundle.
 
+    Separately, a **Docker-backed conformance gate** (a live etcd/TiKV/FDB cluster via
+    ``docker compose``) is denied the docker socket inside the sandbox even on a Docker-capable
+    host, so its runtime evidence can never be earned at Check and always defers to a
+    human-run confirmer — the process gets burdensome exactly where it should be mechanical
+    (#276). The fix is NOT a socket-wide grant (``allowAllUnixSockets`` would hand *every*
+    Bash line the leaf writes access to *every* unix socket — and a root-owned docker daemon
+    is root-adjacent). It is a **named-command exemption**: ``[leaves.sandbox]
+    unsandboxed_commands`` in pdca.toml lists the conformance commands, and only those run
+    outside the sandbox. Everything else the leaf does stays confined — which holds only
+    because the exemption ships with ``allowUnsandboxedCommands: false`` beside it; the list
+    is a *ceiling*, not a floor (see below).
+
+    That list is **harness-owned on purpose**. This function never copies the project's own
+    ``sandbox.excludedCommands`` — that is the operator's *gate* workaround, and inheriting it
+    would let the leaf run whatever the operator exempted for CI (PR #268). A leaf's exemption
+    is declared once, deliberately, in pdca.toml.
+
     **Seeded through an ALLOW-LIST of individual keys** (:data:`_SEEDED_NETWORK_KEYS`), never
     by copying the ``sandbox`` block, and never ``permissions``. Each wider copy would hand
     the leaf a capability its ``tools:`` frontmatter does not grant: ``permissions.allow``
@@ -917,9 +954,15 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path) -> None:
 
     Each key is **value-filtered**, so a present-but-empty grant seeds nothing: that is how a
     grant stays OFF by default (the shipped ``allowedDomains: []`` documents the knob without
-    enabling it). No valid grant ⇒ no file written, so an instance that configures no sandbox
-    is unaffected. Best-effort, like the agent seeding: any read/parse/write error degrades to
-    a no-op, never an aborted Check.
+    enabling it). Nothing granted at all ⇒ no file written, so an instance that configures no
+    sandbox is unaffected.
+
+    The two sources are **independent**. The network grants are the project's, read from its
+    ``.claude/settings.json`` best-effort; the command exemptions are the harness's, read from
+    ``pdca.toml``. An absent or unparseable settings file costs the network grant and nothing
+    else — it must never suppress a pdca.toml exemption (PR #288 review). Best-effort
+    throughout, like the agent seeding: any read/parse/write error degrades to a no-op, never
+    an aborted Check.
 
     Scope: this covers the reviewer / advisory **leaves**. Gate commands are plain
     subprocesses of ``pdca`` and inherit the operator's ambient sandbox instead (docs 05).
@@ -928,21 +971,68 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path) -> None:
     stays NEEDS-HUMAN unless the instance widens its own per-leaf ``argv``.
     """
     src = cfg.root / ".claude" / "settings.json"
-    if not src.is_file():
+    granted: dict = {}
+
+    # The NETWORK grants are the project's (claude reads them from its own settings.json), so
+    # they are read from there — best-effort. An absent or unparseable file means no network
+    # grant, and nothing more: it must not suppress the harness-owned exemptions below.
+    if src.is_file():
+        try:
+            settings = json.loads(src.read_text(encoding="utf-8"))
+            network = (settings.get("sandbox") or {}).get("network") or {}
+            net_granted = {key: network[key] for key, valid in _SEEDED_NETWORK_KEYS.items()
+                           if key in network and valid(network[key])}
+            if net_granted:
+                granted["network"] = net_granted
+        except (OSError, ValueError, AttributeError, TypeError) as exc:
+            print(f"leaves: could not read sandbox settings from {src} ({exc}); the leaf gets "
+                  "no network grant", file=sys.stderr)
+
+    # A leaf's sandbox EXEMPTIONS are HARNESS-owned — `[leaves.sandbox] unsandboxed_commands`
+    # in pdca.toml (#276) — and NEVER this settings file's own ``excludedCommands``, which is
+    # the operator's *gate* workaround and must not be inherited by a leaf (#268). Because
+    # they are the harness's, they must not depend on the project having (or being able to
+    # parse) a `.claude/settings.json` AT ALL: gating them on that made the documented Docker
+    # exemption silently do nothing for an instance without one (PR #288 review).
+    #
+    # An exemption LIST alone does not bound what escapes the sandbox. TWO holes, and BOTH
+    # must be closed or "only these commands run outside the sandbox" — the promise made in
+    # this docstring, in docs 05 and in pdca.toml — is not true (PR #288 review):
+    #
+    # 1. `allowUnsandboxedCommands` defaults to TRUE (settings schema, v2.1.207:
+    #    `sandbox?.allowUnsandboxedCommands ?? true`), and while true the model may retry ANY
+    #    sandbox-denied command with the `dangerouslyDisableSandbox` parameter and have it run
+    #    unconfined. False makes that parameter "completely ignored" (the schema's own words).
+    #    It is a SCALAR, so the seeded project scope genuinely overrides the operator's.
+    # 2. Array-valued settings CONCATENATE across scopes (user → project → local → managed):
+    #    the CLI folds each scope through a merge customizer that unions any two arrays, and
+    #    that union is MONOTONIC — no scope, not even managed policy, can remove what a lower
+    #    one added. So the operator's own `~/.claude/settings.json` `excludedCommands` (their
+    #    INTERACTIVE exemptions — a broad `docker *`) merges straight into the leaf, and a
+    #    seeded list can only ever be a FLOOR. The one way to bound it is to not load the lower
+    #    scope at all: the family's `settings_scope_argv` (claude: `--setting-sources
+    #    project`), applied by the callers. A family without that flag cannot be bounded, so the
+    #    exemption is REFUSED rather than granted unbounded — fail closed, and say why.
+    if cfg.leaf_unsandboxed_commands:
+        if profile.settings_scope_argv:
+            granted["excludedCommands"] = list(cfg.leaf_unsandboxed_commands)
+            granted["allowUnsandboxedCommands"] = False
+        else:
+            print("leaves: [leaves.sandbox] unsandboxed_commands is set, but the "
+                  f"'{profile.name}' family cannot be confined to the harness's own settings, "
+                  "so the exemption cannot be bounded — NOT granted. The leaf stays fully "
+                  "sandboxed and a Docker-backed leg still defers to a human.",
+                  file=sys.stderr)
+
+    if not granted:
         return
     try:
-        settings = json.loads(src.read_text(encoding="utf-8"))
-        network = (settings.get("sandbox") or {}).get("network") or {}
-        granted = {key: network[key] for key, valid in _SEEDED_NETWORK_KEYS.items()
-                   if key in network and valid(network[key])}
-        if not granted:
-            return
         dest = sandbox / ".claude"
         dest.mkdir(parents=True, exist_ok=True)
         (dest / "settings.json").write_text(
-            json.dumps({"sandbox": {"network": granted}}, indent=2), encoding="utf-8")
-    except (OSError, ValueError, AttributeError, TypeError) as exc:
-        print(f"leaves: could not seed sandbox settings from {src} ({exc}); the leaf runs "
+            json.dumps({"sandbox": granted}, indent=2), encoding="utf-8")
+    except OSError as exc:
+        print(f"leaves: could not seed sandbox settings into {sandbox} ({exc}); the leaf runs "
               "under the ambient sandbox policy", file=sys.stderr)
 
 
@@ -966,7 +1056,7 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
         # …and the project's sandbox policy, which is likewise invisible from a temp cwd
         # (#261) — without it a loopback-socket runtime test can't bind, so it can never
         # earn an automated red→green at Check.
-        _seed_sandbox_settings(cfg, sandbox)
+        _seed_sandbox_settings(cfg, sandbox, profile)
         # Ground citations on the brief's target checkout (#75): name it via $PDCA_TARGET
         # so the reviewer doesn't wander into unrelated checkouts, and grant read access
         # via the family's grounding flag (claude: --add-dir). Independence holds — the
@@ -974,7 +1064,8 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
         target = _reviewer_target(d, cfg)
         env = {"PDCA_TARGET": str(target)} if target else None
         extra_argv = ([profile.grounding_flag, str(target)]
-                      if target and profile.grounding_flag else None)
+                      if target and profile.grounding_flag else [])
+        extra_argv += _settings_scope_argv(cfg, profile)
         error_log = d / "check-review.error.log"
         # A transient (no-output) reviewer failure is retried with backoff before it
         # degrades to a §6 placeholder; the failed attempts' stderr lands in error_log.
@@ -1257,11 +1348,12 @@ def _run_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict, 
         # …and the project's sandbox policy, which is likewise invisible from a temp cwd
         # (#261) — without it a loopback-socket runtime test can't bind, so it can never
         # earn an automated red→green at Check.
-        _seed_sandbox_settings(cfg, sandbox)
+        _seed_sandbox_settings(cfg, sandbox, profile)
         target = _reviewer_target(d, cfg)
         env = {"PDCA_TARGET": str(target)} if target else None
         extra = ([profile.grounding_flag, str(target)]
-                 if target and profile.grounding_flag else None)
+                 if target and profile.grounding_flag else [])
+        extra += _settings_scope_argv(cfg, profile)
         out = sandbox / f"check-advisory-{leaf_id}.md"
         error_log = d / f"check-advisory-{leaf_id}.error.log"
         err = _invoke_leaf_resilient(

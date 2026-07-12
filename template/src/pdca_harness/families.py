@@ -58,6 +58,15 @@ class FamilyProfile:
     # keys; explicit argv remains the escape hatch and always wins.
     model_flag: str = ""
     effort_argv: tuple[str, ...] = ()
+    # Flags that confine the CLI to the settings the harness SEEDS — dropping the
+    # operator's own user-scope settings. Needed because array-valued settings
+    # CONCATENATE across scopes (user → project → local → managed) and concatenation
+    # is monotonic: no scope can remove an entry another added. So a seeded
+    # `sandbox.excludedCommands` can only ever be a floor, never the ceiling the
+    # harness promises — unless the lower scope is not loaded at all (#288 review).
+    # Empty ⇒ the family has no such flag; the exemption is then unbounded and
+    # `_seed_sandbox_settings` refuses to grant it.
+    settings_scope_argv: tuple[str, ...] = ()
 
 
 BUILTIN: dict[str, FamilyProfile] = {
@@ -72,6 +81,9 @@ BUILTIN: dict[str, FamilyProfile] = {
         native_guard=True,
         model_flag="--model",
         effort_argv=("--effort", "{effort}"),
+        # Load ONLY the settings the harness seeds into the leaf's cwd (plus managed
+        # policy, which the CLI force-adds) — never the operator's ~/.claude/settings.json.
+        settings_scope_argv=("--setting-sources", "project"),
     ),
     "codex": FamilyProfile(
         name="codex",
