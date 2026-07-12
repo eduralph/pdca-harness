@@ -210,6 +210,24 @@ class TheStandingValidationRow(_Base):
         self.assertFalse(self._try(d), "a real fitness objection must halt, not be archived")
         self._assert_halted(d)
 
+    def test_a_legacy_validation_bullet_in_the_review_is_never_standing(self) -> None:
+        """PR #294 review (codex), second pass. Scoping STANDING to the primary ARTIFACT was
+        still too wide — it must be scoped to the mandated verdict-table ROW.
+
+        `_needs_human` also honours legacy `- NEEDS-HUMAN — …` bullets in `check-review.md`.
+        Those are free prose the reviewer CHOSE to write, so one reading "Validation —
+        fitness-to-purpose: patches the wrong layer" is a substantive objection, not the
+        template row — and would have been archived by an unattended rebuild. Only a table row
+        is the constant that earns STANDING.
+        """
+        review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                  "| C4 Verification (red→green) | NEEDS-HUMAN | [impl] off-by-one |\n"
+                  f"{_STANDING_ROW}\n"
+                  "- NEEDS-HUMAN — Validation — fitness-to-purpose: patches the wrong layer\n")
+        d = self._bundle("SV6", review=review)
+        self.assertFalse(self._try(d), "a legacy fitness bullet is a finding — it must halt")
+        self._assert_halted(d)
+
     def test_the_standing_row_still_blocks_accept(self) -> None:
         # The C6 guard is untouched: the human must still clear §6 before accepting. Not
         # vetoing a REBUILD is not the same as not needing a human at SIGN-OFF.
