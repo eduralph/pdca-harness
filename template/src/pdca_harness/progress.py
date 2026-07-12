@@ -31,6 +31,7 @@ def run_with_heartbeat(
     input_text: str | None = None,
     capture: bool = False,
     stream_json: bool = False,
+    tee_stderr: bool = False,
     stream_format: str = "claude-stream-json",
     interval: int = 15,
     label: str = "",
@@ -40,8 +41,8 @@ def run_with_heartbeat(
 
     Returns ``(returncode, output, produced)``. ``output`` is the combined
     stdout+stderr when ``capture`` is True (so a gate can keep its evidence line);
-    the bounded **stderr tail** when ``stream_json`` is True (so a failed claude
-    leaf's real error — usage/rate limit, 5xx, auth — survives in the bundle
+    the bounded **stderr tail** when ``stream_json`` or ``tee_stderr`` is set (so a
+    failed leaf's real error — usage/rate limit, 5xx, auth — survives in the bundle
     instead of scrolling past on a console nobody is watching); ``""`` otherwise.
     ``produced`` is whether the child emitted a **substantive** stream event — an
     ``assistant`` / ``user`` / ``result`` event, i.e. a session that did real work.
@@ -62,14 +63,23 @@ def run_with_heartbeat(
     stdout is consumed for parsing (not echoed); stderr is **teed** — still echoed
     live so real errors show, *and* its tail retained for the caller. Mutually
     exclusive with ``capture`` (capture wins if both set).
+
+    ``tee_stderr`` asks for that same stderr tee **without** the stream parse, for a
+    family that has no event stream (``generic``, ``gemini``): stdout keeps inheriting
+    the terminal (its output stays live, exactly as before), but stderr is piped, echoed,
+    and its tail returned — so a stream-less leaf's failure is diagnosable too, and not
+    only claude's. Implied by ``stream_json``; ignored under ``capture`` (which already
+    keeps everything).
     """
-    tee_stderr = stream_json and not capture
+    tee_err = (stream_json or tee_stderr) and not capture
     capture_out = capture or stream_json
     stdin = subprocess.PIPE if input_text is not None else None
     if capture:
         stdout, stderr = subprocess.PIPE, subprocess.STDOUT
     elif stream_json:
         stdout, stderr = subprocess.PIPE, subprocess.PIPE  # parse stdout; tee stderr
+    elif tee_err:
+        stdout, stderr = None, subprocess.PIPE  # stdout stays live; tee stderr only
     else:
         stdout, stderr = None, None
     proc = subprocess.Popen(
@@ -97,7 +107,7 @@ def run_with_heartbeat(
         t = threading.Thread(target=_drain, daemon=True)
         t.start()
         readers.append(t)
-    if tee_stderr:
+    if tee_err:
         def _drain_err() -> None:
             assert proc.stderr is not None
             for line in proc.stderr:  # echo live (errors still show) AND keep the tail
@@ -142,7 +152,7 @@ def run_with_heartbeat(
     for stream in (proc.stdout, proc.stderr):
         if stream is not None:
             stream.close()
-    output = "".join(chunks) if capture else ("".join(err_tail) if stream_json else "")
+    output = "".join(chunks) if capture else ("".join(err_tail) if tee_err else "")
     return proc.returncode, output, produced["session"]
 
 

@@ -60,6 +60,11 @@ REVIEWER_INPUTS = ["patch.diff", "brief.md", "check-gates.json"]
 # The interactive sign-off leaf writes its decision here; the flow reads it and
 # routes it through the C6-guarded signoff.record (never a model-written §9).
 SIGNOFF_DECISION = "signoff-decision"
+
+# Where a FAILED Do builder leaves its captured error tail (#279) — the Do-side twin of the
+# reviewer/advisory `check-*.error.log` (#138), so a failed batch can be post-mortem'd from
+# the bundle instead of terminal scrollback.
+BUILD_ERROR_LOG = "build.error.log"
 VALID_DECISIONS = frozenset({"accept", "iterate-do", "iterate-plan", "discontinue"})
 
 
@@ -196,13 +201,17 @@ def _invoke(
     # nothing until it finishes (minutes) and would otherwise look hung.
     # progress.py's stream reader dispatches on the family's stream_format; a family
     # declaring a format it doesn't recognize runs stream-less (heartbeat Tiers 1+2).
+    # tee_stderr regardless: the stream path already tees, and a stream-LESS family
+    # (generic, gemini) otherwise captures nothing at all, so its `*.error.log` reads
+    # "(no output captured)" — a post-mortem artifact that explains nothing (#286 review).
     use_stream = (stream_json and bool(profile.stream_argv)
                   and profile.stream_format in progress.STREAM_FORMATS)
     if use_stream:
         argv += list(profile.stream_argv)
     rc, output, produced = progress.run_with_heartbeat(
         argv, cwd=workdir, input_text=prompt, label=label, status=status,
-        stream_json=use_stream, stream_format=profile.stream_format, env=run_env)
+        stream_json=use_stream, tee_stderr=True, stream_format=profile.stream_format,
+        env=run_env)
     if rc != 0:
         # Only the stream path gives a real "did a session start" signal. Without it
         # (a stream-less family) we cannot tell invocation-death from a substantive
@@ -611,52 +620,85 @@ def do_build(d: Path, cfg: Config) -> None:
     # cfg.builder.mode would run a command variant as a stub (or vice versa) (#134).
     n = attempt_no(d)
     builder = select_builder(d, cfg, n)  # escalate-on-iterate (#135); difficulty (#134)
-    if builder.mode == "command":
-        _record_loop_attempt(d, n, builder)
-        # Isolate Do in a per-cycle worktree off the base (issue #94) so the host's
-        # primary checkout is never mutated. Best-effort: None ⇒ edit in place, as before.
-        wt = worktree.ensure(d, cfg)
-        profile = cfg.profile(builder)
-        if wt and profile.cwd_discovery:
-            # A cwd-discovery family (claude) finds its subagents AND the builder_guard
-            # PreToolUse hook by walking up from its cwd, so cwd MUST stay the harness root
-            # (.claude/agents + .claude/settings live there). Confining its cwd to the
-            # worktree would hide both — `--agent builder` would not resolve and the
-            # STOP-discipline guard would not load. It is grounded in the worktree via
-            # the profile's grounding flag + the prompt instead (as in #94), not by cwd.
-            # (The profile is the SELECTED builder's, so an escalated/variant claude
-            # backend gets this too.)
-            extra = [profile.grounding_flag, str(wt)] if profile.grounding_flag else None
-            workdir, env = cfg.root, {"PDCA_WORKTREE": str(wt)}
-        elif wt:
-            # Other command builders (codex, a local agentic CLI) have no cwd-walking agent
-            # machinery, so CONFINE them by running *in* the worktree (cwd): otherwise the
-            # leaf is launched from the harness root with nothing stopping it from writing
-            # the host checkout or a sibling repo, breaking one-bundle-one-diff (issue #136).
-            # But the builder must ALSO read brief.md and write its artifacts (patch.diff /
-            # the test / build-notes.md) in the BUNDLE dir, which is outside that cwd — and a
-            # sandboxing family (codex `--sandbox workspace-write`) can only write cwd + roots
-            # granted with its grounding flag. So grant the bundle dir as an extra writable
-            # root (#230); a family with no grounding flag (generic) is unsandboxed and reaches
-            # it anyway. cwd stays the worktree, so #136 still confines source edits.
-            workdir, env = wt, {"PDCA_WORKTREE": str(wt)}
-            extra = [profile.grounding_flag, str(d)] if profile.grounding_flag else None
-        else:
-            workdir, env, extra = cfg.root, None, None  # best-effort: edit in place, as before
-        if not profile.native_guard:
-            # A family without its own PreToolUse STOP hook gets the driver's `gh`
-            # PATH shim — the same builder_guard rules, enforced vendor-neutrally.
-            env = guard.shim_env(cfg, env)
-        # Watch the bundle d so the heartbeat shows patch.diff / build-notes.md appearing.
-        _invoke(
-            builder, workdir, _build_prompt(d),
-            label=f"Do {d.name}",
-            status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
-            stream_json=True,  # Tier 3: show the builder's live tool-use
-            env=env, extra_argv=extra, cfg=cfg,
-        )
+    # Clear a stale tail from a prior attempt before EITHER backend runs — an iterate-do
+    # archives it with its attempt, but a rebuild that didn't archive (a resumed run, a
+    # backend switched to stub) would otherwise leave a log at the top level that describes
+    # a failure this build never had (#280 review).
+    error_log = d / BUILD_ERROR_LOG
+    error_log.unlink(missing_ok=True)
+    if builder.mode != "command":
+        _stub_build(d, cfg)
         return
-    _stub_build(d, cfg)
+    # The capture wraps the WHOLE of Do — its SETUP as well as the leaf invocation. Do can
+    # die before the leaf ever launches, and the most likely way is `worktree.ensure`, which
+    # deliberately raises WorktreeError when the target's base ref doesn't resolve (#235,
+    # fail-closed — it refuses to run Do in the operator's primary checkout). In a wave batch
+    # that is precisely what an unpushed folded base looks like. Wrapping only `_invoke` left
+    # those failures with NO bundle-local trace at all — worse than before, since the stale
+    # log was already cleared above — so a post-mortem was back to terminal scrollback for the
+    # one failure mode most likely to hit a whole wave (#286 review).
+    try:
+        _do_build_command(d, cfg, builder, n)
+    except Exception as exc:  # noqa: BLE001 — capture, then re-raise for the caller
+        try:
+            error_log.write_text(_format_leaf_attempt(exc, 1), encoding="utf-8")
+            print(f"leaves: {d.name} — Do failed; captured the error tail in "
+                  f"{BUILD_ERROR_LOG}", file=sys.stderr)
+        except OSError:
+            pass  # never let error-capture mask the real failure
+        raise
+
+
+def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None:
+    """Run Do on a command backend: set up isolation, then invoke the leaf.
+
+    Every failure here — setup or invocation — is captured to `build.error.log` by the
+    caller and re-raised, so `flow._isolate` still contains it and drops just this bundle.
+    """
+    _record_loop_attempt(d, n, builder)
+    # Isolate Do in a per-cycle worktree off the base (issue #94) so the host's
+    # primary checkout is never mutated. Best-effort for the cases isolation can't apply
+    # (None ⇒ edit in place); a real checkout whose base ref won't resolve RAISES (#235).
+    wt = worktree.ensure(d, cfg)
+    profile = cfg.profile(builder)
+    if wt and profile.cwd_discovery:
+        # A cwd-discovery family (claude) finds its subagents AND the builder_guard
+        # PreToolUse hook by walking up from its cwd, so cwd MUST stay the harness root
+        # (.claude/agents + .claude/settings live there). Confining its cwd to the
+        # worktree would hide both — `--agent builder` would not resolve and the
+        # STOP-discipline guard would not load. It is grounded in the worktree via
+        # the profile's grounding flag + the prompt instead (as in #94), not by cwd.
+        # (The profile is the SELECTED builder's, so an escalated/variant claude
+        # backend gets this too.)
+        extra = [profile.grounding_flag, str(wt)] if profile.grounding_flag else None
+        workdir, env = cfg.root, {"PDCA_WORKTREE": str(wt)}
+    elif wt:
+        # Other command builders (codex, a local agentic CLI) have no cwd-walking agent
+        # machinery, so CONFINE them by running *in* the worktree (cwd): otherwise the
+        # leaf is launched from the harness root with nothing stopping it from writing
+        # the host checkout or a sibling repo, breaking one-bundle-one-diff (issue #136).
+        # But the builder must ALSO read brief.md and write its artifacts (patch.diff /
+        # the test / build-notes.md) in the BUNDLE dir, which is outside that cwd — and a
+        # sandboxing family (codex `--sandbox workspace-write`) can only write cwd + roots
+        # granted with its grounding flag. So grant the bundle dir as an extra writable
+        # root (#230); a family with no grounding flag (generic) is unsandboxed and reaches
+        # it anyway. cwd stays the worktree, so #136 still confines source edits.
+        workdir, env = wt, {"PDCA_WORKTREE": str(wt)}
+        extra = [profile.grounding_flag, str(d)] if profile.grounding_flag else None
+    else:
+        workdir, env, extra = cfg.root, None, None  # best-effort: edit in place, as before
+    if not profile.native_guard:
+        # A family without its own PreToolUse STOP hook gets the driver's `gh`
+        # PATH shim — the same builder_guard rules, enforced vendor-neutrally.
+        env = guard.shim_env(cfg, env)
+    # Watch the bundle d so the heartbeat shows patch.diff / build-notes.md appearing.
+    _invoke(
+        builder, workdir, _build_prompt(d),
+        label=f"Do {d.name}",
+        status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
+        stream_json=True,  # Tier 3: show the builder's live tool-use
+        env=env, extra_argv=extra, cfg=cfg,
+    )
 
 
 def _build_prompt(d: Path) -> str:
