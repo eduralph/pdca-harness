@@ -6,9 +6,11 @@ end-to-end (stdlib unittest, no model CLIs, no network).
 from __future__ import annotations
 
 import io
+import re
 import shutil
 import sys
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -325,3 +327,45 @@ class SandboxConfig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShippedPdcaTomlExamples(unittest.TestCase):
+    """PR #292 review (codex). The template shipped TWO commented `[leaves.sandbox]` headers —
+    one per key. The docs say the keys are independent opt-ins, so an operator enabling both
+    naturally uncomments both, and `tomllib` then refuses the file outright ("Cannot declare
+    ('leaves','sandbox') twice"): `pdca.toml` fails to load and the driver will not start AT ALL.
+
+    The commented examples are copy-paste instructions, so they must be valid TOML when
+    uncommented — that is the contract this pins.
+    """
+
+    def _source(self) -> str:
+        """The config an operator actually edits: `pdca.toml.jinja` in-tree, and `pdca.toml` in a
+        RENDERED instance — this test file ships INTO the render, where the .jinja is gone. Both
+        carry the same commented block, so the guard covers the template AND its output. (The
+        first cut hardcoded the .jinja and blew up inside `render-check` — precisely the job that
+        gate exists to do.)"""
+        root = Path(__file__).resolve().parents[1]
+        for name in ("pdca.toml.jinja", "pdca.toml"):
+            path = root / name
+            if path.is_file():
+                return path.read_text(encoding="utf-8")
+        return self.skipTest("no pdca.toml(.jinja) beside the tests")
+
+    def test_leaves_sandbox_is_declared_exactly_once(self) -> None:
+        src = self._source()
+        headers = re.findall(r"^#?\s*\[leaves\.sandbox\]\s*$", src, re.M)
+        self.assertEqual(len(headers), 1,
+                         "a second [leaves.sandbox] header makes the uncommented file unparseable")
+
+    def test_the_commented_example_parses_when_uncommented(self) -> None:
+        src = self._source()
+        block = re.search(r"^# \[leaves\.sandbox\]\n(?:^#[^\n]*\n)+", src, re.M)
+        self.assertIsNotNone(block, "the [leaves.sandbox] example must still be there")
+        uncommented = "\n".join(
+            line[2:] if line.startswith("# ") else line.lstrip("#")
+            for line in block.group(0).strip().splitlines())
+        parsed = tomllib.loads('[project]\ndefault_branch = "main"\n' + uncommented)
+        sandbox = parsed["leaves"]["sandbox"]
+        self.assertIn("unsandboxed_commands", sandbox)   # both keys, under ONE table
+        self.assertIs(sandbox["network_access"], True)   # …and an UNQUOTED boolean

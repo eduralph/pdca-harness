@@ -481,8 +481,10 @@ argv = []
 #
 # Empty (the default) ⇒ no exemptions; the leaf is fully sandboxed and a Docker-backed leg
 # will skip and defer to a human (today's behaviour).
-# [leaves.sandbox]
-# unsandboxed_commands = ["cargo xtask fdb-conformance", "cargo xtask etcd-conformance"]
+#
+# BOTH sandbox keys live under the ONE `[leaves.sandbox]` table below — see `network_access`,
+# documented next. They are independent opt-ins, but TOML forbids declaring the same table
+# twice, so uncomment the header ONCE and put both keys under it.
 
 # `network_access` — the CODEX-shaped grant, and the only way a codex leaf reaches Docker.
 #
@@ -508,8 +510,14 @@ argv = []
 #
 # false (the default) ⇒ the codex leaf's network stays closed; a Docker-backed leg skips and
 # defers to a human (today's behaviour).
+#
+# ONE table, BOTH keys — uncomment only the lines you need. A second `[leaves.sandbox]` header
+# makes tomllib refuse the file ("Cannot declare ('leaves','sandbox') twice") and the driver
+# will not start at all (PR #292 review). Also note `network_access` must be the UNQUOTED
+# boolean `true`; a quoted "true"/"false" is rejected and the grant stays closed.
 # [leaves.sandbox]
-# network_access = true
+# unsandboxed_commands = ["cargo xtask fdb-conformance", "cargo xtask etcd-conformance"]  # claude
+# network_access = true                                                                    # codex
 
 # Doctor rows (`pdca doctor`) — optional. The doctor derives its main checks from
 # this file (every command leaf's CLI + auth, gh, bundle root, notes_cmd); declare
