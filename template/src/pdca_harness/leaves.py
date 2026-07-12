@@ -890,6 +890,44 @@ _SEEDED_NETWORK_KEYS = {
 }
 
 
+def _sandbox_argv(cfg: Config, profile: families.FamilyProfile, *,
+                  seeded: bool) -> list[str]:
+    """Every sandbox flag this leaf's family needs, for the grants the instance opted into.
+
+    ``seeded`` gates ONLY the claude confinement flag, never the codex network grant. The
+    two depend on entirely different things, and conflating them breaks one of them:
+
+    * the confinement flag (:func:`_settings_scope_argv`) is meaningless AND DANGEROUS
+      without the seeded settings file on disk — it drops the operator's ambient sandbox in
+      favour of a project scope that does not exist, leaving the leaf wholly unconfined
+      (#290). A failed seed therefore withholds it: fail closed.
+    * the codex network grant rides on ``argv``, and codex never reads that file at all, so
+      a failed write says nothing about it. Gating it on ``seeded`` would silently kill a
+      codex leaf's Docker access because of a claude-shaped failure it has no stake in.
+
+    Two grants, two shapes, because the vendors' sandboxes differ and neither is strictly
+    tighter (#291) — so they are separate opt-ins, each named for what it actually does:
+
+    * ``[leaves.sandbox] unsandboxed_commands`` (claude) — a NAMED command leaves the sandbox
+      entirely; every other command stays confined. Realized by the seeded ``excludedCommands``
+      + the confinement flags from :func:`_settings_scope_argv`.
+    * ``[leaves.sandbox] network_access`` (codex) — ``--sandbox workspace-write`` has no
+      per-command escape, and its docker-socket denial is **seccomp, not filesystem** (a relayed
+      socket in a granted writable dir is still refused), so only opening the network layer
+      works. That frees the socket/network layer for EVERY command in the leaf, while the
+      filesystem stays confined for every command. It cannot be scoped to one command, which is
+      exactly why it does not ride on ``unsandboxed_commands`` — that key promises "only these
+      commands leave the sandbox", and this would not keep the promise.
+
+    claude deliberately takes no ``network_argv``: it scopes network by DOMAIN instead
+    (``allowedDomains``, #277), which is strictly better where it exists.
+    """
+    argv = _settings_scope_argv(cfg, profile) if seeded else []
+    if cfg.leaf_network_access and profile.network_argv:
+        argv += list(profile.network_argv)
+    return argv
+
+
 def _settings_scope_argv(cfg: Config, profile: families.FamilyProfile) -> list[str]:
     """Flags confining the leaf to the settings the harness SEEDS — nothing of the operator's.
 
@@ -966,9 +1004,10 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path,
 
     Scope: this covers the reviewer / advisory **leaves**. Gate commands are plain
     subprocesses of ``pdca`` and inherit the operator's ambient sandbox instead (docs 05).
-    The **codex** family sandbox (``codex exec --sandbox workspace-write``) is not configured
-    by this file at all — it grants no scoped network, so a codex reviewer's prior-art check
-    stays NEEDS-HUMAN unless the instance widens its own per-leaf ``argv``.
+    The **codex** family sandbox (``codex exec --sandbox workspace-write``) is not configured by
+    this file at all — it reads none of it. Its grants ride on ``argv`` instead: ``[leaves.sandbox]
+    network_access`` opens its socket/network layer, which is the only thing that reaches the
+    docker socket *or* api.github.com there (#291, :func:`_sandbox_argv`).
     """
     src = cfg.root / ".claude" / "settings.json"
     granted: dict = {}
@@ -1041,10 +1080,25 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path,
             granted["allowUnsandboxedCommands"] = False
             granted["failIfUnavailable"] = True
         else:
+            # The posture line must describe the posture the leaf ACTUALLY gets. With
+            # `network_access` also set, this same run appends the network grant a few lines
+            # later — so "the leaf stays fully sandboxed" was a lie whenever BOTH keys were
+            # configured, and a warning that misstates the active security posture is worse than
+            # no warning at all (PR #292 review, local pass).
+            if cfg.leaf_network_access and profile.network_argv:
+                posture = ("The leaf keeps its FILESYSTEM confinement — but `network_access = "
+                           "true` is set, so its socket/network layer IS open, for every command "
+                           "it runs and not just the named ones.")
+            elif profile.network_argv:
+                posture = ("The leaf stays fully sandboxed. For codex, use `[leaves.sandbox] "
+                           "network_access = true` instead: its sandbox has no per-command "
+                           "escape, and its docker-socket denial is the network layer, not the "
+                           "filesystem (#291).")
+            else:
+                posture = "The leaf stays fully sandboxed."
             print("leaves: [leaves.sandbox] unsandboxed_commands is set, but the "
                   f"'{profile.name}' family cannot be confined to the harness's own settings, "
-                  "so the exemption cannot be bounded — NOT granted. The leaf stays fully "
-                  "sandboxed and a Docker-backed leg still defers to a human.",
+                  f"so a per-command exemption cannot be bounded — NOT granted. {posture}",
                   file=sys.stderr)
 
     if not granted:
@@ -1102,11 +1156,9 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
         env = {"PDCA_TARGET": str(target)} if target else None
         extra_argv = ([profile.grounding_flag, str(target)]
                       if target and profile.grounding_flag else [])
-        # …only if the seed is actually ON DISK: withholding the flag keeps the
-        # operator's ambient sandbox rather than dropping it for a file that
-        # isn't there (PR #290 review).
-        if seeded:
-            extra_argv += _settings_scope_argv(cfg, profile)
+        # The confinement flag rides on `seeded` (a file that is not there must not cost
+        # the leaf its ambient sandbox, #290); the codex network grant does not (#291).
+        extra_argv += _sandbox_argv(cfg, profile, seeded=seeded)
         error_log = d / "check-review.error.log"
         # A transient (no-output) reviewer failure is retried with backoff before it
         # degrades to a §6 placeholder; the failed attempts' stderr lands in error_log.
@@ -1394,8 +1446,7 @@ def _run_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict, 
         env = {"PDCA_TARGET": str(target)} if target else None
         extra = ([profile.grounding_flag, str(target)]
                  if target and profile.grounding_flag else [])
-        if seeded:   # see _run_review_sandboxed — never drop the ambient sandbox
-            extra += _settings_scope_argv(cfg, profile)
+        extra += _sandbox_argv(cfg, profile, seeded=seeded)   # see _run_review_sandboxed
         out = sandbox / f"check-advisory-{leaf_id}.md"
         error_log = d / f"check-advisory-{leaf_id}.error.log"
         err = _invoke_leaf_resilient(
