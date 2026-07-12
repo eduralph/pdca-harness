@@ -45,6 +45,34 @@ _ELEMENT_RE = re.compile(r"^(C[1-5]|T[1-5]|V)\b")
 # findings stay HUMAN, so a legacy advisory file can never trigger an auto-iteration.
 _IMPL_MARKER_RE = re.compile(r"^\[impl\]\s*[—:-]*\s*", re.IGNORECASE)
 
+# Leaf-status marker (issue #278). When a reviewer / advisory leaf could not produce a
+# verdict, `leaves` writes a placeholder carrying one of these as a machine-readable comment.
+# An EMPTY advisory artifact is otherwise ambiguous: "the adversary ran and found nothing"
+# reads identically to "the adversary never ran" — and an infra failure then presents as a
+# clean adversarial pass. The status lets §6 say WHY the artifact is empty, and lets a
+# consumer act on it (re-run vs adjudicate) instead of parsing prose.
+# Both INFRA shapes mean "nothing reviewed the diff", but they call for different ACTIONS, so
+# the §6 row must not conflate them: a transient blip is safe to re-run as-is, while a leaf
+# whose command could never be launched will fail identically until that command is fixed —
+# telling the operator "safe to re-run" there would be a false instruction (PR #285 review).
+LEAF_STATUS_INFRA = "infra-empty"      # ran, died with no output — a transient blip
+LEAF_STATUS_STARTUP = "startup-empty"  # never launched — binary absent / not executable
+LEAF_STATUS_HUMAN = "human-empty"      # ran, but yielded no usable verdict
+_LEAF_STATUS_RE = re.compile(r"<!--\s*pdca:leaf-status\s+(\S+)\s*-->")
+_LEAF_STATUS_LABEL = {
+    LEAF_STATUS_INFRA: "leaf did not run (transient infra — safe to re-run)",
+    LEAF_STATUS_STARTUP: ("leaf did not run (its command could not be launched — fix the "
+                          "leaf's config, then re-run)"),
+    LEAF_STATUS_HUMAN: "leaf produced no usable verdict (needs a human)",
+}
+
+
+def leaf_status(artifact_text: str) -> str:
+    """The leaf-status marker a reviewer/advisory placeholder carries, or "" for a real
+    artifact (a leaf that actually produced findings) — issue #278."""
+    m = _LEAF_STATUS_RE.search(artifact_text)
+    return m.group(1) if m else ""
+
 
 def _classify_finding(text: str) -> NeedsHumanItem:
     """Classify one reviewer / advisory §6 item, stripping any `[impl]` marker.
@@ -63,6 +91,20 @@ def _classify_finding(text: str) -> NeedsHumanItem:
     return NeedsHumanItem(text, HUMAN)
 
 
+def _items_from_artifact(text: str) -> list[NeedsHumanItem]:
+    """§6 items from one reviewer / advisory artifact, labelled by its leaf status (#278).
+
+    A placeholder (the leaf could not produce a verdict) has its items prefixed with WHY the
+    artifact is empty — infra vs substance — so the human doesn't have to hand-annotate it,
+    and forced to HUMAN: there is no finding for a rebuild to fix, so an infra-empty must
+    never be auto-iterated (#264). A real artifact is unaffected."""
+    label = _LEAF_STATUS_LABEL.get(leaf_status(text), "")
+    items = [_classify_finding(t) for t in _needs_human(text)]
+    if not label:
+        return items
+    return [NeedsHumanItem(f"{label} — {it.text}", HUMAN) for it in items]
+
+
 def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
     """Every §6 item for this bundle, tagged IMPL / HUMAN, in the order §6 renders them.
 
@@ -76,9 +118,9 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
     advisory_texts = [p.read_text(encoding="utf-8")
                       for p in sorted(d.glob("check-advisory-*.md"))]
 
-    items = [_classify_finding(t) for t in _needs_human(review_text)]
+    items = _items_from_artifact(review_text)
     for atext in advisory_texts:
-        items += [_classify_finding(t) for t in _needs_human(atext)]
+        items += _items_from_artifact(atext)
     # A gate that COULD NOT RUN is not builder-fixable — rebuilding would spin against the
     # same missing mechanic — so it is HUMAN regardless of its (gate-kind) element.
     items += [NeedsHumanItem(t, HUMAN) for t in _unverifiable_items(gates_json)]
