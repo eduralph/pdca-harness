@@ -13,10 +13,16 @@ verification, T1..T4) are mechanically checkable, so a rebuild can address them;
 (C1 spec, C3 change) are the human's. ``assemble.collect_needs_human`` tags every §6 item
 IMPL or HUMAN from exactly that source.
 
-So: when a bundle reaches ``AWAITING_SIGNOFF`` and **every** open §6 item is IMPL, the
-driver writes an ``iterate-do`` decision and re-drives Do. Anything else — an empty §6 (a
-clean bundle awaiting a human accept), a single HUMAN item, an exhausted budget — halts as
-before.
+So: when a bundle reaches ``AWAITING_SIGNOFF`` with at least one IMPL item and nothing the
+human must see first, the driver writes an ``iterate-do`` decision and re-drives Do. Anything
+else — an empty §6 (a clean bundle awaiting a human accept), a situational HUMAN item, an
+exhausted budget — halts as before.
+
+One item is deliberately NOT "something the human must see first": the reviewer's
+``Validation — fitness-to-purpose`` row, which its prompt hard-codes to NEEDS-HUMAN on EVERY
+cycle whatever it finds (:data:`assemble.STANDING`). It is a constant, so it carries no
+signal. Counting it as an ordinary HUMAN item made the original ``all(IMPL)`` rule impossible
+to satisfy on a real bundle, and this feature never fired once in production (#293).
 
 Three properties hold by construction:
 
@@ -38,7 +44,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .assemble import IMPL, NeedsHumanItem
+from .assemble import IMPL, STANDING, NeedsHumanItem
 from .leaves import SIGNOFF_DECISION
 
 BUDGET_FILE = "auto-iterate.json"
@@ -48,15 +54,24 @@ DECISION = "iterate-do"
 
 
 def eligible(items: list[NeedsHumanItem]) -> bool:
-    """True iff a rebuild is the right next step: at least one finding, and every one of
-    them implementation-level.
+    """True iff a rebuild is the right next step: at least one IMPL finding, and nothing
+    else the human must see *first*.
 
     An **empty** §6 is deliberately not eligible — that is a clean bundle awaiting a human
-    *accept*, and auto-iterate must never accept. A single HUMAN item disqualifies the whole
-    bundle: the human has to look at it anyway, so there is nothing to save by rebuilding
-    first (and the rebuild would archive the very finding they need to see).
+    *accept*, and auto-iterate must never accept. A situational HUMAN item still disqualifies
+    the whole bundle: the human has to look at it anyway, so there is nothing to save by
+    rebuilding first.
+
+    But a **STANDING** item does not. The reviewer's prompt hard-codes `Validation —
+    fitness-to-purpose` to NEEDS-HUMAN on EVERY cycle regardless of what it found, so that row
+    is a constant, and a constant is not evidence that a human must look right now. Requiring
+    `all(IMPL)` therefore made this function unreachable in production: every real review
+    artifact carries that row, so auto-iterate never fired once (#293). The bundle still halts
+    for the human as soon as the implementation findings are gone — which is the whole point:
+    iterate Do→Check while the reviewer keeps finding defects only Do can fix, then hand over.
     """
-    return bool(items) and all(item.kind == IMPL for item in items)
+    return (any(item.kind == IMPL for item in items)
+            and all(item.kind in (IMPL, STANDING) for item in items))
 
 
 def count(d: Path) -> int:

@@ -40,11 +40,20 @@ max_passes = 20
 # with implementation defects the reviewer or the adversary catches — a logic slip, a weak
 # test, a red gate. Each of those parks the bundle at AWAITING_SIGNOFF and asks you to press
 # "iterate-do", which is the decision the driver could have made itself. With this on, when
-# EVERY open SUMMARY §6 item is implementation-level the driver records `iterate-do` and
-# rebuilds, unattended. Your judgment is still required — and the bundle still halts — for
-# anything architectural: a judgment cell of the 5/5/1 (C5 causal adequacy, T5 judgment, the
-# validation act), a gate that could not run, an external dependency, an unmarked advisory
-# finding, or a §6 item it cannot classify. It NEVER auto-accepts and never ticks a §6 box.
+# the reviewer has found implementation defects and NOTHING you must see first, the driver
+# records `iterate-do` and rebuilds, unattended — so Do→Check iterates while the reviewer keeps
+# finding things only Do can fix, and hands over once they are gone. Your judgment is still
+# required — and the bundle still halts — for anything architectural: a REAL concern on a
+# judgment cell (C5 causal adequacy, T5 judgment), a gate that could not run, an external
+# dependency, an unmarked advisory finding, or a §6 item it cannot classify.
+#
+# One exception, and it is why this works at all: the reviewer's `Validation —
+# fitness-to-purpose` row is emitted NEEDS-HUMAN on EVERY cycle by design (validation is your
+# call, always), so it is a constant and carries no signal. It does not veto a rebuild — but it
+# is still rendered in §6 and you must still clear it to accept. Treating it as an ordinary
+# blocker is what made this feature never fire at all before v0.54.0 (#293).
+#
+# It NEVER auto-accepts and never ticks a §6 box.
 # Bounded by `max_auto_iters` rounds per bundle (clamped below max_passes); on exhaustion the
 # bundle halts for you as before. `PDCA_AUTO_ITERATE=1` / `--auto-iterate` override.
 auto_iterate = false

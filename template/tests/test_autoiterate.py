@@ -33,8 +33,20 @@ _UNVERIFIABLE = {**_GATE, "cmd": "echo 'PDCA-UNVERIFIABLE: no prod file'; exit 0
 _CLEAN_REVIEW = "All advisory items PASS.\n"
 
 
-def _review_table(item: str, verdict: str = "NEEDS-HUMAN", basis: str = "off-by-one") -> str:
-    return f"# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n| {item} | {verdict} | {basis} |\n"
+# The reviewer's prompt (agents/reviewer.md.jinja) hard-codes this row to NEEDS-HUMAN on EVERY
+# cycle — validation is the human's call by definition. So EVERY real `check-review.md` carries
+# it, and a fixture without it is a shape the product never produces. Omitting it is exactly why
+# the original #264 tests passed while auto-iterate was unreachable in production (#293): they
+# tested the mental model, not the artifact. It belongs in the fixture, not in one new test.
+_STANDING_ROW = "| Validation — fitness-to-purpose | NEEDS-HUMAN | fitness is the human's call |"
+
+
+def _review_table(item: str, verdict: str = "NEEDS-HUMAN", basis: str = "off-by-one",
+                  *, standing: bool = True) -> str:
+    rows = f"| {item} | {verdict} | {basis} |\n"
+    if standing:
+        rows += _STANDING_ROW + "\n"
+    return f"# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n{rows}"
 
 
 def _stub_config(root: Path) -> Config:
@@ -137,6 +149,54 @@ class AutoIterates(_Base):
         d = self._bundle("ATTR", gate=_FAIL)
         self._try(d)
         self.assertIn("auto-iterate", (d / "SUMMARY.md").read_text(encoding="utf-8"))
+
+
+class TheStandingValidationRow(_Base):
+    """Issue #293 — the row that made this whole feature dead code.
+
+    The reviewer's prompt hard-codes `Validation — fitness-to-purpose` to NEEDS-HUMAN on EVERY
+    cycle, whatever it found: validation is the human's call by definition. So every real
+    `check-review.md` carries it. The original rule demanded that EVERY §6 item be IMPL, so a
+    single such row disqualified every bundle and auto-iterate NEVER FIRED in production — a
+    constant was being read as evidence that a human must look right now.
+
+    It still renders in §6 and the C6 accept-guard still blocks on it. All it no longer does is
+    veto a rebuild.
+    """
+
+    def test_an_impl_finding_beside_the_standing_row_auto_iterates(self) -> None:
+        # THE production shape, and the one the old fixture never built.
+        d = self._bundle("SV1", review=_review_table("C4 Verification (red→green)"))
+        self.assertTrue(self._try(d), "a Do-fixable defect must rebuild, not spend a human")
+        self.assertEqual(autoiterate.count(d), 1)
+
+    def test_the_standing_row_alone_still_halts(self) -> None:
+        # Nothing for a rebuild to fix: a clean bundle awaiting the human's ACCEPT. Never
+        # auto-accept — `eligible` needs at least one IMPL item, not merely "no HUMAN item".
+        d = self._bundle("SV2", review=f"# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                                       f"{_STANDING_ROW}\n")
+        self.assertFalse(self._try(d))
+        self._assert_halted(d)
+
+    def test_a_situational_judgment_concern_beside_it_still_halts(self) -> None:
+        # The distinction that makes this safe: C5/T5 are judgment cells too, but the reviewer
+        # raises them only on a REAL concern — so they carry signal and must still stop the
+        # bundle, standing row or not.
+        review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                  "| C4 Verification (red→green) | NEEDS-HUMAN | off-by-one |\n"
+                  "| C5 Causal adequacy | NEEDS-HUMAN | guards the symptom, not the cause |\n"
+                  f"{_STANDING_ROW}\n")
+        d = self._bundle("SV3", review=review)
+        self.assertFalse(self._try(d), "a real judgment concern must still halt")
+        self._assert_halted(d)
+
+    def test_the_standing_row_still_blocks_accept(self) -> None:
+        # The C6 guard is untouched: the human must still clear §6 before accepting. Not
+        # vetoing a REBUILD is not the same as not needing a human at SIGN-OFF.
+        d = self._bundle("SV4", review=_review_table("C4 Verification (red→green)"))
+        summary = (d / "SUMMARY.md").read_text(encoding="utf-8")
+        self.assertIn("Validation — fitness-to-purpose", summary)   # still rendered in §6
+        self.assertTrue(signoff.open_needs_human(d / "SUMMARY.md"))  # still blocks accept
 
 
 class HaltsForTheHuman(_Base):
@@ -474,10 +534,23 @@ class Classification(unittest.TestCase):
         self.assertEqual(expected, {"C2", "C4", "T1", "T2", "T3", "T4"})
 
     def test_judgment_and_input_cells_are_never_impl(self) -> None:
+        # THE invariant: a rebuild can never be aimed at a judgment / input cell. Unchanged.
         for elem, label, kind, _oracle in gates.canonical_elements():
             if kind in ("judgment", "input"):
                 item = assemble._classify_finding(f"{label} — some basis")
-                self.assertEqual(item.kind, assemble.HUMAN, f"{elem} must stay human")
+                self.assertNotEqual(item.kind, assemble.IMPL, f"{elem} must never be impl")
+
+    def test_only_the_validation_row_is_standing(self) -> None:
+        # #293. V is the one row the reviewer's prompt hard-codes to NEEDS-HUMAN every cycle,
+        # so it alone is STANDING (a constant carries no signal). C5/T5 are judgment too, but
+        # the reviewer raises those only on a real concern — they stay situational HUMAN and
+        # still halt the bundle.
+        for elem, label, kind, _oracle in gates.canonical_elements():
+            if kind not in ("judgment", "input"):
+                continue
+            got = assemble._classify_finding(f"{label} — some basis").kind
+            want = assemble.STANDING if elem == "V" else assemble.HUMAN
+            self.assertEqual(got, want, f"{elem} ({label})")
 
     def test_impl_marker_is_case_insensitive_and_stripped(self) -> None:
         self.assertEqual(assemble._classify_finding("[IMPL] — bug"),

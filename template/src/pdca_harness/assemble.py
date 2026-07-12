@@ -22,6 +22,17 @@ from .gates import canonical_elements
 #   HUMAN — an architectural / fitness-to-purpose / environmental call only the human makes.
 IMPL = "impl"
 HUMAN = "human"
+# The reviewer's `Validation — fitness-to-purpose` row, which its prompt hard-codes to
+# NEEDS-HUMAN on EVERY cycle regardless of content (agents/reviewer.md.jinja; the 5/5/1's
+# validation oracle is literally "human at sign-off"). It is the human's to settle at sign-off
+# — but because it is emitted unconditionally it carries NO signal, so it must not be read as
+# evidence that a human has to look *right now*. Treating it as an ordinary HUMAN item made
+# auto-iterate (#264) unreachable in production: every real review artifact carries this row,
+# and `eligible()` demanded that EVERY item be IMPL, so the feature never once fired (#293).
+#
+# It still renders in §6 as a `- [ ]` the human must clear, and the C6 accept-guard still
+# blocks on it. The ONLY thing it no longer does is veto a rebuild.
+STANDING = "standing"
 
 
 class NeedsHumanItem(NamedTuple):
@@ -44,6 +55,13 @@ _ELEMENT_RE = re.compile(r"^(C[1-5]|T[1-5]|V)\b")
 # An advisory leaf tags a builder-fixable finding `- NEEDS-HUMAN [impl] — …`. Unmarked
 # findings stay HUMAN, so a legacy advisory file can never trigger an auto-iteration.
 _IMPL_MARKER_RE = re.compile(r"^\[impl\]\s*[—:-]*\s*", re.IGNORECASE)
+
+# The one STANDING row (#293) — recognised by the canonical label, not a hardcoded string, so
+# it cannot drift from the matrix the reviewer's table mirrors. `V` is the only element the
+# reviewer's prompt hard-codes to NEEDS-HUMAN on every cycle; C5/T5 are judgment too, but the
+# reviewer raises those only when it has an actual concern, so they stay situational HUMAN.
+_V_LABEL = next(label for e, label, _kind, _oracle in canonical_elements() if e == "V")
+_STANDING_RE = re.compile(rf"^\s*(?:V\s*[—:-]\s*)?{re.escape(_V_LABEL)}", re.IGNORECASE)
 
 # Leaf-status marker (issue #278). When a reviewer / advisory leaf could not produce a
 # verdict, `leaves` writes a placeholder carrying one of these as a machine-readable comment.
@@ -77,14 +95,21 @@ def leaf_status(artifact_text: str) -> str:
 def _classify_finding(text: str) -> NeedsHumanItem:
     """Classify one reviewer / advisory §6 item, stripping any `[impl]` marker.
 
+    Three kinds. IMPL — a rebuild can address it. STANDING — the reviewer's `Validation`
+    row, which its prompt emits NEEDS-HUMAN on every cycle whatever it finds, so its presence
+    proves nothing (#293). HUMAN — everything else.
+
     Fail safe: an item we cannot map to a gate element — an unmarked advisory bullet, a
     reviewer row whose Item cell doesn't start with a canonical id, the missing-review
     placeholder — is HUMAN. Auto-iterate only ever fires on findings we positively know
-    a rebuild can address.
+    a rebuild can address, and STANDING is never one of them: it does not *cause* a rebuild,
+    it merely declines to veto one.
     """
     stripped = _IMPL_MARKER_RE.sub("", text, count=1)
     if stripped != text:
         return NeedsHumanItem(stripped.strip(), IMPL)
+    if _STANDING_RE.match(text):
+        return NeedsHumanItem(text, STANDING)   # emitted every cycle ⇒ carries no signal (#293)
     m = _ELEMENT_RE.match(text)
     if m and m.group(1) in _GATE_ELEMENTS:
         return NeedsHumanItem(text, IMPL)
