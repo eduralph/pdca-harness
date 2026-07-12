@@ -22,11 +22,13 @@ from pathlib import Path
 from pdca_harness import gates, publish
 from pdca_harness.config import Config, LeafConfig
 
-# A bundle-scoped gate whose cmd records the exported verify base into the bundle dir, so the
-# test can read back exactly what the driver set (or `UNSET` when the var is absent).
-_ECHO_VERIFY_BASE = {
-    "id": "C4", "tier": "C4", "label": "record verify base", "scope": "bundle", "gating": True,
-    "cmd": 'printf "%s" "${PDCA_VERIFY_BASE-UNSET}" > "$PDCA_BUNDLE/verify-base.txt"',
+# A bundle-scoped gate whose cmd records BOTH exported bases into the bundle dir, so the test
+# reads back exactly what the driver set (`UNSET` when a var is absent). Both, because the
+# load-bearing property is that at most ONE of them is ever set (PR #282 review).
+_ECHO_BASES = {
+    "id": "C4", "tier": "C4", "label": "record bases", "scope": "bundle", "gating": True,
+    "cmd": ('printf "%s\\n%s\\n" "${PDCA_BASE-UNSET}" "${PDCA_VERIFY_BASE-UNSET}" '
+            '> "$PDCA_BUNDLE/bases.txt"'),
 }
 
 
@@ -50,7 +52,7 @@ class VerifyBaseExport(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
         self.cfg = _stub_config(self.tmp)
-        self.cfg.gates_checks = [_ECHO_VERIFY_BASE]
+        self.cfg.gates_checks = [_ECHO_BASES]
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -62,9 +64,14 @@ class VerifyBaseExport(unittest.TestCase):
         (d / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
         return d
 
-    def _recorded_base(self, d: Path) -> str:
+    def _recorded_bases(self, d: Path) -> dict[str, str]:
+        """Both bases as the gate command actually saw them."""
         gates.run_gates(d, self.cfg)
-        return (d / "verify-base.txt").read_text(encoding="utf-8")
+        base, verify_base = (d / "bases.txt").read_text(encoding="utf-8").splitlines()[:2]
+        return {"PDCA_BASE": base, "PDCA_VERIFY_BASE": verify_base}
+
+    def _recorded_base(self, d: Path) -> str:
+        return self._recorded_bases(d)["PDCA_VERIFY_BASE"]
 
     def test_wave_dependent_gets_the_folded_base(self) -> None:
         d = self._bundle("DEP")
@@ -90,6 +97,55 @@ class VerifyBaseExport(unittest.TestCase):
         publish.write_stack_base(d, "pdca-integration/main")
         publish.clear_stack_base(d)
         self.assertEqual(self._recorded_base(d), "UNSET")
+
+    def test_onto_branch_wins_over_the_wave_base(self) -> None:
+        """PR #282 review (codex). A bundle can carry BOTH an `Onto branch` and a wave
+        stack-base marker. `publish.publish` takes the Onto path and returns BEFORE it ever
+        reads the stack-base, so the fix is committed to the Onto branch. Exporting the wave
+        base too would send the verifier to the integration branch while publish commits
+        elsewhere — the test base diverging from the deploy base, which is exactly what #54's
+        PDCA_BASE exists to prevent. The two exports are mutually exclusive; Onto wins."""
+        d = self._bundle("ONTO")
+        (d / "brief.md").write_text(
+            "- **Slug:** v\n- **Onto branch:** origin/feature/x\n", encoding="utf-8")
+        publish.write_stack_base(d, "pdca-integration/main")   # the wave driver stamps it too
+        bases = self._recorded_bases(d)
+        self.assertEqual(bases["PDCA_BASE"], "origin/feature/x")   # where publish commits
+        self.assertEqual(bases["PDCA_VERIFY_BASE"], "UNSET")       # …and where the gate tests
+
+    def test_wave_base_still_exported_without_an_onto_branch(self) -> None:
+        # The ordinary wave dependent — no Onto — is unaffected by the precedence rule.
+        d = self._bundle("NOONTO")
+        publish.write_stack_base(d, "pdca-integration/main")
+        bases = self._recorded_bases(d)
+        self.assertEqual(bases["PDCA_BASE"], "UNSET")
+        self.assertEqual(bases["PDCA_VERIFY_BASE"], "origin/pdca-integration/main")
+
+    def test_onto_alone_is_unchanged(self) -> None:
+        # Stack mode (#54) with no wave marker — behaviour predating #273.
+        d = self._bundle("ONTOONLY")
+        (d / "brief.md").write_text(
+            "- **Slug:** v\n- **Onto branch:** origin/feature/x\n", encoding="utf-8")
+        bases = self._recorded_bases(d)
+        self.assertEqual(bases["PDCA_BASE"], "origin/feature/x")
+        self.assertEqual(bases["PDCA_VERIFY_BASE"], "UNSET")
+
+    def test_the_two_bases_are_never_both_set(self) -> None:
+        # The invariant, stated directly: a gate is told exactly one base, or none.
+        for name, onto, marker in (("A", True, True), ("B", True, False),
+                                   ("C", False, True), ("D", False, False)):
+            with self.subTest(onto=onto, marker=marker):
+                d = self._bundle(f"INV{name}")
+                if onto:
+                    (d / "brief.md").write_text(
+                        "- **Slug:** v\n- **Onto branch:** origin/feature/x\n",
+                        encoding="utf-8")
+                if marker:
+                    publish.write_stack_base(d, "pdca-integration/main")
+                bases = self._recorded_bases(d)
+                set_count = sum(1 for v in bases.values() if v != "UNSET")
+                self.assertLessEqual(set_count, 1,
+                                     f"the test base and the deploy base can diverge: {bases}")
 
     def test_public_accessor_matches_the_marker(self) -> None:
         d = self._bundle("ACC")
