@@ -1026,6 +1026,17 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path,
     # doctor` catches the same gap BEFORE a run; this catches the operator who skipped it.
     if cfg.leaf_unsandboxed_commands:
         if profile.settings_scope_argv:
+            # `enabled` FIRST — without it none of the rest means anything, and this seed was
+            # worse than useless (PR #290 review). `sandbox.enabled` defaults to FALSE
+            # (`sandbox?.enabled ?? false`), and `failIfUnavailable` is gated on it
+            # (`enabled && … && failIfUnavailable`). Worse: `--setting-sources project` drops
+            # the user/local scope, which is exactly where an operator's `sandbox.enabled: true`
+            # lives — so BOUNDING the exemption was REMOVING the sandbox it claims to bound. The
+            # leaf ran fully unconfined and the fail-closed guard never fired. Verified: with
+            # these keys but no `enabled`, a leaf starts silently on a socat-less host; with it,
+            # it refuses — "sandbox required but unavailable … refusing to start without a
+            # working sandbox".
+            granted["enabled"] = True
             granted["excludedCommands"] = list(cfg.leaf_unsandboxed_commands)
             granted["allowUnsandboxedCommands"] = False
             granted["failIfUnavailable"] = True

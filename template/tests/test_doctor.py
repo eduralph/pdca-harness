@@ -150,9 +150,23 @@ class SandboxDeps(unittest.TestCase):
         cdir.mkdir(parents=True, exist_ok=True)
         (cdir / "settings.json").write_text(payload, encoding="utf-8")
 
+    @staticmethod
+    def _deps(present: bool):
+        """Control ONLY the sandbox probes; every other tool answers truthfully.
+
+        A blanket `_have -> True` would tell the doctor that `gh` exists on a host without it,
+        and the `gh` row then shells out to `gh auth status` → FileNotFoundError, so the test
+        died before reaching its own assertions (PR #290 review — hit in a clean container).
+        Patch what the test is about, and nothing else.
+        """
+        real = doctor._have
+        return mock.patch.object(
+            doctor, "_have",
+            side_effect=lambda cmd: present if cmd in doctor._SANDBOX_DEPS else real(cmd))
+
     def test_an_exemption_makes_the_sandbox_deps_required(self) -> None:
         cfg = _load(self.tmp, self._EXEMPTION)
-        with mock.patch.object(doctor, "_have", return_value=False):
+        with self._deps(False):
             rc, out = self._run(cfg)
         self.assertIn("leaf sandbox", out)
         self.assertIn("socat", out)
@@ -163,14 +177,14 @@ class SandboxDeps(unittest.TestCase):
         # No exemption — but the project turned the sandbox on, so it believes it is confined.
         self._settings('{"sandbox": {"enabled": true}}')
         cfg = _load(self.tmp)
-        with mock.patch.object(doctor, "_have", return_value=False):
+        with self._deps(False):
             rc, out = self._run(cfg)
         self.assertIn("socat", out)
         self.assertEqual(rc, 1)
 
     def test_present_deps_pass(self) -> None:
         cfg = _load(self.tmp, self._EXEMPTION)
-        with mock.patch.object(doctor, "_have", return_value=True):
+        with self._deps(True):
             rc, out = self._run(cfg)
         self.assertIn("leaf sandbox", out)
         self.assertEqual(rc, 0)
@@ -179,7 +193,7 @@ class SandboxDeps(unittest.TestCase):
         # The rows ride WITH the belief in a sandbox. An instance that never asked for one is
         # not told to install bubblewrap.
         cfg = _load(self.tmp)
-        with mock.patch.object(doctor, "_have", return_value=False):
+        with self._deps(False):
             _, out = self._run(cfg)
         self.assertNotIn("leaf sandbox", out)
         self.assertNotIn("socat", out)
@@ -187,14 +201,14 @@ class SandboxDeps(unittest.TestCase):
     def test_a_disabled_sandbox_setting_is_not_a_belief(self) -> None:
         self._settings('{"sandbox": {"enabled": false}}')
         cfg = _load(self.tmp)
-        with mock.patch.object(doctor, "_have", return_value=False):
+        with self._deps(False):
             _, out = self._run(cfg)
         self.assertNotIn("leaf sandbox", out)
 
     def test_unreadable_settings_never_crash_the_doctor(self) -> None:
         self._settings("{ not json")
         cfg = _load(self.tmp)
-        with mock.patch.object(doctor, "_have", return_value=False):
+        with self._deps(False):
             _, out = self._run(cfg)          # must not raise
         self.assertNotIn("leaf sandbox", out)
 

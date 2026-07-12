@@ -191,13 +191,20 @@ exemption at all, and a Docker-backed leg goes on deferring to a human.
 nothing. It takes three things, because there are three ways the boundary evaporates that the
 list doesn't cover:
 
-0. **No sandbox at all.** The sandbox does **not** fail closed. If `sandbox.enabled` is true but
-   its dependencies (`bubblewrap`, `socat`) are missing, Claude Code *disables* the sandbox,
-   prints a warning, and runs every command unconfined — a bounded exemption on top of no
-   sandbox is not bounded, it is nothing. So the harness seeds `failIfUnavailable: true` and the
-   leaf **refuses to start** rather than run unconfined under a boundary this page promises it
-   has. `pdca doctor` checks the same dependencies *before* a run (they are **required** rows);
-   this catches the operator who skipped it.
+0. **No sandbox at all** — two ways, both closed by seeding `enabled: true` *and*
+   `failIfUnavailable: true`.
+
+   `sandbox.enabled` **defaults to false**, and (2) below deliberately drops your *user-scope*
+   settings — which is exactly where an operator's `sandbox.enabled: true` normally lives. So
+   without seeding it, bounding the exemption would **remove the very sandbox it claims to
+   bound**, and every command would escape.
+
+   And the sandbox does not fail closed on its own: if `enabled` is true but its dependencies
+   (`bubblewrap`, `socat`) are missing, Claude Code *disables* it, warns, and runs every command
+   unconfined. `failIfUnavailable` — which has effect **only when `enabled` is true** — makes
+   the leaf **refuse to start** instead. A bounded exemption on top of no sandbox is not
+   bounded; it is nothing. `pdca doctor` checks the same dependencies *before* a run (they are
+   **required** rows); this catches the operator who skipped it.
 1. **The escape hatch.** The harness seeds `allowUnsandboxedCommands: false` beside the list.
    Claude Code defaults that key to **true**, and while it is true the model may retry *any*
    sandbox-denied command with the `dangerouslyDisableSandbox` parameter and have it run

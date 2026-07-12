@@ -444,11 +444,14 @@ argv = []
 #
 # "ONLY THEY" is ENFORCED, not merely intended — it takes three things, because a list of names
 # on its own bounds nothing:
-#   0. The sandbox does NOT fail closed: if its dependencies (bubblewrap, socat) are missing it
-#      DISABLES itself, warns, and runs everything unconfined — and a bounded exemption on top
-#      of no sandbox is not bounded, it is nothing. So the harness seeds `failIfUnavailable =
-#      true` and the leaf REFUSES to start instead. `pdca doctor` checks those dependencies
-#      before a run (required rows) — run it.
+#   0. There must BE a sandbox. `sandbox.enabled` defaults to FALSE, and (2) below drops your
+#      user-scope settings — where an operator's `enabled = true` normally lives — so without
+#      seeding it, bounding the exemption would REMOVE the sandbox it claims to bound, and
+#      EVERY command would escape. Nor does the sandbox fail closed on its own: with its
+#      dependencies (bubblewrap, socat) missing it DISABLES itself, warns, and runs everything
+#      unconfined. So the harness seeds `enabled = true` AND `failIfUnavailable = true` (which
+#      only has effect when enabled is true), and the leaf REFUSES to start rather than run
+#      unconfined. `pdca doctor` checks those dependencies before a run (required rows) — run it.
 #   1. The harness seeds `allowUnsandboxedCommands = false` beside the list. Claude Code
 #      defaults it to TRUE, and while true the model may retry ANY sandbox-denied command with
 #      `dangerouslyDisableSandbox` and have it run unconfined.
