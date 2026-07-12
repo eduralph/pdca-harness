@@ -44,22 +44,34 @@ catches: a logic slip, a test that wouldn't have gone red, a failing gate. Each 
 the bundle here and asks you to press `--iterate-do` — the one decision the driver could
 have made itself. Your judgment is owed to *architectural* questions, not to bugs.
 
-Set `[driver].auto_iterate = true` (or `--auto-iterate` / `PDCA_AUTO_ITERATE=1`) and, when
-**every** open §6 item is implementation-level, the driver records `iterate-do` and rebuilds
-unattended (issue #264). The split is not a new taxonomy — it is the `kind` the 5/5/1
-already carries ([step 05](05-check.md)):
+Set `[driver].auto_iterate = true` (or `--auto-iterate` / `PDCA_AUTO_ITERATE=1`) and, when the
+reviewer has found implementation defects and **nothing you must see first**, the driver
+records `iterate-do` and rebuilds unattended (issue #264). So Do→Check keeps iterating while
+the reviewer keeps finding things only Do can fix, and hands over to you once they are gone.
+The split is not a new taxonomy — it is the `kind` the 5/5/1 already carries
+([step 05](05-check.md)):
 
 | §6 item | Kind | Who resolves it |
 |---|---|---|
 | `C2` reproduction, `C4` verification, `T1`–`T4` | gate | **the builder** — auto-iterate rebuilds |
-| `C5` causal adequacy, `T5` judgment, validation | judgment | **you** — it halts |
+| `C5` causal adequacy, `T5` judgment | judgment | **you** — it halts |
 | `C1` spec, `C3` change | input | **you** — it halts |
 | a gate that could not *run* (`unverifiable`) | — | **you** — a rebuild can't conjure the mechanic |
 | an external dependency, an unregistered doctor row | — | **you** — someone must install it |
 | an advisory bullet without an `[impl]` tag | — | **you** — unmarked means unclassified |
+| `Validation — fitness-to-purpose` | **standing** | **you, at sign-off** — but it does *not* veto a rebuild |
 
-One judgment item disqualifies the whole bundle: you have to look at it anyway, so there is
-nothing to save by rebuilding first. It **never** accepts, **never** ticks a `- [ ]`, and is
+One *situational* judgment item disqualifies the whole bundle: you have to look at it anyway,
+so there is nothing to save by rebuilding first.
+
+> **The standing row.** The reviewer emits `Validation — fitness-to-purpose` as NEEDS-HUMAN on
+> **every** cycle, by design — validation is your call, always. That makes it a *constant*, and
+> a constant is not evidence that you must look *right now*. So it does not block a rebuild —
+> while still rendering in §6 and still blocking `accept` until you clear it. Counting it as an
+> ordinary blocker meant this feature could **never fire on a real bundle**: every review
+> artifact carries that row, so before v0.54.0 auto-iterate was dead code (issue #293).
+
+It **never** accepts, **never** ticks a `- [ ]`, and is
 bounded by `max_auto_iters` rounds per bundle — after which the bundle halts here for you,
 exactly as before. Off by default.
 

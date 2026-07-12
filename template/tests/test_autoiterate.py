@@ -33,8 +33,20 @@ _UNVERIFIABLE = {**_GATE, "cmd": "echo 'PDCA-UNVERIFIABLE: no prod file'; exit 0
 _CLEAN_REVIEW = "All advisory items PASS.\n"
 
 
-def _review_table(item: str, verdict: str = "NEEDS-HUMAN", basis: str = "off-by-one") -> str:
-    return f"# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n| {item} | {verdict} | {basis} |\n"
+# The reviewer's prompt (agents/reviewer.md.jinja) hard-codes this row to NEEDS-HUMAN on EVERY
+# cycle — validation is the human's call by definition. So EVERY real `check-review.md` carries
+# it, and a fixture without it is a shape the product never produces. Omitting it is exactly why
+# the original #264 tests passed while auto-iterate was unreachable in production (#293): they
+# tested the mental model, not the artifact. It belongs in the fixture, not in one new test.
+_STANDING_ROW = "| Validation — fitness-to-purpose | NEEDS-HUMAN | fitness is the human's call |"
+
+
+def _review_table(item: str, verdict: str = "NEEDS-HUMAN", basis: str = "off-by-one",
+                  *, standing: bool = True) -> str:
+    rows = f"| {item} | {verdict} | {basis} |\n"
+    if standing:
+        rows += _STANDING_ROW + "\n"
+    return f"# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n{rows}"
 
 
 def _stub_config(root: Path) -> Config:
@@ -137,6 +149,163 @@ class AutoIterates(_Base):
         d = self._bundle("ATTR", gate=_FAIL)
         self._try(d)
         self.assertIn("auto-iterate", (d / "SUMMARY.md").read_text(encoding="utf-8"))
+
+
+class TheStandingValidationRow(_Base):
+    """Issue #293 — the row that made this whole feature dead code.
+
+    The reviewer's prompt hard-codes `Validation — fitness-to-purpose` to NEEDS-HUMAN on EVERY
+    cycle, whatever it found: validation is the human's call by definition. So every real
+    `check-review.md` carries it. The original rule demanded that EVERY §6 item be IMPL, so a
+    single such row disqualified every bundle and auto-iterate NEVER FIRED in production — a
+    constant was being read as evidence that a human must look right now.
+
+    It still renders in §6 and the C6 accept-guard still blocks on it. All it no longer does is
+    veto a rebuild.
+    """
+
+    def test_an_impl_finding_beside_the_standing_row_auto_iterates(self) -> None:
+        # THE production shape, and the one the old fixture never built.
+        d = self._bundle("SV1", review=_review_table("C4 Verification (red→green)"))
+        self.assertTrue(self._try(d), "a Do-fixable defect must rebuild, not spend a human")
+        self.assertEqual(autoiterate.count(d), 1)
+
+    def test_the_standing_row_alone_still_halts(self) -> None:
+        # Nothing for a rebuild to fix: a clean bundle awaiting the human's ACCEPT. Never
+        # auto-accept — `eligible` needs at least one IMPL item, not merely "no HUMAN item".
+        d = self._bundle("SV2", review=f"# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                                       f"{_STANDING_ROW}\n")
+        self.assertFalse(self._try(d))
+        self._assert_halted(d)
+
+    def test_a_situational_judgment_concern_beside_it_still_halts(self) -> None:
+        # The distinction that makes this safe: C5/T5 are judgment cells too, but the reviewer
+        # raises them only on a REAL concern — so they carry signal and must still stop the
+        # bundle, standing row or not.
+        review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                  "| C4 Verification (red→green) | NEEDS-HUMAN | off-by-one |\n"
+                  "| C5 Causal adequacy | NEEDS-HUMAN | guards the symptom, not the cause |\n"
+                  f"{_STANDING_ROW}\n")
+        d = self._bundle("SV3", review=review)
+        self.assertFalse(self._try(d), "a real judgment concern must still halt")
+        self._assert_halted(d)
+
+    def test_an_advisory_fitness_objection_is_never_standing(self) -> None:
+        """PR #294 review (codex). STANDING is the PRIMARY review's privilege, and nothing
+        else's.
+
+        `collect_needs_human` runs `check-review.md` and every `check-advisory-*.md` through the
+        same classifier. The adversary's prompt tells it to raise architectural / scope /
+        fitness objections as free-form `- NEEDS-HUMAN — …` bullets — so one that happens to
+        begin "Validation — fitness-to-purpose" was being read as the reviewer's signal-free
+        standing row, and an unattended rebuild would ARCHIVE a real objection instead of
+        halting for sign-off. The basis for STANDING is "this row is a constant", which is true
+        of the reviewer's mandated table and of nothing else.
+        """
+        advisory = ("# Adversary\n\n- NEEDS-HUMAN — Validation — fitness-to-purpose: this "
+                    "patches the wrong layer; the success criterion cannot be met by this "
+                    "design\n")
+        d = self._bundle("SV5", review=_review_table("C4 Verification (red→green)"),
+                         advisory=advisory)
+        self.assertFalse(self._try(d), "a real fitness objection must halt, not be archived")
+        self._assert_halted(d)
+
+    def test_a_legacy_validation_bullet_in_the_review_is_never_standing(self) -> None:
+        """PR #294 review (codex), second pass. Scoping STANDING to the primary ARTIFACT was
+        still too wide — it must be scoped to the mandated verdict-table ROW.
+
+        `_needs_human` also honours legacy `- NEEDS-HUMAN — …` bullets in `check-review.md`.
+        Those are free prose the reviewer CHOSE to write, so one reading "Validation —
+        fitness-to-purpose: patches the wrong layer" is a substantive objection, not the
+        template row — and would have been archived by an unattended rebuild. Only a table row
+        is the constant that earns STANDING.
+        """
+        review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                  "| C4 Verification (red→green) | NEEDS-HUMAN | [impl] off-by-one |\n"
+                  f"{_STANDING_ROW}\n"
+                  "- NEEDS-HUMAN — Validation — fitness-to-purpose: patches the wrong layer\n")
+        d = self._bundle("SV6", review=review)
+        self.assertFalse(self._try(d), "a legacy fitness bullet is a finding — it must halt")
+        self._assert_halted(d)
+
+    def test_a_second_table_never_earns_the_standing_exemption(self) -> None:
+        """PR #294 review (codex), third pass. Keying on "came from a table" was STILL too wide.
+
+        The reviewer may write more than one table — a "concerns" table beside the mandated
+        verdict table. A row there reading `| Validation — fitness-to-purpose: patches the wrong
+        layer | NEEDS-HUMAN | … |` is a substantive objection, but it came from a table and its
+        text starts with the canonical label, so it was classified STANDING and an unattended
+        rebuild would archive it. The canonical row is now identified by an EXACT match on its
+        Item cell — the only thing that actually distinguishes the template row.
+        """
+        review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                  "| C4 Verification (red→green) | NEEDS-HUMAN | [impl] off-by-one |\n"
+                  f"{_STANDING_ROW}\n"
+                  "\n## Concerns\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                  "| Validation — fitness-to-purpose: patches the wrong layer | NEEDS-HUMAN "
+                  "| the criterion cannot be met by this design |\n")
+        d = self._bundle("SV7", review=review)
+        self.assertFalse(self._try(d), "a concerns-table objection must halt, not be archived")
+        self._assert_halted(d)
+
+    def test_a_concerns_table_with_the_EXACT_label_still_halts(self) -> None:
+        """PR #294, local codex pass. The fourth scoping of the same rule, and the one that
+        finally names the right thing.
+
+        Matching the Item cell was still not enough: a `## Concerns` table can carry the row
+        `| Validation — fitness-to-purpose | NEEDS-HUMAN | patches the wrong layer |` with the
+        **exact** canonical label. The parser had no idea which TABLE a row came from, so that
+        real objection earned STANDING and an unattended rebuild would archive it. My previous
+        test only covered a concerns row with EXTRA text in the cell, so it sailed past this.
+
+        The justification was always "the MANDATED TABLE's Validation row is a constant" — so the
+        parser now identifies that table (≥2 exact canonical Item cells) and only its V row can
+        be standing.
+        """
+        review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                  "| C4 Verification (red→green) | NEEDS-HUMAN | [impl] off-by-one |\n"
+                  "| C5 Causal adequacy | PASS | ok |\n"
+                  f"{_STANDING_ROW}\n"
+                  "\n## Concerns\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                  "| Validation — fitness-to-purpose | NEEDS-HUMAN | patches the wrong layer |\n")
+        d = self._bundle("SV9", review=review)
+        self.assertFalse(self._try(d), "an exact-label concerns row is still a real objection")
+        self._assert_halted(d)
+
+    def test_two_standing_candidates_fail_closed(self) -> None:
+        # The template row is a CONSTANT — it occurs once. If two survive (a duplicated row, a
+        # second verdict-shaped table), at least one is not the constant and we cannot tell
+        # which. Grant STANDING to neither and halt, rather than risk archiving a real objection.
+        review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                  "| C4 Verification (red→green) | NEEDS-HUMAN | [impl] off-by-one |\n"
+                  "| C5 Causal adequacy | PASS | ok |\n"
+                  f"{_STANDING_ROW}\n"
+                  "| Validation — fitness-to-purpose | NEEDS-HUMAN | and again, differently |\n")
+        d = self._bundle("SV10", review=review)
+        self.assertFalse(self._try(d), "ambiguous standing rows must fail closed")
+        self._assert_halted(d)
+
+    def test_the_standing_row_is_never_carried_forward_to_the_builder(self) -> None:
+        """PR #294 review (codex). STANDING rides along in `items` so it cannot veto the rebuild
+        — but it is not a finding, and no builder can act on it. Carrying it into the §9 delta
+        and the brief's carry-forward handed the next Do a human-only judgment call as though it
+        were a defect to fix, under a sentence claiming the set was "implementation-level items
+        only"."""
+        d = self._bundle("SV8", review=_review_table("C4 Verification (red→green)"))
+        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            flow._maybe_auto_iterate(self.cfg, d, by="", today="2026-07-09", apply_now=True)
+            driver.run_issue(d, self.cfg)
+        brief_text = (d / "brief.md").read_text(encoding="utf-8")
+        self.assertIn("C4 Verification", brief_text)                     # the real defect…
+        self.assertNotIn("Validation — fitness-to-purpose", brief_text)  # …and only that
+
+    def test_the_standing_row_still_blocks_accept(self) -> None:
+        # The C6 guard is untouched: the human must still clear §6 before accepting. Not
+        # vetoing a REBUILD is not the same as not needing a human at SIGN-OFF.
+        d = self._bundle("SV4", review=_review_table("C4 Verification (red→green)"))
+        summary = (d / "SUMMARY.md").read_text(encoding="utf-8")
+        self.assertIn("Validation — fitness-to-purpose", summary)   # still rendered in §6
+        self.assertTrue(signoff.open_needs_human(d / "SUMMARY.md"))  # still blocks accept
 
 
 class HaltsForTheHuman(_Base):
@@ -474,10 +643,59 @@ class Classification(unittest.TestCase):
         self.assertEqual(expected, {"C2", "C4", "T1", "T2", "T3", "T4"})
 
     def test_judgment_and_input_cells_are_never_impl(self) -> None:
+        # THE invariant: a rebuild can never be aimed at a judgment / input cell. Unchanged.
         for elem, label, kind, _oracle in gates.canonical_elements():
             if kind in ("judgment", "input"):
                 item = assemble._classify_finding(f"{label} — some basis")
-                self.assertEqual(item.kind, assemble.HUMAN, f"{elem} must stay human")
+                self.assertNotEqual(item.kind, assemble.IMPL, f"{elem} must never be impl")
+
+    def test_only_the_validation_row_is_standing(self) -> None:
+        # #293. Of the 5/5/1's own rows, V is the one the reviewer's prompt hard-codes to
+        # NEEDS-HUMAN every cycle, so it alone can be STANDING (a constant carries no signal).
+        # C5/T5 are judgment too, but the reviewer raises those only on a real concern — they
+        # stay situational HUMAN and still halt the bundle. The PARSER decides which row is the
+        # canonical one; the classifier only honours that decision.
+        for elem, label, kind, _oracle in gates.canonical_elements():
+            if kind not in ("judgment", "input"):
+                continue
+            # A REAL verdict table: the row under test plus another canonical row, which is what
+            # makes it the mandated table rather than a stray one (a lone row cannot nominate
+            # itself as the constant).
+            table = ("| Item | Verdict | Basis |\n|---|---|---|\n"
+                     "| C1 Spec | PASS | ok |\n"
+                     f"| {label} | NEEDS-HUMAN | some basis |\n")
+            [(text, standing)] = assemble._needs_human(table)
+            got = assemble._classify_finding(text, standing=standing).kind
+            want = assemble.STANDING if elem == "V" else assemble.HUMAN
+            self.assertEqual(got, want, f"{elem} ({label})")
+
+    def test_standing_needs_an_EXACT_match_on_the_canonical_item_cell(self) -> None:
+        """PR #294 review (codex). What identifies the template row is its Item cell being
+        EXACTLY the canonical label — not the text's prefix, and not merely "it came from a
+        table". A prefix test let a real objection wear the template's clothes; a table test let
+        a second table do the same. Both are the same mistake, one layer apart."""
+        TBL = "| Item | Verdict | Basis |\n|---|---|---|\n| C1 Spec | PASS | ok |\n"
+        canonical = TBL + "| Validation — fitness-to-purpose | NEEDS-HUMAN | the human's call |\n"
+        objection = TBL + ("| Validation — fitness-to-purpose: patches the wrong layer "
+                           "| NEEDS-HUMAN | the criterion cannot be met |\n")
+        bullet = TBL + "- NEEDS-HUMAN — Validation — fitness-to-purpose: patches the wrong layer\n"
+        lone = "| Validation — fitness-to-purpose | NEEDS-HUMAN | the human's call |\n"
+
+        [(_t, standing)] = assemble._needs_human(canonical)
+        self.assertTrue(standing, "the canonical row of the MANDATED table IS the constant")
+        [(_t, standing)] = assemble._needs_human(objection)
+        self.assertFalse(standing, "a longer Item cell is a real objection, not the template")
+        [(_t, standing)] = assemble._needs_human(bullet)
+        self.assertFalse(standing, "free prose is never the template row")
+        [(_t, standing)] = assemble._needs_human(lone)
+        self.assertFalse(standing, "a lone row in a stray table cannot nominate itself")
+
+    def test_the_classifier_never_re_derives_standing_from_the_text(self) -> None:
+        # Two sources of truth for "is this the constant row" is what produced the bug. The
+        # classifier honours the caller's verdict and does not second-guess it from the text.
+        text = "Validation — fitness-to-purpose — the human's call"
+        self.assertEqual(assemble._classify_finding(text).kind, assemble.HUMAN)
+        self.assertEqual(assemble._classify_finding(text, standing=True).kind, assemble.STANDING)
 
     def test_impl_marker_is_case_insensitive_and_stripped(self) -> None:
         self.assertEqual(assemble._classify_finding("[IMPL] — bug"),

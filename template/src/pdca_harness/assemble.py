@@ -22,6 +22,17 @@ from .gates import canonical_elements
 #   HUMAN — an architectural / fitness-to-purpose / environmental call only the human makes.
 IMPL = "impl"
 HUMAN = "human"
+# The reviewer's `Validation — fitness-to-purpose` row, which its prompt hard-codes to
+# NEEDS-HUMAN on EVERY cycle regardless of content (agents/reviewer.md.jinja; the 5/5/1's
+# validation oracle is literally "human at sign-off"). It is the human's to settle at sign-off
+# — but because it is emitted unconditionally it carries NO signal, so it must not be read as
+# evidence that a human has to look *right now*. Treating it as an ordinary HUMAN item made
+# auto-iterate (#264) unreachable in production: every real review artifact carries this row,
+# and `eligible()` demanded that EVERY item be IMPL, so the feature never once fired (#293).
+#
+# It still renders in §6 as a `- [ ]` the human must clear, and the C6 accept-guard still
+# blocks on it. The ONLY thing it no longer does is veto a rebuild.
+STANDING = "standing"
 
 
 class NeedsHumanItem(NamedTuple):
@@ -44,6 +55,16 @@ _ELEMENT_RE = re.compile(r"^(C[1-5]|T[1-5]|V)\b")
 # An advisory leaf tags a builder-fixable finding `- NEEDS-HUMAN [impl] — …`. Unmarked
 # findings stay HUMAN, so a legacy advisory file can never trigger an auto-iteration.
 _IMPL_MARKER_RE = re.compile(r"^\[impl\]\s*[—:-]*\s*", re.IGNORECASE)
+
+# The one STANDING row (#293) — recognised by the canonical label, not a hardcoded string, so
+# it cannot drift from the matrix the reviewer's table mirrors. `V` is the only element the
+# reviewer's prompt hard-codes to NEEDS-HUMAN on every cycle; C5/T5 are judgment too, but the
+# reviewer raises those only when it has an actual concern, so they stay situational HUMAN.
+_V_LABEL = next(label for e, label, _kind, _oracle in canonical_elements() if e == "V")
+# Every 5/5/1 Item cell, used to recognise the MANDATED verdict table itself — the row alone was
+# never enough (PR #294 review, local pass): a "## Concerns" table can carry the exact same label.
+_CANONICAL_LABELS = frozenset(label.strip().casefold()
+                              for _e, label, _kind, _oracle in canonical_elements())
 
 # Leaf-status marker (issue #278). When a reviewer / advisory leaf could not produce a
 # verdict, `leaves` writes a placeholder carrying one of these as a machine-readable comment.
@@ -74,32 +95,49 @@ def leaf_status(artifact_text: str) -> str:
     return m.group(1) if m else ""
 
 
-def _classify_finding(text: str) -> NeedsHumanItem:
+def _classify_finding(text: str, *, standing: bool = False) -> NeedsHumanItem:
     """Classify one reviewer / advisory §6 item, stripping any `[impl]` marker.
 
-    Fail safe: an item we cannot map to a gate element — an unmarked advisory bullet, a
-    reviewer row whose Item cell doesn't start with a canonical id, the missing-review
-    placeholder — is HUMAN. Auto-iterate only ever fires on findings we positively know
-    a rebuild can address.
+    Three kinds. IMPL — a rebuild can address it. STANDING — the reviewer's `Validation` row,
+    which its prompt emits NEEDS-HUMAN on every cycle whatever it finds, so its presence proves
+    nothing (#293). HUMAN — everything else.
+
+    ``standing`` is decided by the CALLER and defaults off. It is true only for the canonical
+    5/5/1 verdict row of the PRIMARY review, identified by an exact match on its Item cell
+    (:func:`_needs_human`). This function does not re-derive it from the text, deliberately: a
+    prefix test on the text is what let a real objection wear the template's clothes, and two
+    sources of truth for "is this the constant row" is what produced that bug (PR #294 review).
+
+    Fail safe throughout: an item we cannot map to a gate element — an unmarked advisory bullet,
+    a reviewer row whose Item cell doesn't start with a canonical id, the missing-review
+    placeholder — is HUMAN. Auto-iterate only ever fires on findings we positively know a
+    rebuild can address, and STANDING is never one of them: it does not *cause* a rebuild, it
+    merely declines to veto one.
     """
     stripped = _IMPL_MARKER_RE.sub("", text, count=1)
     if stripped != text:
         return NeedsHumanItem(stripped.strip(), IMPL)
+    if standing:
+        return NeedsHumanItem(text, STANDING)   # emitted every cycle ⇒ carries no signal (#293)
     m = _ELEMENT_RE.match(text)
     if m and m.group(1) in _GATE_ELEMENTS:
         return NeedsHumanItem(text, IMPL)
     return NeedsHumanItem(text, HUMAN)
 
 
-def _items_from_artifact(text: str) -> list[NeedsHumanItem]:
+def _items_from_artifact(text: str, *, allow_standing: bool = False) -> list[NeedsHumanItem]:
     """§6 items from one reviewer / advisory artifact, labelled by its leaf status (#278).
+
+    ``allow_standing`` is passed only for the PRIMARY review (#294 review) — see
+    :func:`_classify_finding`. An advisory leaf's free-form bullets never earn STANDING.
 
     A placeholder (the leaf could not produce a verdict) has its items prefixed with WHY the
     artifact is empty — infra vs substance — so the human doesn't have to hand-annotate it,
     and forced to HUMAN: there is no finding for a rebuild to fix, so an infra-empty must
     never be auto-iterated (#264). A real artifact is unaffected."""
     label = _LEAF_STATUS_LABEL.get(leaf_status(text), "")
-    items = [_classify_finding(t) for t in _needs_human(text)]
+    items = [_classify_finding(t, standing=allow_standing and is_standing)
+             for t, is_standing in _needs_human(text)]
     if not label:
         return items
     return [NeedsHumanItem(f"{label} — {it.text}", HUMAN) for it in items]
@@ -118,7 +156,10 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
     advisory_texts = [p.read_text(encoding="utf-8")
                       for p in sorted(d.glob("check-advisory-*.md"))]
 
-    items = _items_from_artifact(review_text)
+    # Only the PRIMARY review may carry a STANDING row: it is the one artifact whose prompt
+    # mandates the Validation row unconditionally, which is the entire basis for treating it as
+    # signal-free. An advisory leaf raising fitness-to-purpose means it FOUND something.
+    items = _items_from_artifact(review_text, allow_standing=True)
     for atext in advisory_texts:
         items += _items_from_artifact(atext)
     # A gate that COULD NOT RUN is not builder-fixable — rebuilding would spin against the
@@ -272,35 +313,90 @@ def _missing_review_text() -> str:
     )
 
 
-def _needs_human(review_text: str) -> list[str]:
-    """Every reviewer NEEDS-HUMAN → a §6 item, order-preserving and deduped.
+def _needs_human(review_text: str) -> list[tuple[str, bool]]:
+    """Every reviewer NEEDS-HUMAN → ``(text, from_table)``, order-preserving and deduped.
 
     The reviewer always emits the 5/5/1 verdict table (see leaves._REVIEW_PROMPT);
     a table row whose verdict cell is NEEDS-HUMAN becomes a §6 item (Item — Basis).
     Legacy ``- NEEDS-HUMAN — …`` bullet lines are still honoured.
-    """
-    items: list[str] = []
-    seen: set[str] = set()
 
-    def add(text: str) -> None:
+    The second element says whether the item IS the canonical standing row — the one the prompt
+    hard-codes every cycle. It demands an **exact** match on the row's *Item cell* against the
+    5/5/1's own label, which is the only thing that identifies the template row:
+
+    * a **legacy bullet** never qualifies — it is free prose the reviewer chose to write, so
+      "Validation — fitness-to-purpose: patches the wrong layer" is a real objection.
+    * nor does a row in some **other table** the reviewer happened to add (a "concerns" table),
+      for the same reason. Keying on "came from a table" was still too wide, and keying on the
+      text's *prefix* let a real objection wear the template's clothes (PR #294 review).
+
+    Everything else keeps its signal.
+    """
+    items: list[tuple[str, bool]] = []
+    seen: set[str] = set()
+    lines = review_text.splitlines()
+    verdict_table = _verdict_table_lines(lines)
+
+    def add(text: str, *, standing: bool) -> None:
         text = text.strip()
         if text and text.lower() not in seen:
             seen.add(text.lower())
-            items.append(text)
+            items.append((text, standing))
 
-    for line in review_text.splitlines():
+    for i, line in enumerate(lines):
         s = line.strip()
         if s.startswith("- NEEDS-HUMAN"):
-            add(s[len("- NEEDS-HUMAN"):].lstrip(" —:-").strip())
+            add(s[len("- NEEDS-HUMAN"):].lstrip(" —:-").strip(), standing=False)
         elif s.startswith("|") and "needs-human" in s.lower():
             cells = [c.strip() for c in s.strip("|").split("|")]
-            vi = next((i for i, c in enumerate(cells) if "needs-human" in c.lower()), None)
+            vi = next((j for j, c in enumerate(cells) if "needs-human" in c.lower()), None)
             if vi is None:
                 continue
             label = cells[0] if cells else ""
             basis = cells[vi + 1] if vi + 1 < len(cells) else ""
-            add(f"{label} — {basis}" if basis else label)
+            add(f"{label} — {basis}" if basis else label,
+                standing=(i in verdict_table
+                          and label.strip().casefold() == _V_LABEL.casefold()))
+
+    # FAIL CLOSED on ambiguity. The template row is a CONSTANT — it occurs exactly once. If two
+    # survive (a second verdict-shaped table, a duplicated row), at least one of them is not the
+    # constant, and we cannot tell which. Grant STANDING to neither, so the bundle halts for the
+    # human rather than risk archiving a real objection.
+    if sum(1 for _t, standing in items if standing) > 1:
+        return [(t, False) for t, _s in items]
     return items
+
+
+def _verdict_table_lines(lines: list[str]) -> set[int]:
+    """Line indices belonging to the reviewer's MANDATED 5/5/1 verdict table.
+
+    The whole basis for STANDING is that *that* table's Validation row is a constant the prompt
+    emits every cycle. So the parser has to know which table a row came from — and it did not.
+    Matching the Item cell alone let a "## Concerns" table carrying the **exact** canonical label
+    earn the exemption, and an unattended rebuild would archive that real objection (PR #294
+    review, local pass). Keying on the row was the fourth scoping of this same rule; the table is
+    what the justification was always about.
+
+    A contiguous run of ``|``-rows is the verdict table when **two or more** of its Item cells
+    exactly match canonical 5/5/1 labels — the mandated table carries all eleven, while an
+    ad-hoc concerns table carries its own prose. Two, not one, so a lone Validation row in a
+    stray table cannot nominate itself.
+    """
+    out: set[int] = set()
+    i = 0
+    while i < len(lines):
+        if not lines[i].strip().startswith("|"):
+            i += 1
+            continue
+        j = i
+        while j < len(lines) and lines[j].strip().startswith("|"):
+            j += 1
+        block = range(i, j)
+        labels = {lines[k].strip().strip("|").split("|")[0].strip().casefold() for k in block}
+        if len(labels & _CANONICAL_LABELS) >= 2:
+            out.update(block)
+        i = j
+    return out
 
 
 def _declared_external_deps(build_notes_text: str) -> list[str]:
