@@ -331,14 +331,33 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
     # Worktree isolation (issue #94): the tree Do edited; a gate cmd targets $PDCA_WORKTREE.
     if worktree_path is not None:
         env = {**(env or {}), "PDCA_WORKTREE": str(worktree_path)}
-    # Stack mode (issue #54): when the brief names an existing PR's head to stack onto,
-    # expose it as PDCA_BASE so the verify/repro gate establishes red→green on THAT branch
-    # — the same branch publish commits onto and pushes to. Single-sourced from the brief,
-    # so the test base and the deploy base can't diverge. Absent ⇒ no PDCA_BASE, unchanged.
+    # The base a per-fix verifier must reset to before applying patch.diff. The governing
+    # invariant (issue #54): the TEST base and the DEPLOY base must not diverge — the gate has
+    # to establish red→green on the very branch publish will commit to. So these two exports
+    # are MUTUALLY EXCLUSIVE, resolved in the same order publish resolves its own base:
+    #
+    #   1. `Onto branch` (#54) → PDCA_BASE. The brief names an existing PR's head; publish
+    #      appends a commit to THAT branch (`publish.publish` takes the Onto path and returns
+    #      before it ever reads the stack-base marker), so it is also the test base.
+    #   2. else the wave's folded integration branch (#273) → PDCA_VERIFY_BASE. A wave>0
+    #      bundle's Do worktree is cut off the run-scoped integration branch (prior waves'
+    #      folded patches, pushed to origin), and publish opens its PR against that branch. A
+    #      verifier that instead reset to the brief's origin base would, for a dependent
+    #      sharing a file with its prereq, either false-fail "patch does not apply — stale" or
+    #      measure red→green against a tree LACKING the prereq.
+    #
+    # Exporting both would tell the gate to verify against the integration branch while
+    # publish commits to the Onto branch — exactly the divergence #54 exists to prevent
+    # (PR #282 review). Neither applies (wave 0, no Onto) ⇒ no export, unchanged behaviour.
     if bundle is not None:
         onto = brief.onto_branch(bundle / "brief.md")
         if onto is not None:
             env = {**(env or {}), "PDCA_BASE": f"{onto[0]}/{onto[1]}"}
+        else:
+            from . import publish  # lazy: publish imports leaves→gates; avoid an import cycle
+            stack_base = publish.read_stack_base(bundle)
+            if stack_base:
+                env = {**(env or {}), "PDCA_VERIFY_BASE": f"origin/{stack_base}"}
     # Under in-driver lane concurrency, expose the worker-slot id so a gate command can
     # scope its checkout / container name / port / scratch per lane (docs 09). Absent
     # (serial driver) → no PDCA_LANE, so gates run exactly as before.

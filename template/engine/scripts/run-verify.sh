@@ -10,8 +10,22 @@
 #   scope = "bundle"
 #
 # The driver exports $PDCA_BUNDLE = the bundle dir (results/issue_<id>/), which
-# holds patch.diff and the brief that names the test. The contract this script
-# must enforce, exiting 0 iff BOTH hold:
+# holds patch.diff and the brief that names the test. It also exports, when set:
+#   - $PDCA_WORKTREE   — the tree Do edited (worktree isolation, #94); run/reset here.
+#   - $PDCA_BASE / $PDCA_VERIFY_BASE — the base to reset to before applying patch.diff.
+#       The driver sets AT MOST ONE of these: the test base must never diverge from the base
+#       publish will commit to. Prefer whichever is set.
+#         * $PDCA_BASE (issue #54) — the brief's `Onto branch`. Publish appends the fix as a
+#           commit to that existing PR head, so the gate must prove red->green on IT.
+#         * $PDCA_VERIFY_BASE (issue #273) — the wave's folded integration branch
+#           (`origin/pdca-integration/<base>`) for a wave>0 bundle in a dependency batch, so a
+#           dependent verifies against base+prereqs. Resetting to the brief's origin base
+#           instead would false-fail "patch does not apply — stale" for a dependent that
+#           shares a file with its prereq, or measure red->green against a tree LACKING it.
+#       Resolve as: $PDCA_BASE > $PDCA_VERIFY_BASE > your own override > the brief's
+#       `Repo + branch target` > origin/<default>. Neither is set for an ordinary wave-0
+#       single bundle, where the brief's base is the correct one.
+# The contract this script must enforce, exiting 0 iff BOTH hold:
 #   - WITHOUT the fix applied, the bundle's test FAILS (red) — proves the repro.
 #   - WITH the fix (patch.diff) applied, the bundle's test PASSES (green).
 # That validates THIS change, not the whole suite (see engine/README.md).
