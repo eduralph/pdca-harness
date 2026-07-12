@@ -192,6 +192,19 @@ class SandboxDeps(unittest.TestCase):
         self.assertIn("bwrap", out)
         self.assertEqual(rc, 1, "a sandbox that cannot start is a REQUIRED failure")
 
+    def test_the_install_hint_names_the_PACKAGE_not_the_binary(self) -> None:
+        """PR #290 review (codex). The binary is `bwrap`; the package that provides it is
+        `bubblewrap` (`dpkg -S /usr/bin/bwrap` → bubblewrap; `apt-cache show bwrap` finds
+        nothing). The hint said `sudo apt install bwrap`, which simply FAILS — and on a REQUIRED
+        row that is not cosmetic: an operator who follows the hint stays blocked forever."""
+        cfg = self._cfg(self._CLAUDE_REVIEWER, self._EXEMPTION)
+        with self._deps(False):
+            _, out = self._run(cfg)
+        self.assertIn("sudo apt install bubblewrap", out)
+        self.assertNotIn("sudo apt install bwrap", out)
+        self.assertIn("bwrap (", out)                    # …the ROW still names the binary probed
+        self.assertIn("sudo apt install socat", out)     # socat: binary and package coincide
+
     def test_present_deps_pass(self) -> None:
         cfg = self._cfg(self._CLAUDE_REVIEWER, self._EXEMPTION)
         with self._deps(True):

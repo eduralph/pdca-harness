@@ -67,9 +67,13 @@ def _have(cmd: str) -> bool:
 
 # What Claude Code's Linux sandbox needs on PATH before it will actually engage. Missing any
 # of these, it does not fail — it disables the sandbox and runs unconfined (#289).
+# binary on PATH -> (what it is, the PACKAGE that provides it). The two differ for bubblewrap:
+# the binary is `bwrap`, the package is `bubblewrap`, and `apt install bwrap` simply fails. On a
+# REQUIRED row that is not a cosmetic slip — an operator who follows the hint stays blocked
+# (PR #290 review). Probe the BINARY, name the PACKAGE.
 _SANDBOX_DEPS = {
-    "bwrap": "bubblewrap — the leaf sandbox's jail",
-    "socat": "the leaf sandbox's network proxy",
+    "bwrap": ("bubblewrap — the leaf sandbox's jail", "bubblewrap"),
+    "socat": ("the leaf sandbox's network proxy", "socat"),
 }
 
 
@@ -281,10 +285,10 @@ def run(cfg: Config, *, strict: bool = False) -> int:
         # unconfined. A leaf would then run *everything* outside a sandbox that pdca.toml and
         # docs 05 both say bounds it to the named commands. So these are REQUIRED — the
         # consequence of a miss is not a degraded feature, it is a false security claim (#289).
-        for tool, why in _SANDBOX_DEPS.items():
+        for tool, (why, package) in _SANDBOX_DEPS.items():
             r.row(OK if _have(tool) else MISSING, f"{tool} ({why})",
                   "" if _have(tool) else
-                  f"sudo apt install {tool} — without it the leaf sandbox silently does NOT "
+                  f"sudo apt install {package} — without it the leaf sandbox silently does NOT "
                   "engage and the bounded exemption does not hold",
                   required=True)
 
