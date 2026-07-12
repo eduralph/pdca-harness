@@ -200,13 +200,17 @@ def _invoke(
     # nothing until it finishes (minutes) and would otherwise look hung.
     # progress.py's stream reader dispatches on the family's stream_format; a family
     # declaring a format it doesn't recognize runs stream-less (heartbeat Tiers 1+2).
+    # tee_stderr regardless: the stream path already tees, and a stream-LESS family
+    # (generic, gemini) otherwise captures nothing at all, so its `*.error.log` reads
+    # "(no output captured)" — a post-mortem artifact that explains nothing (#286 review).
     use_stream = (stream_json and bool(profile.stream_argv)
                   and profile.stream_format in progress.STREAM_FORMATS)
     if use_stream:
         argv += list(profile.stream_argv)
     rc, output, produced = progress.run_with_heartbeat(
         argv, cwd=workdir, input_text=prompt, label=label, status=status,
-        stream_json=use_stream, stream_format=profile.stream_format, env=run_env)
+        stream_json=use_stream, tee_stderr=True, stream_format=profile.stream_format,
+        env=run_env)
     if rc != 0:
         # Only the stream path gives a real "did a session start" signal. Without it
         # (a stream-less family) we cannot tell invocation-death from a substantive

@@ -14,7 +14,9 @@ Offline: no model, no network. Run from the project root:
 from __future__ import annotations
 
 import io
+import os
 import shutil
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -131,6 +133,70 @@ class BuildErrorLog(unittest.TestCase):
                 redirect_stderr(io.StringIO()):
             with self.assertRaises(leaves.LeafError):
                 leaves.do_build(self.d, self.cfg)
+
+
+class StreamlessFamiliesAreDiagnosableToo(unittest.TestCase):
+    """PR #286 review (codex). The error tail was only ever captured on the vendor STREAM path
+    (`run_with_heartbeat` kept stderr iff `capture or stream_json`), and `_invoke` passes neither
+    for a family with no `stream_argv`. So for `generic` and `gemini` — the local/custom builders,
+    the ones whose failures are least self-evident — `build.error.log` was written faithfully and
+    said only "(no output captured)": a post-mortem artifact that explains nothing.
+
+    These drive the REAL `_invoke` → `progress` → `subprocess` path with a child that writes a
+    diagnosable line to stderr and dies. Mocking `_invoke` (as the tests above do) is what let the
+    gap through: it hands the output in, so it can never observe that nothing was captured.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _cfg(self.tmp)
+        self.d = self.cfg.bundle("ERR")
+        self.d.mkdir(parents=True)
+        (self.d / "brief.md").write_text("- **Slug:** e\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    FATAL = "toolchain is missing libfoo.so"
+
+    def _build_with_a_dying_child(self, family: str) -> str:
+        # The marker reaches the child through the ENV, never through argv. `_format_leaf_attempt`
+        # echoes the failed command line into the log, so a marker written as an argv literal is
+        # matched by that echo and the assertion passes with NO capture at all — the first cut of
+        # this test was vacuous for exactly that reason. Env-borne, the only way it can reach the
+        # log is by actually being captured off the child's stderr.
+        self.cfg.builder = LeafConfig(mode="command", family=family, argv=[
+            sys.executable, "-c",
+            "import os, sys; sys.stderr.write(os.environ['PDCA_TEST_STDERR'] + chr(10));"
+            " sys.exit(3)"])
+        # stderr is TEE'd (echoed live AND kept), so send the live echo to /dev/null — the
+        # assertion must read the LOG, not the console the tee also wrote to.
+        with mock.patch.dict(os.environ, {"PDCA_TEST_STDERR": self.FATAL}), \
+                open(os.devnull, "w", encoding="utf-8") as null:
+            saved = os.dup(2)
+            os.dup2(null.fileno(), 2)
+            try:
+                with self.assertRaises(leaves.LeafError):
+                    leaves.do_build(self.d, self.cfg)
+            finally:
+                os.dup2(saved, 2)
+                os.close(saved)
+        return (self.d / leaves.BUILD_ERROR_LOG).read_text(encoding="utf-8")
+
+    def _assert_diagnosable(self, family: str) -> None:
+        text = self._build_with_a_dying_child(family)
+        self.assertIn(self.FATAL, text, f"{family}: the child's real error must survive")
+        self.assertNotIn("no output captured", text)
+
+    def test_a_generic_builders_stderr_survives_in_the_log(self) -> None:
+        self._assert_diagnosable("generic")
+
+    def test_a_gemini_builders_stderr_survives_in_the_log(self) -> None:
+        self._assert_diagnosable("gemini")
+
+    def test_the_streaming_family_still_keeps_its_tail(self) -> None:
+        # The claude path already tee'd; decoupling the tee from stream_json must not lose it.
+        self._assert_diagnosable("claude")
 
 
 if __name__ == "__main__":
