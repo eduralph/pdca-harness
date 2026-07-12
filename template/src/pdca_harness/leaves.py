@@ -945,9 +945,8 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
             env=env, extra_argv=extra_argv, cfg=cfg,
         )
         if err is not None:
-            transient = getattr(err, "transient", False)
             _review_unavailable(d, f"reviewer leaf failed: {err}",
-                                transient=transient, error_log=error_log)
+                                failure=_failure_class(err), error_log=error_log)
             return
         produced = sandbox / "check-review.md"
         if produced.exists():
@@ -956,27 +955,54 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
             _review_unavailable(d, "reviewer produced no check-review.md")
 
 
-def _review_unavailable(d: Path, reason: str, *, transient: bool = False,
+# How a reviewer / advisory leaf failed (#138, #278). The split that matters downstream is
+# INFRA (nothing reviewed the diff) vs SUBSTANTIVE (it reviewed, and yielded nothing usable) —
+# but the two infra shapes need different *actions* from the operator, so keep them distinct.
+_FAIL_TRANSIENT = "transient"      # ran, exited non-zero with no output; retries exhausted
+_FAIL_STARTUP = "startup"          # never ran at all — the command could not be launched
+_FAIL_SUBSTANTIVE = "substantive"  # ran and produced output, but no usable verdict
+
+
+def _failure_class(exc: Exception | None) -> str:
+    """Classify a failed leaf invocation.
+
+    A :class:`LeafError` means the child actually ran: ``transient`` (no output — a rate
+    limit / 5xx / network blip) or substantive. But a **startup** failure never produces a
+    LeafError at all — the spawn raises ``FileNotFoundError`` before one exists, when the
+    configured binary is absent or not executable (the canonical ``[Errno 2] … 'codex'``).
+    Reading ``.transient`` off such an exception yields ``False``, so it was reported as "the
+    leaf ran but did not yield a usable verdict" — for a leaf that never started (PR #285
+    review). It is infra, and it is precisely the case #278 exists to distinguish; but a
+    *plain* re-run fails the same way, so it is not the same action as a transient blip."""
+    if isinstance(exc, LeafError):
+        return _FAIL_TRANSIENT if exc.transient else _FAIL_SUBSTANTIVE
+    if isinstance(exc, OSError):  # FileNotFoundError / PermissionError from the spawn
+        return _FAIL_STARTUP
+    return _FAIL_SUBSTANTIVE
+
+
+def _review_unavailable(d: Path, reason: str, *, failure: str = _FAIL_SUBSTANTIVE,
                         error_log: Path | None = None) -> None:
     """Write a placeholder review flagging the gap as a §6 NEEDS-HUMAN, so a failed or
     interrupted reviewer leaves a re-runnable bundle — not a half-checked one that
     crashes assemble. The bundle still reaches sign-off; accept is blocked (C6).
 
-    ``transient`` classifies the placeholder (#138) so the human can tell a transient
-    infra blip (safe to re-run) from a reviewer that genuinely needs a human; when an
-    ``error_log`` with the failed attempts' output exists, the placeholder points at it."""
+    ``failure`` (see :func:`_failure_class`) classifies the placeholder (#138) so the human
+    can tell infra — a transient blip, or a leaf that never started — from a reviewer that
+    genuinely needs a human; when an ``error_log`` with the failed attempts' output exists,
+    the placeholder points at it."""
     print(f"leaves: {d.name} — advisory review unavailable ({reason})", file=sys.stderr)
     (d / "check-review.md").write_text(
         "# Advisory review — NOT COMPLETED\n\n"
         f"The reviewer did not produce a verdict table ({reason}).\n\n"
-        + _unavailable_classification(transient, error_log)
+        + _unavailable_classification(failure, error_log)
         + "- NEEDS-HUMAN — re-run the Check reviewer; this bundle has no advisory review "
         "and must not be accepted until one exists.\n",
         encoding="utf-8",
     )
 
 
-def _unavailable_classification(transient: bool, error_log: Path | None) -> str:
+def _unavailable_classification(failure: str, error_log: Path | None) -> str:
     """Shared classification block for a failed reviewer/advisory placeholder (#138):
     name the failure class and point at the captured error log when present.
 
@@ -984,15 +1010,29 @@ def _unavailable_classification(transient: bool, error_log: Path | None) -> str:
     artifact is ambiguous — "the adversary ran and found nothing" reads exactly like "the
     adversary never ran", so an infra failure (no Docker, missing binary) presents as a clean
     adversarial pass and the operator has to hand-annotate "infra, not substance". `assemble`
-    reads the marker and labels the §6 row accordingly."""
-    status = assemble.LEAF_STATUS_INFRA if transient else assemble.LEAF_STATUS_HUMAN
+    reads the marker and labels the §6 row accordingly.
+
+    Both infra shapes (transient, startup) carry the INFRA marker — nothing reviewed the diff
+    either way — but their prose differs, because the operator's next action does: a transient
+    blip is safe to re-run as-is; a leaf that never started will fail the same way until its
+    command is fixed."""
+    status = {
+        _FAIL_TRANSIENT: assemble.LEAF_STATUS_INFRA,
+        _FAIL_STARTUP: assemble.LEAF_STATUS_STARTUP,
+    }.get(failure, assemble.LEAF_STATUS_HUMAN)
     marker = f"<!-- pdca:leaf-status {status} -->\n\n"
-    if transient:
+    if failure == _FAIL_TRANSIENT:
         kind = ("**transient infra — safe to re-run.** The leaf exited non-zero with no "
                 "output and retries did not recover, so it almost certainly hit a usage/"
                 "rate limit or a transient API/network error rather than reviewing the "
                 "diff; a sibling advisory leaf of a different family may already have "
                 "covered it.")
+    elif failure == _FAIL_STARTUP:
+        kind = ("**startup infra — the leaf never ran.** Its configured command could not be "
+                "launched at all (the binary is absent, or not executable), so nothing "
+                "reviewed the diff — this is NOT an empty verdict. A plain re-run will fail "
+                "the same way: fix the leaf's `argv` / PATH first (`pdca doctor` checks each "
+                "command leaf's CLI), then re-run.")
     else:
         kind = ("**substantive — needs a human.** The leaf ran but did not yield a usable "
                 "verdict; do not assume an infra blip.")
@@ -1189,9 +1229,8 @@ def _run_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict, 
             status=lambda: progress.bundle_activity(sandbox, (out.name,)),
             stream_json=True, env=env, extra_argv=extra, cfg=cfg)
         if err is not None:  # advisory must never crash the cycle
-            transient = getattr(err, "transient", False)
             _advisory_unavailable(d, leaf_id, f"leaf failed: {err}",
-                                  transient=transient, error_log=error_log)
+                                  failure=_failure_class(err), error_log=error_log)
             return
         if out.exists():
             shutil.copy2(out, advisory_artifact(d, leaf_id))
@@ -1209,12 +1248,13 @@ def _stub_advisory(d: Path, spec: dict, leaf_id: str) -> None:
         encoding="utf-8")
 
 
-def _advisory_unavailable(d: Path, leaf_id: str, reason: str, *, transient: bool = False,
+def _advisory_unavailable(d: Path, leaf_id: str, reason: str, *,
+                          failure: str = _FAIL_SUBSTANTIVE,
                           error_log: Path | None = None) -> None:
     print(f"leaves: {d.name} — advisory '{leaf_id}' unavailable ({reason})", file=sys.stderr)
     advisory_artifact(d, leaf_id).write_text(
         f"# Advisory review — {leaf_id} — NOT COMPLETED\n\n"
-        + _unavailable_classification(transient, error_log)
+        + _unavailable_classification(failure, error_log)
         + f"- NEEDS-HUMAN — advisory leaf '{leaf_id}' did not produce findings ({reason}); "
         "re-run it or adjudicate by hand.\n",
         encoding="utf-8")

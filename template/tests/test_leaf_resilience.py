@@ -92,7 +92,7 @@ class LeafResilience(unittest.TestCase):
 
     def test_placeholder_classification_transient_vs_substantive(self) -> None:
         leaves._review_unavailable(self.tmp, "reviewer leaf failed: x",
-                                   transient=True, error_log=self.error_log)
+                                   failure=leaves._FAIL_TRANSIENT, error_log=self.error_log)
         txt = (self.tmp / "check-review.md").read_text()
         self.assertIn("transient infra", txt)
         self.assertIn("NEEDS-HUMAN", txt)

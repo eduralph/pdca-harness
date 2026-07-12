@@ -22,6 +22,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from pdca_harness import assemble, gates, leaves, signoff
 from pdca_harness.config import Config, LeafConfig
@@ -49,21 +50,49 @@ class LeafStatusMarker(unittest.TestCase):
     """The marker itself — written by leaves, parsed by assemble."""
 
     def test_transient_failure_is_infra_empty(self) -> None:
-        block = leaves._unavailable_classification(True, None)
+        block = leaves._unavailable_classification(leaves._FAIL_TRANSIENT, None)
         self.assertEqual(assemble.leaf_status(block), assemble.LEAF_STATUS_INFRA)
 
     def test_substantive_failure_is_human_empty(self) -> None:
-        block = leaves._unavailable_classification(False, None)
+        block = leaves._unavailable_classification(leaves._FAIL_SUBSTANTIVE, None)
         self.assertEqual(assemble.leaf_status(block), assemble.LEAF_STATUS_HUMAN)
 
     def test_a_real_artifact_carries_no_status(self) -> None:
         # A leaf that actually reviewed the diff — no marker, so no relabelling.
         self.assertEqual(assemble.leaf_status("# Review\n\n- NEEDS-HUMAN — scope creep\n"), "")
 
+    def test_a_startup_failure_is_infra_not_substance(self) -> None:
+        # PR #285 review (codex). A missing binary raises FileNotFoundError from the spawn —
+        # never a LeafError — so `getattr(exc, "transient", False)` was False and the canonical
+        # `[Errno 2] 'codex'` failure was reported as "the leaf ran but did not yield a usable
+        # verdict"… for a leaf that never started. It is the exact case #278 exists to catch.
+        exc = FileNotFoundError(2, "No such file or directory", "codex")
+        self.assertEqual(leaves._failure_class(exc), leaves._FAIL_STARTUP)
+        block = leaves._unavailable_classification(leaves._FAIL_STARTUP, None)
+        self.assertEqual(assemble.leaf_status(block), assemble.LEAF_STATUS_STARTUP)
+
+    def test_startup_prose_says_a_plain_re_run_will_not_help(self) -> None:
+        # Infra, but NOT the same action as a transient blip: the binary is still absent.
+        block = leaves._unavailable_classification(leaves._FAIL_STARTUP, None)
+        self.assertIn("never ran", block)
+        self.assertIn("re-run will fail the same way", block)
+        self.assertNotIn("safe to re-run", block)
+
+    def test_failure_class_maps_every_shape(self) -> None:
+        self.assertEqual(
+            leaves._failure_class(leaves.LeafError(1, ["x"], output="", produced=False)),
+            leaves._FAIL_TRANSIENT)                       # ran, no output → retryable blip
+        self.assertEqual(
+            leaves._failure_class(leaves.LeafError(1, ["x"], output="verdict?", produced=True)),
+            leaves._FAIL_SUBSTANTIVE)                     # ran, produced output → human
+        self.assertEqual(leaves._failure_class(PermissionError(13, "denied", "codex")),
+                         leaves._FAIL_STARTUP)            # could not launch → infra
+        self.assertEqual(leaves._failure_class(None), leaves._FAIL_SUBSTANTIVE)
+
     def test_prose_classification_is_preserved(self) -> None:
         # The #138 prose stays — the marker is additive, not a replacement.
-        self.assertIn("safe to re-run", leaves._unavailable_classification(True, None))
-        self.assertIn("needs a human", leaves._unavailable_classification(False, None))
+        self.assertIn("safe to re-run", leaves._unavailable_classification(leaves._FAIL_TRANSIENT, None))
+        self.assertIn("needs a human", leaves._unavailable_classification(leaves._FAIL_SUBSTANTIVE, None))
 
 
 class Section6Labelling(unittest.TestCase):
@@ -93,17 +122,17 @@ class Section6Labelling(unittest.TestCase):
             assemble.assemble_summary(d, self.cfg)
         return [i for i in assemble.collect_needs_human(d, self.cfg) if "leaf" in i.text]
 
-    def _fail_advisory(self, d: Path, *, transient: bool) -> None:
+    def _fail_advisory(self, d: Path, *, failure: str) -> None:
         with redirect_stderr(io.StringIO()):
             leaves._advisory_unavailable(
-                d, "adversary", "leaf failed: [Errno 2] 'codex'", transient=transient)
+                d, "adversary", "leaf failed: [Errno 2] 'codex'", failure=failure)
 
     def test_infra_failure_is_labelled_and_re_runnable(self) -> None:
         d = self._bundle("INFRA")
-        self._fail_advisory(d, transient=True)
+        self._fail_advisory(d, failure=leaves._FAIL_TRANSIENT)
         items = self._advisory_items(d)
         self.assertEqual(len(items), 1)
-        self.assertTrue(items[0].text.startswith("leaf did not run (infra — safe to re-run)"),
+        self.assertTrue(items[0].text.startswith("leaf did not run (transient infra — safe to re-run)"),
                         items[0].text)
         # …and it reaches §6, so the empty adversarial pass can't be accepted as clean.
         self.assertTrue(any("infra" in it for it in
@@ -111,7 +140,7 @@ class Section6Labelling(unittest.TestCase):
 
     def test_substantive_failure_is_labelled_for_the_human(self) -> None:
         d = self._bundle("SUBST")
-        self._fail_advisory(d, transient=False)
+        self._fail_advisory(d, failure=leaves._FAIL_SUBSTANTIVE)
         items = self._advisory_items(d)
         self.assertEqual(len(items), 1)
         self.assertTrue(
@@ -121,20 +150,46 @@ class Section6Labelling(unittest.TestCase):
     def test_the_two_are_distinguishable(self) -> None:
         # The whole point: infra and substance must not render the same §6 row.
         a, b = self._bundle("A"), self._bundle("B")
-        self._fail_advisory(a, transient=True)
-        self._fail_advisory(b, transient=False)
+        self._fail_advisory(a, failure=leaves._FAIL_TRANSIENT)
+        self._fail_advisory(b, failure=leaves._FAIL_SUBSTANTIVE)
         self.assertNotEqual(self._advisory_items(a)[0].text,
                             self._advisory_items(b)[0].text)
 
     def test_an_empty_artifact_is_never_auto_iterated(self) -> None:
         # #264: an infra-empty has no finding a rebuild could fix — it must stay HUMAN, or
         # auto-iterate would spin rebuilding against a leaf that never ran.
-        for transient in (True, False):
-            with self.subTest(transient=transient):
-                d = self._bundle(f"K{int(transient)}")
-                self._fail_advisory(d, transient=transient)
+        for failure in (leaves._FAIL_TRANSIENT, leaves._FAIL_STARTUP, leaves._FAIL_SUBSTANTIVE):
+            with self.subTest(failure=failure):
+                d = self._bundle(f"K{failure}")
+                self._fail_advisory(d, failure=failure)
                 items = self._advisory_items(d)
                 self.assertEqual([i.kind for i in items], [assemble.HUMAN])
+
+    def test_a_missing_leaf_binary_lands_in_section6_as_infra(self) -> None:
+        """The end-to-end shape of the PR #285 review finding, driven through the real leaf
+        invocation rather than a hand-passed class. The spawn raises FileNotFoundError before
+        any LeafError exists, so the old `getattr(err, "transient", False)` read False and §6
+        told the operator to adjudicate an *empty verdict* — for a leaf that never started.
+        This is the `[Errno 2] 'codex'` case the issue itself cites."""
+        d = self._bundle("NOBIN")
+        leaf = LeafConfig(mode="command", family="codex", argv=["codex"])
+        with mock.patch.object(
+                leaves.progress, "run_with_heartbeat",
+                side_effect=FileNotFoundError(2, "No such file or directory", "codex")), \
+                redirect_stderr(io.StringIO()):
+            leaves._run_advisory_sandboxed(
+                d, self.cfg, leaf, {"id": "adversary", "role": "refute"}, "adversary")
+
+        art = (d / "check-advisory-adversary.md").read_text(encoding="utf-8")
+        self.assertEqual(assemble.leaf_status(art), assemble.LEAF_STATUS_STARTUP)
+        self.assertIn("never ran", art)
+
+        items = self._advisory_items(d)
+        self.assertTrue(items[0].text.startswith("leaf did not run ("), items[0].text)
+        # …and §6 must NOT tell the operator a plain re-run is safe — the binary is still gone.
+        self.assertIn("could not be launched", items[0].text)
+        self.assertNotIn("safe to re-run", items[0].text)
+        self.assertEqual(items[0].kind, assemble.HUMAN)   # still the human's, never auto-iterated
 
     def test_an_impl_tagged_finding_in_a_placeholder_cannot_smuggle_in_impl(self) -> None:
         # Defence in depth: even if a placeholder's bullet carried an `[impl]` tag, an empty
@@ -162,7 +217,8 @@ class Section6Labelling(unittest.TestCase):
     def test_a_failed_main_reviewer_is_labelled_too(self) -> None:
         d = self._bundle("REV")
         with redirect_stderr(io.StringIO()):
-            leaves._review_unavailable(d, "connection dropped", transient=True)
+            leaves._review_unavailable(d, "connection dropped",
+                                       failure=leaves._FAIL_TRANSIENT)
         with redirect_stdout(io.StringIO()):
             assemble.assemble_summary(d, self.cfg)
         items = [i for i in assemble.collect_needs_human(d, self.cfg)

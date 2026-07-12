@@ -51,11 +51,18 @@ _IMPL_MARKER_RE = re.compile(r"^\[impl\]\s*[—:-]*\s*", re.IGNORECASE)
 # reads identically to "the adversary never ran" — and an infra failure then presents as a
 # clean adversarial pass. The status lets §6 say WHY the artifact is empty, and lets a
 # consumer act on it (re-run vs adjudicate) instead of parsing prose.
-LEAF_STATUS_INFRA = "infra-empty"   # the leaf never really ran (crash, no binary, no output)
-LEAF_STATUS_HUMAN = "human-empty"   # the leaf ran but yielded no usable verdict
+# Both INFRA shapes mean "nothing reviewed the diff", but they call for different ACTIONS, so
+# the §6 row must not conflate them: a transient blip is safe to re-run as-is, while a leaf
+# whose command could never be launched will fail identically until that command is fixed —
+# telling the operator "safe to re-run" there would be a false instruction (PR #285 review).
+LEAF_STATUS_INFRA = "infra-empty"      # ran, died with no output — a transient blip
+LEAF_STATUS_STARTUP = "startup-empty"  # never launched — binary absent / not executable
+LEAF_STATUS_HUMAN = "human-empty"      # ran, but yielded no usable verdict
 _LEAF_STATUS_RE = re.compile(r"<!--\s*pdca:leaf-status\s+(\S+)\s*-->")
 _LEAF_STATUS_LABEL = {
-    LEAF_STATUS_INFRA: "leaf did not run (infra — safe to re-run)",
+    LEAF_STATUS_INFRA: "leaf did not run (transient infra — safe to re-run)",
+    LEAF_STATUS_STARTUP: ("leaf did not run (its command could not be launched — fix the "
+                          "leaf's config, then re-run)"),
     LEAF_STATUS_HUMAN: "leaf produced no usable verdict (needs a human)",
 }
 
