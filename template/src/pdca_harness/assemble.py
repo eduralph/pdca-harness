@@ -61,7 +61,6 @@ _IMPL_MARKER_RE = re.compile(r"^\[impl\]\s*[—:-]*\s*", re.IGNORECASE)
 # reviewer's prompt hard-codes to NEEDS-HUMAN on every cycle; C5/T5 are judgment too, but the
 # reviewer raises those only when it has an actual concern, so they stay situational HUMAN.
 _V_LABEL = next(label for e, label, _kind, _oracle in canonical_elements() if e == "V")
-_STANDING_RE = re.compile(rf"^\s*(?:V\s*[—:-]\s*)?{re.escape(_V_LABEL)}", re.IGNORECASE)
 
 # Leaf-status marker (issue #278). When a reviewer / advisory leaf could not produce a
 # verdict, `leaves` writes a placeholder carrying one of these as a machine-readable comment.
@@ -92,27 +91,18 @@ def leaf_status(artifact_text: str) -> str:
     return m.group(1) if m else ""
 
 
-def _classify_finding(text: str, *, allow_standing: bool = False) -> NeedsHumanItem:
+def _classify_finding(text: str, *, standing: bool = False) -> NeedsHumanItem:
     """Classify one reviewer / advisory §6 item, stripping any `[impl]` marker.
 
     Three kinds. IMPL — a rebuild can address it. STANDING — the reviewer's `Validation` row,
     which its prompt emits NEEDS-HUMAN on every cycle whatever it finds, so its presence proves
     nothing (#293). HUMAN — everything else.
 
-    ``allow_standing`` defaults off and is passed ONLY for a **mandated verdict-table row of the
-    primary review** — the one place the prompt hard-codes the Validation row every cycle, which
-    is the entire reason it is signal-free. Two things are therefore excluded, and both would
-    otherwise let a real objection be archived by an unattended rebuild (PR #294 review):
-
-    * an **advisory** leaf's findings — it has no verdict table; its `- NEEDS-HUMAN — …` bullets
-      are free-form, and fitness-to-purpose is one of the architectural objections its prompt
-      explicitly tells it to raise. Raising it means it FOUND something.
-    * a **legacy bullet** in the primary review — also free prose the reviewer *chose* to write,
-      so a bullet reading "Validation — fitness-to-purpose: patches the wrong layer" is a real
-      objection, not the template row.
-
-    The justification for STANDING is "this row is a constant". That is true of the mandated
-    table row and of nothing else, so it is scoped to exactly that.
+    ``standing`` is decided by the CALLER and defaults off. It is true only for the canonical
+    5/5/1 verdict row of the PRIMARY review, identified by an exact match on its Item cell
+    (:func:`_needs_human`). This function does not re-derive it from the text, deliberately: a
+    prefix test on the text is what let a real objection wear the template's clothes, and two
+    sources of truth for "is this the constant row" is what produced that bug (PR #294 review).
 
     Fail safe throughout: an item we cannot map to a gate element — an unmarked advisory bullet,
     a reviewer row whose Item cell doesn't start with a canonical id, the missing-review
@@ -123,7 +113,7 @@ def _classify_finding(text: str, *, allow_standing: bool = False) -> NeedsHumanI
     stripped = _IMPL_MARKER_RE.sub("", text, count=1)
     if stripped != text:
         return NeedsHumanItem(stripped.strip(), IMPL)
-    if allow_standing and _STANDING_RE.match(text):
+    if standing:
         return NeedsHumanItem(text, STANDING)   # emitted every cycle ⇒ carries no signal (#293)
     m = _ELEMENT_RE.match(text)
     if m and m.group(1) in _GATE_ELEMENTS:
@@ -142,8 +132,8 @@ def _items_from_artifact(text: str, *, allow_standing: bool = False) -> list[Nee
     and forced to HUMAN: there is no finding for a rebuild to fix, so an infra-empty must
     never be auto-iterated (#264). A real artifact is unaffected."""
     label = _LEAF_STATUS_LABEL.get(leaf_status(text), "")
-    items = [_classify_finding(t, allow_standing=allow_standing and from_table)
-             for t, from_table in _needs_human(text)]
+    items = [_classify_finding(t, standing=allow_standing and is_standing)
+             for t, is_standing in _needs_human(text)]
     if not label:
         return items
     return [NeedsHumanItem(f"{label} — {it.text}", HUMAN) for it in items]
@@ -326,25 +316,31 @@ def _needs_human(review_text: str) -> list[tuple[str, bool]]:
     a table row whose verdict cell is NEEDS-HUMAN becomes a §6 item (Item — Basis).
     Legacy ``- NEEDS-HUMAN — …`` bullet lines are still honoured.
 
-    ``from_table`` records WHICH form the item came from, because only the mandated table has a
-    row the prompt hard-codes every cycle. A **legacy bullet** is free prose the reviewer chose
-    to write — including one that happens to start "Validation — fitness-to-purpose", which is
-    then a real objection, not the template row. Only a table row can ever be STANDING
-    (PR #294 review); everything else keeps its signal.
+    The second element says whether the item IS the canonical standing row — the one the prompt
+    hard-codes every cycle. It demands an **exact** match on the row's *Item cell* against the
+    5/5/1's own label, which is the only thing that identifies the template row:
+
+    * a **legacy bullet** never qualifies — it is free prose the reviewer chose to write, so
+      "Validation — fitness-to-purpose: patches the wrong layer" is a real objection.
+    * nor does a row in some **other table** the reviewer happened to add (a "concerns" table),
+      for the same reason. Keying on "came from a table" was still too wide, and keying on the
+      text's *prefix* let a real objection wear the template's clothes (PR #294 review).
+
+    Everything else keeps its signal.
     """
     items: list[tuple[str, bool]] = []
     seen: set[str] = set()
 
-    def add(text: str, *, from_table: bool) -> None:
+    def add(text: str, *, standing: bool) -> None:
         text = text.strip()
         if text and text.lower() not in seen:
             seen.add(text.lower())
-            items.append((text, from_table))
+            items.append((text, standing))
 
     for line in review_text.splitlines():
         s = line.strip()
         if s.startswith("- NEEDS-HUMAN"):
-            add(s[len("- NEEDS-HUMAN"):].lstrip(" —:-").strip(), from_table=False)
+            add(s[len("- NEEDS-HUMAN"):].lstrip(" —:-").strip(), standing=False)
         elif s.startswith("|") and "needs-human" in s.lower():
             cells = [c.strip() for c in s.strip("|").split("|")]
             vi = next((i for i, c in enumerate(cells) if "needs-human" in c.lower()), None)
@@ -352,7 +348,8 @@ def _needs_human(review_text: str) -> list[tuple[str, bool]]:
                 continue
             label = cells[0] if cells else ""
             basis = cells[vi + 1] if vi + 1 < len(cells) else ""
-            add(f"{label} — {basis}" if basis else label, from_table=True)
+            add(f"{label} — {basis}" if basis else label,
+                standing=label.strip().casefold() == _V_LABEL.casefold())
     return items
 
 

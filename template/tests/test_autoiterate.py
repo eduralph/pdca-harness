@@ -228,6 +228,40 @@ class TheStandingValidationRow(_Base):
         self.assertFalse(self._try(d), "a legacy fitness bullet is a finding — it must halt")
         self._assert_halted(d)
 
+    def test_a_second_table_never_earns_the_standing_exemption(self) -> None:
+        """PR #294 review (codex), third pass. Keying on "came from a table" was STILL too wide.
+
+        The reviewer may write more than one table — a "concerns" table beside the mandated
+        verdict table. A row there reading `| Validation — fitness-to-purpose: patches the wrong
+        layer | NEEDS-HUMAN | … |` is a substantive objection, but it came from a table and its
+        text starts with the canonical label, so it was classified STANDING and an unattended
+        rebuild would archive it. The canonical row is now identified by an EXACT match on its
+        Item cell — the only thing that actually distinguishes the template row.
+        """
+        review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                  "| C4 Verification (red→green) | NEEDS-HUMAN | [impl] off-by-one |\n"
+                  f"{_STANDING_ROW}\n"
+                  "\n## Concerns\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                  "| Validation — fitness-to-purpose: patches the wrong layer | NEEDS-HUMAN "
+                  "| the criterion cannot be met by this design |\n")
+        d = self._bundle("SV7", review=review)
+        self.assertFalse(self._try(d), "a concerns-table objection must halt, not be archived")
+        self._assert_halted(d)
+
+    def test_the_standing_row_is_never_carried_forward_to_the_builder(self) -> None:
+        """PR #294 review (codex). STANDING rides along in `items` so it cannot veto the rebuild
+        — but it is not a finding, and no builder can act on it. Carrying it into the §9 delta
+        and the brief's carry-forward handed the next Do a human-only judgment call as though it
+        were a defect to fix, under a sentence claiming the set was "implementation-level items
+        only"."""
+        d = self._bundle("SV8", review=_review_table("C4 Verification (red→green)"))
+        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            flow._maybe_auto_iterate(self.cfg, d, by="", today="2026-07-09", apply_now=True)
+            driver.run_issue(d, self.cfg)
+        brief_text = (d / "brief.md").read_text(encoding="utf-8")
+        self.assertIn("C4 Verification", brief_text)                     # the real defect…
+        self.assertNotIn("Validation — fitness-to-purpose", brief_text)  # …and only that
+
     def test_the_standing_row_still_blocks_accept(self) -> None:
         # The C6 guard is untouched: the human must still clear §6 before accepting. Not
         # vetoing a REBUILD is not the same as not needing a human at SIGN-OFF.
@@ -579,25 +613,43 @@ class Classification(unittest.TestCase):
                 self.assertNotEqual(item.kind, assemble.IMPL, f"{elem} must never be impl")
 
     def test_only_the_validation_row_is_standing(self) -> None:
-        # #293. In the PRIMARY review, V is the one row the reviewer's prompt hard-codes to
-        # NEEDS-HUMAN every cycle, so it alone is STANDING (a constant carries no signal).
+        # #293. Of the 5/5/1's own rows, V is the one the reviewer's prompt hard-codes to
+        # NEEDS-HUMAN every cycle, so it alone can be STANDING (a constant carries no signal).
         # C5/T5 are judgment too, but the reviewer raises those only on a real concern — they
-        # stay situational HUMAN and still halt the bundle.
+        # stay situational HUMAN and still halt the bundle. The PARSER decides which row is the
+        # canonical one; the classifier only honours that decision.
         for elem, label, kind, _oracle in gates.canonical_elements():
             if kind not in ("judgment", "input"):
                 continue
-            got = assemble._classify_finding(f"{label} — some basis", allow_standing=True).kind
+            row = f"| {label} | NEEDS-HUMAN | some basis |\n"
+            [(text, standing)] = assemble._needs_human(row)
+            got = assemble._classify_finding(text, standing=standing).kind
             want = assemble.STANDING if elem == "V" else assemble.HUMAN
             self.assertEqual(got, want, f"{elem} ({label})")
 
-    def test_standing_is_the_primary_reviews_privilege_alone(self) -> None:
-        # PR #294 review (codex). The default is OFF, so an ADVISORY leaf's free-form
-        # fitness objection is HUMAN and still halts — it means the adversary FOUND something.
-        # STANDING is earned only by the reviewer's mandated table, where the row is a constant.
-        text = "Validation — fitness-to-purpose: this patches the wrong layer"
+    def test_standing_needs_an_EXACT_match_on_the_canonical_item_cell(self) -> None:
+        """PR #294 review (codex). What identifies the template row is its Item cell being
+        EXACTLY the canonical label — not the text's prefix, and not merely "it came from a
+        table". A prefix test let a real objection wear the template's clothes; a table test let
+        a second table do the same. Both are the same mistake, one layer apart."""
+        canonical = "| Validation — fitness-to-purpose | NEEDS-HUMAN | the human's call |\n"
+        objection = ("| Validation — fitness-to-purpose: patches the wrong layer | NEEDS-HUMAN "
+                     "| the criterion cannot be met |\n")
+        bullet = "- NEEDS-HUMAN — Validation — fitness-to-purpose: patches the wrong layer\n"
+
+        [(_t, standing)] = assemble._needs_human(canonical)
+        self.assertTrue(standing, "the canonical row IS the constant")
+        [(_t, standing)] = assemble._needs_human(objection)
+        self.assertFalse(standing, "a longer Item cell is a real objection, not the template")
+        [(_t, standing)] = assemble._needs_human(bullet)
+        self.assertFalse(standing, "free prose is never the template row")
+
+    def test_the_classifier_never_re_derives_standing_from_the_text(self) -> None:
+        # Two sources of truth for "is this the constant row" is what produced the bug. The
+        # classifier honours the caller's verdict and does not second-guess it from the text.
+        text = "Validation — fitness-to-purpose — the human's call"
         self.assertEqual(assemble._classify_finding(text).kind, assemble.HUMAN)
-        self.assertEqual(assemble._classify_finding(text, allow_standing=True).kind,
-                         assemble.STANDING)
+        self.assertEqual(assemble._classify_finding(text, standing=True).kind, assemble.STANDING)
 
     def test_impl_marker_is_case_insensitive_and_stripped(self) -> None:
         self.assertEqual(assemble._classify_finding("[IMPL] — bug"),

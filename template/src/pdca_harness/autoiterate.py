@@ -92,8 +92,14 @@ def bump(d: Path) -> int:
 
 def rationale(items: list[NeedsHumanItem], *, attempt: int) -> str:
     """The §9 "Iteration delta" line, which the driver folds into the brief's carry-forward
-    so the next Do iteration isn't blind about why it was rejected."""
-    findings = "; ".join(item.text for item in items)
+    so the next Do iteration isn't blind about why it was rejected.
+
+    IMPL items ONLY. The STANDING `Validation` row rides along in ``items`` (it does not veto
+    the rebuild, #293), but it is not a finding and no builder can act on it — carrying it
+    forward would hand the next Do a human-only judgment call as though it were a defect to fix,
+    under a sentence claiming the set is "implementation-level items only" (PR #294 review).
+    """
+    findings = "; ".join(item.text for item in items if item.kind == IMPL)
     return (f"Auto-iterate (round {attempt}): Check found implementation-level items only, "
             f"no architectural judgment required — {findings}")
 
