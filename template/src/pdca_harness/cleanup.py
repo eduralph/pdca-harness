@@ -47,7 +47,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import driver, publish, signoff, state
+from . import brief, driver, publish, signoff, state
 from .config import Config
 
 _MID_FLIGHT = (state.PLANNED, state.BUILT, state.CHECKED,
@@ -210,7 +210,11 @@ def _plan_bundle(cfg: Config, d: Path, *, issue_side: bool, repo: str,
         return None                                  # still closed: in sync
 
     # PR-side (class b): tracker-independent — reads the recorded pr_url like merged.py.
-    record = publish._publish_record(d) or {}
+    # A decodable-but-non-object publish.json (`[]`, `null`) must read as "no record",
+    # not abort the whole sweep on `.get` (#300 review round 2) — one damaged bundle
+    # must never block every other bundle's reconciliation.
+    record = publish._publish_record(d)
+    record = record if isinstance(record, dict) else {}
     pr_url = str(record.get("pr_url", "") or "")
     if st != state.COMPLETE and pr_url and _pr_state(pr_url) == "MERGED":
         return _Row(d.name, st, "PR MERGED",
@@ -228,7 +232,12 @@ def _plan_bundle(cfg: Config, d: Path, *, issue_side: bool, repo: str,
         return _Row(d.name, st, "unknown", "tracker state unreadable (gh failed) — no action")
 
     if remote.get("state") == "CLOSED":
-        if not (d / "brief.md").exists():
+        # "Notes-only" uses the SAME placeholder semantics as state.state() (#300 review
+        # round 2): an unfilled template copy is "never authored" (#113), so a closed
+        # tracker bundle carrying one still takes the RESOLVED path — a bare existence
+        # test left it UNPLANNED-with-no-row, unreconcilable forever.
+        bp = d / "brief.md"
+        if not bp.exists() or brief.is_placeholder(bp):
             if st == state.UNPLANNED:
                 if (d / "notes.json").exists():
                     try:

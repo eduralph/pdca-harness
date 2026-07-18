@@ -18,7 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from pdca_harness import cleanup, signoff, state
+from pdca_harness import cleanup, cli, signoff, state
 from pdca_harness.config import Config, LeafConfig
 
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
@@ -318,6 +318,44 @@ class GuardsAndScope(CleanupBase):
         self.issue_states["91"] = _CLOSED
         self._run(apply=True)
         self.assertEqual(state.state(d), state.RESOLVED)   # re-resolved by class a1
+
+    def test_placeholder_brief_bundle_still_takes_the_resolved_path(self) -> None:
+        # #300 review round 2: an unfilled template copy is "never authored" (#113) —
+        # the same placeholder semantics as state.state(). A bare existence test left
+        # the bundle UNPLANNED with no row, unreconcilable forever.
+        d = self._tracker("85")
+        (d / "brief.md").write_text("- **Slug:** <fill-me>\n", encoding="utf-8")
+        self.issue_states["85"] = _CLOSED
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(state.state(d), state.RESOLVED)
+
+    def test_damaged_publish_record_never_aborts_the_sweep(self) -> None:
+        # #300 review round 2: a decodable-but-non-object publish.json ([] / null) must
+        # read as "no record" — one damaged bundle must not block every other bundle.
+        broken = self._staged("86", signoff_action=None)
+        (broken / "publish.json").write_text("[]", encoding="utf-8")
+        healthy = self._tracker("87")
+        self.issue_states["86"] = _OPEN
+        self.issue_states["87"] = _CLOSED
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)                            # no crash, sweep completed
+        self.assertEqual(state.state(healthy), state.RESOLVED)  # sibling still reconciled
+
+    def test_waves_excludes_resolved_placeholder_bundles(self) -> None:
+        # #302 review round 2 (filed on PR #308): a resolved bundle with a stray
+        # placeholder brief has brief.md on disk — `pdca waves` must filter on the
+        # terminal set, not the file test, or settled work reads as schedulable.
+        d = self._tracker("88")
+        (d / "brief.md").write_text("- **Slug:** <fill-me>\n", encoding="utf-8")
+        self.issue_states["88"] = _CLOSED
+        self._run(apply=True)
+        self.assertEqual(state.state(d), state.RESOLVED)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = cli._waves(self.cfg, [])
+        self.assertEqual(rc, 0)
+        self.assertIn("no briefed bundles to schedule", out.getvalue())
 
     def test_archived_completed_bundles_are_reconciled_too(self) -> None:
         # #300 review: a bundle archived to results/completed/ (#171) is exactly the
