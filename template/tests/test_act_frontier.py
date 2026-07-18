@@ -199,6 +199,21 @@ class CliScope(unittest.TestCase):
         data = json.loads((self.cfg.process_dir / ".act-reviewed").read_text("utf-8"))
         self.assertEqual(data["reviewed"], ["issue_1", "issue_2", "issue_3"])
 
+    def test_fully_reviewed_index_still_renders_the_signal_history(self) -> None:
+        # #299 review: an empty SCOPED set ("everything reviewed") must not discard the
+        # full-history sections — the recurring signals and the process-delta ledger are
+        # exactly what an operator checks between reviews.
+        _freeze(self.cfg, "1", candidate="tighten the repro gate for flaky suites")
+        _freeze(self.cfg, "2", candidate="tighten the repro gate for flaky suites")
+        self._main(["act", "log", "--date", "2026-07-18", "--append"])   # registers + covers all
+        rc, out, err = self._main(["act", "index"])
+        self.assertEqual(rc, 0)
+        self.assertIn("0 unreviewed of 2 frozen", err)
+        self.assertIn("(no cycles in scope)", out)
+        self.assertIn("2× tighten the repro gate", out)   # signal history preserved
+        self.assertIn("Process-delta ledger", out)
+        self.assertIn("tighten the repro gate", out.split("Process-delta ledger")[1])
+
     def test_pattern_history_spans_the_frontier(self) -> None:
         # A signal seen once BEFORE the frontier and once after must still register as
         # recurring — narrowing the narrative scope must never narrow signal history.

@@ -14,7 +14,6 @@ contribution's disposition, run the validator/suite, or author the next brief.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
@@ -24,6 +23,29 @@ from pathlib import Path
 
 from . import revalidate, state
 from .config import Config
+
+# Cross-platform advisory file lock (#299 review): ``fcntl`` is Unix-only, and cli.py
+# imports this module at load time — a hard ``import fcntl`` would break EVERY installed
+# command on Windows (scripts/install.ps1 is a supported bootstrap path) before argument
+# parsing. ``msvcrt.locking`` is the Windows equivalent (LK_LOCK retries, then raises).
+if os.name == "nt":  # pragma: no cover — exercised only on Windows
+    import msvcrt
+
+    def _lock_exclusive(fh) -> None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+
+    def _unlock(fh) -> None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    def _lock_exclusive(fh) -> None:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+
+    def _unlock(fh) -> None:
+        fcntl.flock(fh, fcntl.LOCK_UN)
 
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
@@ -140,7 +162,7 @@ def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "
     marker = cfg.process_dir / _CADENCE_MARKER
     lock = marker.with_name(marker.name + ".lock")
     with lock.open("w") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)  # blocking: the critical section is tiny
+        _lock_exclusive(fh)  # blocking: the critical section is tiny
         try:
             frozen = frozen_bundles(cfg)
             frozen_names = {d.name for d in frozen}
@@ -152,7 +174,7 @@ def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "
             tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
             os.replace(tmp, marker)
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            _unlock(fh)
 
 
 def cycles_since_review(cfg: Config) -> int:
@@ -301,8 +323,12 @@ def render_index(entries: list[ActEntry], pats: dict[str, list[str]],
                  ledger: list[dict] | None = None, recs: list[dict] | None = None) -> str:
     lines = [f"# Act bundle index — {len(entries)} frozen cycle(s)", ""]
     if not entries:
-        lines.append("(no frozen bundles — nothing to review yet)")
-        return "\n".join(lines) + "\n"
+        # NOT an early return (#299 review): with the frontier default, an empty scoped
+        # set is common ("everything reviewed") while the FULL history still carries the
+        # recurring signals, the ledger and the recurrence warnings computed below —
+        # discarding them made the command misread as "no frozen bundles".
+        lines.append("(no cycles in scope)")
+        lines.append("")
     for e in entries:
         lines += [
             f"## {e.bundle.name}  ({e.date or 'no date'}) — {e.outcome or 'no outcome'}",
