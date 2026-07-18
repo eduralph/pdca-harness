@@ -798,10 +798,14 @@ def _act_log(cfg: Config, args: argparse.Namespace) -> int:
     if not entries:
         print("no frozen cycles to review (need COMPLETE bundles)", file=sys.stderr)
         return 1
-    act.register_signals(cfg, entries, args.date)  # track recurring signals (#149)
     text = act.scaffold_entry(entries, act.patterns(entries), date=args.date,
                               recs=act.recurrences(cfg, entries))
     if args.append:
+        # Recording is the ONLY writing path (#298 review): the ledger registration
+        # (#149) rides --append with the entry, so a plain `act log` stays the safe,
+        # read-only preview the help promises. The scaffold itself doesn't change —
+        # patterns/recurrences never read the open entries registration adds.
+        act.register_signals(cfg, entries, args.date)  # track recurring signals (#149)
         log = act.append_entry(cfg, text)
         act.mark_reviewed(cfg)  # a manual Act review resets the flow cadence too (#109)
         print(f"appended entry to {log}")
