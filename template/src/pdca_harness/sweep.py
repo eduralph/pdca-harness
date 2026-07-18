@@ -28,6 +28,7 @@ same lanes (the flow's own call sites run after all lane threads join).
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -45,15 +46,21 @@ def _git(repo: Path, *args: str) -> int:
                           capture_output=True, text=True).returncode
 
 
-def _primaries(cfg: Config, bundles: list[Path] | None) -> list[Path]:
+def target_checkouts(cfg: Config, bundles: list[Path] | None = None) -> list[Path]:
     """Every target checkout the harness may have left siblings next to: all configured
-    ``[publisher.checkouts]`` entries plus each driven bundle's resolved target (covers
-    the sibling-convention fallback). Only real git checkouts qualify."""
+    ``[publisher.checkouts]`` entries plus each bundle's resolved target — which covers
+    the sibling-convention fallback, the common setup with NO explicit checkout map
+    (#297 review). ``bundles=None`` ⇒ every persisted ``issue_*`` bundle, so the manual
+    ``pdca sweep`` and the doctor discover targets without an active flow. Only real
+    git checkouts qualify."""
     from . import publish  # lazy: publish imports leaves→worktree; avoid an import cycle
+    if bundles is None:
+        bundles = (sorted(d for d in cfg.bundle_root.glob("issue_*") if d.is_dir())
+                   if cfg.bundle_root.exists() else [])
     candidates: dict[Path, None] = {}
     for spec in cfg.repo_checkouts:
         candidates.setdefault(publish._checkout_path(cfg, spec), None)
-    for d in bundles or []:
+    for d in bundles:
         try:
             repo_spec, _base, _slug = publish._resolve_target(d)
         except Exception:  # noqa: BLE001 — resolution is best-effort here
@@ -64,10 +71,13 @@ def _primaries(cfg: Config, bundles: list[Path] | None) -> list[Path]:
 
 
 def _lane_dirs(primary: Path) -> list[Path]:
-    """The per-lane Do/Check worktrees for ``primary`` (``<name>.pdca-wt[-l<slot>]``) —
-    dirs only, excluding overflow trees and the ``.owner`` sidecar files."""
+    """The per-lane Do/Check worktrees for ``primary`` — EXACTLY the names the harness
+    creates (``<name>.pdca-wt`` / ``<name>.pdca-wt-l<slot>``), never a loose prefix
+    match (#297 review): a sibling like ``<name>.pdca-wt-backup`` is not ours and must
+    never be touched, let alone rmtree'd by the removal fallback."""
+    exact = re.compile(re.escape(primary.name + worktree.WT_SUFFIX) + r"(-l\d+)?$")
     return sorted(p for p in primary.parent.glob(primary.name + worktree.WT_SUFFIX + "*")
-                  if p.is_dir() and worktree._OVF_SUFFIX not in p.name)
+                  if p.is_dir() and exact.fullmatch(p.name))
 
 
 def _integ_dirs(primary: Path) -> list[Path]:
@@ -76,23 +86,31 @@ def _integ_dirs(primary: Path) -> list[Path]:
                   if p.is_dir())
 
 
-def _remove_tree(primary: Path, wt: Path) -> None:
+def _remove_tree(primary: Path, wt: Path) -> bool:
     """``git worktree remove`` with the rmtree + prune fallback (the drift.py pattern),
-    plus the owner sidecar. Best-effort."""
+    plus the owner sidecar. Refuses (False) a dir with no ``.git`` entry — whatever it
+    is, it is not a worktree the harness created, and the unconditional rmtree fallback
+    must never eat an unrelated sibling (#297 review). Best-effort otherwise."""
+    if not (wt / ".git").exists():
+        return False
     if _git(primary, "worktree", "remove", "--force", str(wt)) != 0:
         shutil.rmtree(wt, ignore_errors=True)
         _git(primary, "worktree", "prune")
     worktree._owner_file(wt).unlink(missing_ok=True)
+    return True
 
 
 def sweep(cfg: Config, bundles: list[Path] | None = None, *,
           mode: str | None = None, dry_run: bool = False) -> list[str]:
     """Reclaim harness worktree/build footprint; return human-readable report lines.
 
-    ``mode`` overrides ``cfg.sweep_worktrees`` (the CLI passes it explicitly, so the
-    manual command works even under ``"off"``). ``dry_run`` reports without touching.
-    Never raises: a failing target is reported and skipped (teardown must not fail a
-    run); sizes are deliberately not computed (no ``du`` over a 200 GB tree).
+    ``bundles=None`` discovers targets from every persisted ``issue_*`` bundle (the
+    manual command / sibling-convention setups, #297 review); the flow passes its
+    run's bundles. ``mode`` overrides ``cfg.sweep_worktrees`` (the CLI passes it
+    explicitly, so the manual command works even under ``"off"``). ``dry_run``
+    reports without touching. Never raises: a failing target is reported and skipped
+    (teardown must not fail a run); sizes are deliberately not computed (no ``du``
+    over a 200 GB tree).
     """
     mode = mode or cfg.sweep_worktrees
     if mode not in MODES:  # defensive: config.load already normalizes
@@ -101,15 +119,27 @@ def sweep(cfg: Config, bundles: list[Path] | None = None, *,
         return []
     lines: list[str] = []
     verb = "would " if dry_run else ""
-    for primary in _primaries(cfg, bundles):
+    for primary in target_checkouts(cfg, bundles):
         try:
-            ovf = worktree._overflow_dirs(primary)
-            if ovf:
-                lines.append(f"sweep: {verb}remove {len(ovf)} orphaned overflow tree(s) "
-                             f"next to {primary.name}")
+            # Overflow trees: reclaim only PROVEN orphans (creator pid gone, #297
+            # review) — a live pid may be another process's in-flight gate read, and
+            # deleting its working directory mid-command invalidates that gate.
+            orphans = worktree.orphan_overflow_dirs(primary)
+            live = len(worktree._overflow_dirs(primary)) - len(orphans)
+            if orphans:
+                lines.append(f"sweep: {verb}remove {len(orphans)} orphaned overflow "
+                             f"tree(s) next to {primary.name}")
+            if live:
+                lines.append(f"sweep: left {live} overflow tree(s) next to "
+                             f"{primary.name} (owner process still alive)")
             if not dry_run:
-                worktree.sweep_overflow(primary)  # prunes git admin state too
+                for ovf in orphans:
+                    worktree.overflow_remove(primary, ovf)
             for integ in _integ_dirs(primary):
+                if not (integ / ".git").exists():
+                    lines.append(f"sweep: left {integ.name} (no .git entry — not a "
+                                 "harness worktree)")
+                    continue
                 lines.append(f"sweep: {verb}remove integration tree {integ.name}")
                 if not dry_run:
                     _remove_tree(primary, integ)

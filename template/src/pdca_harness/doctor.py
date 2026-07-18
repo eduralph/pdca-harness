@@ -66,17 +66,18 @@ def _have(cmd: str) -> bool:
 
 
 def _footprint_counts(cfg: Config) -> tuple[int, int, int]:
-    """(lane, integration, overflow) sibling-worktree counts across the configured target
-    checkouts — a cheap glob-count (issue #297), never a size walk."""
-    from . import integrate, publish, worktree  # lazy: doctor stays import-light
+    """(lane, integration, orphaned-overflow) sibling-worktree counts (issue #297) — a
+    cheap glob-count, never a size walk. Targets come from :func:`sweep.target_checkouts`
+    so the common sibling-convention setup with NO ``[publisher.checkouts]`` entries is
+    still covered (#297 review — the counts were permanently 0 there), and only overflow
+    trees whose creating process is provably gone count as orphans (a live pid may be
+    another process's in-flight gate read)."""
+    from . import integrate, sweep, worktree  # lazy: doctor stays import-light
     lanes = integs = ovfs = 0
-    for spec in cfg.repo_checkouts:
-        primary = publish._checkout_path(cfg, spec)
-        if not (primary / ".git").exists():
-            continue
+    for primary in sweep.target_checkouts(cfg):
         sibs = [p for p in primary.parent.glob(primary.name + worktree.WT_SUFFIX + "*")
                 if p.is_dir()]
-        ovfs += sum(1 for p in sibs if worktree._OVF_SUFFIX in p.name)
+        ovfs += len(worktree.orphan_overflow_dirs(primary))
         lanes += sum(1 for p in sibs if worktree._OVF_SUFFIX not in p.name)
         integs += sum(1 for p in primary.parent.glob(
             primary.name + integrate.INTEG_INFIX + "*") if p.is_dir())

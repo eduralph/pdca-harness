@@ -50,9 +50,16 @@ class SweepRealGit(unittest.TestCase):
         return sp.run(["git", "-C", str(repo), "status", "--porcelain"],
                       capture_output=True, text=True).stdout.strip()
 
+    @staticmethod
+    def _dead_pid() -> int:
+        """A pid that provably no longer exists (a reaped child) — the orphan case."""
+        p = sp.Popen(["true"])
+        p.wait()
+        return p.pid
+
     def _seed_footprint(self) -> Path:
         """A populated lane (with ignored build output + an untracked stray), an
-        integration tree, and a fake orphaned overflow dir."""
+        integration tree, and an orphaned overflow dir (dead creator pid)."""
         d = self.cfg.bundle("WT")
         d.mkdir(parents=True)
         (d / "brief.md").write_text(
@@ -64,7 +71,8 @@ class SweepRealGit(unittest.TestCase):
         integ = self.tmp / "checkout.pdca-integ-main"
         sp.run(["git", "-C", str(self.primary), "worktree", "add", "--force",
                 str(integ), "origin/main"], check=True, capture_output=True)
-        (self.tmp / "checkout.pdca-wt-ovf-9").mkdir()
+        self.ovf = self.tmp / f"checkout.pdca-wt-ovf-{self._dead_pid()}-0"
+        self.ovf.mkdir()
         return d
 
     def test_clean_mode_strips_build_state_keeps_lane_warm(self) -> None:
@@ -76,7 +84,7 @@ class SweepRealGit(unittest.TestCase):
         self.assertFalse((self.lane / "stray.txt").exists())  # untracked gone
         self.assertEqual(self._porcelain(self.lane), "")      # clean tree
         self.assertFalse((self.tmp / "checkout.pdca-integ-main").exists())  # integ removed
-        self.assertFalse((self.tmp / "checkout.pdca-wt-ovf-9").exists())    # orphan removed
+        self.assertFalse(self.ovf.exists())                                  # orphan removed
         self.assertEqual(self._porcelain(self.primary), "")   # primary never touched
         self.assertTrue((d / "brief.md").exists())            # bundles never touched
 
@@ -95,7 +103,7 @@ class SweepRealGit(unittest.TestCase):
         self.cfg.sweep_worktrees = "off"
         self.assertEqual(sweep.sweep(self.cfg, [d]), [])      # flow path: no-op
         self.assertTrue((self.lane / "stray.txt").exists())
-        self.assertTrue((self.tmp / "checkout.pdca-wt-ovf-9").exists())
+        self.assertTrue(self.ovf.exists())
         # …but an explicit CLI mode still reclaims under "off".
         self.assertTrue(sweep.sweep(self.cfg, [d], mode="clean"))
         self.assertFalse((self.lane / "stray.txt").exists())
@@ -107,7 +115,57 @@ class SweepRealGit(unittest.TestCase):
         self.assertTrue(any("would remove integration tree" in ln for ln in lines))
         self.assertTrue((self.lane / "stray.txt").exists())   # nothing touched
         self.assertTrue((self.tmp / "checkout.pdca-integ-main").exists())
-        self.assertTrue((self.tmp / "checkout.pdca-wt-ovf-9").exists())
+        self.assertTrue(self.ovf.exists())
+
+    def test_live_owner_overflow_tree_is_left_alone(self) -> None:
+        # #297 review: an overflow name embeds its creator pid; a LIVE pid may be
+        # another process's in-flight gate read — deleting its working directory
+        # mid-command would invalidate that gate. Only proven orphans are reclaimed.
+        d = self._seed_footprint()
+        holder = sp.Popen(["sleep", "30"])                    # a live owner process
+        self.addCleanup(holder.kill)
+        live = self.tmp / f"checkout.pdca-wt-ovf-{holder.pid}-0"
+        live.mkdir()
+        unparseable = self.tmp / "checkout.pdca-wt-ovf-occupied"
+        unparseable.mkdir()
+        lines = sweep.sweep(self.cfg, [d])
+        self.assertFalse(self.ovf.exists())                   # dead pid → reclaimed
+        self.assertTrue(live.exists())                        # live pid → left alone
+        self.assertTrue(unparseable.exists())                 # unprovable → left alone
+        self.assertTrue(any("owner process still alive" in ln for ln in lines))
+
+    def test_manual_sweep_discovers_sibling_convention_targets(self) -> None:
+        # #297 review: with no [publisher.checkouts] entries (the sibling-convention
+        # setup) and no bundles passed (the manual `pdca sweep`), targets are derived
+        # from the persisted issue_* bundles — the command must not report "nothing".
+        d = self._seed_footprint()
+        self.cfg.repo_checkouts = {}
+        self.cfg.root = self.tmp / "proj"                     # sibling: <root>/../checkout
+        self.cfg.root.mkdir()
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Repo + branch target:** org/checkout @ main\n",
+            encoding="utf-8")
+        lines = sweep.sweep(self.cfg)                         # no bundles argument
+        self.assertTrue(lines)
+        self.assertFalse((self.lane / "stray.txt").exists())  # lane found and cleaned
+        self.assertFalse((self.tmp / "checkout.pdca-integ-main").exists())
+
+    def test_unrelated_siblings_are_never_touched(self) -> None:
+        # #297 review: the lane glob matches EXACTLY <name>.pdca-wt / -l<slot>; a
+        # sibling like `<name>.pdca-wt-backup` is not ours, and an integ-named plain
+        # dir with no .git entry must never hit the rmtree fallback.
+        d = self._seed_footprint()
+        backup = self.tmp / "checkout.pdca-wt-backup"
+        backup.mkdir()
+        (backup / "precious.txt").write_text("keep me\n", encoding="utf-8")
+        fake_integ = self.tmp / "checkout.pdca-integ-fake"
+        fake_integ.mkdir()
+        (fake_integ / "precious.txt").write_text("keep me\n", encoding="utf-8")
+        lines = sweep.sweep(self.cfg, [d], mode="remove")
+        self.assertTrue((backup / "precious.txt").exists())   # never matched
+        self.assertTrue((fake_integ / "precious.txt").exists())  # matched, refused
+        self.assertTrue(any("not a harness worktree" in ln for ln in lines))
+        self.assertFalse(self.lane.exists())                  # the real lane still removed
 
     def test_second_sweep_is_a_quiet_noop_for_removed_trees(self) -> None:
         d = self._seed_footprint()

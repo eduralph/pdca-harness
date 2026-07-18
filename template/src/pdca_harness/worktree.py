@@ -327,10 +327,34 @@ def overflow_remove(primary: Path, ovf: Path) -> None:
 
 def sweep_overflow(primary: Path) -> None:
     """Reclaim crash-orphaned overflow trees for ``primary``: prune git's admin entries,
-    then rmtree any leftover ``*-ovf-*`` dirs. Best-effort; safe to call before a run."""
+    then rmtree any leftover ``*-ovf-*`` dirs. Best-effort; safe to call before a run.
+    NB: removes ALL overflow trees — a caller that may overlap other live processes
+    (the footprint sweep, #297) must use :func:`orphan_overflow_dirs` instead."""
     _git(primary, "worktree", "prune")
     for d in _overflow_dirs(primary):
         overflow_remove(primary, d)
+
+
+def orphan_overflow_dirs(primary: Path) -> list[Path]:
+    """Overflow trees whose creating process is provably gone (#297 review).
+
+    The overflow name embeds the creator's pid (``…-ovf-<pid>-<seq>``). A live pid —
+    including a process we lack permission to signal — means the tree may be mid-gate
+    in another process, and reclaiming it would invalidate that gate's results; only a
+    pid that positively no longer exists marks an orphan. An unparseable name proves
+    nothing, so it is skipped too (never delete what can't be classified)."""
+    out: list[Path] = []
+    for p in _overflow_dirs(primary):
+        pid_s = p.name.split(_OVF_SUFFIX, 1)[1].split("-", 1)[0]
+        if not pid_s.isdigit():
+            continue
+        try:
+            os.kill(int(pid_s), 0)
+        except ProcessLookupError:
+            out.append(p)  # provably dead → a crash leftover
+        except (PermissionError, OSError):
+            continue  # exists (another user's) / unknowable → treat as live
+    return out
 
 
 def _overflow_create(d: Path, primary: Path, base_ref: str) -> Path | None:

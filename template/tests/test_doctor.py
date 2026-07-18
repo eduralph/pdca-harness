@@ -96,19 +96,47 @@ class Doctor(unittest.TestCase):
         _rc, out = self._run(cfg)
         self.assertNotIn("free disk space", out)
 
+    @staticmethod
+    def _dead_pid() -> int:
+        """A pid that provably no longer exists (a reaped child) — the orphan case."""
+        import subprocess
+        p = subprocess.Popen(["true"])
+        p.wait()
+        return p.pid
+
     def test_orphaned_overflow_trees_warn(self) -> None:
-        # #297: overflow dirs outside a run are always crash leftovers — WARN with the
-        # reclaim hint. A plain lane worktree sibling stays an OK informational count.
+        # #297 (+review): only an overflow dir whose creator pid is provably gone is an
+        # orphan — WARN with the reclaim hint; a live-pid tree may be another process's
+        # in-flight gate read and must not be counted (or reclaimed).
         repo = self.tmp / "repo"
         (repo / ".git").mkdir(parents=True)
-        (self.tmp / "repo.pdca-wt-ovf-9").mkdir()
+        (self.tmp / f"repo.pdca-wt-ovf-{self._dead_pid()}-0").mkdir()
+        (self.tmp / f"repo.pdca-wt-ovf-{os.getpid()}-0").mkdir()   # live: this process
         cfg = _load(self.tmp,
                     "[doctor]\nmin_free_gb = 0\n"
                     f'[publisher.checkouts]\n"org/repo" = "{repo}"\n')
         _rc, out = self._run(cfg)
         self.assertIn("harness worktree footprint", out)
-        self.assertIn("orphaned overflow tree(s)", out)
+        self.assertIn("1 orphaned overflow tree(s)", out)
         self.assertIn("pdca sweep", out)
+
+    def test_footprint_counts_cover_sibling_convention_bundles(self) -> None:
+        # #297 review: with no [publisher.checkouts] entries, targets must still be
+        # derived from persisted bundles (the sibling convention, <root>/../checkout) —
+        # the counts were permanently "0 lane / 0 integration" in those default setups.
+        proj = self.tmp / "proj"
+        proj.mkdir()
+        repo = self.tmp / "checkout"
+        (repo / ".git").mkdir(parents=True)
+        (self.tmp / "checkout.pdca-wt").mkdir()
+        d = proj / "results" / "issue_7"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Repo + branch target:** org/checkout @ main\n",
+            encoding="utf-8")
+        cfg = _load(proj, "[doctor]\nmin_free_gb = 0\n")
+        _rc, out = self._run(cfg)
+        self.assertIn("1 lane / 0 integration worktree(s)", out)
 
     def test_per_lane_expands_over_driver_lanes(self) -> None:
         cfg = _load(self.tmp,
