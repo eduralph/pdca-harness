@@ -98,6 +98,7 @@ def publish(
     today: str | None = None,
     skip_if_no_target: bool = False,
     pending_id: bool = False,
+    texts_prevalidated: bool = False,
 ) -> int:
     """Contribute an accepted bundle's fix as a draft PR. Return a process code.
 
@@ -111,6 +112,13 @@ def publish(
     then **relaxed to a flag** instead of a hard block, and the bundle is recorded
     ``id_pending`` so the human adds the real id and re-gates T4 before marking the PR
     ready. The publisher leaf omits the trailer (no invented id) in this case.
+
+    ``texts_prevalidated`` (set by the flow, #295 review): the caller already ran
+    :func:`draft_texts` — drafting AND the T4 gate — over this bundle, so this call is
+    mechanics-only. Skipping the second T4 run matters beyond cost: a transient or
+    stateful T4 command that passed the pre-pass but failed here would recreate the
+    half-published wave the pre-pass exists to prevent. Direct ``pdca publish`` never
+    sets it, keeping the lazy draft+gate path self-contained.
     """
     d = cfg.bundle(issue_id)
     today = today or datetime.date.today().isoformat()
@@ -149,26 +157,37 @@ def publish(
         print(msg, file=sys.stderr)
         return 1
 
-    # Artifacts the T4 gate needs — write them with the publisher leaf if absent.
-    # (The flow already drafted+gated them in its #295 pre-pass; this lazy path keeps
-    # direct `pdca publish` self-contained, and is idempotent — only-if-missing.)
-    if not _ensure_texts(cfg, d):
-        return 1
-
-    # T4 contribution gate — the artifacts MUST pass before anything is pushed,
-    # UNLESS pending_id (--no-issue): then a T4 failure is relaxed to a flag, since the
-    # one thing legitimately missing is the not-yet-assigned tracker id. The bundle is
-    # recorded id_pending so the human adds the id and re-gates T4 before ready.
-    if not _t4_passes(cfg, d):
-        if pending_id:
-            print(f"publish: T4 contribution gate not satisfied on {COMMIT_MSG} / "
-                  f"{PR_BODY} — proceeding in --no-issue (pending-id) mode; the "
-                  "contribution is FLAGGED. Add the tracker id and re-run T4 before "
-                  "marking the PR ready.", file=sys.stderr)
-        else:
-            print(f"publish: T4 contribution gate FAILED on {COMMIT_MSG} / {PR_BODY} — "
-                  "fix them and retry", file=sys.stderr)
+    # Artifacts the T4 gate needs — write them with the publisher leaf if absent, then
+    # gate them. Skipped wholesale when the flow's pre-pass already drafted AND gated
+    # (texts_prevalidated, #295 review) — re-running a transient/stateful T4 here could
+    # fail mid-wave AFTER siblings pushed, recreating the half-published state the
+    # pre-pass exists to prevent. The lazy path keeps direct `pdca publish`
+    # self-contained, and is idempotent — only-if-missing.
+    if not texts_prevalidated:
+        if not _ensure_texts(cfg, d):
             return 1
+
+        # T4 contribution gate — the artifacts MUST pass before anything is pushed,
+        # UNLESS pending_id (--no-issue): then a T4 failure is relaxed to a flag, since
+        # the one thing legitimately missing is the not-yet-assigned tracker id. The
+        # bundle is recorded id_pending so the human adds the id and re-gates T4 before
+        # ready.
+        if not _t4_passes(cfg, d):
+            if pending_id:
+                print(f"publish: T4 contribution gate not satisfied on {COMMIT_MSG} / "
+                      f"{PR_BODY} — proceeding in --no-issue (pending-id) mode; the "
+                      "contribution is FLAGGED. Add the tracker id and re-run T4 before "
+                      "marking the PR ready.", file=sys.stderr)
+            else:
+                print(f"publish: T4 contribution gate FAILED on {COMMIT_MSG} / {PR_BODY} — "
+                      "fix them and retry", file=sys.stderr)
+                return 1
+    elif not ((d / COMMIT_MSG).is_file() and (d / PR_BODY).is_file()):
+        # Defensive: prevalidated promises the texts exist; a vanished artifact means
+        # the promise no longer holds — refuse rather than push without a commit message.
+        print(f"publish: {COMMIT_MSG} / {PR_BODY} missing despite prevalidation — "
+              "aborting", file=sys.stderr)
+        return 1
 
     # Stack mode (issue #54): the brief names an existing PR's head branch — contribute a
     # commit onto it instead of a new PR. The shared spine above (guard, target, artifacts,

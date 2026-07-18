@@ -726,6 +726,30 @@ class DraftTexts(unittest.TestCase):
             self.assertFalse(publish.draft_texts(self.cfg, d))
         self.assertIn("T4 contribution gate FAILED", err.getvalue())
 
+    def test_prevalidated_mechanics_never_rerun_t4(self) -> None:
+        # #295 review: a transient/stateful T4 that passed the pre-pass but failed the
+        # in-publish re-run would recreate the half-published wave. With
+        # texts_prevalidated the mechanics phase runs NO second T4; the direct path
+        # (no flag) still gates.
+        self.cfg.gates_checks = [{"id": "T4-x", "tier": "T4", "cmd": "exit 1", "scope": "bundle"}]
+        d = _bundle(self.cfg, "D6", brief_body=_FIX_BRIEF, accepted=True)
+        (d / "commit-msg.txt").write_text("feat: x\n\nFixes #6\n", encoding="utf-8")
+        (d / "pr-description.md").write_text("body\n", encoding="utf-8")
+        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            self.assertEqual(publish.publish(self.cfg, "D6", dry_run=True), 1)  # gated
+            self.assertEqual(publish.publish(self.cfg, "D6", dry_run=True,
+                                             texts_prevalidated=True), 0)       # mechanics-only
+
+    def test_prevalidated_still_refuses_vanished_texts(self) -> None:
+        # Defensive: prevalidation promises the texts exist; if one vanished between the
+        # pre-pass and mechanics, refuse rather than push without a commit message.
+        _bundle(self.cfg, "D7", brief_body=_FIX_BRIEF, accepted=True)
+        with mock.patch.object(publish.leaves, "run_publish") as run_pub, \
+                redirect_stderr(io.StringIO()):
+            rc = publish.publish(self.cfg, "D7", dry_run=True, texts_prevalidated=True)
+        self.assertEqual(rc, 1)
+        run_pub.assert_not_called()                        # mechanics-only: no drafting
+
     def test_wave_drafts_all_texts_before_any_mechanics(self) -> None:
         # Two-bundle wave: BOTH pre-pass drafts precede the FIRST publish call, and a
         # failed draft blocks only its own bundle — the sibling still publishes, loudly.
@@ -739,8 +763,11 @@ class DraftTexts(unittest.TestCase):
             calls.append(("draft", d.name))
             return d.name != "issue_O1"                 # O1's texts fail the pre-pass
 
-        def fake_publish(_cfg, issue_id, **_kw):
+        def fake_publish(_cfg, issue_id, **kw):
             calls.append(("publish", f"issue_{issue_id}"))
+            # The wave's mechanics phase must declare the pre-pass validation (#295
+            # review) so publish never re-runs T4 mid-wave.
+            self.assertTrue(kw.get("texts_prevalidated"))
             return 0
 
         err = io.StringIO()
