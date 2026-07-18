@@ -55,7 +55,7 @@ def _ensure_texts(cfg: Config, d: Path) -> bool:
     return True
 
 
-def draft_texts(cfg: Config, d: Path) -> bool:
+def draft_texts(cfg: Config, d: Path, *, run_t4: bool = True) -> bool:
     """Pre-pass (issue #295): make bundle ``d`` text-ready for publishing — NO git/gh.
 
     Drafts the two contribution artifacts (``commit-msg.txt`` / ``pr-description.md``)
@@ -64,7 +64,12 @@ def draft_texts(cfg: Config, d: Path) -> bool:
     starts — a mid-wave drafting failure then blocks only its bundle, never leaves a
     wave half-pushed.
 
-    Returns True when mechanics may proceed — including the cases where there is
+    ``run_t4=False`` is the flow's DRAFT-ONLY phase (#295 review round 2): publisher
+    leaves run from the shared project root, so a later bundle's leaf can touch an
+    earlier bundle's artifacts — validation is therefore a separate pass the flow runs
+    only after EVERY leaf has finished, so T4 always judges the final contents.
+
+    Returns True when the phase succeeded — including the cases where there is
     legitimately nothing to draft (not COMPLETE, a close/no-fix empty patch, no usable
     target): :func:`publish`'s own guards re-decide and report those with their richer
     messages. False = drafting or T4 failed: do not enter the mechanics loop. (The
@@ -81,7 +86,7 @@ def draft_texts(cfg: Config, d: Path) -> bool:
         return True                                  # non-contributing cycle
     if not _ensure_texts(cfg, d):
         return False
-    if not _t4_passes(cfg, d):
+    if run_t4 and not _t4_passes(cfg, d):
         print(f"publish: T4 contribution gate FAILED on {COMMIT_MSG} / {PR_BODY} for "
               f"{d.name} — fix them and retry", file=sys.stderr)
         return False
