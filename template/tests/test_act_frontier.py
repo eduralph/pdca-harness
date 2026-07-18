@@ -74,7 +74,7 @@ class MarkerFormat(unittest.TestCase):
         self.assertEqual(data["reviewed"], ["issue_10", "issue_20"])
         self.assertEqual(data["count"], 2)
         self.assertEqual(data["last_review_date"], "2026-07-18")
-        self.assertFalse(self.marker.with_name(self.marker.name + ".tmp").exists())
+        self.assertEqual(list(self.cfg.process_dir.glob(".act-reviewed.tmp*")), [])
         self.assertEqual(act.cycles_since_review(self.cfg), 0)
 
     def test_legacy_bare_int_marker_keeps_old_arithmetic(self) -> None:
@@ -90,7 +90,10 @@ class MarkerFormat(unittest.TestCase):
     def test_garbage_marker_means_nothing_reviewed_never_a_crash(self) -> None:
         _freeze(self.cfg, "10")
         self.cfg.process_dir.mkdir(parents=True, exist_ok=True)
-        for garbage in ("{not json", '"a string"', "true", '{"reviewed": "nope"}'):
+        # `{"count": true}` is the #299-review case: bool is an int subclass, and
+        # accepting it would silently treat one frozen bundle as reviewed.
+        for garbage in ("{not json", '"a string"', "true", '{"reviewed": "nope"}',
+                        '{"count": true}'):
             self.marker.write_text(garbage, encoding="utf-8")
             self.assertEqual(act.cycles_since_review(self.cfg), 1, msg=garbage)
             self.assertEqual(len(act.unreviewed_bundles(self.cfg)), 1, msg=garbage)
@@ -106,6 +109,24 @@ class MarkerFormat(unittest.TestCase):
         act.mark_reviewed(self.cfg, reviewed=[], date="2026-07-03")
         data = json.loads(self.marker.read_text(encoding="utf-8"))
         self.assertEqual(data["reviewed"], ["issue_20"])    # …can't wedge the counts
+
+    def test_concurrent_marks_union_not_overwrite(self) -> None:
+        # #299 review: two overlapping Act sessions must serialize on the marker —
+        # the read-union-write is flock-guarded and temp files are per-writer, so
+        # neither invocation's reviewed set is lost and no stray tmp survives.
+        a = _freeze(self.cfg, "10")
+        b = _freeze(self.cfg, "20")
+        import threading
+        ts = [threading.Thread(target=act.mark_reviewed, args=(self.cfg,),
+                               kwargs={"reviewed": [d], "date": "2026-07-18"})
+              for d in (a, b)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        data = json.loads(self.marker.read_text(encoding="utf-8"))
+        self.assertEqual(data["reviewed"], ["issue_10", "issue_20"])
+        self.assertEqual(list(self.cfg.process_dir.glob(".act-reviewed.tmp*")), [])
 
     def test_out_of_order_freeze_surfaces_as_unreviewed(self) -> None:
         # The observed coverage-gap case: issue_20 froze AROUND a review that covered
@@ -187,7 +208,10 @@ class CliScope(unittest.TestCase):
         rc, out, _err = self._main(["act", "log", "--date", "2026-07-19"])
         self.assertEqual(rc, 0)
         self.assertIn("2× tighten the repro gate", out)     # counted across the frontier
-        ledger = act.load_ledger(self.cfg)
+        self.assertEqual(act.load_ledger(self.cfg), [])     # preview registers nothing (#298 review)
+        rc, _out, _err = self._main(["act", "log", "--date", "2026-07-19", "--append"])
+        self.assertEqual(rc, 0)
+        ledger = act.load_ledger(self.cfg)                  # recording registers, over ALL history
         self.assertTrue(any("tighten the repro gate" in e.get("raw", "") for e in ledger))
 
 

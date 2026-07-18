@@ -14,6 +14,7 @@ contribution's disposition, run the validator/suite, or author the next brief.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -96,7 +97,11 @@ def _load_marker(cfg: Config) -> dict:
         if isinstance(reviewed, list) and all(isinstance(n, str) for n in reviewed):
             return {"count": len(reviewed), "reviewed": set(reviewed)}
         count = data.get("count")
-        return {"count": max(0, count) if isinstance(count, int) else 0, "reviewed": None}
+        # bool is an int subclass here too (#299 review): a malformed `{"count": true}`
+        # must read as "nothing reviewed", not as one covered bundle.
+        if isinstance(count, int) and not isinstance(count, bool):
+            return {"count": max(0, count), "reviewed": None}
+        return {"count": 0, "reviewed": None}
     return {"count": 0, "reviewed": None}
 
 
@@ -125,19 +130,29 @@ def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "
 
     ``reviewed=None`` ⇒ every currently frozen bundle (what a full auto-Act covers).
     The union is intersected with the current frozen set so a deleted bundle can't
-    wedge the counts. Crash-atomic: written to a temp sibling then ``os.replace``.
+    wedge the counts. Concurrency-safe (#299 review): the whole read-union-write runs
+    under an exclusive ``flock`` on a lock sidecar — two overlapping Act sessions
+    serialize instead of one overwriting the other's reviewed set — and the temp file
+    is per-writer (pid-suffixed) so one writer's ``os.replace`` can never consume
+    another's. Each write stays crash-atomic (temp sibling + ``os.replace``).
     """
-    frozen = frozen_bundles(cfg)
-    frozen_names = {d.name for d in frozen}
-    prior = _reviewed_names(cfg, frozen)
-    new = {d.name for d in (reviewed if reviewed is not None else frozen)}
-    covered = sorted((prior | new) & frozen_names)
-    payload = {"count": len(covered), "reviewed": covered, "last_review_date": date}
     cfg.process_dir.mkdir(parents=True, exist_ok=True)
     marker = cfg.process_dir / _CADENCE_MARKER
-    tmp = marker.with_name(marker.name + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, marker)
+    lock = marker.with_name(marker.name + ".lock")
+    with lock.open("w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)  # blocking: the critical section is tiny
+        try:
+            frozen = frozen_bundles(cfg)
+            frozen_names = {d.name for d in frozen}
+            prior = _reviewed_names(cfg, frozen)
+            new = {d.name for d in (reviewed if reviewed is not None else frozen)}
+            covered = sorted((prior | new) & frozen_names)
+            payload = {"count": len(covered), "reviewed": covered, "last_review_date": date}
+            tmp = marker.with_name(f"{marker.name}.tmp.{os.getpid()}")
+            tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            os.replace(tmp, marker)
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def cycles_since_review(cfg: Config) -> int:
