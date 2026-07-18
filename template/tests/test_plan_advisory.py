@@ -174,7 +174,8 @@ class BatchAndAssemble(unittest.TestCase):
             self.assertTrue((d / "plan-advisory-benefit.json").exists(), iid)
         self.assertEqual(list(pre.glob("plan-advisory-*")), [])  # pre-existing untouched
 
-    def _summary_bundle(self, cfg: Config, benefit: dict | str) -> Path:
+    def _summary_bundle(self, cfg: Config, benefit: dict | str,
+                        findings: list[str] = ()) -> Path:
         d = _brief(cfg, "S1")
         (d / "patch.diff").write_text("diff --git a/x b/x\n", encoding="utf-8")
         (d / "check-gates.json").write_text(json.dumps({"overall": "pass", "rows": []}),
@@ -182,31 +183,69 @@ class BatchAndAssemble(unittest.TestCase):
         (d / "check-review.md").write_text("looks fine\n", encoding="utf-8")
         text = benefit if isinstance(benefit, str) else json.dumps(benefit)
         (d / "plan-advisory-benefit.json").write_text(text, encoding="utf-8")
+        if findings:
+            (d / "plan-advisory-plan-reviewer.md").write_text(
+                "# Plan advisory — plan-reviewer\n\n"
+                + "".join(f"- NEEDS-HUMAN — {f}\n" for f in findings), encoding="utf-8")
         return d
 
-    def test_unrevised_findings_surface_once_in_section6_and_in_section10(self) -> None:
+    def test_findings_fold_into_section6_individually(self) -> None:
+        # #301 review: every plan-advisory NEEDS-HUMAN finding folds into §6 like the
+        # Check advisories', and the benefit line rides §10 — telemetry, never a gate.
         cfg = _cfg(self.tmp)
-        d = self._summary_bundle(cfg, {"findings": 2, "revised": False})
+        d = self._summary_bundle(cfg, {"findings": 2, "revised": False},
+                                 findings=["success criterion is unverifiable",
+                                           "hidden scope: touches the exporter too"])
         assemble.assemble_summary(d, cfg)
         summary = (d / "SUMMARY.md").read_text(encoding="utf-8")
-        self.assertIn("Plan advisory raised 2 finding(s) and the brief was NOT revised",
-                      summary)
+        self.assertIn("- [ ] success criterion is unverifiable", summary)
+        self.assertIn("- [ ] hidden scope: touches the exporter too", summary)
         self.assertIn("- Plan advisory: 2 finding(s); brief revised: no", summary)
 
-    def test_revised_findings_report_only_in_section10(self) -> None:
+    def test_findings_stay_visible_even_after_a_revision(self) -> None:
+        # #301 review: a bundle-wide "brief revised" bit cannot say WHICH findings the
+        # revision addressed — it must never suppress them. Each stays a §6 item the
+        # human dispositions at sign-off; §10 still records the benefit telemetry.
         cfg = _cfg(self.tmp)
-        d = self._summary_bundle(cfg, {"findings": 2, "revised": True})
+        d = self._summary_bundle(cfg, {"findings": 1, "revised": True},
+                                 findings=["root cause framing contradicts the thread"])
         assemble.assemble_summary(d, cfg)
         summary = (d / "SUMMARY.md").read_text(encoding="utf-8")
-        self.assertNotIn("NOT revised", summary)
-        self.assertIn("- Plan advisory: 2 finding(s); brief revised: yes", summary)
+        self.assertIn("- [ ] root cause framing contradicts the thread", summary)
+        self.assertIn("- Plan advisory: 1 finding(s); brief revised: yes", summary)
+
+    def test_decorrelation_note_surfaces_in_section6(self) -> None:
+        # #301 review: the same-vendor fallback note must reach §6 — no other summary
+        # path reads plan-advisory-*.md, so without the fold the independence lapse
+        # could be accepted without human confirmation.
+        cfg = _cfg(self.tmp, plan_advisory=[{"id": "claude-lens", "mode": "stub",
+                                             "family": "claude"}],
+                   selection={"mode": "vendor-complement"},
+                   planner=LeafConfig(mode="stub", family="claude", interactive=True))
+        d = self._summary_bundle(cfg, {"findings": 1, "revised": False})
+        leaves.run_plan_advisory(d, cfg)                  # same-family pool → note
+        assemble.assemble_summary(d, cfg)
+        summary = (d / "SUMMARY.md").read_text(encoding="utf-8")
+        self.assertIn("could not be decorrelated from the planner", summary)
 
     def test_malformed_benefit_record_never_crashes_assemble(self) -> None:
         cfg = _cfg(self.tmp)
         d = self._summary_bundle(cfg, "{not json")
         assemble.assemble_summary(d, cfg)                 # no raise
-        self.assertNotIn("Plan advisory",
+        self.assertNotIn("Plan advisory:",
                          (d / "SUMMARY.md").read_text(encoding="utf-8"))
+
+    def test_doctor_enumerates_plan_advisory_command_leaves(self) -> None:
+        # #301 review: a command-mode plan advisory is a CLI a real run spawns —
+        # doctor's command-leaf enumeration (and thus --strict + the sandbox-dep
+        # gate) must include it.
+        from pdca_harness import doctor
+        cfg = _cfg(self.tmp, plan_advisory=[{"id": "pr", "mode": "command",
+                                             "family": "codex",
+                                             "argv": ["no-such-plan-cli-xyz"]}])
+        leaves_map = doctor._command_leaves(cfg)
+        self.assertIn("plan-advisory:pr", leaves_map)
+        self.assertEqual(leaves_map["plan-advisory:pr"].argv, ["no-such-plan-cli-xyz"])
 
 
 if __name__ == "__main__":

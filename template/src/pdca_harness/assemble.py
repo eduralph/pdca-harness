@@ -172,16 +172,17 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
                   for t in _declared_external_deps(build_notes.read_text(encoding="utf-8"))]
     items += [NeedsHumanItem(t, HUMAN)
               for t in _unregistered_dependency_items(d / "brief.md", cfg)]
-    # Plan-advisory benefit record (#301): findings the planner did NOT revise for had
-    # their revision chance and were left standing — that must stay visible (fail-visible)
-    # as ONE item, not a re-listing of every finding (they already got their pass). HUMAN
-    # kind: whether the un-revised brief is acceptable is a scope/architecture call, so
+    # Plan-advisory findings (#301 + review): folded into §6 individually, exactly like
+    # the Check advisories — including the decorrelation note and any NOT-COMPLETED
+    # placeholder, which no other summary path reads. Each finding stays visible until
+    # the human dispositions it at sign-off: a bundle-wide "was the brief revised?" bit
+    # cannot say WHICH findings the revision addressed, so it must never suppress them
+    # (one cosmetic edit would have hidden every remaining objection from C6). All
+    # HUMAN-kind by construction (the plan prompt emits no [impl] markers), so
     # auto-iterate correctly declines (#264).
-    benefit = _plan_advisory_benefit(d)
-    if benefit and benefit.get("findings", 0) > 0 and not benefit.get("revised"):
-        items.append(NeedsHumanItem(
-            f"Plan advisory raised {benefit['findings']} finding(s) and the brief was NOT "
-            "revised — review plan-advisory-*.md before accepting.", HUMAN))
+    for ptext in [p.read_text(encoding="utf-8")
+                  for p in sorted(d.glob("plan-advisory-*.md"))]:
+        items += _items_from_artifact(ptext)
     return items
 
 

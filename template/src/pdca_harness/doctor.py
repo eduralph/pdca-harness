@@ -104,7 +104,7 @@ def _sandbox_expected(cfg: Config) -> bool:
         return False
     return any(cfg.profile(leaf).settings_scope_argv
                for role, leaf in _command_leaves(cfg).items()
-               if role == "reviewer" or role.startswith("advisory:"))
+               if role == "reviewer" or role.startswith(("advisory:", "plan-advisory:")))
 
 
 def _auth_probe(family: str) -> tuple[str, str] | None:
@@ -140,8 +140,11 @@ def _command_leaves(cfg: Config) -> dict[str, LeafConfig]:
     out = {role: leaf for role, leaf in named.items()
            if leaf.mode == "command" and leaf.argv}
     # (kind, specs, base) — base is the leaf an omitted field inherits from (None ⇒
-    # no inheritance: advisory's own mode/argv/family).
+    # no inheritance: advisory's own mode/argv/family). Plan advisories (#301) are
+    # command leaves a real run spawns too — omitting them let --strict pass while the
+    # Plan beat later died on the missing CLI (#301 review).
     for kind, specs, base in (("advisory", cfg.advisory_leaves, None),
+                              ("plan-advisory", getattr(cfg, "plan_advisory_leaves", []), None),
                               ("variant", cfg.builder_variants, cfg.builder),
                               ("escalation", cfg.builder_escalation, cfg.builder)):
         for i, spec in enumerate(specs):
