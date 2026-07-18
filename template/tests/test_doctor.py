@@ -80,6 +80,36 @@ class Doctor(unittest.TestCase):
         self.assertIn("WARN", out)
         self.assertEqual(self._run(cfg, strict=True)[0], 1)  # --strict escalates the WARN
 
+    def test_low_free_space_warns_and_strict_escalates(self) -> None:
+        # #297: a 1 PiB threshold is always unmet, so the workspace row WARNs (preflight,
+        # not required-fatal) and points at `pdca sweep`; --strict escalates as usual.
+        cfg = _load(self.tmp, "[doctor]\nmin_free_gb = 1048576.0\n")
+        rc, out = self._run(cfg)
+        self.assertEqual(rc, 0)
+        self.assertIn("== workspace ==", out)
+        self.assertIn("free disk space", out)
+        self.assertIn("pdca sweep", out)
+        self.assertEqual(self._run(cfg, strict=True)[0], 1)
+
+    def test_free_space_row_disabled_at_zero(self) -> None:
+        cfg = _load(self.tmp, "[doctor]\nmin_free_gb = 0\n")
+        _rc, out = self._run(cfg)
+        self.assertNotIn("free disk space", out)
+
+    def test_orphaned_overflow_trees_warn(self) -> None:
+        # #297: overflow dirs outside a run are always crash leftovers — WARN with the
+        # reclaim hint. A plain lane worktree sibling stays an OK informational count.
+        repo = self.tmp / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (self.tmp / "repo.pdca-wt-ovf-9").mkdir()
+        cfg = _load(self.tmp,
+                    "[doctor]\nmin_free_gb = 0\n"
+                    f'[publisher.checkouts]\n"org/repo" = "{repo}"\n')
+        _rc, out = self._run(cfg)
+        self.assertIn("harness worktree footprint", out)
+        self.assertIn("orphaned overflow tree(s)", out)
+        self.assertIn("pdca sweep", out)
+
     def test_per_lane_expands_over_driver_lanes(self) -> None:
         cfg = _load(self.tmp,
                     '[driver]\nlanes = 3\n'

@@ -19,7 +19,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import (act, brief, doctor, drift, driver, flow, gates, manual_test, merged, publish,
-               queue, registry, revalidate, revert, signoff, state, waves, worktree)
+               queue, registry, revalidate, revert, signoff, state, sweep, waves, worktree)
 from .config import Config
 
 
@@ -244,6 +244,18 @@ def main(argv: list[str] | None = None) -> int:
     p_actres.add_argument("--location", default="", help="where the delta landed (path:line / rule)")
     p_actres.add_argument("--date", help="applied date (ISO; default today)")
 
+    # Footprint reclaim (issue #297): the on-demand counterpart of the flow's end-of-run
+    # sweep. Distinct from tracker cleanup — this touches only harness-named sibling
+    # worktrees of target checkouts, never bundles.
+    p_sweep = sub.add_parser("sweep",
+                             help="reclaim harness worktree/build footprint (lane, "
+                                  "integration, overflow trees; #297)")
+    p_sweep.add_argument("--remove", action="store_true",
+                         help="remove lane worktrees entirely (default: clean their build "
+                              "state, keep the checkouts warm)")
+    p_sweep.add_argument("--dry-run", action="store_true",
+                         help="report what would be reclaimed without touching anything")
+
     p_signoff = sub.add_parser("signoff", help="record the human Check sign-off (§9)")
     p_signoff.add_argument("issue_id")
     g = p_signoff.add_mutually_exclusive_group(required=True)
@@ -342,6 +354,15 @@ def main(argv: list[str] | None = None) -> int:
                                open_pr=not args.no_pr, by=args.by, pending_id=args.no_issue)
     if args.cmd == "doctor":
         return doctor.run(cfg, strict=args.strict)
+    if args.cmd == "sweep":
+        # Explicit mode so the manual command works even under sweep_worktrees = "off".
+        lines = sweep.sweep(cfg, mode="remove" if args.remove else "clean",
+                            dry_run=args.dry_run)
+        for line in lines:
+            print(line)
+        if not lines:
+            print("sweep: nothing to reclaim (no harness worktrees found)")
+        return 0
     if args.cmd == "revert":
         return revert.revert(cfg, args.issue_id, dry_run=args.dry_run, by=args.by)
     return 2

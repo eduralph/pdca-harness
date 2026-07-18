@@ -258,6 +258,19 @@ class Config:
     # builds on it, so a combination that is red though each fix was green alone STOPs the
     # run. Off by default (needs the project's repo-scoped gates). [driver].regate_between_waves.
     regate_between_waves: bool = False
+    # Footprint sweep (issue #297): what the flow does with the harness's sibling
+    # worktrees once a run's waves complete (the publish/freeze boundary). "clean"
+    # (default) strips lane worktrees of build state but keeps the checkout warm, and
+    # removes integration/overflow trees outright; "remove" removes lane worktrees too;
+    # "off" never sweeps automatically (``pdca sweep`` still works). Left unbounded, the
+    # footprint (dominated by per-lane build dirs) has exhausted disk quotas and
+    # false-redded gating gates mid-run. ``[driver].sweep_worktrees``.
+    sweep_worktrees: str = "clean"
+    # Free-space preflight threshold in GiB for `pdca doctor`'s workspace row (issue
+    # #297): WARN when the filesystem under the project root has less free space, so
+    # quota exhaustion is a preflight warning instead of a mid-gate `os error 122`.
+    # 0 disables the row. ``[doctor].min_free_gb``.
+    doctor_min_free_gb: float = 10.0
     # Act cadence (issue #109): Act is a cross-cycle beat that only yields a real delta
     # once enough cycles have frozen to show a pattern, so ``flow`` auto-runs it only when
     # this many cycles have frozen SINCE the last Act review (counted across flow
@@ -466,6 +479,17 @@ class Config:
         merge_method = driver_cfg.get("merge_method", "merge")  # merge | squash | rebase
         regate_between_waves = bool(driver_cfg.get("regate_between_waves", False))
         act_cadence = max(1, int(driver_cfg.get("act_cadence", 5)))  # issue #109
+        # Footprint sweep mode (issue #297). An unknown value falls back to "clean" with a
+        # note — the fail-safe direction is "still sweeps", never a silently-growing quota.
+        sweep_worktrees = str(driver_cfg.get("sweep_worktrees", "clean")).strip().lower()
+        if sweep_worktrees not in ("clean", "remove", "off"):
+            print(f"config: unknown [driver].sweep_worktrees '{sweep_worktrees}' — "
+                  "expected clean | remove | off; using 'clean'", file=sys.stderr)
+            sweep_worktrees = "clean"
+        try:  # free-space WARN threshold (issue #297); 0 disables the doctor row
+            doctor_min_free_gb = max(0.0, float(data.get("doctor", {}).get("min_free_gb", 10.0)))
+        except (TypeError, ValueError):
+            doctor_min_free_gb = 10.0
 
         # Close-disposition classes (issue #60): a configured list retunes the default
         # for an instance's tracker vocabulary; absent ⇒ the built-in default.
@@ -522,6 +546,8 @@ class Config:
             merge_method=merge_method,
             regate_between_waves=regate_between_waves,
             act_cadence=act_cadence,
+            sweep_worktrees=sweep_worktrees,
+            doctor_min_free_gb=doctor_min_free_gb,
             close_dispositions=close_dispositions,
             families={k.strip().lower(): dict(v)
                       for k, v in data.get("families", {}).items()},

@@ -67,12 +67,17 @@ def _git(repo: Path, *args: str) -> int:
                           capture_output=True, text=True).returncode
 
 
+# The harness-owned sibling-dir infix for integration worktrees; single-sourced so the
+# footprint sweeper (issue #297) globs exactly what this module creates.
+INTEG_INFIX = ".pdca-integ-"
+
+
 def _integ_worktree(primary: Path, base: str) -> Path:
     """The dedicated worktree a target's integration branch is assembled in — a sibling of
     the primary checkout, keyed by ``base`` (injective, like the branch) so two bases on the
     same repo don't share one worktree (#187), reused (reset) across folds, never the Do/Check
     lane worktrees."""
-    return primary.parent / (primary.name + ".pdca-integ-" + _flatten_base(base))
+    return primary.parent / (primary.name + INTEG_INFIX + _flatten_base(base))
 
 
 def _targeted(patched: list[Path]) -> list[tuple[Path, str, str]]:

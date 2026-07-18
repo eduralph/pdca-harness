@@ -119,6 +119,18 @@ regate_between_waves = false
 # skips Act with a hint; `pdca act log` runs it on demand and `--no-act` always skips.
 # Set to 1 to run Act after every completed flow (the prior behaviour).
 act_cadence = 5
+# Footprint sweep (issue #297). What `pdca flow` does with the harness's sibling
+# worktrees once a run's waves complete (the publish/freeze boundary). Left unbounded,
+# stale lane/integration/overflow trees and their build dirs (target/, node_modules, …)
+# have accumulated >200 GB and false-redded GATING gates with 'Disk quota exceeded'
+# mid-`cargo test` — an environment fault misattributed to the patch.
+#   "clean"  (default) — strip lane worktrees of build state (`git clean -fdxq` +
+#            `reset --hard`; the bulk of the footprint) but keep the checkouts warm;
+#            remove integration + overflow trees outright (folds rebuild from the base
+#            every call, so their reuse value is nil).
+#   "remove" — remove lane worktrees too (Do / `pdca try` recreate them on demand).
+#   "off"    — never sweep automatically; `pdca sweep` still reclaims on demand.
+sweep_worktrees = "clean"
 # Close-disposition fast path (issue #60). A bundle whose brief's `Disposition hint`
 # matches one of these close / no-fix classes skips the builder + reviewer model leaves
 # (the engine's only token spend) and routes straight to sign-off, where the human
@@ -531,6 +543,12 @@ argv = []
 # Doctor rows (`pdca doctor`) — optional. The doctor derives its main checks from
 # this file (every command leaf's CLI + auth, gh, bundle root, notes_cmd); declare
 # INSTANCE-specific prerequisites here as data, the same pattern as [[gates.checks]].
+#
+# The built-in workspace section also WARNs when free disk space under the project root
+# drops below [doctor].min_free_gb GiB (issue #297 — quota exhaustion mid-gate produces
+# an arbitrary failing test name, misattributed to the patch). 0 disables the row.
+# [doctor]
+# min_free_gb = 10.0
 # Each cmd runs from the project root; exit 0 = OK. Fields:
 #   group     optional section header the row prints under (e.g. "engine")
 #   level     status when the cmd FAILS — "WARN" for optional, default "MISSING"

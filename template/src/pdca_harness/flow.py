@@ -25,7 +25,7 @@ import threading
 from pathlib import Path
 
 from . import (act, assemble, autoiterate, brief, driver, gates, integrate, lane, leaves,
-               merge, merged, preflight, publish, queue, signoff, state, waves)
+               merge, merged, preflight, publish, queue, signoff, state, sweep, waves)
 from .config import Config
 
 
@@ -270,6 +270,7 @@ def flow(
         if rc:
             print(f"flow: issue_{issue_id} is COMPLETE but publish did not complete "
                   f"(rc {rc}) — NOT published; run `pdca publish {issue_id}`.", file=sys.stderr)
+    _sweep_quietly(cfg, [d])  # publish/freeze boundary — reclaim footprint (#297)
     if do_act:
         _maybe_run_act(cfg, today, any_complete=(final == state.COMPLETE))
     return final
@@ -394,6 +395,25 @@ def _run_beat_round_pooled(
     for t in threads:
         t.join()
     return progressed[0]
+
+
+def _sweep_quietly(cfg: Config, bundles: list[Path]) -> None:
+    """Reclaim the harness's worktree/build footprint at the end of a run (issue #297).
+
+    Runs only after every lane thread has joined (the callers sit past the drive loops),
+    so it never races a live Do. Best-effort by contract: a sweep failure must never
+    fail a run that already produced its results — one stderr summary, never a raise.
+    """
+    try:
+        lines = sweep.sweep(cfg, bundles)
+        if lines:
+            print(f"flow: footprint sweep — {len(lines)} action(s) "
+                  f"([driver].sweep_worktrees = {cfg.sweep_worktrees}):", file=sys.stderr)
+            for line in lines:
+                print(f"  {line}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 — teardown must never fail the run
+        print(f"flow: footprint sweep failed ({type(exc).__name__}: {exc}); "
+              "run `pdca sweep` manually", file=sys.stderr)
 
 
 def _publish_bundle(cfg: Config, d: Path, *, by: str, today: str) -> None:
@@ -677,6 +697,7 @@ def _drive_and_act(
                               f"not run).", file=sys.stderr)
                         break
 
+    _sweep_quietly(cfg, bundles)  # publish/freeze boundary — reclaim footprint (#297)
     results = {d.name.replace("issue_", ""): state.state(d) for d in bundles}
     if do_act:
         _maybe_run_act(cfg, today,

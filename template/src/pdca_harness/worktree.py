@@ -69,11 +69,16 @@ def _target(d: Path, cfg: Config) -> tuple[Path, str] | None:
     return primary, base_ref
 
 
+# The harness-owned sibling-dir suffix for lane worktrees; single-sourced so the
+# footprint sweeper (issue #297) globs exactly what this module creates.
+WT_SUFFIX = ".pdca-wt"
+
+
 def _wt_dir(primary: Path) -> Path:
     """The worktree directory for the current lane slot — a sibling of the primary
     checkout (``<name>.pdca-wt`` / ``<name>.pdca-wt-l<lane>`` under concurrency)."""
     slot = lane.current()
-    suffix = ".pdca-wt" + (f"-l{slot}" if slot is not None else "")
+    suffix = WT_SUFFIX + (f"-l{slot}" if slot is not None else "")
     return primary.parent / (primary.name + suffix)
 
 

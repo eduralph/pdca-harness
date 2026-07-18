@@ -65,6 +65,24 @@ def _have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
+def _footprint_counts(cfg: Config) -> tuple[int, int, int]:
+    """(lane, integration, overflow) sibling-worktree counts across the configured target
+    checkouts — a cheap glob-count (issue #297), never a size walk."""
+    from . import integrate, publish, worktree  # lazy: doctor stays import-light
+    lanes = integs = ovfs = 0
+    for spec in cfg.repo_checkouts:
+        primary = publish._checkout_path(cfg, spec)
+        if not (primary / ".git").exists():
+            continue
+        sibs = [p for p in primary.parent.glob(primary.name + worktree.WT_SUFFIX + "*")
+                if p.is_dir()]
+        ovfs += sum(1 for p in sibs if worktree._OVF_SUFFIX in p.name)
+        lanes += sum(1 for p in sibs if worktree._OVF_SUFFIX not in p.name)
+        integs += sum(1 for p in primary.parent.glob(
+            primary.name + integrate.INTEG_INFIX + "*") if p.is_dir())
+    return lanes, integs, ovfs
+
+
 # What Claude Code's Linux sandbox needs on PATH before it will actually engage. Missing any
 # of these, it does not fail — it disables the sandbox and runs unconfined (#289).
 # binary on PATH -> (what it is, the PACKAGE that provides it). The two differ for bubblewrap:
@@ -291,6 +309,30 @@ def run(cfg: Config, *, strict: bool = False) -> int:
                   f"sudo apt install {package} — without it the leaf sandbox silently does NOT "
                   "engage and the bounded exemption does not hold",
                   required=True)
+
+    print()
+    print("== workspace ==")
+    # Footprint preflight (issue #297): quota exhaustion mid-`cargo test` produces an
+    # arbitrary failing test name, so a gating red gets misattributed to the patch until a
+    # human traces it. Surface it HERE, before a run — statvfs is O(1); never `du` a
+    # multi-hundred-GB tree.
+    if cfg.doctor_min_free_gb > 0:
+        try:
+            free_gb = shutil.disk_usage(cfg.root).free / (1024 ** 3)
+            low = free_gb < cfg.doctor_min_free_gb
+            r.row(WARN if low else OK, "free disk space",
+                  f"{free_gb:.1f} GiB free < {cfg.doctor_min_free_gb:g} GiB threshold — "
+                  "gate runs will false-red on quota; run 'pdca sweep' "
+                  "(or 'pdca sweep --remove')" if low else f"{free_gb:.1f} GiB free")
+        except OSError as exc:
+            r.row(WARN, "free disk space", f"could not stat {cfg.root}: {exc}")
+    lanes_n, integs, ovfs = _footprint_counts(cfg)
+    if ovfs:
+        r.row(WARN, "harness worktree footprint",
+              f"{ovfs} orphaned overflow tree(s) (crash leftovers) — run 'pdca sweep'")
+    else:
+        r.row(OK, "harness worktree footprint",
+              f"{lanes_n} lane / {integs} integration worktree(s)")
 
     rows = _expand_checks(getattr(cfg, "doctor_checks", []), cfg.lanes)
     if rows:
