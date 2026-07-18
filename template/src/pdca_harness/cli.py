@@ -229,17 +229,54 @@ def main(argv: list[str] | None = None) -> int:
     p_drift.add_argument("--no-fetch", action="store_true",
                          help="skip `git fetch` (check against already-fetched base refs)")
 
-    # Act tooling as one command group (#89): `act index` / `act log`.
-    p_act = sub.add_parser("act", help="cross-cycle Act tooling (index / log)")
+    # Act tooling as one command group (#89): `act index` / `act log` / `act resolve`.
+    # The help text is the operator's contract for the OUT-OF-TURN review path (#298):
+    # every load-bearing fact an operator needs to run an Act review outside the flow's
+    # cadence lives here, not only in module docstrings. RawDescription keeps the
+    # epilog's command sequence lines intact; no literal `%` (argparse %-substitution),
+    # and `%(prog)s` renders the per-instance command name (#73).
+    p_act = sub.add_parser(
+        "act", help="cross-cycle Act tooling (index / log / resolve)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Manual, out-of-turn Act review across frozen (COMPLETE) cycles.\n"
+            "These commands carry no cadence gate — [driver].act_cadence throttles only\n"
+            "the flow's auto-run Act — so run them whenever a review is worth doing.\n"
+            "Needs at least one frozen COMPLETE bundle (otherwise `log` exits 1)."),
+        epilog=(
+            "typical out-of-turn review:\n"
+            "  %(prog)s index                      survey frozen cycles + recurring signals\n"
+            "  %(prog)s log --date <ISO>           preview the scaffolded entry (prints only)\n"
+            "  %(prog)s log --date <ISO> --append  record it; also stamps process/.act-reviewed,\n"
+            "                                      so the flow's next auto-Act won't re-cover\n"
+            "                                      these cycles\n"
+            "  %(prog)s resolve <signal>           mark an applied process delta (act-ledger.json)\n"
+            "the scaffold's Process-deltas section is deliberately TODO — choosing the deltas\n"
+            "is Act's irreducible human work"))
     act_sub = p_act.add_subparsers(dest="act_cmd", required=True)
-    p_actidx = act_sub.add_parser("index", help="read-only index of frozen cycles + recurring signals")
+    p_actidx = act_sub.add_parser(
+        "index", help="read-only index of frozen cycles + recurring signals",
+        description="Read-only index of frozen (COMPLETE) cycles, their §6/§7/§10 extracts "
+                    "and recurring signals. No cadence gate; writes nothing.")
     p_actidx.add_argument("--since", help="only cycles signed off on/after this ISO date")
-    p_actlog = act_sub.add_parser("log", help="scaffold a dated act-log entry (deltas left to the human)")
+    p_actlog = act_sub.add_parser(
+        "log", help="scaffold a dated act-log entry (deltas left to the human)",
+        description="Scaffold a dated act-log entry over the frozen (COMPLETE) cycles "
+                    "(exits 1 when none exist). The Process-deltas section is left TODO "
+                    "deliberately — choosing the deltas is Act's irreducible human work. "
+                    "Without --append the entry is only printed (a safe preview).")
     p_actlog.add_argument("--since", help="only consider cycles signed off on/after this ISO date")
     p_actlog.add_argument("--date", required=True, help="review date (ISO; Act is out-of-band so pass it)")
-    p_actlog.add_argument("--append", action="store_true", help="append to process/act-log.md (default: print)")
-    p_actres = act_sub.add_parser("resolve",
-                                  help="mark a tracked recurring signal as a delta you applied (#149)")
+    p_actlog.add_argument("--append", action="store_true",
+                          help="append to process/act-log.md AND stamp process/.act-reviewed — "
+                               "a manual Act review resets the flow's cadence too, so the next "
+                               "auto-Act won't re-cover these cycles (default: print only)")
+    p_actres = act_sub.add_parser(
+        "resolve",
+        help="mark a tracked recurring signal as a delta you applied (#149)",
+        description="Mark a tracked recurring signal as a process delta you applied. The "
+                    "record lands in process/act-ledger.json; a later Act flags the signal "
+                    "as an ineffective delta if it recurs after the applied date (#149).")
     p_actres.add_argument("signal", help="substring of the recurring signal to mark applied")
     p_actres.add_argument("--location", default="", help="where the delta landed (path:line / rule)")
     p_actres.add_argument("--date", help="applied date (ISO; default today)")

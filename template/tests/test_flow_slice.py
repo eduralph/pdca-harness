@@ -563,6 +563,31 @@ class CliSurface(unittest.TestCase):
         # `act log` routes through and reports "no frozen cycles" (return 1) — proves the group.
         self.assertEqual(cli.main(["act", "log", "--date", "2026-01-01"]), 1)
 
+    def test_act_help_documents_the_out_of_turn_workflow(self) -> None:
+        # #298: the CLI help is the operator's contract for the out-of-turn Act review —
+        # it must carry the load-bearing facts, not leave them to module docstrings.
+        buf = io.StringIO()
+        with redirect_stdout(buf), self.assertRaises(SystemExit) as ctx:
+            cli.main(["act", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        text = buf.getvalue()
+        for phrase in ("no cadence gate", "COMPLETE", ".act-reviewed",
+                       "log --date", "resolve", "irreducible human work"):
+            self.assertIn(phrase, text)
+
+    def test_act_log_help_documents_the_append_side_effect(self) -> None:
+        # #298: `--append` also stamps process/.act-reviewed (resets the flow cadence) —
+        # omitting that makes an operator fear double-reviewing or hand-edit the marker.
+        buf = io.StringIO()
+        with redirect_stdout(buf), self.assertRaises(SystemExit) as ctx:
+            cli.main(["act", "log", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn(".act-reviewed", buf.getvalue())
+        buf = io.StringIO()
+        with redirect_stdout(buf), self.assertRaises(SystemExit):
+            cli.main(["act", "resolve", "--help"])
+        self.assertIn("act-ledger.json", buf.getvalue())
+
     def test_flow_requires_ids_or_csv(self) -> None:
         self.assertEqual(cli.main(["flow"]), 2)  # no ids and no --from-csv → usage error
 
