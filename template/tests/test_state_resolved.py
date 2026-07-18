@@ -14,7 +14,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pdca_harness import cli, driver, flow, state
+from unittest import mock
+
+from pdca_harness import cli, driver, flow, leaves, state
 from pdca_harness.config import Config, LeafConfig
 
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
@@ -121,6 +123,57 @@ class ResolvedIsTerminal(unittest.TestCase):
         d.mkdir(parents=True)
         (d / "notes.json").write_text(json.dumps(_RESOLVED), encoding="utf-8")
         self.assertEqual(flow.flow_ids(self.cfg, ["10"], plan_missing=False), {})
+
+
+class PlanNeverReopensResolved(unittest.TestCase):
+    """#302 review: Plan must not re-open a settled ticket — not when seeding first
+    reveals the resolution, not via the id-seeded batch, not via a CSV-session brief
+    (an authored brief deliberately overrides the marker, so the guard sits in Plan)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _cfg(self.tmp)
+        self.cfg.bundle_root.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _resolved(self, iid: str) -> Path:
+        d = self.cfg.bundle(iid)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "notes.json").write_text(json.dumps(_RESOLVED), encoding="utf-8")
+        return d
+
+    def test_do_plan_skips_a_tracker_resolved_at_seed_time(self) -> None:
+        # The seed can be what FIRST writes the resolved notes (a notes_cmd / tracker
+        # source during `pdca flow <id>`) — the planner must not run after it.
+        d = self._resolved("21")
+        leaves.do_plan(d, self.cfg)                       # stub planner would write a brief
+        self.assertFalse((d / "brief.md").exists())
+        self.assertEqual(state.state(d), state.RESOLVED)
+
+    def test_do_plan_batch_excludes_resolved_ids(self) -> None:
+        self._resolved("22")
+        leaves.do_plan_batch(self.cfg, ids=["22", "23"])
+        self.assertFalse((self.cfg.bundle("22") / "brief.md").exists())
+        self.assertEqual(state.state(self.cfg.bundle("22")), state.RESOLVED)
+        self.assertTrue((self.cfg.bundle("23") / "brief.md").exists())  # sibling briefed
+
+    def test_csv_session_brief_for_a_resolved_bundle_is_set_aside(self) -> None:
+        # CSV/default path: the planner picks ids MID-session, so the up-front filter
+        # can't protect the bundle — a brief it authors for one is rejected afterwards.
+        d = self._resolved("24")
+        self.cfg.planner = LeafConfig(mode="command", interactive=True, argv=["x"])
+
+        def fake_invoke(leaf, cwd, prompt, **kw):
+            (d / "brief.md").write_text("- **Slug:** reopened\n- **Defect:** x.\n",
+                                        encoding="utf-8")
+
+        with mock.patch.object(leaves, "_invoke", side_effect=fake_invoke):
+            leaves.do_plan_batch(self.cfg)
+        self.assertFalse((d / "brief.md").exists())
+        self.assertTrue((d / "brief.superseded-by-resolution.md").exists())  # kept, aside
+        self.assertEqual(state.state(d), state.RESOLVED)
 
 
 if __name__ == "__main__":

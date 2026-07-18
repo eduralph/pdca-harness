@@ -51,6 +51,7 @@ from . import gates
 from . import guard
 from . import progress
 from . import sources
+from . import state
 from . import worktree
 from .config import Config, LeafConfig
 
@@ -308,6 +309,14 @@ def ensure_notes(cfg: Config, d: Path) -> None:
 def do_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
     d.mkdir(parents=True, exist_ok=True)
     sources.seed(cfg, d)  # seed notes.json + sources/ from the configured providers (#65/#102)
+    # The seed above can be what FIRST writes notes.json — including a tracker item
+    # already settled in-issue (#302 review). Re-check AFTER seeding: a RESOLVED bundle
+    # is terminal, and invoking the planner would author a brief that overrides the
+    # marker, letting a settled ticket be built and published.
+    if state.state(d) == state.RESOLVED:
+        print(f"leaves: {d.name} — tracker item is resolved (notes.json `resolved`); "
+              "skipping Plan (terminal, #302)", file=sys.stderr)
+        return
     if cfg.planner.mode == "command":
         _invoke(cfg.planner, cfg.root, _plan_prompt(cfg, csv, d), cfg=cfg)
         return
@@ -395,6 +404,25 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
     cfg.bundle_root.mkdir(parents=True, exist_ok=True)
     for iid in ids or []:
         sources.seed(cfg, cfg.bundle(iid))  # seed notes.json + sources/ per bundle (#65/#102)
+    # RESOLVED trackers are terminal and must not enter the Plan session (#302 review):
+    # an authored brief deliberately overrides the marker, so a batch planner briefing
+    # one would re-open a settled ticket for Do/Check. Ids are filtered up front (the
+    # seed just above may be what first resolved them); the CSV/default path — where the
+    # planner picks ids MID-session — is guarded after the session below.
+    if ids is not None:
+        kept = []
+        for iid in ids:
+            if state.state(cfg.bundle(iid)) == state.RESOLVED:
+                print(f"plan: issue_{iid} — tracker item is resolved; excluded from the "
+                      "Plan session (terminal, #302)", file=sys.stderr)
+            else:
+                kept.append(iid)
+        if not kept:
+            print("plan: every listed issue is resolved — nothing to brief", file=sys.stderr)
+            return
+        ids = kept
+    resolved_before = {b.name for b in cfg.bundle_root.glob("issue_*")
+                       if state.state(b) == state.RESOLVED}
     if cfg.planner.mode == "command":
         # On the CSV/default path the planner CHOOSES the ids mid-session, so the per-bundle
         # seed above never ran for them. Snapshot which bundles ALREADY HAD a brief so we can
@@ -405,8 +433,27 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
         _invoke(cfg.planner, cfg.root, _plan_batch_prompt(cfg, csv, ids), cfg=cfg)
         if ids is None:
             _warn_unseeded_briefs(cfg, before)
-        return
-    _stub_plan_batch(cfg, ids)
+    else:
+        _stub_plan_batch(cfg, ids)
+    _reject_resolved_briefs(cfg, resolved_before)
+
+
+def _reject_resolved_briefs(cfg: Config, resolved_before: set[str]) -> None:
+    """Reject a brief the Plan session authored for a bundle that was RESOLVED going in
+    (#302 review). On the CSV/default path the planner picks ids MID-session, so the
+    up-front id filter cannot protect a resolved tracker; an authored brief would
+    override the marker and re-open the settled ticket for Do/Check. The brief is set
+    aside (not deleted — the planner's work stays inspectable), loudly, so the bundle
+    reads RESOLVED again before the drive set is built."""
+    for name in sorted(resolved_before):
+        b = cfg.bundle_root / name
+        bp = b / "brief.md"
+        if bp.exists() and state.state(b) != state.RESOLVED:
+            bp.rename(b / "brief.superseded-by-resolution.md")
+            print(f"plan: {name} — the session briefed a RESOLVED tracker item; the brief "
+                  "was set aside as brief.superseded-by-resolution.md (the issue was "
+                  "settled in the tracker; reopen it there to plan it again)",
+                  file=sys.stderr)
 
 
 def _warn_unseeded_briefs(cfg: Config, before: set[str]) -> None:
