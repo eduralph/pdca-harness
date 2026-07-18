@@ -34,6 +34,7 @@ subprocess in the working dir; ``interactive`` leaves inherit the terminal.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -396,9 +397,13 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
     """
     cfg.bundle_root.mkdir(parents=True, exist_ok=True)
     # Snapshot the briefed set so the #301 plan-advisory pass covers exactly the bundles
-    # THIS session briefs (a pre-existing brief was reviewed when it was written).
+    # THIS session briefs (a pre-existing brief was reviewed when it was written). An
+    # unfilled template copy is NOT briefed (#301 review round 2 — the same placeholder
+    # semantics as state.state(), #113): the session replaces it with a real brief, and
+    # that fresh brief must get its plan review, not be snapshot-excluded.
     briefed_before = {d.name for d in cfg.bundle_root.glob("issue_*")
-                      if (d / "brief.md").exists()}
+                      if (d / "brief.md").exists()
+                      and not brief.is_placeholder(d / "brief.md")}
     for iid in ids or []:
         sources.seed(cfg, cfg.bundle(iid))  # seed notes.json + sources/ per bundle (#65/#102)
     if cfg.planner.mode == "command":
@@ -1615,11 +1620,46 @@ def _run_plan_advisory_leaves(d: Path, cfg: Config) -> list[str]:
     return ran
 
 
+@contextlib.contextmanager
+def _pinned_plan_target(d: Path, cfg: Config):
+    """A read-only checkout PINNED to the brief's resolved base ref, for grounding the
+    plan review (#301 review round 2).
+
+    Pre-Do there is no per-cycle worktree, so :func:`_reviewer_target` falls back to
+    the human's sibling checkout — which may sit on another branch or carry local
+    edits, and the antagonist would then fault (and trigger brief revisions against)
+    code that is not the plan's target. This materializes a temp DETACHED worktree at
+    the exact ``base_ref`` the brief resolves to (the drift.py pattern), removed after
+    the review. Unresolvable target / failed add ⇒ the sibling-checkout fallback (a
+    loosely-grounded review still beats none — this is advisory, never a gate)."""
+    tgt = worktree._target(d, cfg)
+    if tgt is None:
+        yield _reviewer_target(d, cfg)
+        return
+    primary, base_ref = tgt
+    worktree._git(primary, "fetch", cfg.base_remote)  # best-effort refresh of the base
+    tmp = tempfile.mkdtemp(prefix="pdca-plan-target-")
+    pinned = Path(tmp) / "target"
+    if worktree._git(primary, "worktree", "add", "--detach", str(pinned), base_ref) != 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        yield _reviewer_target(d, cfg)
+        return
+    try:
+        yield pinned
+    finally:
+        if worktree._git(primary, "worktree", "remove", "--force", str(pinned)) != 0:
+            shutil.rmtree(pinned, ignore_errors=True)
+            worktree._git(primary, "worktree", "prune")
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _run_plan_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict,
                                  leaf_id: str) -> None:
     """One plan-advisory leaf in a temp dir holding ONLY the plan inputs (the reviewer
-    independence sandbox, minus patch/gates), grounding on $PDCA_TARGET."""
-    with tempfile.TemporaryDirectory(prefix="pdca-plan-advisory-") as tmp:
+    independence sandbox, minus patch/gates), grounding on $PDCA_TARGET — a checkout
+    pinned to the brief's resolved base (#301 review round 2)."""
+    with tempfile.TemporaryDirectory(prefix="pdca-plan-advisory-") as tmp, \
+            _pinned_plan_target(d, cfg) as target:
         sandbox = Path(tmp)
         for name in PLAN_ADVISORY_INPUTS:
             if (d / name).exists():
@@ -1629,7 +1669,6 @@ def _run_plan_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: d
         profile = cfg.profile(leaf)
         _seed_sandbox_agents(cfg, sandbox)
         seeded = _seed_sandbox_settings(cfg, sandbox, profile)
-        target = _reviewer_target(d, cfg)
         env = {"PDCA_TARGET": str(target)} if target else None
         extra = ([profile.grounding_flag, str(target)]
                  if target and profile.grounding_flag else [])

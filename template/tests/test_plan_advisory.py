@@ -157,6 +157,60 @@ class VendorComplement(unittest.TestCase):
                       .read_text(encoding="utf-8"))
 
 
+class PinnedTarget(unittest.TestCase):
+    """#301 review round 2: the plan review grounds on a checkout PINNED to the brief's
+    resolved base — never the human's sibling checkout, which may sit on another branch
+    or carry local edits the antagonist would mistake for the plan's target."""
+
+    def setUp(self) -> None:
+        import subprocess as sp
+        self.sp = sp
+        self.tmp = Path(tempfile.mkdtemp())
+        self.primary = self.tmp / "checkout"
+        origin = self.tmp / "origin.git"
+        sp.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        sp.run(["git", "clone", "-q", str(origin), str(self.primary)], check=True)
+        g = lambda *a: sp.run(["git", "-C", str(self.primary), *a], check=True,
+                              capture_output=True)
+        g("config", "user.email", "t@example.com")
+        g("config", "user.name", "T")
+        (self.primary / "file.txt").write_text("base\n", encoding="utf-8")
+        g("add", "-A"); g("commit", "-q", "-m", "base")
+        g("branch", "-M", "main"); g("push", "-q", "-u", "origin", "main")
+        # The human's checkout drifts: another branch + a local edit.
+        g("checkout", "-q", "-b", "wip")
+        (self.primary / "file.txt").write_text("LOCAL WIP EDIT\n", encoding="utf-8")
+        self.cfg = _cfg(self.tmp)
+        self.cfg.base_remote = "origin"
+        self.cfg.repo_checkouts = {"org/repo": str(self.primary)}
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_target_is_pinned_to_the_resolved_base_and_cleaned_up(self) -> None:
+        d = self.cfg.bundle("PT")
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Repo + branch target:** org/repo @ main\n", encoding="utf-8")
+        with leaves._pinned_plan_target(d, self.cfg) as target:
+            self.assertIsNotNone(target)
+            self.assertNotEqual(target, self.primary)     # never the drifted checkout
+            self.assertEqual((target / "file.txt").read_text(encoding="utf-8"),
+                             "base\n")                    # the resolved base, not WIP
+            kept = target
+        self.assertFalse(kept.exists())                   # removed after the review
+        # The human's checkout is untouched.
+        self.assertEqual((self.primary / "file.txt").read_text(encoding="utf-8"),
+                         "LOCAL WIP EDIT\n")
+
+    def test_unresolvable_target_falls_back_to_reviewer_target(self) -> None:
+        d = self.cfg.bundle("NOTGT")
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")  # no target
+        with leaves._pinned_plan_target(d, self.cfg) as target:
+            self.assertEqual(target, leaves._reviewer_target(d, self.cfg))
+
+
 class BatchAndAssemble(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
@@ -173,6 +227,18 @@ class BatchAndAssemble(unittest.TestCase):
             self.assertTrue(leaves.plan_advisory_artifact(d, "plan-reviewer").exists(), iid)
             self.assertTrue((d / "plan-advisory-benefit.json").exists(), iid)
         self.assertEqual(list(pre.glob("plan-advisory-*")), [])  # pre-existing untouched
+
+    def test_placeholder_brief_counts_as_unbriefed_in_the_snapshot(self) -> None:
+        # #301 review round 2: an unfilled template copy is not "briefed" (#113) — the
+        # session replaces it with a real brief, and that fresh brief must get its plan
+        # review instead of being snapshot-excluded.
+        cfg = _cfg(self.tmp, plan_advisory=[_REVIEWER])
+        d = cfg.bundle("PH1")
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** <fill-me>\n", encoding="utf-8")
+        leaves.do_plan_batch(cfg, ids=["PH1"])            # stub batch authors the brief
+        self.assertTrue(leaves.plan_advisory_artifact(d, "plan-reviewer").exists())
+        self.assertTrue((d / "plan-advisory-benefit.json").exists())
 
     def _summary_bundle(self, cfg: Config, benefit: dict | str,
                         findings: list[str] = ()) -> Path:
