@@ -79,7 +79,13 @@ def state(d: Path) -> str:
         # placeholder) means the planner never authored it, so treat it as UNPLANNED and
         # let the Plan beat re-plan it instead of being skipped (issue #113). Scoped to
         # the pre-Do boundary so a real, progressed bundle is never reclassified.
-        return UNPLANNED if brief.is_placeholder(bp) else PLANNED
+        # A placeholder is "never authored" — the same standing as no brief at all — so
+        # the tracker's terminal `resolved` marker still wins there (#302 review): a
+        # resolved notes-only bundle that picked up a stray template copy must not
+        # reappear as pending. An AUTHORED brief keeps its normal PLANNED path.
+        if brief.is_placeholder(bp):
+            return RESOLVED if is_resolved(d) else UNPLANNED
+        return PLANNED
     if not (d / "check-gates.json").exists():
         return BUILT
     if not (d / "SUMMARY.md").exists():
