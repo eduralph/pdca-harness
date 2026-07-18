@@ -42,6 +42,52 @@ PR_BODY = "pr-description.md"
 STACK_BASE_FILE = "stack-base"
 
 
+def _ensure_texts(cfg: Config, d: Path) -> bool:
+    """Draft the two contribution artifacts with the publisher leaf if absent (only-if-
+    missing, so re-runs never clobber an edited text); False when still missing after."""
+    if not ((d / COMMIT_MSG).is_file() and (d / PR_BODY).is_file()):
+        print("publish: drafting contribution artifacts "
+              f"({COMMIT_MSG} / {PR_BODY})…", file=sys.stderr)
+        leaves.run_publish(d, cfg)
+    if not ((d / COMMIT_MSG).is_file() and (d / PR_BODY).is_file()):
+        print(f"publish: {COMMIT_MSG} / {PR_BODY} still missing — aborting", file=sys.stderr)
+        return False
+    return True
+
+
+def draft_texts(cfg: Config, d: Path) -> bool:
+    """Pre-pass (issue #295): make bundle ``d`` text-ready for publishing — NO git/gh.
+
+    Drafts the two contribution artifacts (``commit-msg.txt`` / ``pr-description.md``)
+    if absent and runs the T4 contribution gate over them, so the flow can generate and
+    validate EVERY accepted bundle's publishing texts before any mechanical publishing
+    starts — a mid-wave drafting failure then blocks only its bundle, never leaves a
+    wave half-pushed.
+
+    Returns True when mechanics may proceed — including the cases where there is
+    legitimately nothing to draft (not COMPLETE, a close/no-fix empty patch, no usable
+    target): :func:`publish`'s own guards re-decide and report those with their richer
+    messages. False = drafting or T4 failed: do not enter the mechanics loop. (The
+    ``--no-issue``/pending-id T4 relaxation stays exclusive to :func:`publish` — the
+    flow never publishes pending-id.)
+    """
+    if state.state(d) != state.COMPLETE:
+        return True
+    patch = d / "patch.diff"
+    if not patch.is_file() or not patch.read_text(encoding="utf-8").strip():
+        return True                                  # close/no-fix: nothing to contribute
+    repo_spec, base, _slug = _resolve_target(d)
+    if not repo_spec or not base:
+        return True                                  # non-contributing cycle
+    if not _ensure_texts(cfg, d):
+        return False
+    if not _t4_passes(cfg, d):
+        print(f"publish: T4 contribution gate FAILED on {COMMIT_MSG} / {PR_BODY} for "
+              f"{d.name} — fix them and retry", file=sys.stderr)
+        return False
+    return True
+
+
 def publish(
     cfg: Config,
     issue_id: str,
@@ -104,12 +150,9 @@ def publish(
         return 1
 
     # Artifacts the T4 gate needs — write them with the publisher leaf if absent.
-    if not ((d / COMMIT_MSG).is_file() and (d / PR_BODY).is_file()):
-        print("publish: drafting contribution artifacts "
-              f"({COMMIT_MSG} / {PR_BODY})…", file=sys.stderr)
-        leaves.run_publish(d, cfg)
-    if not ((d / COMMIT_MSG).is_file() and (d / PR_BODY).is_file()):
-        print(f"publish: {COMMIT_MSG} / {PR_BODY} still missing — aborting", file=sys.stderr)
+    # (The flow already drafted+gated them in its #295 pre-pass; this lazy path keeps
+    # direct `pdca publish` self-contained, and is idempotent — only-if-missing.)
+    if not _ensure_texts(cfg, d):
         return 1
 
     # T4 contribution gate — the artifacts MUST pass before anything is pushed,
