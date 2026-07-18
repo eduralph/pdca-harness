@@ -34,6 +34,7 @@ subprocess in the working dir; ``interactive`` leaves inherit the terminal.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -310,8 +311,9 @@ def do_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
     sources.seed(cfg, d)  # seed notes.json + sources/ from the configured providers (#65/#102)
     if cfg.planner.mode == "command":
         _invoke(cfg.planner, cfg.root, _plan_prompt(cfg, csv, d), cfg=cfg)
-        return
-    _stub_plan(d, cfg)
+    else:
+        _stub_plan(d, cfg)
+    run_plan_advisory(d, cfg)  # opt-in antagonistic review of the brief (#301); no-op unless configured
 
 
 def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
@@ -393,6 +395,10 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
     :func:`ensure_notes`; the flow then drives exactly those ids (``flow.flow_ids``).
     """
     cfg.bundle_root.mkdir(parents=True, exist_ok=True)
+    # Snapshot the briefed set so the #301 plan-advisory pass covers exactly the bundles
+    # THIS session briefs (a pre-existing brief was reviewed when it was written).
+    briefed_before = {d.name for d in cfg.bundle_root.glob("issue_*")
+                      if (d / "brief.md").exists()}
     for iid in ids or []:
         sources.seed(cfg, cfg.bundle(iid))  # seed notes.json + sources/ per bundle (#65/#102)
     if cfg.planner.mode == "command":
@@ -405,8 +411,13 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
         _invoke(cfg.planner, cfg.root, _plan_batch_prompt(cfg, csv, ids), cfg=cfg)
         if ids is None:
             _warn_unseeded_briefs(cfg, before)
-        return
-    _stub_plan_batch(cfg, ids)
+    else:
+        _stub_plan_batch(cfg, ids)
+    # #301: one advisory pass over the freshly briefed bundles, then ONE revision session
+    # if any review found something. No-op unless [[leaves.plan_advisory]] is configured.
+    fresh = sorted(d for d in cfg.bundle_root.glob("issue_*")
+                   if (d / "brief.md").exists() and d.name not in briefed_before)
+    run_plan_advisory_batch(cfg, fresh)
 
 
 def _warn_unseeded_briefs(cfg: Config, before: set[str]) -> None:
@@ -1485,6 +1496,239 @@ def _advisory_unavailable(d: Path, leaf_id: str, reason: str, *,
         + f"- NEEDS-HUMAN — advisory leaf '{leaf_id}' did not produce findings ({reason}); "
         "re-run it or adjudicate by hand.\n",
         encoding="utf-8")
+
+
+# ----------------------------------------------------------------------------
+# Plan-beat advisory reviewers (issue #301) — antagonists of the BRIEF, mirroring the
+# Check advisory machinery (#64/#200) at Plan: right after the planner writes brief.md,
+# each configured [[leaves.plan_advisory]] leaf reviews the PLAN (brief + notes +
+# sources — no patch, no gates), writes plan-advisory-<id>.md, the planner gets ONE
+# bounded revision pass over the findings, and a per-bundle BENEFIT record
+# (plan-advisory-benefit.json: brief hash before/after, revised?, finding count) captures
+# whether the review changed anything — the raw signal Act needs to judge whether plan
+# reviews pay off. Opt-in; an empty list leaves the Plan beat untouched.
+# ----------------------------------------------------------------------------
+PLAN_ADVISORY_INPUTS = ["brief.md", "notes.json"]  # + the sources/ dir, copied whole
+PLAN_ADVISORY_BENEFIT = "plan-advisory-benefit.json"
+
+
+def plan_advisory_artifact(d: Path, leaf_id: str) -> Path:
+    """The artifact a plan-advisory leaf writes. A distinct prefix from
+    ``check-advisory-*`` — the Check-side globs (assemble §5, archive) must not
+    pick these up as patch reviews."""
+    return d / f"plan-advisory-{leaf_id}.md"
+
+
+def _plan_advisory_prompt(spec: dict, leaf_id: str) -> str:
+    role = spec.get("role") or ("refute the brief: wrong root cause, untestable success "
+                                "criterion, hidden scope")
+    return (
+        f"You are an ADVISORY plan reviewer — an antagonist of the BRIEF, lens: {role}. "
+        "You have ONLY brief.md, notes.json and the sources/ dir here (no patch exists "
+        "yet); ground every claim about the code on the target source at $PDCA_TARGET, "
+        "never other checkouts. Attack the plan, not the prose: does the stated defect "
+        "match the tracker thread in notes.json/sources (wrong root-cause framing?); is "
+        "the success criterion something a gate or reviewer can actually verify, or "
+        "vibes; is the scope one logical fix or a hidden second change; do the repo + "
+        "branch target and any `Depends on` ids resolve; did the brief ignore a "
+        "load-bearing comment in the thread. "
+        f"Write plan-advisory-{leaf_id}.md: a short list of findings, each a Markdown "
+        "bullet prefixed '- NEEDS-HUMAN — ' with the evidence (a brief line, a thread "
+        "quote, a path:line). You are ADVISORY — you never gate, and you never edit "
+        "brief.md yourself. \"Could not fault the brief after a real attempt\" is an "
+        "acceptable strong answer — say so explicitly."
+    )
+
+
+def _plan_decorrelation_note(d: Path, msg: str) -> None:
+    """The plan-side twin of :func:`_decorrelation_note` (#200/#301)."""
+    plan_advisory_artifact(d, "decorrelation").write_text(
+        "# Plan advisory — decorrelation\n\n- NEEDS-HUMAN — " + msg + "\n", encoding="utf-8")
+
+
+def _select_plan_advisory(specs: list[dict], d: Path, cfg: Config) -> list[dict]:
+    """The #200 selection policy anchored on the PLANNER family (issue #301).
+
+    Pre-Do there is no builder telemetry, and the brief is the planner's artifact —
+    "reviewer ≠ author" therefore keys on ``cfg.planner.family`` (static config, no
+    telemetry needed). Unknown/empty planner family or no different-vendor leaf ⇒
+    same-vendor fallback + a decorrelation note, mirroring the Check-side contract."""
+    if cfg.plan_advisory_selection.get("mode") != "vendor-complement":
+        return specs
+    plan_advisory_artifact(d, "decorrelation").unlink(missing_ok=True)
+    if not specs:
+        return specs
+    planner_family = (cfg.planner.family or "").strip().lower()
+    if planner_family:
+        complement = next(
+            (s for s in specs
+             if (fam := s.get("family", "").strip().lower()) and fam != planner_family),
+            None)
+        if complement is not None:
+            return [complement]
+        reason = (f"the planner runs family '{planner_family}' and no configured "
+                  "plan-advisory declares a different (non-empty) family")
+    else:
+        reason = "the planner's family is not declared in [leaves.planner]"
+    chosen = specs[0]
+    _plan_decorrelation_note(
+        d, f"plan reviewer '{chosen.get('id') or 'plan-advisory'}' could not be "
+           f"decorrelated from the planner — {reason}; it ran same-vendor. Confirm the "
+           "review's independence by hand, or add a different-`family` "
+           "[[leaves.plan_advisory]] entry.")
+    return [chosen]
+
+
+def _brief_sha(d: Path) -> str:
+    """sha256 of brief.md's bytes ("" if absent) — the before/after benefit signal."""
+    bp = d / "brief.md"
+    return hashlib.sha256(bp.read_bytes()).hexdigest() if bp.is_file() else ""
+
+
+def _plan_findings(d: Path) -> int:
+    """NEEDS-HUMAN findings across this bundle's plan-advisory artifacts (the
+    decorrelation note is a selection lapse, not a brief finding — excluded)."""
+    count = 0
+    for p in sorted(d.glob("plan-advisory-*.md")):
+        if p.name == "plan-advisory-decorrelation.md":
+            continue
+        count += sum(1 for line in p.read_text(encoding="utf-8").splitlines()
+                     if line.lstrip().startswith("- NEEDS-HUMAN"))
+    return count
+
+
+def _run_plan_advisory_leaves(d: Path, cfg: Config) -> list[str]:
+    """Run the applicable plan-advisory leaves for one briefed bundle; return the leaf
+    ids that ran. Artifacts only — the revision + benefit record are the caller's."""
+    applicable = [s for s in cfg.plan_advisory_leaves if _advisory_applies(s, d)]
+    ran: list[str] = []
+    for spec in _select_plan_advisory(applicable, d, cfg):
+        leaf_id = spec.get("id") or "plan-advisory"
+        leaf = LeafConfig(mode=spec.get("mode", "stub"), family=spec.get("family", ""),
+                          argv=list(spec.get("argv", [])), agent=spec.get("agent", ""),
+                          model=spec.get("model", ""), effort=spec.get("effort", ""))
+        if leaf.mode == "command":
+            _run_plan_advisory_sandboxed(d, cfg, leaf, spec, leaf_id)
+        else:
+            _stub_plan_advisory(d, spec, leaf_id)
+        ran.append(leaf_id)
+    return ran
+
+
+def _run_plan_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict,
+                                 leaf_id: str) -> None:
+    """One plan-advisory leaf in a temp dir holding ONLY the plan inputs (the reviewer
+    independence sandbox, minus patch/gates), grounding on $PDCA_TARGET."""
+    with tempfile.TemporaryDirectory(prefix="pdca-plan-advisory-") as tmp:
+        sandbox = Path(tmp)
+        for name in PLAN_ADVISORY_INPUTS:
+            if (d / name).exists():
+                shutil.copy2(d / name, sandbox / name)
+        if (d / "sources").is_dir():
+            shutil.copytree(d / "sources", sandbox / "sources")
+        profile = cfg.profile(leaf)
+        _seed_sandbox_agents(cfg, sandbox)
+        seeded = _seed_sandbox_settings(cfg, sandbox, profile)
+        target = _reviewer_target(d, cfg)
+        env = {"PDCA_TARGET": str(target)} if target else None
+        extra = ([profile.grounding_flag, str(target)]
+                 if target and profile.grounding_flag else [])
+        extra += _sandbox_argv(cfg, profile, seeded=seeded)
+        out = sandbox / f"plan-advisory-{leaf_id}.md"
+        error_log = d / f"plan-advisory-{leaf_id}.error.log"
+        err = _invoke_leaf_resilient(
+            leaf, sandbox, _plan_advisory_prompt(spec, leaf_id),
+            error_log=error_log,
+            label=f"Plan advisory {leaf_id} {d.name}",
+            status=lambda: progress.bundle_activity(sandbox, (out.name,)),
+            stream_json=True, env=env, extra_argv=extra, cfg=cfg)
+        if err is not None:  # advisory must never crash Plan
+            _plan_advisory_unavailable(d, leaf_id, f"leaf failed: {err}",
+                                       failure=_failure_class(err), error_log=error_log)
+            return
+        if out.exists():
+            shutil.copy2(out, plan_advisory_artifact(d, leaf_id))
+        else:
+            _plan_advisory_unavailable(d, leaf_id, "produced no artifact")
+
+
+def _stub_plan_advisory(d: Path, spec: dict, leaf_id: str) -> None:
+    role = spec.get("role") or "refute the brief (root cause, success criterion, scope)"
+    plan_advisory_artifact(d, leaf_id).write_text(
+        f"# Plan advisory — {leaf_id} (stub)\n\nLens: {role}.\n\n"
+        f"- NEEDS-HUMAN — plan-advisory lens is a stub here; a real `{leaf_id}` leaf "
+        "(family/argv in [[leaves.plan_advisory]]) reviews the brief and lists findings. "
+        "The human adjudicates at sign-off.\n",
+        encoding="utf-8")
+
+
+def _plan_advisory_unavailable(d: Path, leaf_id: str, reason: str, *,
+                               failure: str = _FAIL_SUBSTANTIVE,
+                               error_log: Path | None = None) -> None:
+    print(f"leaves: {d.name} — plan advisory '{leaf_id}' unavailable ({reason})",
+          file=sys.stderr)
+    plan_advisory_artifact(d, leaf_id).write_text(
+        f"# Plan advisory — {leaf_id} — NOT COMPLETED\n\n"
+        + _unavailable_classification(failure, error_log)
+        + f"- NEEDS-HUMAN — plan-advisory leaf '{leaf_id}' did not produce findings "
+        f"({reason}); re-run it or adjudicate by hand.\n",
+        encoding="utf-8")
+
+
+def _plan_revision_prompt(cfg: Config, bundles: list[Path]) -> str:
+    per_bundle = "\n".join(
+        f"- {d}: findings in " + ", ".join(
+            p.name for p in sorted(d.glob("plan-advisory-*.md"))
+            if p.name != "plan-advisory-decorrelation.md")
+        for d in bundles)
+    return (
+        "You are the Plan leaf on a REVISION pass (issue #301) — do not re-plan from "
+        "scratch and do not implement. An antagonistic plan review raised findings "
+        "against the brief(s) below. For each bundle: read its plan-advisory-*.md, then "
+        "either revise brief.md in place to address a finding, or append a short "
+        "`Plan-review response:` line under the brief stating why the brief stands. "
+        "Keep the parsed `- **Label:** value` field shape. One pass, no new bundles.\n"
+        + per_bundle
+    )
+
+
+def run_plan_advisory_batch(cfg: Config, bundles: list[Path]) -> None:
+    """The Plan-beat advisory pass over freshly briefed bundles (issue #301).
+
+    Per bundle: run the selected plan-advisory leaves (artifacts). Then, if any bundle
+    has findings, ONE planner revision invocation covers them all (bounded by
+    construction — never a loop), and each reviewed bundle gets its benefit record.
+    No-op when nothing is configured or nothing is reviewable (a placeholder brief is
+    a template, not a plan — reviewing it would grade boilerplate)."""
+    if not cfg.plan_advisory_leaves:
+        return
+    reviewed = [d for d in bundles
+                if (d / "brief.md").exists() and not brief.is_placeholder(d / "brief.md")]
+    ran: dict[Path, list[str]] = {}
+    for d in reviewed:
+        ids = _run_plan_advisory_leaves(d, cfg)
+        if ids:
+            ran[d] = ids
+    if not ran:
+        return
+    before = {d: _brief_sha(d) for d in ran}
+    with_findings = [d for d in ran if _plan_findings(d) > 0]
+    if with_findings and cfg.planner.mode == "command":
+        _invoke(cfg.planner, cfg.root, _plan_revision_prompt(cfg, with_findings), cfg=cfg)
+    for d, ids in ran.items():
+        after = _brief_sha(d)
+        (d / PLAN_ADVISORY_BENEFIT).write_text(json.dumps({
+            "before_sha": before[d],
+            "after_sha": after,
+            "revised": after != before[d],
+            "findings": _plan_findings(d),
+            "leaves": ids,
+        }, indent=2) + "\n", encoding="utf-8")
+
+
+def run_plan_advisory(d: Path, cfg: Config) -> None:
+    """Single-bundle convenience over :func:`run_plan_advisory_batch`."""
+    run_plan_advisory_batch(cfg, [d])
 
 
 # ----------------------------------------------------------------------------

@@ -172,7 +172,30 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
                   for t in _declared_external_deps(build_notes.read_text(encoding="utf-8"))]
     items += [NeedsHumanItem(t, HUMAN)
               for t in _unregistered_dependency_items(d / "brief.md", cfg)]
+    # Plan-advisory benefit record (#301): findings the planner did NOT revise for had
+    # their revision chance and were left standing — that must stay visible (fail-visible)
+    # as ONE item, not a re-listing of every finding (they already got their pass). HUMAN
+    # kind: whether the un-revised brief is acceptable is a scope/architecture call, so
+    # auto-iterate correctly declines (#264).
+    benefit = _plan_advisory_benefit(d)
+    if benefit and benefit.get("findings", 0) > 0 and not benefit.get("revised"):
+        items.append(NeedsHumanItem(
+            f"Plan advisory raised {benefit['findings']} finding(s) and the brief was NOT "
+            "revised — review plan-advisory-*.md before accepting.", HUMAN))
     return items
+
+
+def _plan_advisory_benefit(d: Path) -> dict | None:
+    """The bundle's plan-advisory benefit record (#301), or None if absent/unreadable —
+    the same tolerant contract as every other bundle-file read (testbed #3)."""
+    p = d / "plan-advisory-benefit.json"
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def assemble_summary(d: Path, cfg: Config) -> None:
@@ -254,11 +277,22 @@ def assemble_summary(d: Path, cfg: Config) -> None:
             "- By / date:",
             "",
             "## 10. Act candidates (hints for the next Act review)",
+            *_plan_advisory_act_lines(d),
             "- (empty is the common case)",
             "",
         ]
     )
     (d / "SUMMARY.md").write_text(out, encoding="utf-8")
+
+
+def _plan_advisory_act_lines(d: Path) -> list[str]:
+    """§10 line for the plan-advisory benefit record (#301): benefit telemetry is process
+    signal — exactly what Act reviews to judge whether plan reviews pay off over cycles."""
+    benefit = _plan_advisory_benefit(d)
+    if not benefit:
+        return []
+    return [f"- Plan advisory: {benefit.get('findings', 0)} finding(s); brief revised: "
+            f"{'yes' if benefit.get('revised') else 'no'} (plan-advisory-*.md)"]
 
 
 def _gate_lines(gates: dict, *, prefix: str) -> str:

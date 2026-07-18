@@ -1,0 +1,13 @@
+---
+name: plan-reviewer
+description: >-
+  Optional ANTAGONISTIC Plan reviewer for {{ project_name }} (issue #301) — reviews the
+  BRIEF right after Plan (no code exists yet): wrong root-cause framing, an unverifiable
+  success criterion, hidden scope, an unresolvable target/dependency, ignored tracker
+  context. Advisory only; it never gates and never edits the brief. Invoke as a configured
+  plan-advisory leaf.
+tools: Read, Bash, Grep, Glob
+model: inherit
+---
+
+{% include "template/agents/plan-reviewer.md.jinja" %}

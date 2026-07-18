@@ -143,6 +143,19 @@ class Config:
     # vice-versa with no per-brief edits — the cross-vendor decorrelation Check relies on
     # (INTEGRATION §4), made automatic. No different-vendor leaf ⇒ same-vendor fallback + §6.
     advisory_selection: dict = field(default_factory=dict)
+    # Plan-beat advisory reviewers (issue #301): an OPEN list mirroring [[leaves.advisory]]
+    # but reviewing the BRIEF right after Plan ([[leaves.plan_advisory]] in pdca.toml) —
+    # an antagonist of the plan, not the patch. Same spec shape ({id, role, family, mode,
+    # argv, agent, when?}); always advisory. A separate list, not a `beat` key on the
+    # Check list: the vendor-complement anchor differs (the PLANNER authored the brief;
+    # the builder authored the patch) and so does the input contract (brief/notes/sources,
+    # no patch/gates). Empty (default) ⇒ the Plan beat is unchanged.
+    plan_advisory_leaves: list[dict] = field(default_factory=list)
+    # Plan-advisory selection ([leaves.plan_advisory_selection], issue #301): same policy
+    # vocabulary as advisory_selection, anchored on the PLANNER family under
+    # ``mode = "vendor-complement"`` (pre-Do there is no builder telemetry, and the brief
+    # is the planner's artifact — reviewer ≠ author).
+    plan_advisory_selection: dict = field(default_factory=dict)
     # Commands a Check leaf may run OUTSIDE its sandbox ([leaves.sandbox]
     # unsandboxed_commands, issue #276). The reviewer/advisory leaves run under Claude Code's
     # sandbox, which denies the docker socket — so a Docker-backed conformance gate (a live
@@ -393,6 +406,14 @@ class Config:
         # Advisory-selection policy (issue #200) — how the driver picks from that list.
         advisory_selection = dict(leaves.get("advisory_selection", {}))
 
+        # Plan-beat advisory leaves (issue #301) — [[leaves.plan_advisory]], mirroring the
+        # Check list; PDCA_LEAVES_MODE forces their mode too.
+        plan_advisory_leaves = [
+            {**spec, "mode": mode_override or spec.get("mode", "stub")}
+            for spec in leaves.get("plan_advisory", [])
+        ]
+        plan_advisory_selection = dict(leaves.get("plan_advisory_selection", {}))
+
         # Commands a Check leaf may run outside its sandbox (issue #276) — a harness-owned
         # exemption list, never the project's own settings.json `excludedCommands`.
         leaf_unsandboxed_commands = [
@@ -508,6 +529,8 @@ class Config:
             leaf_unsandboxed_commands=leaf_unsandboxed_commands,
             leaf_network_access=leaf_network_access,
             advisory_selection=advisory_selection,
+            plan_advisory_leaves=plan_advisory_leaves,
+            plan_advisory_selection=plan_advisory_selection,
             builder_escalation=builder_escalation,
             builder_variants=builder_variants,
             gates_runner=gates_runner,
