@@ -222,6 +222,42 @@ class WorktreeRealGit(unittest.TestCase):
         self.assertEqual((wt / "file.txt").read_text(encoding="utf-8"), "base\npatched\n")
         self.assertEqual(self._porcelain(self.primary), "")         # primary untouched
 
+    def test_rebuild_fails_closed_on_a_submodule_gitlink_patch(self) -> None:
+        # #296 review: plain `git apply` exits 0 for a gitlink (mode 160000) hunk while
+        # leaving the submodule checkout untouched — the "reconstructed" tree would carry
+        # the wrong submodule revision under a valid stamp. Fail CLOSED instead.
+        worktree.ensure(self.d, self.cfg)
+        (self.d / "patch.diff").write_text(
+            "diff --git a/vendor/lib b/vendor/lib\nindex 1111111..2222222 160000\n"
+            "--- a/vendor/lib\n+++ b/vendor/lib\n@@ -1 +1 @@\n"
+            "-Subproject commit 1111111111111111111111111111111111111111\n"
+            "+Subproject commit 2222222222222222222222222222222222222222\n",
+            encoding="utf-8")
+        with self.assertRaises(worktree.WorktreeError) as ctx:
+            worktree.rebuild_for_gate(self.d, self.cfg)
+        self.assertIn("gitlink", str(ctx.exception))
+        wt = self.tmp / "checkout.pdca-wt"
+        self.assertIsNone(worktree.owner_of(wt))            # never stamped as valid
+
+    def test_busy_lane_fails_the_gate_read_closed(self) -> None:
+        # #296 review: an owner stamp cannot say whether that Do is STILL RUNNING —
+        # while the lane lock is held (an in-flight Do / another gate run), a gate read
+        # must fail closed ("lane busy") instead of reconstructing under the live run.
+        (self.d / "patch.diff").write_text(self._PATCH, encoding="utf-8")
+        with worktree.lane_lock(self.d, self.cfg, wait=True):   # simulate the live Do
+            with self.assertRaises(worktree.WorktreeError) as ctx:
+                worktree.for_gate(self.d, self.cfg)
+            self.assertIn("busy", str(ctx.exception))
+        wt, ovf = worktree.for_gate(self.d, self.cfg)           # released → proceeds
+        self.assertIsNotNone(wt)
+        self.assertEqual((wt / "file.txt").read_text(encoding="utf-8"), "base\npatched\n")
+
+    def test_lane_lock_is_a_noop_where_isolation_cannot_apply(self) -> None:
+        self.cfg.worktree = False
+        with worktree.lane_lock(self.d, self.cfg, wait=False):
+            pass                                            # yields without a lock file
+        self.cfg.worktree = True
+
     def test_rebuild_fails_closed_when_patch_does_not_apply(self) -> None:
         # #296 (supersedes the #225 best-effort fallback): if this bundle's patch no longer
         # applies to the base, the tree CANNOT be made to match patch.diff. The gate read

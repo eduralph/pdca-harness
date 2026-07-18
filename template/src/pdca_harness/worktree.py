@@ -21,8 +21,11 @@ left behind, and fails closed on any mismatch (issue #296).
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import itertools
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -117,6 +120,54 @@ def path(d: Path, cfg: Config) -> Path | None:
     return wt if (wt / ".git").exists() else None
 
 
+# A patch hunk that changes a submodule gitlink (mode 160000). Plain `git apply` exits 0
+# for these while leaving the submodule checkout untouched, so a reconstruction that
+# "succeeded" would still not be base + patch.diff — the exact lie #296 forbids.
+_GITLINK_RE = re.compile(r"^[+-]Subproject commit [0-9a-f]", re.MULTILINE)
+
+
+@contextlib.contextmanager
+def lane_lock(d: Path, cfg: Config, *, wait: bool):
+    """Advisory per-lane exclusive lock (#296 review) — the lane lifecycle guard.
+
+    The owner stamp names which bundle's Do last populated a lane; it cannot say
+    whether that Do (or a gate) is STILL RUNNING there. Without a lifecycle guard, an
+    out-of-band gate read (``pdca gates <id>``) overlapping an in-flight Do for the
+    same bundle would reconstruct the lane under the builder — destroying its
+    uncommitted work — and two concurrent gate reads could clean each other's outputs
+    mid-run. Both the Do band (ensure → builder invocation) and the gate read
+    (reconstruction → gate commands) therefore hold this ``flock`` on a per-lane
+    ``.lock`` sidecar for their whole critical section.
+
+    ``wait=True`` blocks (Do waits out a transient gate read); ``wait=False`` raises
+    :class:`WorktreeError` when the lane is busy — the gate then fails CLOSED with a
+    reason instead of clobbering a live tree. No-op (yields) where isolation doesn't
+    apply. flock serializes across processes AND across same-process file handles.
+    """
+    if not cfg.worktree:
+        yield
+        return
+    tgt = _target(d, cfg)
+    if tgt is None:
+        yield
+        return
+    wt = _wt_dir(tgt[0])
+    fh = wt.with_name(wt.name + ".lock").open("w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+    except OSError as exc:
+        fh.close()
+        raise WorktreeError(
+            f"{d.name}: lane {wt.name} is busy (another Do or gate run holds it) — "
+            "refusing to reconstruct under a live run; retry when it finishes.") from exc
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        fh.close()
+
+
 def rebuild_for_gate(d: Path, cfg: Config) -> Path | None:
     """Reconstruct the lane worktree as ``base + patch.diff`` — the tree a gate may trust.
 
@@ -165,7 +216,20 @@ def rebuild_for_gate(d: Path, cfg: Config) -> Path | None:
             f"{d.name}: could not reset {wt} to '{base_ref}' before the gate read. "
             "Failing closed — the tree cannot be shown to match patch.diff.")
     patch = d / "patch.diff"
-    if patch.is_file() and patch.read_text(encoding="utf-8").strip():
+    patch_text = patch.read_text(encoding="utf-8") if patch.is_file() else ""
+    if patch_text.strip():
+        if _GITLINK_RE.search(patch_text):
+            # A submodule gitlink hunk: plain `git apply` exits 0 while ignoring it, so
+            # the "reconstructed" tree would carry the wrong submodule revision under a
+            # valid owner stamp — precisely the mismatched-green this path exists to
+            # prevent. The reconstruction cannot materialize submodule state; fail
+            # CLOSED rather than certify it (#296 review).
+            _owner_file(wt).unlink(missing_ok=True)
+            raise WorktreeError(
+                f"{d.name}: patch.diff changes a submodule gitlink (mode 160000), which "
+                "this reconstruction cannot materialize — `git apply` would silently "
+                "skip it and a green would attest the wrong submodule revision (#296). "
+                "Gate this bundle against a checkout with the submodule updated by hand.")
         if _git(wt, "apply", str(patch.resolve())) != 0:
             # The patch no longer applies to the base (drifted since Do, or corrupt): the
             # tree is clean base, NOT this bundle's build. Do NOT hand it to the gate (it
@@ -363,7 +427,8 @@ def _overflow_create(d: Path, primary: Path, base_ref: str) -> Path | None:
         return None
 
 
-def for_gate(d: Path, cfg: Config) -> tuple[Path | None, Path | None]:
+def for_gate(d: Path, cfg: Config,
+             hold: contextlib.ExitStack | None = None) -> tuple[Path | None, Path | None]:
     """Resolve the worktree a gate should read for bundle ``d`` (issues #226, #296).
 
     Returns ``(worktree_path, overflow_primary)``:
@@ -380,7 +445,15 @@ def for_gate(d: Path, cfg: Config) -> tuple[Path | None, Path | None]:
     stamp. A lane owned by a DIFFERENT bundle still prefers an overflow tree (with overflow
     enabled and under the cap) over clobbering a lane whose Do may be mid-flight; a failed
     overflow create falls through to the reconstruction, which fails closed
-    (:class:`WorktreeError`) rather than hand the gate a mismatched tree."""
+    (:class:`WorktreeError`) rather than hand the gate a mismatched tree.
+
+    Touching the lane requires the :func:`lane_lock` (#296 review) — an in-flight Do (or
+    another gate run) holding it means the tree is LIVE, and reconstruction would destroy
+    its work; the lock is tried non-blocking and a busy lane raises. Pass ``hold`` (an
+    ``ExitStack``) to keep the lock for the whole gate run — gates do, so a concurrent
+    reconstruction can't clean their outputs mid-command; without it the lock guards only
+    the reconstruction itself (direct/test callers). The overflow spill path never locks
+    the lane — it never touches it."""
     if not cfg.worktree:
         return None, None
     tgt = _target(d, cfg)
@@ -402,4 +475,8 @@ def for_gate(d: Path, cfg: Config) -> tuple[Path | None, Path | None]:
             print(f"worktree: {d.name} gate read spilled to an overflow tree {ovf.name} "
                   f"(lane owned by {lane_owner})", file=sys.stderr)
             return ovf, primary
-    return rebuild_for_gate(d, cfg), None
+    if hold is not None:
+        hold.enter_context(lane_lock(d, cfg, wait=False))
+        return rebuild_for_gate(d, cfg), None
+    with lane_lock(d, cfg, wait=False):
+        return rebuild_for_gate(d, cfg), None

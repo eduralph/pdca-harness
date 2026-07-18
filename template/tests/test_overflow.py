@@ -154,7 +154,13 @@ class Overflow(unittest.TestCase):
         rlock = threading.Lock()
 
         def run(d):
-            r = worktree.for_gate(d, self.cfg)
+            # Over-cap readers race for the shared lane; the #296-review lane lock makes
+            # the losers fail closed ("lane busy") instead of clobbering each other —
+            # count those as no-overflow results, the property under test is the cap.
+            try:
+                r = worktree.for_gate(d, self.cfg)
+            except worktree.WorktreeError:
+                r = (None, None)
             with rlock:
                 results.append(r)
 

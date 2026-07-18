@@ -32,6 +32,7 @@ where the C6 accept-guard forces the human to clear it before sign-off.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shlex
@@ -273,12 +274,18 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
     # (`ovf_primary` not None) is torn down in the finally once the gates run. A tree that
     # cannot be made to match patch.diff raises WorktreeError: fail CLOSED with a synthetic
     # gating red — never run gates over mismatched content, never emit green for it (#296).
+    # The lane lock (#296 review) is entered via `hold` and kept for the WHOLE gate run,
+    # not just the reconstruction — so a concurrent reconstruction can't clean this run's
+    # outputs mid-command; released in the finally. A busy lane (an in-flight Do, another
+    # gate run) raises WorktreeError → the same fail-closed red as a mismatched tree.
+    hold = contextlib.ExitStack()
     if worktree_override is not None:
         wt, ovf_primary = worktree_override, None
     elif bundle is not None:
         try:
-            wt, ovf_primary = worktree.for_gate(bundle, cfg)
+            wt, ovf_primary = worktree.for_gate(bundle, cfg, hold=hold)
         except worktree.WorktreeError as exc:
+            hold.close()
             print(f"gates: {exc} — failing closed, no gate was run", file=sys.stderr)
             return _assemble_matrix([_row(
                 "C4 Verification (worktree mismatch)", "fail",
@@ -301,6 +308,7 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
     finally:
         if ovf_primary is not None and wt is not None:
             worktree.overflow_remove(ovf_primary, wt)
+        hold.close()
     # Overlay the configured gate results onto the complete 5/5/1 matrix.
     return _assemble_matrix(configured, stub=False)
 
