@@ -859,8 +859,12 @@ def _act_resolve(cfg: Config, args: argparse.Namespace) -> int:
     date = args.date or datetime.date.today().isoformat()
     raw = act.resolve(cfg, args.signal, args.location, date)
     if raw is None:
+        # The registration path is --append (a plain `act log` is a read-only preview,
+        # #298 review) — the recovery hint must name the WRITING invocation, or the
+        # operator follows it and the next resolve fails identically.
         print(f"act resolve: no open ledger signal matching '{args.signal}' — run "
-              f"`pdca act log` to register recurring signals first", file=sys.stderr)
+              f"`pdca act log --date <ISO> --append` to register recurring signals first",
+              file=sys.stderr)
         return 1
     print(f"marked applied ({date}): {raw}")
     return 0
