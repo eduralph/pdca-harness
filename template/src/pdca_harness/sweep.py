@@ -55,8 +55,12 @@ def target_checkouts(cfg: Config, bundles: list[Path] | None = None) -> list[Pat
     git checkouts qualify."""
     from . import publish  # lazy: publish imports leaves→worktree; avoid an import cycle
     if bundles is None:
-        bundles = (sorted(d for d in cfg.bundle_root.glob("issue_*") if d.is_dir())
-                   if cfg.bundle_root.exists() else [])
+        # Archived completed/ bundles (#171) count too (#297 review round 2): an
+        # installation that archived everything still has the worktrees on disk, and
+        # they may be the ONLY record of the sibling-convention targets.
+        roots = (cfg.bundle_root, cfg.bundle_root / "completed")
+        bundles = sorted(d for root in roots if root.exists()
+                         for d in root.glob("issue_*") if d.is_dir())
     candidates: dict[Path, None] = {}
     for spec in cfg.repo_checkouts:
         candidates.setdefault(publish._checkout_path(cfg, spec), None)
@@ -86,12 +90,32 @@ def _integ_dirs(primary: Path) -> list[Path]:
                   if p.is_dir())
 
 
+def _registered_worktree(primary: Path, wt: Path) -> bool:
+    """True iff ``wt`` is a worktree REGISTERED to ``primary`` (`git worktree list
+    --porcelain`). A ``.git`` entry alone proves nothing (#297 review round 2): a
+    standalone clone that merely matches our sibling naming has a ``.git`` DIRECTORY,
+    fails ``git worktree remove``, and the rmtree fallback would eat an unrelated
+    repository. Registration is the authoritative "the harness created this here"."""
+    proc = subprocess.run(["git", "-C", str(primary), "worktree", "list", "--porcelain"],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        return False
+    registered = {line[len("worktree "):].strip()
+                  for line in proc.stdout.splitlines() if line.startswith("worktree ")}
+    try:
+        target = str(wt.resolve())
+    except OSError:
+        return False
+    return any(target == str(Path(p).resolve()) for p in registered)
+
+
 def _remove_tree(primary: Path, wt: Path) -> bool:
     """``git worktree remove`` with the rmtree + prune fallback (the drift.py pattern),
-    plus the owner sidecar. Refuses (False) a dir with no ``.git`` entry — whatever it
-    is, it is not a worktree the harness created, and the unconditional rmtree fallback
-    must never eat an unrelated sibling (#297 review). Best-effort otherwise."""
-    if not (wt / ".git").exists():
+    plus the owner sidecar. Refuses (False) anything not REGISTERED as a worktree of
+    ``primary`` — whatever it is (a plain dir, a standalone clone that matches our
+    naming), the harness did not create it and the rmtree fallback must never eat it
+    (#297 review). Best-effort otherwise."""
+    if not _registered_worktree(primary, wt):
         return False
     if _git(primary, "worktree", "remove", "--force", str(wt)) != 0:
         shutil.rmtree(wt, ignore_errors=True)
@@ -136,15 +160,19 @@ def sweep(cfg: Config, bundles: list[Path] | None = None, *,
                 for ovf in orphans:
                     worktree.overflow_remove(primary, ovf)
             for integ in _integ_dirs(primary):
-                if not (integ / ".git").exists():
-                    lines.append(f"sweep: left {integ.name} (no .git entry — not a "
-                                 "harness worktree)")
+                if not _registered_worktree(primary, integ):
+                    lines.append(f"sweep: left {integ.name} (not a worktree registered "
+                                 f"to {primary.name} — not ours to remove)")
                     continue
                 lines.append(f"sweep: {verb}remove integration tree {integ.name}")
                 if not dry_run:
                     _remove_tree(primary, integ)
             for lane_wt in _lane_dirs(primary):
                 if mode == "remove":
+                    if not _registered_worktree(primary, lane_wt):
+                        lines.append(f"sweep: left {lane_wt.name} (not a worktree "
+                                     f"registered to {primary.name} — not ours to remove)")
+                        continue
                     lines.append(f"sweep: {verb}remove lane worktree {lane_wt.name}")
                     if not dry_run:
                         _remove_tree(primary, lane_wt)
@@ -156,6 +184,12 @@ def sweep(cfg: Config, bundles: list[Path] | None = None, *,
                                 or _git(lane_wt, "reset", "--hard") != 0):
                             lines.append(f"sweep: {lane_wt.name}: clean/reset failed "
                                          "(left as is)")
+                        else:
+                            # The reset stripped the bundle's patch, so the owner stamp
+                            # no longer describes the tree's CONTENT — a later gate read
+                            # trusting it would false-green against the unpatched base
+                            # (#297 review round 2). Clear it; the next read re-populates.
+                            worktree._owner_file(lane_wt).unlink(missing_ok=True)
             if not dry_run:
                 _git(primary, "worktree", "prune")
         except Exception as exc:  # noqa: BLE001 — teardown must never fail a run

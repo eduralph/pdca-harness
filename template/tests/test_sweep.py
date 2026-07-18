@@ -83,6 +83,10 @@ class SweepRealGit(unittest.TestCase):
         self.assertFalse((self.lane / "build" / "leftover.o").exists())  # ignored output gone
         self.assertFalse((self.lane / "stray.txt").exists())  # untracked gone
         self.assertEqual(self._porcelain(self.lane), "")      # clean tree
+        # #297 review round 2: the reset stripped the bundle's patch, so the owner
+        # stamp must go with it — a stale stamp would let a later gate read trust the
+        # unpatched base as the bundle's build.
+        self.assertIsNone(worktree.owner_of(self.lane))
         self.assertFalse((self.tmp / "checkout.pdca-integ-main").exists())  # integ removed
         self.assertFalse(self.ovf.exists())                                  # orphan removed
         self.assertEqual(self._porcelain(self.primary), "")   # primary never touched
@@ -164,8 +168,40 @@ class SweepRealGit(unittest.TestCase):
         lines = sweep.sweep(self.cfg, [d], mode="remove")
         self.assertTrue((backup / "precious.txt").exists())   # never matched
         self.assertTrue((fake_integ / "precious.txt").exists())  # matched, refused
-        self.assertTrue(any("not a harness worktree" in ln for ln in lines))
+        self.assertTrue(any("not ours to remove" in ln for ln in lines))
         self.assertFalse(self.lane.exists())                  # the real lane still removed
+
+    def test_standalone_clone_matching_our_naming_is_never_deleted(self) -> None:
+        # #297 review round 2: a standalone git CLONE named like an integ tree has a
+        # .git entry, fails `git worktree remove`, and the old fallback would rmtree an
+        # unrelated repository. Registration in `git worktree list` is now required.
+        d = self._seed_footprint()
+        clone = self.tmp / "checkout.pdca-integ-notours"
+        sp.run(["git", "init", "-q", str(clone)], check=True)
+        (clone / "precious.txt").write_text("someone's repo\n", encoding="utf-8")
+        lines = sweep.sweep(self.cfg, [d], mode="remove")
+        self.assertTrue((clone / "precious.txt").exists())    # survived
+        self.assertTrue(any("not ours to remove" in ln and "notours" in ln
+                            for ln in lines))
+        self.assertFalse((self.tmp / "checkout.pdca-integ-main").exists())  # real one gone
+
+    def test_discovery_covers_archived_completed_bundles(self) -> None:
+        # #297 review round 2: with everything archived to results/completed/ and no
+        # [publisher.checkouts], the archived bundles are the only record of the
+        # sibling-convention targets — discovery must read them too.
+        d = self._seed_footprint()
+        self.cfg.repo_checkouts = {}
+        self.cfg.root = self.tmp / "proj"
+        self.cfg.root.mkdir()
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Repo + branch target:** org/checkout @ main\n",
+            encoding="utf-8")
+        archived = self.cfg.bundle_root / "completed" / d.name
+        archived.parent.mkdir(parents=True, exist_ok=True)
+        d.rename(archived)                                    # the #171 archive move
+        lines = sweep.sweep(self.cfg)                         # no bundles argument
+        self.assertTrue(lines)
+        self.assertFalse((self.lane / "stray.txt").exists())  # target still discovered
 
     def test_second_sweep_is_a_quiet_noop_for_removed_trees(self) -> None:
         d = self._seed_footprint()
