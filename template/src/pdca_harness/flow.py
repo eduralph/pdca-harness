@@ -479,10 +479,11 @@ def _audit_wave_overlap(wave: list[Path]) -> None:
                       f"conflict; review before merge.", file=sys.stderr)
 
 
-# Terminal: finished (COMPLETE) or deliberately abandoned (DISCONTINUED). A bundle left in
-# ANY other state when the driver stops driving it is work in flight — it will not be
-# published, and nothing else advances it this run.
-_TERMINAL = (state.COMPLETE, state.DISCONTINUED)
+# Terminal: finished (COMPLETE), deliberately abandoned (DISCONTINUED), or settled in the
+# tracker outside a cycle (RESOLVED, #302). A bundle left in ANY other state when the driver
+# stops driving it is work in flight — it will not be published, and nothing else advances
+# it this run.
+_TERMINAL = (state.COMPLETE, state.DISCONTINUED, state.RESOLVED)
 
 
 def _warn_abandoned(bundles: list[Path], *, why: str) -> None:
@@ -572,7 +573,7 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
             for d in chunk:
                 _isolate(d, "sign-off", lambda d=d: _apply_decision(
                     cfg, d, by=by, today=today, apply_now=False))
-        if all(state.state(d) in (state.COMPLETE, state.DISCONTINUED) for d in wave):
+        if all(state.state(d) in _TERMINAL for d in wave):
             return
     # Budget spent with work still in flight. An `iterate-do` recorded on the last allowed
     # pass defers its rebuild to "the next pass's build-all" — which never comes.
@@ -710,12 +711,13 @@ def flow_batch(
 
     leaves.do_plan_batch(cfg, csv)
     # Resume set: every bundle with a brief that isn't finished. UNPLANNED (skipped /
-    # un-briefed), COMPLETE (done) and DISCONTINUED (deliberately abandoned)
-    # are excluded, so a re-run is idempotent and a discontinued bundle stays out of the sweep.
+    # un-briefed), COMPLETE (done), DISCONTINUED (deliberately abandoned) and RESOLVED
+    # (settled in the tracker, #302) are excluded, so a re-run is idempotent and a
+    # discontinued or resolved bundle stays out of the sweep.
     bundles = sorted(
         (cfg.bundle_root / name for name in _bundle_dirs(cfg)
          if state.state(cfg.bundle_root / name)
-         not in (state.COMPLETE, state.UNPLANNED, state.DISCONTINUED)),
+         not in (state.COMPLETE, state.UNPLANNED, state.DISCONTINUED, state.RESOLVED)),
         key=lambda p: p.name,
     )
     if not bundles:
@@ -782,7 +784,7 @@ def flow_ids(
         if not d.exists() or s == state.UNPLANNED:
             print(f"flow: {d.name} — no brief.md, skipped (brief it at Plan first)", file=sys.stderr)
             continue
-        if s in (state.COMPLETE, state.DISCONTINUED):
+        if s in _TERMINAL:
             print(f"flow: {d.name} — already terminal ({s}), skipped", file=sys.stderr)
             continue
         bundles.append(d)

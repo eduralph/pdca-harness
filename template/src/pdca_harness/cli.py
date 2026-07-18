@@ -48,6 +48,7 @@ _STATE_ORDER = [
     state.ITERATE_PLAN,
     state.COMPLETE,
     state.DISCONTINUED,
+    state.RESOLVED,
 ]
 
 
