@@ -47,6 +47,11 @@ def _stub_config(root: Path) -> Config:
         publisher=LeafConfig(mode="stub", family="claude", interactive=True),
         act=LeafConfig(mode="stub", family="claude", interactive=True),
         act_cadence=1,  # most flow tests assert Act runs after a flow; cadence #109 tested separately
+        # Hermetic: pin the toy target to a path inside this test's tmp root (absent →
+        # worktree isolation legitimately doesn't apply, gates run in place). The sibling
+        # convention would resolve to the SHARED `/tmp/example-repo`, where a stray leftover
+        # dir with a broken .git flips gates to a fail-closed WorktreeError (#296).
+        repo_checkouts={"example-org/example-repo": str(root / "example-repo")},
     )
 
 

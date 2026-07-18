@@ -43,6 +43,12 @@ def _cfg(root: Path) -> Config:
         publisher=LeafConfig(mode="stub", interactive=True),
         act=LeafConfig(mode="stub", interactive=True),
         gates_checks=[],
+        # Hermetic: pin the toy target to a path inside this test's tmp root. Without a
+        # mapping, the sibling convention resolves to `<tmp>/../example-repo` — a SHARED
+        # /tmp path a stray dir (e.g. an earlier run's leftover with a broken .git) can
+        # occupy, turning the deterministic "no checkout → run in place" fallback into a
+        # fail-closed WorktreeError (#296) depending on host state.
+        repo_checkouts={"example-org/example-repo": str(root / "example-repo")},
     )
 
 
