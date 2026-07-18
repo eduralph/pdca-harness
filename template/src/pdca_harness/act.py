@@ -15,6 +15,7 @@ contribution's disposition, run the validator/suite, or author the next brief.
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -50,37 +51,106 @@ def frozen_bundles(cfg: Config) -> list[Path]:
 
 
 # ----------------------------------------------------------------------------
-# Cadence (issue #109): Act yields a real delta only once enough cycles have frozen to
-# show a pattern. The flow auto-runs it only when this many cycles have frozen SINCE the
-# last Act — counted from a durable marker (the frozen count at the last review) so it
-# holds across flow invocations, and works even when a command-mode Act writes no
-# act-log entry (the model judged "no delta"). Frozen bundles are monotonic (COMPLETE is
-# terminal), so current-minus-marker is the count of unreviewed cycles.
+# Cadence + review frontier (issues #109, #299). Act yields a real delta only once
+# enough cycles have frozen to show a pattern; the flow auto-runs it only when enough
+# have frozen SINCE the last Act. The durable marker used to hold just the frozen
+# COUNT at the last review — enough for the cadence trigger, useless for resume: a
+# count identifies neither WHICH bundles were covered nor when, so overlapping
+# sessions re-reviewed each other's cycles (real merge conflicts in act-log.md and
+# the marker) and out-of-order freezes slipped through uncovered. The marker is now a
+# JSON object recording the reviewed bundle NAMES (the frontier):
+#
+#     {"count": 14, "reviewed": ["issue_101", "issue_58"], "last_review_date": "…"}
+#
+# ``reviewed`` is authoritative (sorted → deterministic file, mergeable-by-union in
+# git); ``count`` is derived/informational. A legacy bare-int marker (valid JSON!)
+# is read as "the first n name-sorted frozen bundles are reviewed" — a one-time
+# migration heuristic reproducing the old arithmetic instead of dumping a full
+# re-review on upgrade; the first new-format write repairs it permanently. An older
+# engine reading the JSON object hits int() → ValueError → 0: degrades toward
+# re-review, never toward silent skips.
 # ----------------------------------------------------------------------------
-_CADENCE_MARKER = ".act-reviewed"  # holds the frozen-bundle count at the last Act
+_CADENCE_MARKER = ".act-reviewed"
 
 
-def mark_reviewed(cfg: Config) -> None:
-    """Record that Act just ran: stamp the current frozen-bundle count (issue #109)."""
+def _load_marker(cfg: Config) -> dict:
+    """The parsed review marker: ``{"count": int, "reviewed": set[str] | None}``.
+
+    ``reviewed is None`` ⇒ legacy count-only or absent/garbage marker (callers apply
+    the name-sorted-prefix heuristic). Defensive like :func:`load_ledger` — any
+    unreadable/malformed content is "nothing reviewed", never a crash.
+    """
+    marker = cfg.process_dir / _CADENCE_MARKER
+    if not marker.exists():
+        return {"count": 0, "reviewed": None}
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return {"count": 0, "reviewed": None}
+    if isinstance(data, bool):  # bool is an int subclass; a `true` marker means nothing
+        return {"count": 0, "reviewed": None}
+    if isinstance(data, int):  # legacy bare-int marker (pre-#299)
+        return {"count": max(0, data), "reviewed": None}
+    if isinstance(data, dict):
+        reviewed = data.get("reviewed")
+        if isinstance(reviewed, list) and all(isinstance(n, str) for n in reviewed):
+            return {"count": len(reviewed), "reviewed": set(reviewed)}
+        count = data.get("count")
+        return {"count": max(0, count) if isinstance(count, int) else 0, "reviewed": None}
+    return {"count": 0, "reviewed": None}
+
+
+def _reviewed_names(cfg: Config, frozen: list[Path]) -> set[str]:
+    """The frontier as bundle names, resolving a legacy count marker via the
+    name-sorted-prefix heuristic (the state the old marker could actually represent)."""
+    m = _load_marker(cfg)
+    if m["reviewed"] is not None:
+        return m["reviewed"]
+    return {d.name for d in frozen[:m["count"]]}
+
+
+def unreviewed_bundles(cfg: Config) -> list[Path]:
+    """Frozen bundles not covered by the last review — the default Act scope (#299).
+
+    Set difference on bundle names, so a bundle frozen out of name order around a
+    past review (the observed coverage-gap case) still surfaces as unreviewed.
+    """
+    frozen = frozen_bundles(cfg)
+    reviewed = _reviewed_names(cfg, frozen)
+    return [d for d in frozen if d.name not in reviewed]
+
+
+def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "") -> None:
+    """Advance the review frontier: union the covered bundles into the marker (#109/#299).
+
+    ``reviewed=None`` ⇒ every currently frozen bundle (what a full auto-Act covers).
+    The union is intersected with the current frozen set so a deleted bundle can't
+    wedge the counts. Crash-atomic: written to a temp sibling then ``os.replace``.
+    """
+    frozen = frozen_bundles(cfg)
+    frozen_names = {d.name for d in frozen}
+    prior = _reviewed_names(cfg, frozen)
+    new = {d.name for d in (reviewed if reviewed is not None else frozen)}
+    covered = sorted((prior | new) & frozen_names)
+    payload = {"count": len(covered), "reviewed": covered, "last_review_date": date}
     cfg.process_dir.mkdir(parents=True, exist_ok=True)
-    (cfg.process_dir / _CADENCE_MARKER).write_text(
-        f"{len(frozen_bundles(cfg))}\n", encoding="utf-8")
+    marker = cfg.process_dir / _CADENCE_MARKER
+    tmp = marker.with_name(marker.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, marker)
 
 
 def cycles_since_review(cfg: Config) -> int:
-    """How many cycles have frozen since the last Act (issue #109).
+    """How many frozen cycles the last Act did not cover (issue #109).
 
-    ``current frozen count − marker`` (no marker ⇒ all frozen cycles count). Never
-    negative, so a deleted bundle can't wedge the cadence.
+    Exact under the frontier marker (name-set difference); the legacy count
+    arithmetic (``current − marker``, never negative) for a pre-#299 marker.
     """
-    marker = cfg.process_dir / _CADENCE_MARKER
-    last = 0
-    if marker.exists():
-        try:
-            last = int(marker.read_text(encoding="utf-8").strip() or 0)
-        except ValueError:
-            last = 0
-    return max(0, len(frozen_bundles(cfg)) - last)
+    frozen = frozen_bundles(cfg)
+    m = _load_marker(cfg)
+    if m["reviewed"] is None:
+        return max(0, len(frozen) - m["count"])
+    return sum(1 for d in frozen if d.name not in m["reviewed"])
 
 
 def act_due(cfg: Config) -> bool:
@@ -188,9 +258,14 @@ def recurrences(cfg: Config, entries: list[ActEntry] | None = None) -> list[dict
     return out
 
 
-def index(cfg: Config, since: str | None = None) -> list[ActEntry]:
-    """Extract §6/§7/§9/§10 from each frozen bundle, newest filtering via §9 date."""
-    entries = [_extract(d / "SUMMARY.md", d) for d in frozen_bundles(cfg)]
+def index(cfg: Config, since: str | None = None,
+          bundles: list[Path] | None = None) -> list[ActEntry]:
+    """Extract §6/§7/§9/§10 from each frozen bundle, newest filtering via §9 date.
+
+    ``bundles`` (#299) restricts the extraction to an explicit list (e.g. the
+    unreviewed set); default is every frozen bundle."""
+    entries = [_extract(d / "SUMMARY.md", d)
+               for d in (frozen_bundles(cfg) if bundles is None else bundles)]
     if since:
         entries = [e for e in entries if e.date and e.date >= since]
     return entries

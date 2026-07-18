@@ -1590,9 +1590,11 @@ def run_act(cfg: Config, date: str) -> None:
         _invoke(cfg.act, cfg.root, _act_prompt(cfg, date), cfg=cfg)
     else:
         _stub_act(cfg, date)
-    # Reset the cadence marker (issue #109) whenever the Act beat runs — even if a
-    # command-mode Act judged "no delta" and wrote no act-log entry, the review happened.
-    act_mod.mark_reviewed(cfg)
+    # Advance the review frontier (issues #109/#299) whenever the Act beat runs — even
+    # if a command-mode Act judged "no delta" and wrote no act-log entry, the review
+    # happened. The auto-Act indexes ALL frozen bundles, so that is exactly what it
+    # covered.
+    act_mod.mark_reviewed(cfg, reviewed=act_mod.frozen_bundles(cfg), date=date)
 
 
 def _act_prompt(cfg: Config, date: str) -> str:

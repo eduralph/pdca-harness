@@ -251,26 +251,39 @@ def main(argv: list[str] | None = None) -> int:
             "                                      so the flow's next auto-Act won't re-cover\n"
             "                                      these cycles\n"
             "  %(prog)s resolve <signal>           mark an applied process delta (act-ledger.json)\n"
+            "index/log default to the cycles frozen since the last review (the frontier\n"
+            "recorded in .act-reviewed) — --all or --since widens to the full history;\n"
             "the scaffold's Process-deltas section is deliberately TODO — choosing the deltas\n"
             "is Act's irreducible human work"))
     act_sub = p_act.add_subparsers(dest="act_cmd", required=True)
     p_actidx = act_sub.add_parser(
         "index", help="read-only index of frozen cycles + recurring signals",
         description="Read-only index of frozen (COMPLETE) cycles, their §6/§7/§10 extracts "
-                    "and recurring signals. No cadence gate; writes nothing.")
-    p_actidx.add_argument("--since", help="only cycles signed off on/after this ISO date")
+                    "and recurring signals. No cadence gate; writes nothing. Defaults to "
+                    "the cycles frozen since the last review (#299).")
+    p_actidx.add_argument("--since", help="only cycles signed off on/after this ISO date "
+                                          "(implies the full frozen history as base scope)")
+    p_actidx.add_argument("--all", action="store_true",
+                          help="cover every frozen cycle, not just those unreviewed since "
+                               "the last Act")
     p_actlog = act_sub.add_parser(
         "log", help="scaffold a dated act-log entry (deltas left to the human)",
         description="Scaffold a dated act-log entry over the frozen (COMPLETE) cycles "
                     "(exits 1 when none exist). The Process-deltas section is left TODO "
                     "deliberately — choosing the deltas is Act's irreducible human work. "
-                    "Without --append the entry is only printed (a safe preview).")
-    p_actlog.add_argument("--since", help="only consider cycles signed off on/after this ISO date")
+                    "Without --append the entry is only printed (a safe preview). "
+                    "Defaults to the cycles frozen since the last review (#299).")
+    p_actlog.add_argument("--since", help="only consider cycles signed off on/after this ISO "
+                                          "date (implies the full frozen history as base scope)")
+    p_actlog.add_argument("--all", action="store_true",
+                          help="cover every frozen cycle, not just those unreviewed since "
+                               "the last Act")
     p_actlog.add_argument("--date", required=True, help="review date (ISO; Act is out-of-band so pass it)")
     p_actlog.add_argument("--append", action="store_true",
-                          help="append to process/act-log.md AND stamp process/.act-reviewed — "
-                               "a manual Act review resets the flow's cadence too, so the next "
-                               "auto-Act won't re-cover these cycles (default: print only)")
+                          help="append to process/act-log.md AND advance the review frontier in "
+                               "process/.act-reviewed — a manual Act review resets the flow's "
+                               "cadence too, so the next auto-Act won't re-cover these cycles "
+                               "(default: print only)")
     p_actres = act_sub.add_parser(
         "resolve",
         help="mark a tracked recurring signal as a delta you applied (#149)",
@@ -779,11 +792,32 @@ def _act(cfg: Config, args: argparse.Namespace) -> int:
     return 2
 
 
+def _act_scope(cfg: Config, args: argparse.Namespace) -> tuple[list, list, bool]:
+    """``(scoped_entries, all_entries, full)`` for an act command (#299).
+
+    Default scope = the unreviewed frozen set (resume from the frontier); ``--all``
+    or ``--since`` widens to every frozen cycle (``--since`` then date-filters).
+    Patterns / ledger registration / recurrence detection always run over
+    ``all_entries`` — a signal seen once before the frontier and once after must
+    still count as recurring, so narrowing the narrative scope must never narrow
+    the signal history.
+    """
+    full = bool(args.all or args.since)
+    all_entries = act.index(cfg, since=args.since)
+    if full:
+        return all_entries, all_entries, True
+    scoped = act.index(cfg, bundles=act.unreviewed_bundles(cfg))
+    return scoped, all_entries, False
+
+
 def _act_index(cfg: Config, args: argparse.Namespace) -> int:
-    """Print the read-only Act bundle index across frozen cycles."""
-    entries = act.index(cfg, since=args.since)
-    print(act.render_index(entries, act.patterns(entries),
-                           act.load_ledger(cfg), act.recurrences(cfg, entries)))
+    """Print the read-only Act bundle index (default: unreviewed cycles only, #299)."""
+    entries, all_entries, full = _act_scope(cfg, args)
+    if not full:
+        print(f"act index: {len(entries)} unreviewed of {len(all_entries)} frozen "
+              "cycle(s) (--all for the full index)", file=sys.stderr)
+    print(act.render_index(entries, act.patterns(all_entries),
+                           act.load_ledger(cfg), act.recurrences(cfg, all_entries)))
     return 0
 
 
@@ -792,18 +826,25 @@ def _act_log(cfg: Config, args: argparse.Namespace) -> int:
 
     The scaffold pre-fills the considered bundles and recurring signals; the
     Process-deltas section is left TODO because choosing them is Act's
-    irreducible human work.
+    irreducible human work. Default scope resumes from the review frontier (#299);
+    --append advances the frontier past the covered cycles.
     """
-    entries = act.index(cfg, since=args.since)
-    if not entries:
+    entries, all_entries, full = _act_scope(cfg, args)
+    if not all_entries:
         print("no frozen cycles to review (need COMPLETE bundles)", file=sys.stderr)
         return 1
-    act.register_signals(cfg, entries, args.date)  # track recurring signals (#149)
-    text = act.scaffold_entry(entries, act.patterns(entries), date=args.date,
-                              recs=act.recurrences(cfg, entries))
+    if not entries:
+        print(f"no unreviewed frozen cycles ({len(all_entries)} frozen, all covered by "
+              "the last Act) — use --all or --since to re-review", file=sys.stderr)
+        return 1
+    act.register_signals(cfg, all_entries, args.date)  # track recurring signals (#149)
+    text = act.scaffold_entry(entries, act.patterns(all_entries), date=args.date,
+                              recs=act.recurrences(cfg, all_entries))
     if args.append:
+        # Log first, frontier second: a crash between the two re-reviews the cycles
+        # next time — never silently skips them. The marker write itself is atomic.
         log = act.append_entry(cfg, text)
-        act.mark_reviewed(cfg)  # a manual Act review resets the flow cadence too (#109)
+        act.mark_reviewed(cfg, reviewed=[e.bundle for e in entries], date=args.date)
         print(f"appended entry to {log}")
     else:
         print(text)
