@@ -82,6 +82,17 @@ class StateResolved(unittest.TestCase):
         (d / "brief.md").write_text("- **Slug:** real-work\n", encoding="utf-8")
         self.assertEqual(state.state(d), state.PLANNED)
 
+    def test_placeholder_brief_does_not_unresolve_a_resolved_tracker(self) -> None:
+        # #302 review: a stray unfilled template copy (e.g. the stub/batch planner
+        # copying brief.md.tpl) is "never authored" — the same standing as no brief —
+        # so the tracker's terminal resolution still wins and the bundle must not
+        # reappear as pending. Without the resolved marker it stays UNPLANNED (#113).
+        d = self._bundle("9", json.dumps(_RESOLVED))
+        (d / "brief.md").write_text("- **Slug:** <fill-me>\n", encoding="utf-8")
+        self.assertEqual(state.state(d), state.RESOLVED)
+        (d / "notes.json").unlink()
+        self.assertEqual(state.state(d), state.UNPLANNED)
+
 
 class ResolvedIsTerminal(unittest.TestCase):
     def setUp(self) -> None:
