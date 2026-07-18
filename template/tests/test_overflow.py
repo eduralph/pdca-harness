@@ -201,6 +201,27 @@ class Overflow(unittest.TestCase):
         self.assertTrue((self.lane / "orphan.txt").exists())
         self.assertEqual(worktree._overflow_dirs(self.primary), [])             # torn down
 
+    def test_overflow_declines_gitlink_patches_and_fails_closed(self) -> None:
+        # #296 review round 2: the overflow reconstruction uses the same plain
+        # `git apply`, so it must carry the same gitlink fail-closed — the spill
+        # declines (tree torn down) and the read falls through to rebuild_for_gate,
+        # which raises the loud WorktreeError instead of certifying the wrong
+        # submodule revision.
+        other = self._bundle("OTHER")
+        worktree.ensure(other, self.cfg)                   # lane owned by OTHER
+        d = self._bundle("WT")
+        (d / "patch.diff").write_text(
+            "diff --git a/vendor/lib b/vendor/lib\nindex 1111111..2222222 160000\n"
+            "--- a/vendor/lib\n+++ b/vendor/lib\n@@ -1 +1 @@\n"
+            "-Subproject commit 1111111111111111111111111111111111111111\n"
+            "+Subproject commit 2222222222222222222222222222222222222222\n",
+            encoding="utf-8")
+        self.cfg.overflow = 2
+        with self.assertRaises(worktree.WorktreeError) as ctx:
+            worktree.for_gate(d, self.cfg)
+        self.assertIn("gitlink", str(ctx.exception))
+        self.assertEqual(worktree._overflow_dirs(self.primary), [])  # spill torn down
+
     def test_gate_fails_closed_when_tree_cannot_match_patch(self) -> None:
         # #296: a patch.diff that no longer applies means NO tree can be shown to match the
         # patch under review. The run must fail CLOSED: no gate command executes, the matrix

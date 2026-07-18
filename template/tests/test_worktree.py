@@ -239,6 +239,20 @@ class WorktreeRealGit(unittest.TestCase):
         wt = self.tmp / "checkout.pdca-wt"
         self.assertIsNone(worktree.owner_of(wt))            # never stamped as valid
 
+    def test_text_mention_of_subproject_commit_is_not_a_gitlink(self) -> None:
+        # #296 review round 2: detection keys on the 160000 mode headers, never hunk
+        # text — a docs/test-fixture line reading "Subproject commit …" must still
+        # reconstruct normally, not fail closed.
+        worktree.ensure(self.d, self.cfg)
+        (self.d / "patch.diff").write_text(
+            "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n"
+            "@@ -1 +1,2 @@\n base\n+Subproject commit deadbeef documented here\n",
+            encoding="utf-8")
+        wt = worktree.rebuild_for_gate(self.d, self.cfg)
+        self.assertIsNotNone(wt)
+        self.assertIn("Subproject commit deadbeef",
+                      (wt / "file.txt").read_text(encoding="utf-8"))
+
     def test_busy_lane_fails_the_gate_read_closed(self) -> None:
         # #296 review: an owner stamp cannot say whether that Do is STILL RUNNING —
         # while the lane lock is held (an in-flight Do / another gate run), a gate read

@@ -22,7 +22,6 @@ left behind, and fails closed on any mismatch (issue #296).
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import itertools
 import os
 import re
@@ -34,6 +33,30 @@ from pathlib import Path
 
 from . import lane
 from .config import Config
+
+# Cross-platform advisory file lock (#296 review round 2, same rationale as act.py):
+# ``fcntl`` is Unix-only and cli.py imports this module at load time, so a hard import
+# would break every installed command on Windows (scripts/install.ps1 is a supported
+# bootstrap). ``msvcrt.locking`` is the Windows equivalent; LK_NBLCK raises at once
+# when contended, matching flock's LOCK_NB.
+if os.name == "nt":  # pragma: no cover — exercised only on Windows
+    import msvcrt
+
+    def _lock_file(fh, *, wait: bool) -> None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK if wait else msvcrt.LK_NBLCK, 1)
+
+    def _unlock_file(fh) -> None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    def _lock_file(fh, *, wait: bool) -> None:
+        fcntl.flock(fh, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+
+    def _unlock_file(fh) -> None:
+        fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 class WorktreeError(Exception):
@@ -120,10 +143,17 @@ def path(d: Path, cfg: Config) -> Path | None:
     return wt if (wt / ".git").exists() else None
 
 
-# A patch hunk that changes a submodule gitlink (mode 160000). Plain `git apply` exits 0
+# A patch that changes a submodule gitlink (mode 160000). Plain `git apply` exits 0
 # for these while leaving the submodule checkout untouched, so a reconstruction that
 # "succeeded" would still not be base + patch.diff — the exact lie #296 forbids.
-_GITLINK_RE = re.compile(r"^[+-]Subproject commit [0-9a-f]", re.MULTILINE)
+# Keyed on the DIFF HEADERS that declare the 160000 mode (index/old mode/new mode/new
+# file mode/deleted file mode lines), never on hunk text alone (#296 review round 2):
+# an ordinary text file may legitimately contain a `Subproject commit …` line, and
+# misclassifying it would fail-close a patch `git apply` materializes correctly.
+_GITLINK_RE = re.compile(
+    r"^(?:index [0-9a-f]+\.\.[0-9a-f]+|old mode|new mode|new file mode|deleted file mode)"
+    r" 160000$",
+    re.MULTILINE)
 
 
 @contextlib.contextmanager
@@ -154,7 +184,7 @@ def lane_lock(d: Path, cfg: Config, *, wait: bool):
     wt = _wt_dir(tgt[0])
     fh = wt.with_name(wt.name + ".lock").open("w")
     try:
-        fcntl.flock(fh, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        _lock_file(fh, wait=wait)
     except OSError as exc:
         fh.close()
         raise WorktreeError(
@@ -164,7 +194,7 @@ def lane_lock(d: Path, cfg: Config, *, wait: bool):
         yield
     finally:
         with contextlib.suppress(OSError):
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            _unlock_file(fh)
         fh.close()
 
 
@@ -417,7 +447,16 @@ def _overflow_create(d: Path, primary: Path, base_ref: str) -> Path | None:
         if _git(primary, "worktree", "add", "--force", str(ovf), base_ref) != 0:
             return None
         patch = d / "patch.diff"
-        if patch.is_file() and patch.read_text(encoding="utf-8").strip():
+        patch_text = patch.read_text(encoding="utf-8") if patch.is_file() else ""
+        if patch_text.strip():
+            if _GITLINK_RE.search(patch_text):
+                # Same gitlink fail-closed as rebuild_for_gate (#296 review round 2):
+                # plain `git apply` exits 0 while skipping the gitlink, so this tree
+                # would carry the wrong submodule revision. Decline the overflow; the
+                # caller falls through to rebuild_for_gate, which raises the loud
+                # WorktreeError → the fail-closed gating red.
+                overflow_remove(primary, ovf)
+                return None
             if _git(ovf, "apply", str(patch.resolve())) != 0:
                 overflow_remove(primary, ovf)  # patch didn't apply → not this bundle's build
                 return None
