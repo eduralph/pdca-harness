@@ -98,11 +98,17 @@ def _pr_state(url: str) -> str:
 
 
 def _github_tracker(cfg: Config) -> tuple[bool, str]:
-    """(issue-side reconciliation possible, default --repo). A ``[[plan.source]]``
-    github provider wins (its optional ``repo`` names the issue repo, as in
-    sources._github); else the legacy ``[tracker].system`` setting."""
+    """(issue-side reconciliation possible, default --repo).
+
+    Only a github ``[[plan.source]]`` that DECLARES ``role = "tracker"`` is canonical
+    (#300 review) — that is exactly the meaning ``sources._is_tracker`` reserves for the
+    role. A github source WITHOUT it is supplementary reading material (a linked spec
+    repo, a mirror), and reconciling against it could comment on or close an unrelated
+    issue that merely shares the numeric id. Fallback: the legacy ``[tracker].system``
+    setting."""
     for src in cfg.plan_sources:
-        if isinstance(src, dict) and src.get("type") == "github":
+        if (isinstance(src, dict) and src.get("type") == "github"
+                and (src.get("role") or "").strip().lower() == "tracker"):
             return True, str(src.get("repo", "") or "")
     return cfg.tracker_system == "github", ""
 
@@ -146,20 +152,37 @@ def _discontinue(cfg: Config, d: Path, remote: dict, *, by: str, today: str) -> 
 
 
 def _close_issue(d: Path, number: str, repo: str, *, reason: str, fallback_body: str) -> bool:
-    """Comment (bundle's tracker-comment.md if present, else the fallback) then close."""
+    """Close the issue with the comment ATTACHED — one ``gh issue close --comment`` call
+    (#300 review). The two-step comment-then-close left a partial state on a transient
+    close failure: the comment was already posted, and a ``--apply`` retry posted it
+    again — spamming the tracker and breaking the advertised idempotence. A single call
+    either does everything or (on failure) has posted nothing to retry around. The
+    bundle's ``tracker-comment.md`` is preferred as the body, else the fallback."""
     repo_args = ["--repo", repo] if repo else []
     comment = d / "tracker-comment.md"
+    body = fallback_body
     if comment.is_file() and comment.read_text(encoding="utf-8").strip():
-        c = _gh(["issue", "comment", number, *repo_args, "--body-file", str(comment)])
-    else:
-        c = _gh(["issue", "comment", number, *repo_args, "--body", fallback_body])
-    if c.returncode != 0:
-        print(f"cleanup: issue_{number}: comment failed: {c.stderr.strip()}", file=sys.stderr)
-        return False
-    r = _gh(["issue", "close", number, *repo_args, "--reason", reason])
+        body = comment.read_text(encoding="utf-8").strip()
+    r = _gh(["issue", "close", number, *repo_args, "--reason", reason, "--comment", body])
     if r.returncode != 0:
         print(f"cleanup: issue_{number}: close failed: {r.stderr.strip()}", file=sys.stderr)
         return False
+    return True
+
+
+def _unresolve(d: Path) -> bool:
+    """Drop the ``resolved`` marker from notes.json — the tracker REOPENED the issue, so
+    the terminal resolution no longer holds and the bundle must return to the pending
+    set (#300 review). Tolerant read; False when there is nothing safe to change."""
+    notes = d / "notes.json"
+    try:
+        data = json.loads(notes.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return False
+    if not isinstance(data, dict) or "resolved" not in data:
+        return False
+    del data["resolved"]
+    notes.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return True
 
 
@@ -167,10 +190,24 @@ def _plan_bundle(cfg: Config, d: Path, *, issue_side: bool, repo: str,
                  by: str, today: str) -> _Row | None:
     """The reconciliation row for one bundle, or None when local and remote agree."""
     st = state.state(d)
-    if st == state.RESOLVED:
-        return None                                  # terminal and tracker-derived: in sync
     number = d.name.removeprefix("issue_")
     numeric = number.isdigit()
+    if st == state.RESOLVED:
+        # NOT unconditionally in sync (#300 review): the tracker can REOPEN an issue
+        # after cleanup resolved its bundle, and RESOLVED ∈ HALTED would then suppress
+        # the reopened work forever. Re-check the remote; an OPEN issue clears the
+        # marker (the bundle returns to the pending set for the next Plan).
+        if not issue_side or not numeric:
+            return None
+        remote = _issue_state(number, repo)
+        if remote is None:
+            return _Row(d.name, st, "unknown", "tracker state unreadable (gh failed) — no action")
+        if remote.get("state") == "OPEN":
+            return _Row(d.name, st, "OPEN",
+                        "issue REOPENED after resolution — clear the resolved marker "
+                        "so the tracker item is pending again",
+                        apply=[lambda: _unresolve(d)])
+        return None                                  # still closed: in sync
 
     # PR-side (class b): tracker-independent — reads the recorded pr_url like merged.py.
     record = publish._publish_record(d) or {}
@@ -248,14 +285,19 @@ def run(cfg: Config, ids: list[str], *, apply: bool = False, repo: str = "",
     """Reconcile bundles against the tracker; report (default) or ``--apply``."""
     today = today or datetime.date.today().isoformat()
     if ids:
-        bundles = [cfg.bundle(i) for i in ids]
+        # find_bundle resolves the archived completed/ path too (#171 convention).
+        bundles = [cfg.find_bundle(i) for i in ids]
         missing = [d.name for d in bundles if not d.is_dir()]
         if missing:
             print(f"cleanup: no such bundle(s): {', '.join(missing)}", file=sys.stderr)
             return 2
     else:
-        bundles = sorted(d for d in cfg.bundle_root.glob("issue_*") if d.is_dir()) \
-            if cfg.bundle_root.exists() else []
+        # The archived completed/ bundles (#171, the manual archive convention) are
+        # exactly the locally-terminal cases class (c) exists to close (#300 review) —
+        # sweep them too, not just the active top level.
+        roots = (cfg.bundle_root, cfg.bundle_root / "completed")
+        bundles = sorted(d for root in roots if root.exists()
+                         for d in root.glob("issue_*") if d.is_dir())
     if not bundles:
         print("cleanup: no bundles found")
         return 0

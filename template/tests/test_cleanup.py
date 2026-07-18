@@ -87,6 +87,9 @@ class CleanupBase(unittest.TestCase):
     def _mutations(self) -> list[list[str]]:
         return [c for c in self.gh_calls if c[1:3] in (["issue", "comment"], ["issue", "close"])]
 
+    def _closes(self) -> list[list[str]]:
+        return [c for c in self.gh_calls if c[1:3] == ["issue", "close"]]
+
     # --- bundle builders ---------------------------------------------------------
     def _tracker(self, iid: str, notes: str | None = '{"title": "q"}') -> Path:
         d = self.cfg.bundle(iid)
@@ -164,24 +167,28 @@ class ClosedIssueSide(CleanupBase):
 
 
 class OpenIssueSide(CleanupBase):
-    def test_complete_with_merged_pr_comments_and_closes_completed(self) -> None:
+    def test_complete_with_merged_pr_closes_completed_with_comment_attached(self) -> None:
+        # #300 review: comment + close is ONE gh call, so a transient failure never
+        # leaves a posted comment behind for a retry to duplicate.
         self._staged("21", signoff_action="accept", pr_url=_PR)
         self.issue_states["21"] = _OPEN
         self.pr_states[_PR] = "MERGED"
         rc, _out, _err = self._run(apply=True)
         self.assertEqual(rc, 0)
         muts = self._mutations()
-        self.assertEqual(muts[0][1:3], ["issue", "comment"])
-        self.assertIn(f"Fixed by {_PR} (merged).", muts[0])
-        self.assertEqual(muts[1][1:3], ["issue", "close"])
-        self.assertIn("completed", muts[1])
+        self.assertEqual(len(muts), 1)                     # a single atomic mutation
+        close = muts[0]
+        self.assertEqual(close[1:3], ["issue", "close"])
+        self.assertIn("completed", close)
+        self.assertIn("--comment", close)
+        self.assertIn(f"Fixed by {_PR} (merged).", close)
 
     def test_complete_close_disposition_closes_not_planned(self) -> None:
         self._staged("22", signoff_action="accept", patch="   \n")
         self.issue_states["22"] = _OPEN
         rc, _out, _err = self._run(apply=True)
         self.assertEqual(rc, 0)
-        close = [c for c in self._mutations() if c[1:3] == ["issue", "close"]][0]
+        close = self._closes()[0]
         self.assertIn("not planned", close)                # the space form gh accepts
 
     def test_discontinued_closes_not_planned_with_rationale(self) -> None:
@@ -191,8 +198,8 @@ class OpenIssueSide(CleanupBase):
         self.issue_states["23"] = _OPEN
         rc, _out, _err = self._run(apply=True)
         self.assertEqual(rc, 0)
-        comment = [c for c in self._mutations() if c[1:3] == ["issue", "comment"]][0]
-        self.assertTrue(any("superseded by the v2 design" in a for a in comment))
+        close = self._closes()[0]
+        self.assertTrue(any("superseded by the v2 design" in a for a in close))
 
     def test_complete_with_unmerged_pr_is_report_only(self) -> None:
         self._staged("24", signoff_action="accept", pr_url=_PR)
@@ -209,8 +216,8 @@ class OpenIssueSide(CleanupBase):
         self.issue_states["25"] = _OPEN
         self.pr_states[_PR] = "MERGED"
         self._run(apply=True)
-        comment = [c for c in self._mutations() if c[1:3] == ["issue", "comment"]][0]
-        self.assertIn("--body-file", comment)
+        close = self._closes()[0]
+        self.assertIn("Hand-written closing note.", close)  # inlined as the close comment
 
 
 class GuardsAndScope(CleanupBase):
@@ -269,6 +276,67 @@ class GuardsAndScope(CleanupBase):
         rc, _out, err = self._run(ids=["999"])
         self.assertEqual(rc, 2)
         self.assertIn("no such bundle", err)
+
+    def test_github_source_without_tracker_role_is_not_canonical(self) -> None:
+        # #300 review: only a [[plan.source]] github provider with role = "tracker" is
+        # the canonical tracker (sources._is_tracker). A github source WITHOUT the role
+        # (supplementary reading) must not drive issue reconciliation — closing an
+        # unrelated same-numbered issue in that repo would be a real write to the wrong
+        # place.
+        self.cfg.tracker_system = "gitlab"
+        self.cfg.plan_sources = [{"type": "github", "repo": "other/spec-repo"}]  # no role
+        self._tracker("81")
+        self.issue_states["81"] = _CLOSED
+        rc, out, err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("not GitHub", err)                   # issue side skipped
+        self.assertFalse(any(c[1:3] == ["issue", "view"] for c in self.gh_calls))
+        # …and WITH the role, the provider's repo is used for the issue reads.
+        self.cfg.plan_sources = [{"type": "github", "role": "tracker",
+                                  "repo": "org/tracker-repo"}]
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        view = next(c for c in self.gh_calls if c[1:3] == ["issue", "view"])
+        self.assertIn("org/tracker-repo", view)
+
+    def test_reopened_issue_clears_the_resolved_marker(self) -> None:
+        # #300 review: RESOLVED is in HALTED, so a tracker REOPEN after resolution
+        # would otherwise be suppressed forever. Cleanup re-checks the remote and,
+        # under --apply, clears the marker so the item is pending again.
+        d = self._tracker("91")
+        self.issue_states["91"] = _CLOSED
+        self._run(apply=True)
+        self.assertEqual(state.state(d), state.RESOLVED)
+        self.issue_states["91"] = _OPEN                    # the tracker reopened it
+        rc, out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(state.state(d), state.UNPLANNED)  # pending again
+        data = json.loads((d / "notes.json").read_text(encoding="utf-8"))
+        self.assertNotIn("resolved", data)
+        self.assertEqual(data["title"], "q")               # the rest untouched
+        # Still-closed stays in sync (no row, no write).
+        self.issue_states["91"] = _CLOSED
+        self._run(apply=True)
+        self.assertEqual(state.state(d), state.RESOLVED)   # re-resolved by class a1
+
+    def test_archived_completed_bundles_are_reconciled_too(self) -> None:
+        # #300 review: a bundle archived to results/completed/ (#171) is exactly the
+        # locally-terminal case class (c) exists to close — the sweep must visit it.
+        d = self.cfg.bundle_root / "completed" / "issue_95"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        (d / "patch.diff").write_text("diff --git a/x b/x\n", encoding="utf-8")
+        (d / "check-gates.json").write_text("{}", encoding="utf-8")
+        shutil.copyfile(TEMPLATES / "SUMMARY.md.tpl", d / "SUMMARY.md")
+        signoff.record(d / "SUMMARY.md", action="accept", by="T", date="2026-07-01")
+        (d / "publish.json").write_text(json.dumps({"pr_url": _PR}), encoding="utf-8")
+        self.issue_states["95"] = _OPEN
+        self.pr_states[_PR] = "MERGED"
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        close = self._closes()[0]
+        self.assertIn("95", close)
+        self.assertIn("completed", close)
 
 
 if __name__ == "__main__":
