@@ -18,8 +18,8 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from . import (act, brief, doctor, drift, driver, flow, gates, manual_test, merged, publish,
-               queue, registry, revalidate, revert, signoff, state, waves, worktree)
+from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, manual_test, merged,
+               publish, queue, registry, revalidate, revert, signoff, state, waves, worktree)
 from .config import Config
 
 
@@ -245,6 +245,26 @@ def main(argv: list[str] | None = None) -> int:
     p_actres.add_argument("--location", default="", help="where the delta landed (path:line / rule)")
     p_actres.add_argument("--date", help="applied date (ISO; default today)")
 
+    # Tracker reconciliation (issue #300): bundles and the issue tracker drift out of
+    # sync; cleanup reports the discrepancies (dry-run default) and --apply acts.
+    p_cleanup = sub.add_parser(
+        "cleanup",
+        help="reconcile bundle state with the issue tracker (dry-run; --apply acts; #300)",
+        description="Match each bundle's state against its tracker issue: a closed issue "
+                    "resolves its notes-only tracker bundle (RESOLVED, #302) or "
+                    "discontinues one awaiting sign-off; a COMPLETE/DISCONTINUED bundle "
+                    "whose issue is still open gets it commented and closed; a merged PR "
+                    "on an unaccepted bundle is reported (never auto-accepted — the C6 "
+                    "verdict stays human). Dry-run by default; --apply executes.")
+    p_cleanup.add_argument("issue_ids", nargs="*",
+                           help="bundle ids to reconcile (default: every issue_* bundle)")
+    p_cleanup.add_argument("--apply", action="store_true",
+                           help="execute the planned actions (default: report only)")
+    p_cleanup.add_argument("--repo", default="",
+                           help="GitHub repo of the tracker issues (OWNER/REPO; default: "
+                                "the [[plan.source]] github provider's repo, or gh's default)")
+    p_cleanup.add_argument("--by", default="", help="§9 attribution for discontinue records")
+
     p_signoff = sub.add_parser("signoff", help="record the human Check sign-off (§9)")
     p_signoff.add_argument("issue_id")
     g = p_signoff.add_mutually_exclusive_group(required=True)
@@ -341,6 +361,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "publish":
         return publish.publish(cfg, args.issue_id, dry_run=args.dry_run,
                                open_pr=not args.no_pr, by=args.by, pending_id=args.no_issue)
+    if args.cmd == "cleanup":
+        return cleanup.run(cfg, args.issue_ids, apply=args.apply, repo=args.repo, by=args.by)
     if args.cmd == "doctor":
         return doctor.run(cfg, strict=args.strict)
     if args.cmd == "revert":
