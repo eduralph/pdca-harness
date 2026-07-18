@@ -837,12 +837,15 @@ def _act_log(cfg: Config, args: argparse.Namespace) -> int:
         print(f"no unreviewed frozen cycles ({len(all_entries)} frozen, all covered by "
               "the last Act) — use --all or --since to re-review", file=sys.stderr)
         return 1
-    act.register_signals(cfg, all_entries, args.date)  # track recurring signals (#149)
     text = act.scaffold_entry(entries, act.patterns(all_entries), date=args.date,
                               recs=act.recurrences(cfg, all_entries))
     if args.append:
+        # Recording is the ONLY writing path (#298 review): the ledger registration
+        # (#149) rides --append with the entry, so a plain `act log` stays the safe,
+        # read-only preview the help promises — over the FULL signal history (#299).
         # Log first, frontier second: a crash between the two re-reviews the cycles
         # next time — never silently skips them. The marker write itself is atomic.
+        act.register_signals(cfg, all_entries, args.date)  # track recurring signals (#149)
         log = act.append_entry(cfg, text)
         act.mark_reviewed(cfg, reviewed=[e.bundle for e in entries], date=args.date)
         print(f"appended entry to {log}")
