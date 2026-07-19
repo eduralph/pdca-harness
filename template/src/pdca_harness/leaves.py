@@ -1590,15 +1590,32 @@ def signoff_rationale(d: Path) -> str:
 # Leaf 4 — Act (act, interactive): review frozen cycles, suggest deltas if sensible.
 # ----------------------------------------------------------------------------
 def run_act(cfg: Config, date: str) -> None:
+    # Snapshot the frozen set BEFORE the session (#299 review round 5): the review can
+    # only have covered what existed when it started — a bundle freezing mid-session
+    # must stay unreviewed, and re-globbing afterwards would push it past the frontier
+    # unseen.
+    covered = act_mod.frozen_bundles(cfg)
+    started = time.time()
     if cfg.act.mode == "command":
         _invoke(cfg.act, cfg.root, _act_prompt(cfg, date), cfg=cfg)
     else:
         _stub_act(cfg, date)
+
+    def _delta_during_session(d: Path) -> bool:
+        # A revalidation delta stamped WHILE the session ran was not in the reviewed
+        # index; re-marking that bundle would hide the new delta behind the frontier
+        # (#299 review round 5 — preserve unmark_reviewed's effect).
+        try:
+            return any(p.stat().st_mtime >= started
+                       for p in d.glob("revalidation-*.json"))
+        except OSError:
+            return False
+
     # Advance the review frontier (issues #109/#299) whenever the Act beat runs — even
     # if a command-mode Act judged "no delta" and wrote no act-log entry, the review
-    # happened. The auto-Act indexes ALL frozen bundles, so that is exactly what it
-    # covered.
-    act_mod.mark_reviewed(cfg, reviewed=act_mod.frozen_bundles(cfg), date=date)
+    # happened, over exactly the pre-session snapshot.
+    act_mod.mark_reviewed(
+        cfg, reviewed=[d for d in covered if not _delta_during_session(d)], date=date)
 
 
 def _act_prompt(cfg: Config, date: str) -> str:

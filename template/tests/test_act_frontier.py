@@ -152,6 +152,32 @@ class MarkerFormat(unittest.TestCase):
         self.assertEqual(data["reviewed"], ["issue_10", "issue_20"])
         self.assertEqual(list(self.cfg.process_dir.glob(".act-reviewed.tmp*")), [])
 
+    def test_auto_act_frontier_uses_the_pre_session_snapshot(self) -> None:
+        # #299 review round 5: the review can only have covered what existed when it
+        # started — a bundle freezing mid-session, and a bundle whose revalidation
+        # delta landed mid-session, must both stay OUT of the frontier advance.
+        from pdca_harness import leaves
+        from pdca_harness.config import LeafConfig
+        reviewed_early = _freeze(self.cfg, "50")
+        self.cfg.act = LeafConfig(mode="stub", interactive=True)
+        self.cfg.templates_dir = self.cfg.root / "no-templates"
+
+        real_stub = leaves._stub_act
+
+        def stub_with_midrun_events(cfg_, date_):
+            real_stub(cfg_, date_)
+            _freeze(self.cfg, "60")                     # froze while the session ran
+            (reviewed_early / "revalidation-2026-07-19.json").write_text(
+                json.dumps({"date": "2026-07-19", "rows": [
+                    {"check": "C4", "old": "pass", "new": "fail", "changed": True,
+                     "gating": True}], "changed": True}), encoding="utf-8")
+
+        with mock.patch.object(leaves, "_stub_act", side_effect=stub_with_midrun_events):
+            leaves.run_act(self.cfg, "2026-07-19")
+        names = [d.name for d in act.unreviewed_bundles(self.cfg)]
+        self.assertIn("issue_60", names)                # mid-session freeze not marked
+        self.assertIn("issue_50", names)                # mid-session delta not re-hidden
+
     def test_revalidation_delta_reopens_the_reviewed_bundle(self) -> None:
         # #299 review round 4: a revalidation DELTA on a frozen cycle is new Act signal
         # — the bundle must re-enter the default scope instead of hiding behind the
