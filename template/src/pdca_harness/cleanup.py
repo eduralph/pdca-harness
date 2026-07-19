@@ -369,9 +369,21 @@ def run(cfg: Config, ids: list[str], *, apply: bool = False, repo: str = "",
         print("cleanup: `gh auth status` failed — run `gh auth login` first", file=sys.stderr)
         return 2
 
-    rows = [r for d in bundles
-            if (r := _plan_bundle(cfg, d, issue_side=issue_side, repo=repo,
-                                  by=by, today=today)) is not None]
+    # Planning is isolated PER BUNDLE like the apply loop below (#300 review round
+    # 10): one damaged bundle (a non-UTF-8 patch.diff, an unreadable artifact) must
+    # become its own report-only row, never abort the sweep before the healthy
+    # siblings are even planned.
+    rows = []
+    for d in bundles:
+        try:
+            r = _plan_bundle(cfg, d, issue_side=issue_side, repo=repo, by=by, today=today)
+        except Exception as exc:  # noqa: BLE001 — isolate the bundle, keep planning
+            rows.append(_Row(d.name, "unreadable", "unknown",
+                             f"planning failed ({type(exc).__name__}: {exc}) — "
+                             "no action; inspect the bundle's artifacts"))
+            continue
+        if r is not None:
+            rows.append(r)
     if not rows:
         print(f"cleanup: {len(bundles)} bundle(s) checked — all in sync with the tracker")
         return 0

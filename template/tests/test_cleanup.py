@@ -227,6 +227,21 @@ class ApplyFailureHonesty(CleanupBase):
         self.assertEqual(rc, 0)                            # planned, never crashed
         del d  # (fixture bookkeeping)
 
+    def test_unreadable_artifact_becomes_a_report_only_row(self) -> None:
+        # #300 review round 10: a non-UTF-8 patch.diff makes _plan_bundle raise while
+        # rows are PLANNED — that must become the damaged bundle's own report-only
+        # row, never abort the sweep before healthy siblings are reconciled.
+        broken = self._staged("93", signoff_action="accept", pr_url=_PR)
+        (broken / "patch.diff").write_bytes(b"\xff\xfe not utf-8 \x00")
+        healthy = self._tracker("94")
+        self.issue_states["93"] = _OPEN
+        self.issue_states["94"] = _CLOSED
+        self.pr_states[_PR] = "MERGED"
+        rc, out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("planning failed", out)              # the damaged row reported
+        self.assertEqual(state.state(healthy), state.RESOLVED)  # sibling reconciled
+
     def test_one_raising_row_does_not_abort_the_sweep(self) -> None:
         # #300 review round 7: an exception from one row's action (permission/disk
         # error mid-write) is isolated to that row — reported as its failure while
