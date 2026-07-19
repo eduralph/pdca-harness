@@ -2049,8 +2049,11 @@ def run_act(cfg: Config, date: str) -> None:
         # Snapshot the frozen set BEFORE the session (#299 review round 5): the
         # review can only have covered what existed when it started — a bundle
         # freezing mid-session must stay unreviewed, and re-globbing afterwards
-        # would push it past the frontier unseen.
+        # would push it past the frontier unseen. Fingerprints ride the SAME
+        # snapshot (#299 review round 17): a bundle recreated while the leaf runs
+        # must be attested by the hash the review read, not by post-session disk.
         covered = act_mod.frozen_bundles(cfg)
+        snap_fps = {d.name: act_mod._fingerprint(d) for d in covered}
         started = time.time()
         if cfg.act.mode == "command":
             _invoke(cfg.act, cfg.root, _act_prompt(cfg, date, bundles=covered), cfg=cfg)
@@ -2064,7 +2067,8 @@ def run_act(cfg: Config, date: str) -> None:
         # critical section (#299 review round 7 — a scan out here would race
         # revalidate's unmark_reviewed); the stamp's `changed` verdict decides, so
         # a confirming revalidation doesn't withhold.
-        act_mod.mark_reviewed(cfg, reviewed=covered, date=date, delta_guard=started)
+        act_mod.mark_reviewed(cfg, reviewed=covered, date=date, delta_guard=started,
+                              fingerprints=snap_fps)
 
 
 def _act_prompt(cfg: Config, date: str, bundles: list[Path] | None = None) -> str:

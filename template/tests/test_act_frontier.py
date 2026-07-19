@@ -355,6 +355,28 @@ class MarkerFormat(unittest.TestCase):
                          ["issue_40"])
         self.assertEqual(act.cycles_since_review(self.cfg), 1)   # cadence sees it too
 
+    def test_midsession_recreation_is_never_attested(self) -> None:
+        # #299 review round 17: the fingerprint rides the pre-session snapshot — a
+        # bundle recreated WHILE the review runs must not be attested by a hash
+        # computed from the new generation's file after the session.
+        from pdca_harness import leaves
+        from pdca_harness.config import LeafConfig
+        d = _freeze(self.cfg, "55", date="2026-07-01")
+        self.cfg.act = LeafConfig(mode="stub", interactive=True)
+        self.cfg.act_cadence = 1
+        self.cfg.templates_dir = self.cfg.root / "no-templates"
+        real_stub = leaves._stub_act
+
+        def stub_recreates(cfg_, date_, bundles=None):
+            real_stub(cfg_, date_, bundles=bundles)
+            shutil.rmtree(d)
+            _freeze(self.cfg, "55", date="2026-07-10")     # generation B, mid-session
+
+        with mock.patch.object(leaves, "_stub_act", side_effect=stub_recreates):
+            leaves.run_act(self.cfg, "2026-07-02")
+        self.assertEqual([b.name for b in act.unreviewed_bundles(self.cfg)],
+                         ["issue_55"])                     # gen B was never attested
+
     def test_recreated_bundle_is_unreviewed_again(self) -> None:
         # #299 review round 16: the documented redo (rm -rf + rerun) recreates
         # issue_X under the SAME name — the frontier keys coverage on the frozen

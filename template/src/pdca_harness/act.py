@@ -75,6 +75,7 @@ class ActEntry:
     unproven: list[str] = field(default_factory=list)  # §7 unproven lines
     act_candidates: list[str] = field(default_factory=list)  # §10 hints
     reval_deltas: list[str] = field(default_factory=list)  # revalidation stamps (#11)
+    fingerprint: str = ""  # SUMMARY.md hash AT EXTRACTION time (#299 review round 17)
 
 
 def frozen_bundles(cfg: Config) -> list[Path]:
@@ -241,7 +242,8 @@ def unreviewed_bundles(cfg: Config, frozen: list[Path] | None = None) -> list[Pa
 
 
 def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "",
-                  delta_guard: float | None = None) -> list[str]:
+                  delta_guard: float | None = None,
+                  fingerprints: dict[str, str] | None = None) -> list[str]:
     """Advance the review frontier: union the covered bundles into the marker (#109/#299).
 
     ``reviewed=None`` ⇒ every currently frozen bundle (what a full auto-Act covers).
@@ -259,7 +261,14 @@ def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "
     a caller's stale scan and this write, and the stale union would re-hide the
     delta. Revalidate writes the stamp BEFORE calling ``unmark_reviewed`` (which
     takes this same lock), so whichever side enters the critical section second sees
-    the other's effect. Returns the withheld bundle names (callers report them)."""
+    the other's effect. Returns the withheld bundle names (callers report them).
+
+    ``fingerprints`` are the hashes captured WITH the caller's snapshot (#299 review
+    round 17): a bundle recreated while the review ran must not be attested by a
+    hash computed from the NEW generation's file after the fact — the marker records
+    what the review actually read, and the recreated generation stays unreviewed.
+    Names without a snapshot hash fall back to hashing now (direct callers whose
+    review IS the present content)."""
     cfg.process_dir.mkdir(parents=True, exist_ok=True)
     marker = cfg.process_dir / _CADENCE_MARKER
     lock = marker.with_name(marker.name + ".lock")
@@ -287,7 +296,9 @@ def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "
             # recreated bundle must not be re-attested by a review that never read
             # it). A retained name without one (transitional marker) stays name-only.
             by_name = {d.name: d for d in frozen}
-            fps = {nm: (_fingerprint(by_name[nm]) if nm in new else prior_fps[nm])
+            snap = fingerprints or {}
+            fps = {nm: ((snap.get(nm) or _fingerprint(by_name[nm])) if nm in new
+                        else prior_fps[nm])
                    for nm in covered if nm in new or nm in prior_fps}
             payload = {"count": len(covered), "reviewed": covered,
                        "fingerprints": fps, "last_review_date": date}
@@ -668,7 +679,12 @@ def append_reviewed(cfg: Config, entries: list[ActEntry], render, *, date: str,
             frozen_names = {d.name for d in frozen}
             covered = sorted((prior | new) & frozen_names)
             by_name = {d.name: d for d in frozen}
-            fps = {nm: (_fingerprint(by_name[nm]) if nm in new else prior_fps[nm])
+            # The entries carry the hash captured when their SUMMARY was extracted
+            # (#299 review round 17) — attest the logged content, never whatever a
+            # concurrent redo left on disk after the append.
+            ent_fps = {e.bundle.name: e.fingerprint for e in kept if e.fingerprint}
+            fps = {nm: ((ent_fps.get(nm) or _fingerprint(by_name[nm])) if nm in new
+                        else prior_fps[nm])
                    for nm in covered if nm in new or nm in prior_fps}
             payload = {"count": len(covered), "reviewed": covered,
                        "fingerprints": fps, "last_review_date": date}
@@ -684,6 +700,10 @@ def append_reviewed(cfg: Config, entries: list[ActEntry], render, *, date: str,
 def _extract(summary: Path, bundle: Path) -> ActEntry:
     if not summary.exists():
         return ActEntry(bundle=bundle)
+    # The fingerprint is captured HERE, at extraction time (#299 review round 17):
+    # the entry's hash must attest the content the review/scaffold actually read,
+    # not whatever a concurrent redo leaves on disk by the time the frontier writes.
+    fingerprint = _fingerprint(bundle)
     secs = _sections(summary.read_text(encoding="utf-8"))
     s9 = _find(secs, "9. Check sign-off")
     s6 = _find(secs, "6. NEEDS-HUMAN")
@@ -699,6 +719,7 @@ def _extract(summary: Path, bundle: Path) -> ActEntry:
         unproven=_unproven(s7),
         act_candidates=_candidates(s10),
         reval_deltas=revalidate.deltas(bundle),  # frozen-gate staleness surfaced (#11)
+        fingerprint=fingerprint,
     )
 
 
