@@ -136,6 +136,41 @@ class ManualTestLaunch(unittest.TestCase):
             self.assertEqual(manual_test.launch(self.cfg, "X"), 1)
             run.assert_not_called()
 
+    def test_launch_holds_the_lane_lock_for_the_whole_session(self) -> None:
+        # #297 review round 8: while the human drives the app, the footprint sweeper
+        # (and any Do/gate run) must find the lane BUSY — without the lock a sweep
+        # could clean/reset/remove the patched tree beneath the active validation.
+        import contextlib
+        self._built_bundle()
+        events: list = []
+
+        @contextlib.contextmanager
+        def recording_lock(d, cfg, *, wait):
+            events.append(("lock", wait))
+            yield
+            events.append(("unlock",))
+
+        def fake_run(*a, **kw):
+            events.append(("run",))
+            return SimpleNamespace(returncode=0)
+
+        with mock.patch.object(worktree, "lane_lock", recording_lock), \
+                mock.patch.object(worktree, "stage", return_value=self._fake_worktree()), \
+                mock.patch.object(manual_test.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(manual_test.launch(self.cfg, "X"), 0)
+        # Non-blocking acquire, and the interactive command ran INSIDE the lock.
+        self.assertEqual(events, [("lock", False), ("run",), ("unlock",)])
+
+    def test_busy_lane_refuses_the_manual_test(self) -> None:
+        # A Do/gate run owns the lane right now — refuse with a reason rather than
+        # stage over (and later be swept under) its critical section.
+        self._built_bundle()
+        with mock.patch.object(worktree, "lane_lock",
+                               side_effect=worktree.WorktreeError("lane busy")), \
+                mock.patch.object(manual_test.subprocess, "run") as run:
+            self.assertEqual(manual_test.launch(self.cfg, "X"), 1)
+            run.assert_not_called()
+
     def test_dispatch_via_cli(self) -> None:
         # Exercise the full parser → dispatch → handler path; stub Config.load so it uses
         # our built bundle instead of hunting for a pdca.toml in cwd.
