@@ -209,11 +209,13 @@ class PlanNeverReopensResolved(unittest.TestCase):
         self.assertTrue((d / "brief.superseded-by-resolution-2.md").exists())
         self.assertEqual(state.state(d), state.RESOLVED)
 
-    def test_csv_session_brief_for_a_reopened_tracker_is_kept(self) -> None:
-        # #302 review round 6: the CSV/zero-id path has no up-front id filter and the
-        # marker is a cache — when the live tracker says OPEN, the brief the session
-        # authored must SURVIVE (marker cleared, closure-era notes aside), or batch
-        # users can never resume a reopened issue without hand-editing notes.json.
+    def test_csv_session_brief_for_a_reopened_tracker_is_deferred(self) -> None:
+        # #302 review rounds 6/10: the CSV/zero-id path has no up-front id filter and
+        # the marker is a cache — when the live tracker says OPEN, the bundle must
+        # NOT stay locked out (marker cleared, closure-era notes aside), but the
+        # session's brief was authored from those STALE notes, so it is set aside
+        # too and the bundle DEFERS to the next Plan instead of driving Do/Check on
+        # context that missed the reopen discussion.
         from types import SimpleNamespace
         d = self._resolved("29")
         self.cfg.planner = LeafConfig(mode="command", interactive=True, argv=["x"])
@@ -228,10 +230,11 @@ class PlanNeverReopensResolved(unittest.TestCase):
                 mock.patch.object(sources.subprocess, "run", return_value=gh_open), \
                 mock.patch.object(sources.shutil, "which", return_value="/usr/bin/gh"):
             leaves.do_plan_batch(self.cfg)
-        self.assertTrue((d / "brief.md").exists())          # the fresh brief is kept
+        self.assertFalse((d / "brief.md").exists())         # stale-context brief aside
+        self.assertTrue((d / "brief.stale-reopen-context.md").exists())
         self.assertFalse((d / "notes.json").exists())       # stale closure notes aside
         self.assertTrue((d / "notes.superseded-by-reopen.json").exists())
-        self.assertNotEqual(state.state(d), state.RESOLVED)  # re-enters the drive set
+        self.assertEqual(state.state(d), state.UNPLANNED)   # deferred to the next Plan
 
     def test_reopen_probe_scopes_gh_to_the_tracker_repo(self) -> None:
         # #302 review round 7: on the legacy [tracker] path the repo is DERIVED from
