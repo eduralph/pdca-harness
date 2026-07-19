@@ -200,6 +200,36 @@ class FoldGit(unittest.TestCase):
                 integrate.fold(self.cfg, [b])
         self.assertFalse(self._pushed("pdca-integration/main"))  # nothing left origin
 
+    def test_multi_target_locks_acquire_in_sorted_order(self) -> None:
+        # #297 review round 11: with a caller-held locks stack, two concurrent
+        # multi-target flows encountering their groups in opposite bundle order
+        # would deadlock (each holding one lock, waiting on the other's). Groups are
+        # processed in sorted (repo, base) order regardless of the accepted order,
+        # so acquisition is globally consistent and concurrent folds serialize.
+        import contextlib as ctx
+        from unittest import mock
+        self._git(self.primary, "push", "-q", "origin", "main:aa")
+        b_main = self._bundle("O1", self._modify_patch("one\n"))
+        b_aa = self.cfg.bundle("O2")
+        b_aa.mkdir(parents=True)
+        (b_aa / "brief.md").write_text(
+            "- **Slug:** o2\n- **Repo + branch target:** org/repo @ aa\n",
+            encoding="utf-8")
+        (b_aa / "patch.diff").write_text(self._add_patch("f2.txt", "hi\n"),
+                                         encoding="utf-8")
+        order: list[str] = []
+        real_lock = integrate.integ_lock
+
+        @ctx.contextmanager
+        def spy(wt, **kw):
+            order.append(wt.name)
+            with real_lock(wt, **kw) as held:
+                yield held
+
+        with mock.patch.object(integrate, "integ_lock", spy):
+            integrate.fold(self.cfg, [b_main, b_aa])     # accepted order: main FIRST
+        self.assertEqual(order, ["repo.pdca-integ-aa", "repo.pdca-integ-main"])
+
     def test_caller_stack_keeps_the_lock_held_after_fold(self) -> None:
         # #297 review round 10: with a caller-supplied ExitStack the integ lock
         # SURVIVES fold's return, covering the re-gate window — a concurrent sweep's

@@ -170,7 +170,13 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
 
     base_remote = cfg.base_remote
     result: dict[tuple[str, str], tuple[str, Path | None]] = {}
-    for (repo_spec, base), bundles in groups.items():
+    # Groups are processed in SORTED (repo, base) order (#297 review round 11): with a
+    # caller-held ``locks`` stack the per-target locks accumulate, and two concurrent
+    # multi-target flows encountering their groups in opposite bundle order would
+    # otherwise deadlock (A holds target-1 waiting on target-2 while B holds target-2
+    # waiting on target-1). A globally consistent acquisition order makes them
+    # serialize instead. Stack order WITHIN each group is untouched.
+    for (repo_spec, base), bundles in sorted(groups.items()):
         branch = integration_branch(cfg, base)
         repo = publish._checkout_path(cfg, repo_spec)
         if dry_run:
