@@ -80,6 +80,140 @@ class Doctor(unittest.TestCase):
         self.assertIn("WARN", out)
         self.assertEqual(self._run(cfg, strict=True)[0], 1)  # --strict escalates the WARN
 
+    def test_low_free_space_warns_and_strict_escalates(self) -> None:
+        # #297: a 1 PiB threshold is always unmet, so the workspace row WARNs (preflight,
+        # not required-fatal) and points at `pdca sweep`; --strict escalates as usual.
+        cfg = _load(self.tmp, "[doctor]\nmin_free_gb = 1048576.0\n")
+        rc, out = self._run(cfg)
+        self.assertEqual(rc, 0)
+        self.assertIn("== workspace ==", out)
+        self.assertIn("free disk space", out)
+        self.assertIn("pdca sweep", out)
+        self.assertEqual(self._run(cfg, strict=True)[0], 1)
+
+    def test_free_space_row_disabled_at_zero(self) -> None:
+        cfg = _load(self.tmp, "[doctor]\nmin_free_gb = 0\n")
+        _rc, out = self._run(cfg)
+        self.assertNotIn("free disk space", out)
+
+    def test_free_space_measures_each_target_filesystem(self) -> None:
+        # #297 review round 7: a target checkout can sit on ANOTHER filesystem than
+        # the harness root — lane worktrees and gate build output fill THAT fs, so
+        # the preflight must measure it too, not only cfg.root.
+        from types import SimpleNamespace
+        cfg = _load(self.tmp, "[doctor]\nmin_free_gb = 10.0\n")
+        other = self.tmp / "elsewhere-checkout"
+        other.mkdir()
+        big = SimpleNamespace(free=100 * 1024 ** 3, total=1, used=1)
+        small = SimpleNamespace(free=1 * 1024 ** 3, total=1, used=1)
+        with mock.patch.object(doctor, "_space_roots",
+                               return_value=[cfg.root, other]), \
+                mock.patch.object(doctor.shutil, "disk_usage",
+                                  side_effect=lambda p: small if Path(p) == other
+                                  else big):
+            rc, out = self._run(cfg)
+        self.assertEqual(rc, 0)                            # WARN, not fatal
+        self.assertIn("free disk space (elsewhere-checkout)", out)
+        self.assertIn("pdca sweep", out)
+
+    def test_quota_headroom_bounds_the_free_space_row(self) -> None:
+        # #297 review round 12: EDQUOT was the motivating incident — a shared volume
+        # with hundreds of fs-level GiB free while THIS user's quota is nearly
+        # exhausted. The row must report (and WARN on) the tighter bound.
+        from types import SimpleNamespace
+        cfg = _load(self.tmp, "[doctor]\nmin_free_gb = 10.0\n")
+        big = SimpleNamespace(free=500 * 1024 ** 3, total=1, used=1)
+        with mock.patch.object(doctor.shutil, "disk_usage", return_value=big), \
+                mock.patch.object(doctor, "_quota_free_gb", return_value=1.5):
+            rc, out = self._run(cfg)
+        self.assertEqual(rc, 0)                            # WARN, not fatal
+        self.assertIn("1.5 GiB user-quota headroom", out)
+        self.assertIn("pdca sweep", out)
+
+    def test_quota_probe_parses_the_matching_mountpoint(self) -> None:
+        from types import SimpleNamespace
+        text = (
+            "Disk quotas for user eddie (uid 1000):\n"
+            "     Filesystem  blocks   quota   limit   grace   files   quota   limit"
+            "   grace\n"
+            "      /          1000     0       0       0       1       0       0"
+            "       0\n"
+            "      /home      968000*  1000000 1048576 6days   12      0       0"
+            "       0\n")
+        fake = SimpleNamespace(returncode=1, stdout=text, stderr="")  # over-quota rc
+        with mock.patch.object(doctor.shutil, "which", return_value="/usr/bin/quota"):
+            gb = doctor._quota_free_gb(Path("/home/eddie/project"),
+                                       runner=lambda *a, **k: fake)
+            self.assertIsNotNone(gb)
+            self.assertAlmostEqual(gb, (1048576 - 968000) / 1024 ** 2, places=4)
+            # A path outside every quota'd mountpoint (the / row has limit 0 — no
+            # quota) → None: the fs-level number stands.
+            self.assertIsNone(doctor._quota_free_gb(Path("/srv/elsewhere"),
+                                                    runner=lambda *a, **k: fake))
+
+    def test_space_roots_measure_the_checkout_parent_filesystem(self) -> None:
+        # #297 review round 9: lane/integ/overflow siblings are created under
+        # checkout.PARENT — when the checkout is itself a mount point, statting the
+        # checkout measures the mounted fs while the siblings fill the parent's.
+        cfg = _load(self.tmp, "[doctor]\nmin_free_gb = 10.0\n")
+        mount = self.tmp / "mnt" / "checkout"
+        (mount / ".git").mkdir(parents=True)
+        cfg.repo_checkouts = {"org/x": str(mount)}
+        devs = {cfg.root: 1, mount.parent: 2, mount: 3}  # the mount differs from both
+        roots = doctor._space_roots(cfg, dev=lambda p: devs[p])
+        self.assertEqual(roots, [cfg.root, mount.parent])  # the parent, never the mount
+
+    def test_space_roots_dedupe_by_filesystem(self) -> None:
+        # Same-device targets collapse to one measurement (statvfs per FILESYSTEM,
+        # not per checkout); the root always leads.
+        cfg = _load(self.tmp, "[doctor]\nmin_free_gb = 10.0\n")
+        checkout = self.tmp / "checkout"
+        (checkout / ".git").mkdir(parents=True)            # same fs as cfg.root
+        cfg.repo_checkouts = {"org/x": str(checkout)}
+        self.assertEqual(doctor._space_roots(cfg), [cfg.root])
+
+    @staticmethod
+    def _dead_pid() -> int:
+        """A pid that provably no longer exists (a reaped child) — the orphan case."""
+        import subprocess
+        p = subprocess.Popen(["true"])
+        p.wait()
+        return p.pid
+
+    def test_orphaned_overflow_trees_warn(self) -> None:
+        # #297 (+review): only an overflow dir whose creator pid is provably gone is an
+        # orphan — WARN with the reclaim hint; a live-pid tree may be another process's
+        # in-flight gate read and must not be counted (or reclaimed).
+        repo = self.tmp / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (self.tmp / f"repo.pdca-wt-ovf-{self._dead_pid()}-0").mkdir()
+        (self.tmp / f"repo.pdca-wt-ovf-{os.getpid()}-0").mkdir()   # live: this process
+        cfg = _load(self.tmp,
+                    "[doctor]\nmin_free_gb = 0\n"
+                    f'[publisher.checkouts]\n"org/repo" = "{repo}"\n')
+        _rc, out = self._run(cfg)
+        self.assertIn("harness worktree footprint", out)
+        self.assertIn("1 orphaned overflow tree(s)", out)
+        self.assertIn("pdca sweep", out)
+
+    def test_footprint_counts_cover_sibling_convention_bundles(self) -> None:
+        # #297 review: with no [publisher.checkouts] entries, targets must still be
+        # derived from persisted bundles (the sibling convention, <root>/../checkout) —
+        # the counts were permanently "0 lane / 0 integration" in those default setups.
+        proj = self.tmp / "proj"
+        proj.mkdir()
+        repo = self.tmp / "checkout"
+        (repo / ".git").mkdir(parents=True)
+        (self.tmp / "checkout.pdca-wt").mkdir()
+        d = proj / "results" / "issue_7"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Repo + branch target:** org/checkout @ main\n",
+            encoding="utf-8")
+        cfg = _load(proj, "[doctor]\nmin_free_gb = 0\n")
+        _rc, out = self._run(cfg)
+        self.assertIn("1 lane / 0 integration worktree(s)", out)
+
     def test_per_lane_expands_over_driver_lanes(self) -> None:
         cfg = _load(self.tmp,
                     '[driver]\nlanes = 3\n'
