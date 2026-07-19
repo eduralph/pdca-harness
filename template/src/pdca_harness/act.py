@@ -34,7 +34,19 @@ if os.name == "nt":  # pragma: no cover — exercised only on Windows
 
     def _lock_exclusive(fh, *, wait: bool = True) -> None:
         fh.seek(0)
-        msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK if wait else msvcrt.LK_NBLCK, 1)
+        if not wait:
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        # LK_LOCK is NOT flock's indefinite block: it retries ten times at 1 s
+        # intervals and then raises (#299 review round 15). A concurrent interactive
+        # Act easily outlives ten seconds, and giving up would skip the waiter's
+        # promised review — loop until the lock is actually held.
+        while True:
+            try:
+                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                continue  # LK_LOCK slept ~10 s itself; retry until acquired
 
     def _unlock(fh) -> None:
         fh.seek(0)
