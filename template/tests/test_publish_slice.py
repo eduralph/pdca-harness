@@ -750,18 +750,48 @@ class DraftTexts(unittest.TestCase):
         self.assertEqual(rc, 1)
         run_pub.assert_not_called()                        # mechanics-only: no drafting
 
-    def test_wave_drafts_all_texts_before_any_mechanics(self) -> None:
-        # Two-bundle wave: BOTH pre-pass drafts precede the FIRST publish call, and a
-        # failed draft blocks only its own bundle — the sibling still publishes, loudly.
+    def test_draft_only_phase_skips_t4(self) -> None:
+        # #295 review round 2: run_t4=False is the flow's draft-only phase — validation
+        # is deferred until every publisher leaf has finished.
+        self.cfg.gates_checks = [{"id": "T4-x", "tier": "T4", "cmd": "exit 1", "scope": "bundle"}]
+        d = _bundle(self.cfg, "D8", brief_body=_FIX_BRIEF, accepted=True)
+        with redirect_stderr(io.StringIO()):
+            self.assertTrue(publish.draft_texts(self.cfg, d, run_t4=False))  # drafted only
+            self.assertTrue((d / "commit-msg.txt").exists())
+            self.assertFalse(publish.draft_texts(self.cfg, d))               # T4 phase gates
+
+    def test_validation_phase_never_redrafts_a_deleted_text(self) -> None:
+        # #295 review round 4: a text missing at VALIDATION means a later leaf deleted
+        # it — re-drafting would invoke the publisher leaf mid-validation, reopening
+        # the shared-root mutation window. Validation fails the bundle instead.
+        d = _bundle(self.cfg, "D9", brief_body=_FIX_BRIEF, accepted=True)
+        with redirect_stderr(io.StringIO()):
+            self.assertTrue(publish.draft_texts(self.cfg, d, run_t4=False))  # drafted
+        (d / "pr-description.md").unlink()             # a later leaf "deleted" it
+        err = io.StringIO()
+        with mock.patch.object(publish.leaves, "run_publish") as run_pub, \
+                redirect_stderr(err):
+            self.assertFalse(publish.draft_texts(self.cfg, d, draft=False))
+        run_pub.assert_not_called()                    # never re-drafts mid-validation
+        self.assertIn("NOT re-drafting", err.getvalue())
+
+    def test_wave_drafts_all_then_validates_all_before_any_mechanics(self) -> None:
+        # Two-bundle wave, three phases (#295 review round 2): EVERY draft precedes any
+        # T4 validation (a later bundle's leaf may touch an earlier bundle's artifacts —
+        # T4 must judge final contents), and every validation precedes the first publish.
+        # A failed validation blocks only its own bundle.
         for iid in ("O1", "O2"):
             d = self.cfg.bundle(iid)
             d.mkdir(parents=True)
             (d / "brief.md").write_text(_FIX_BRIEF, encoding="utf-8")
         calls: list[tuple[str, str]] = []
 
-        def fake_draft(_cfg, d):
-            calls.append(("draft", d.name))
-            return d.name != "issue_O1"                 # O1's texts fail the pre-pass
+        def fake_draft(_cfg, d, run_t4=True, draft=True):
+            kind = "validate" if run_t4 else "draft"
+            if kind == "validate":
+                self.assertFalse(draft)  # validation never re-drafts (#295 review r4)
+            calls.append((kind, d.name))
+            return True if not run_t4 else d.name != "issue_O1"  # O1 fails validation
 
         def fake_publish(_cfg, issue_id, **kw):
             calls.append(("publish", f"issue_{issue_id}"))
@@ -778,9 +808,11 @@ class DraftTexts(unittest.TestCase):
                                     today="2026-07-18")
         self.assertEqual(set(results.values()), {state.COMPLETE})
         drafts = [i for i, c in enumerate(calls) if c[0] == "draft"]
+        validates = [i for i, c in enumerate(calls) if c[0] == "validate"]
         publishes = [i for i, c in enumerate(calls) if c[0] == "publish"]
-        self.assertEqual(len(drafts), 2)
-        self.assertTrue(publishes and max(drafts) < min(publishes))  # all drafts first
+        self.assertEqual((len(drafts), len(validates)), (2, 2))
+        self.assertTrue(max(drafts) < min(validates))         # all leaves finish first
+        self.assertTrue(max(validates) < min(publishes))      # all T4 before mechanics
         self.assertEqual([calls[i][1] for i in publishes], ["issue_O2"])  # O1 blocked
         self.assertIn("issue_O1 — publish texts not ready", err.getvalue())
         self.assertIn("pdca publish O1", err.getvalue())
