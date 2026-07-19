@@ -563,9 +563,13 @@ def _waves(cfg: Config, ids: list[str]) -> int:
     if ids:
         bundles = [cfg.bundle(i) for i in ids if (cfg.bundle(i) / "brief.md").exists()]
     elif cfg.bundle_root.exists():
+        # RESOLVED is terminal too (#302 review round 8): a resolved bundle keeping a
+        # placeholder brief must not surface as a runnable wave — the preview must
+        # match the flow's actual drive set.
         bundles = sorted((d for d in cfg.bundle_root.glob("issue_*")
                           if d.is_dir() and (d / "brief.md").exists()
-                          and state.state(d) not in (state.COMPLETE, state.DISCONTINUED)),
+                          and state.state(d) not in (state.COMPLETE, state.DISCONTINUED,
+                                                     state.RESOLVED)),
                          key=lambda p: p.name)
     else:
         bundles = []
