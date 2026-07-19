@@ -87,11 +87,14 @@ def frozen_bundles(cfg: Config) -> list[Path]:
 #
 # ``reviewed`` is authoritative (sorted → deterministic file, mergeable-by-union in
 # git); ``count`` is derived/informational. A legacy bare-int marker (valid JSON!)
-# is read as "the first n name-sorted frozen bundles are reviewed" — a one-time
-# migration heuristic reproducing the old arithmetic instead of dumping a full
-# re-review on upgrade; the first new-format write repairs it permanently. An older
-# engine reading the JSON object hits int() → ValueError → 0: degrades toward
-# re-review, never toward silent skips.
+# keeps the old cadence ARITHMETIC but carries NO name information — inferring names
+# from it (e.g. a sorted prefix) misassigns whenever a new bundle sorts before
+# reviewed ones (issue_10 freezing after 20/30 were reviewed; numeric ids at digit
+# boundaries like 99→100), and a misassignment there is a PERMANENT silent skip
+# (#299 review round 3). So under a legacy marker the default scope is the FULL
+# frozen history, once, loudly; the first --append then records a real frontier.
+# An older engine reading the JSON object hits int() → ValueError → 0: degrades
+# toward re-review, never toward silent skips — the same failure direction.
 # ----------------------------------------------------------------------------
 _CADENCE_MARKER = ".act-reviewed"
 
@@ -127,23 +130,32 @@ def _load_marker(cfg: Config) -> dict:
     return {"count": 0, "reviewed": None}
 
 
-def _reviewed_names(cfg: Config, frozen: list[Path]) -> set[str]:
-    """The frontier as bundle names, resolving a legacy count marker via the
-    name-sorted-prefix heuristic (the state the old marker could actually represent)."""
+def _reviewed_names(cfg: Config) -> set[str]:
+    """The frontier as bundle names. A legacy count marker carries NO name information
+    (#299 review round 3) — no prefix inference: names it cannot prove reviewed are
+    unreviewed, so nothing is ever silently skipped."""
     m = _load_marker(cfg)
-    if m["reviewed"] is not None:
-        return m["reviewed"]
-    return {d.name for d in frozen[:m["count"]]}
+    return m["reviewed"] if m["reviewed"] is not None else set()
 
 
-def unreviewed_bundles(cfg: Config) -> list[Path]:
+def has_frontier(cfg: Config) -> bool:
+    """True iff the marker records WHICH bundles were reviewed (the #299 format);
+    False for a legacy count-only / absent / garbage marker — callers then treat the
+    full frozen history as the scope, loudly, until the first frontier write."""
+    return _load_marker(cfg)["reviewed"] is not None
+
+
+def unreviewed_bundles(cfg: Config, frozen: list[Path] | None = None) -> list[Path]:
     """Frozen bundles not covered by the last review — the default Act scope (#299).
 
     Set difference on bundle names, so a bundle frozen out of name order around a
-    past review (the observed coverage-gap case) still surfaces as unreviewed.
+    past review (the observed coverage-gap case) still surfaces as unreviewed. Pass
+    ``frozen`` to reuse one snapshot across scope computations (#299 review round 3 —
+    two globs can disagree when a bundle freezes between them).
     """
-    frozen = frozen_bundles(cfg)
-    reviewed = _reviewed_names(cfg, frozen)
+    if frozen is None:
+        frozen = frozen_bundles(cfg)
+    reviewed = _reviewed_names(cfg)
     return [d for d in frozen if d.name not in reviewed]
 
 
@@ -166,7 +178,11 @@ def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "
         try:
             frozen = frozen_bundles(cfg)
             frozen_names = {d.name for d in frozen}
-            prior = _reviewed_names(cfg, frozen)
+            # A legacy marker contributes NO prior names (#299 review round 3): the count
+            # can't say WHICH bundles it covered, and inferring would risk a permanent
+            # skip. Older cycles stay in the default scope until reviewed once more —
+            # fail toward re-review, never toward skipping.
+            prior = _reviewed_names(cfg)
             new = {d.name for d in (reviewed if reviewed is not None else frozen)}
             covered = sorted((prior | new) & frozen_names)
             payload = {"count": len(covered), "reviewed": covered, "last_review_date": date}

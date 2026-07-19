@@ -801,13 +801,25 @@ def _act_scope(cfg: Config, args: argparse.Namespace) -> tuple[list, list, bool]
     ``all_entries`` — a signal seen once before the frontier and once after must
     still count as recurring, so narrowing the narrative scope must never narrow
     the signal history.
+
+    Both scopes derive from ONE frozen snapshot (#299 review round 3): a bundle
+    freezing between two globs would enter the scoped set (and be marked reviewed on
+    --append) while missing from the signal history — its recurring signals never
+    registered yet its cycles pushed past the frontier.
     """
-    full = bool(args.all or args.since)
-    all_entries = act.index(cfg, since=args.since)
-    if full:
+    frozen = act.frozen_bundles(cfg)
+    all_entries = act.index(cfg, since=args.since, bundles=frozen)
+    if args.all or args.since:
         return all_entries, all_entries, True
-    scoped = act.index(cfg, bundles=act.unreviewed_bundles(cfg))
-    return scoped, all_entries, False
+    if not act.has_frontier(cfg):
+        # A legacy count marker records no names — cover the full history once,
+        # loudly; the first --append then records a real frontier (#299 review r3).
+        if frozen:
+            print("act: legacy count marker (no frontier recorded) — covering the "
+                  "full frozen history; `--append` records the frontier", file=sys.stderr)
+        return all_entries, all_entries, False
+    unreviewed = set(act.unreviewed_bundles(cfg, frozen=frozen))
+    return [e for e in all_entries if e.bundle in unreviewed], all_entries, False
 
 
 def _act_index(cfg: Config, args: argparse.Namespace) -> int:

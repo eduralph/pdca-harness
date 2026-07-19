@@ -17,6 +17,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from pdca_harness import act, cli, signoff
 from pdca_harness.config import Config, LeafConfig
@@ -77,15 +78,38 @@ class MarkerFormat(unittest.TestCase):
         self.assertEqual(list(self.cfg.process_dir.glob(".act-reviewed.tmp*")), [])
         self.assertEqual(act.cycles_since_review(self.cfg), 0)
 
-    def test_legacy_bare_int_marker_keeps_old_arithmetic(self) -> None:
+    def test_legacy_bare_int_marker_keeps_cadence_but_infers_no_names(self) -> None:
+        # #299 review round 3: a count carries NO name information. Inferring a sorted
+        # prefix misassigns when a new bundle sorts before reviewed ones (issue_10
+        # freezing after 20/30; 99→100 digit boundaries) — and a misassignment is a
+        # PERMANENT silent skip once the first --append converts it to a frontier. So
+        # the cadence keeps the legacy arithmetic, but the scope treats EVERYTHING as
+        # unreviewed until a real frontier is recorded (fail toward re-review).
         for iid in ("10", "20", "30"):
             _freeze(self.cfg, iid)
         self.cfg.process_dir.mkdir(parents=True, exist_ok=True)
         self.marker.write_text("2\n", encoding="utf-8")     # pre-#299 count marker
-        self.assertEqual(act.cycles_since_review(self.cfg), 1)
-        # Legacy heuristic: the first n name-sorted frozen bundles read as reviewed.
+        self.assertEqual(act.cycles_since_review(self.cfg), 1)   # cadence: old arithmetic
+        self.assertFalse(act.has_frontier(self.cfg))
         self.assertEqual([d.name for d in act.unreviewed_bundles(self.cfg)],
-                         ["issue_30"])
+                         ["issue_10", "issue_20", "issue_30"])   # scope: no inference
+        # A pre-existing-but-newly-sorting-first bundle can therefore never be skipped:
+        # the first frontier write records exactly what THAT review covered.
+        act.mark_reviewed(self.cfg, reviewed=[self.cfg.bundle("issue_30".removeprefix("issue_"))],
+                          date="2026-07-19")
+        data = json.loads(self.marker.read_text(encoding="utf-8"))
+        self.assertEqual(data["reviewed"], ["issue_30"])    # legacy count contributed nothing
+
+    def test_act_scope_uses_one_frozen_snapshot(self) -> None:
+        # #299 review round 3: both scopes must come from ONE glob — a bundle freezing
+        # between two would be marked reviewed while missing from the signal history.
+        _freeze(self.cfg, "1")
+        import argparse
+        args = argparse.Namespace(all=False, since=None)
+        with mock.patch.object(cli.act, "frozen_bundles",
+                               wraps=cli.act.frozen_bundles) as fb:
+            cli._act_scope(self.cfg, args)
+        self.assertEqual(fb.call_count, 1)
 
     def test_garbage_marker_means_nothing_reviewed_never_a_crash(self) -> None:
         _freeze(self.cfg, "10")
