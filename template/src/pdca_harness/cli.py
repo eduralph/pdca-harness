@@ -517,10 +517,15 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
                       "the resolved marker and planning it.", file=sys.stderr)
             else:
                 print(f"{state.RESOLVED}\t{d}", file=sys.stderr)
+                # The manual remediation names the WHOLE file (#302 review round 15):
+                # deleting only the `resolved` key would leave the closure-era
+                # notes.json in place, and ensure_notes refuses to re-fetch while it
+                # exists — Plan would brief from the pre-reopen thread.
                 print("  tracker item resolved outside a cycle — nothing to run. Reopen "
                       "it in the tracker (a reachable GitHub tracker is then picked up "
-                      "here automatically; otherwise remove the `resolved` key from "
-                      "notes.json) to plan it again.", file=sys.stderr)
+                      "here automatically; otherwise rename notes.json away — e.g. to "
+                      "notes.superseded-by-reopen.json — so the next Plan re-fetches "
+                      "the fresh thread) to plan it again.", file=sys.stderr)
                 return 0
         if not d.exists():
             d.mkdir(parents=True)
