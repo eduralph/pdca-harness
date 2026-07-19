@@ -1,10 +1,12 @@
 """Overflow worktrees (issue #226, stdlib unittest, real git — no Claude, no network).
 
-Proves the cached-lane vs ephemeral-overflow decision for a gate read:
-- the bundle's OWN lane is returned warm and untouched (the hot Do→Check path);
+Proves the lane vs ephemeral-overflow decision for a gate read:
+- the bundle's OWN lane is RECONSTRUCTED to base + patch.diff before the gate reads it
+  (#296 — the lane is a warm checkout cache, never a trusted content cache);
 - a lane owned by a DIFFERENT bundle spills to a throwaway overflow tree (built off the
   base + this bundle's patch) when `[driver].overflow` > 0 — the lane is NOT mutated —
-  and falls back to the in-place `resync` heal when overflow is 0 or at the cap;
+  and falls back to the in-lane `rebuild_for_gate` reconstruction when overflow is 0 or
+  at the cap;
 - overflow trees are torn down after use and reclaimable by a sweep.
 """
 
@@ -65,15 +67,19 @@ class Overflow(unittest.TestCase):
 
     # --- the decision --------------------------------------------------------
 
-    def test_own_lane_is_returned_warm_and_untouched(self) -> None:
+    def test_own_lane_is_reconstructed_before_a_gate(self) -> None:
+        # #296 (inverts the former warm-and-untouched contract): even the bundle's OWN lane
+        # is rebuilt to base + patch.diff — an owner stamp attests what Do intended, not
+        # what the tree is, so a gating green must never trust leftover tree content.
         d = self._bundle("WT", patch=True)
         worktree.ensure(d, self.cfg)                       # lane owned by WT
-        (self.lane / "built.txt").write_text("do output\n", encoding="utf-8")  # Do's build
+        (self.lane / "built.txt").write_text("do output\n", encoding="utf-8")  # untracked leftover
         self.cfg.overflow = 2
         wt, ovf_primary = worktree.for_gate(d, self.cfg)
-        self.assertEqual(wt, self.lane)                    # the cached lane…
+        self.assertEqual(wt, self.lane)                    # still the lane…
         self.assertIsNone(ovf_primary)                     # …not an overflow
-        self.assertTrue((self.lane / "built.txt").exists())  # left exactly as Do built it
+        self.assertFalse((self.lane / "built.txt").exists())  # reconstructed, not trusted
+        self.assertEqual((self.lane / "file.txt").read_text(encoding="utf-8"), "base\npatched\n")
 
     def test_foreign_lane_spills_to_overflow_and_leaves_the_lane(self) -> None:
         other = self._bundle("OTHER")
@@ -99,7 +105,7 @@ class Overflow(unittest.TestCase):
         worktree.ensure(other, self.cfg)
         (self.lane / "orphan.txt").write_text("from OTHER\n", encoding="utf-8")
         d = self._bundle("WT", patch=True)
-        self.cfg.overflow = 0                              # disabled → resync in place
+        self.cfg.overflow = 0                              # disabled → rebuild in the lane
         wt, ovf_primary = worktree.for_gate(d, self.cfg)
         self.assertEqual(wt, self.lane)                    # the healed lane
         self.assertIsNone(ovf_primary)
@@ -148,14 +154,20 @@ class Overflow(unittest.TestCase):
         rlock = threading.Lock()
 
         def run(d):
-            r = worktree.for_gate(d, self.cfg)
+            # Over-cap readers race for the shared lane; the #296-review lane lock makes
+            # the losers fail closed ("lane busy") instead of clobbering each other —
+            # count those as no-overflow results, the property under test is the cap.
+            try:
+                r = worktree.for_gate(d, self.cfg)
+            except worktree.WorktreeError:
+                r = (None, None)
             with rlock:
                 results.append(r)
 
-        # resync (the non-overflow fallback) mutates the shared lane concurrently — stub it to
-        # isolate the cap logic under test from that unrelated contention.
+        # rebuild_for_gate (the non-overflow fallback) mutates the shared lane concurrently —
+        # stub it to isolate the cap logic under test from that unrelated contention.
         with mock.patch.object(worktree, "_overflow_create", slow_create), \
-                mock.patch.object(worktree, "resync", return_value=self.lane):
+                mock.patch.object(worktree, "rebuild_for_gate", return_value=self.lane):
             ts = [threading.Thread(target=run, args=(d,)) for d in bundles]
             for t in ts:
                 t.start()
@@ -188,6 +200,46 @@ class Overflow(unittest.TestCase):
         self.assertEqual(worktree.owner_of(self.lane), "issue_OTHER")           # lane untouched
         self.assertTrue((self.lane / "orphan.txt").exists())
         self.assertEqual(worktree._overflow_dirs(self.primary), [])             # torn down
+
+    def test_overflow_declines_gitlink_patches_and_fails_closed(self) -> None:
+        # #296 review round 2: the overflow reconstruction uses the same plain
+        # `git apply`, so it must carry the same gitlink fail-closed — the spill
+        # declines (tree torn down) and the read falls through to rebuild_for_gate,
+        # which raises the loud WorktreeError instead of certifying the wrong
+        # submodule revision.
+        other = self._bundle("OTHER")
+        worktree.ensure(other, self.cfg)                   # lane owned by OTHER
+        d = self._bundle("WT")
+        (d / "patch.diff").write_text(
+            "diff --git a/vendor/lib b/vendor/lib\nindex 1111111..2222222 160000\n"
+            "--- a/vendor/lib\n+++ b/vendor/lib\n@@ -1 +1 @@\n"
+            "-Subproject commit 1111111111111111111111111111111111111111\n"
+            "+Subproject commit 2222222222222222222222222222222222222222\n",
+            encoding="utf-8")
+        self.cfg.overflow = 2
+        with self.assertRaises(worktree.WorktreeError) as ctx:
+            worktree.for_gate(d, self.cfg)
+        self.assertIn("gitlink", str(ctx.exception))
+        self.assertEqual(worktree._overflow_dirs(self.primary), [])  # spill torn down
+
+    def test_gate_fails_closed_when_tree_cannot_match_patch(self) -> None:
+        # #296: a patch.diff that no longer applies means NO tree can be shown to match the
+        # patch under review. The run must fail CLOSED: no gate command executes, the matrix
+        # carries one synthetic gating red (rule_id "worktree-mismatch"), overall is "fail" —
+        # a green for a mismatched tree is the defect class this guards against.
+        d = self._bundle("WT")
+        (d / "patch.diff").write_text(
+            "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n"
+            "@@ -1 +1 @@\n-not the base line\n+changed\n", encoding="utf-8")
+        probe = self.tmp / "probe.txt"
+        self.cfg.gates_checks = [{
+            "id": "probe", "tier": "T3", "label": "would touch probe",
+            "cmd": f'touch "{probe}"', "gating": True, "scope": "repo"}]
+        result = gates.run_gates(d, self.cfg)
+        self.assertEqual(result["overall"], "fail")
+        self.assertTrue(any(r["rule_id"] == "worktree-mismatch" and r["gating"]
+                            and r["result"] == "fail" for r in result["rows"]))
+        self.assertFalse(probe.exists())                   # no gate command was run
 
     def _porcelain(self, repo: Path) -> str:
         return sp.run(["git", "-C", str(repo), "status", "--porcelain"],

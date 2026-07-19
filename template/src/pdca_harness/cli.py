@@ -230,17 +230,54 @@ def main(argv: list[str] | None = None) -> int:
     p_drift.add_argument("--no-fetch", action="store_true",
                          help="skip `git fetch` (check against already-fetched base refs)")
 
-    # Act tooling as one command group (#89): `act index` / `act log`.
-    p_act = sub.add_parser("act", help="cross-cycle Act tooling (index / log)")
+    # Act tooling as one command group (#89): `act index` / `act log` / `act resolve`.
+    # The help text is the operator's contract for the OUT-OF-TURN review path (#298):
+    # every load-bearing fact an operator needs to run an Act review outside the flow's
+    # cadence lives here, not only in module docstrings. RawDescription keeps the
+    # epilog's command sequence lines intact; no literal `%` (argparse %-substitution),
+    # and `%(prog)s` renders the per-instance command name (#73).
+    p_act = sub.add_parser(
+        "act", help="cross-cycle Act tooling (index / log / resolve)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Manual, out-of-turn Act review across frozen (COMPLETE) cycles.\n"
+            "These commands carry no cadence gate — [driver].act_cadence throttles only\n"
+            "the flow's auto-run Act — so run them whenever a review is worth doing.\n"
+            "Needs at least one frozen COMPLETE bundle (otherwise `log` exits 1)."),
+        epilog=(
+            "typical out-of-turn review:\n"
+            "  %(prog)s index                      survey frozen cycles + recurring signals\n"
+            "  %(prog)s log --date <ISO>           preview the scaffolded entry (prints only)\n"
+            "  %(prog)s log --date <ISO> --append  record it; also stamps process/.act-reviewed,\n"
+            "                                      so the flow's next auto-Act won't re-cover\n"
+            "                                      these cycles\n"
+            "  %(prog)s resolve <signal>           mark an applied process delta (act-ledger.json)\n"
+            "the scaffold's Process-deltas section is deliberately TODO — choosing the deltas\n"
+            "is Act's irreducible human work"))
     act_sub = p_act.add_subparsers(dest="act_cmd", required=True)
-    p_actidx = act_sub.add_parser("index", help="read-only index of frozen cycles + recurring signals")
+    p_actidx = act_sub.add_parser(
+        "index", help="read-only index of frozen cycles + recurring signals",
+        description="Read-only index of frozen (COMPLETE) cycles, their §6/§7/§10 extracts "
+                    "and recurring signals. No cadence gate; writes nothing.")
     p_actidx.add_argument("--since", help="only cycles signed off on/after this ISO date")
-    p_actlog = act_sub.add_parser("log", help="scaffold a dated act-log entry (deltas left to the human)")
+    p_actlog = act_sub.add_parser(
+        "log", help="scaffold a dated act-log entry (deltas left to the human)",
+        description="Scaffold a dated act-log entry over the frozen (COMPLETE) cycles "
+                    "(exits 1 when none exist). The Process-deltas section is left TODO "
+                    "deliberately — choosing the deltas is Act's irreducible human work. "
+                    "Without --append the entry is only printed (a safe preview).")
     p_actlog.add_argument("--since", help="only consider cycles signed off on/after this ISO date")
     p_actlog.add_argument("--date", required=True, help="review date (ISO; Act is out-of-band so pass it)")
-    p_actlog.add_argument("--append", action="store_true", help="append to process/act-log.md (default: print)")
-    p_actres = act_sub.add_parser("resolve",
-                                  help="mark a tracked recurring signal as a delta you applied (#149)")
+    p_actlog.add_argument("--append", action="store_true",
+                          help="append to process/act-log.md AND stamp process/.act-reviewed — "
+                               "a manual Act review resets the flow's cadence too, so the next "
+                               "auto-Act won't re-cover these cycles (default: print only)")
+    p_actres = act_sub.add_parser(
+        "resolve",
+        help="mark a tracked recurring signal as a delta you applied (#149)",
+        description="Mark a tracked recurring signal as a process delta you applied. The "
+                    "record lands in process/act-ledger.json; a later Act flags the signal "
+                    "as an ineffective delta if it recurs after the applied date (#149).")
     p_actres.add_argument("signal", help="substring of the recurring signal to mark applied")
     p_actres.add_argument("--location", default="", help="where the delta landed (path:line / rule)")
     p_actres.add_argument("--date", help="applied date (ISO; default today)")
@@ -370,6 +407,47 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
+def _resolved_tracker_reopened(cfg: Config, iid: str) -> bool:
+    """True iff the RESOLVED bundle's tracker issue is verifiably OPEN again (#302
+    review round 4). Best-effort and conservative: only a GitHub tracker (a
+    ``[[plan.source]]`` with ``role = "tracker"``, else ``[tracker].system``), a
+    numeric id and a working ``gh`` can prove a reopen — anything unknowable keeps
+    the terminal no-op (never a crash, never a false reopen)."""
+    if not iid.isdigit():
+        return False
+    is_github, repo = cfg.tracker_system == "github", ""
+    for src in cfg.plan_sources:
+        if (isinstance(src, dict)
+                and (src.get("type") or "").strip().lower() == "github"
+                and (src.get("role") or "").strip().lower() == "tracker"):
+            is_github, repo = True, str(src.get("repo", "") or "")
+            break
+    if not is_github or shutil.which("gh") is None:
+        return False
+    args = ["gh", "issue", "view", iid, "--json", "state"]
+    if repo:
+        args += ["--repo", repo]
+    proc = subprocess.run(args, capture_output=True, text=True)
+    if proc.returncode != 0:
+        return False
+    try:
+        return json.loads(proc.stdout).get("state") == "OPEN"
+    except ValueError:
+        return False
+
+
+def _clear_resolved_marker(d: Path) -> None:
+    """Drop the ``resolved`` key from notes.json (tolerant read; the rest untouched)."""
+    notes = d / "notes.json"
+    try:
+        data = json.loads(notes.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return
+    if isinstance(data, dict) and "resolved" in data:
+        del data["resolved"]
+        notes.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
 def _init_issue(cfg: Config, issue_id: str, from_brief: Path | None) -> int:
     # init-issue seeds a bundle from a brief you authored OUTSIDE the loop. With no
     # --from-brief it used to copy the blank brief.md.tpl, which left a content-less
@@ -466,10 +544,21 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
             # A settled tracker item is a successful no-op, like COMPLETE (#302 review
             # round 3): the multi-id path skips it and exits 0 — automation must not
             # read this terminal state as a failed flow on the single-id path either.
-            print(f"{state.RESOLVED}\t{d}", file=sys.stderr)
-            print("  tracker item resolved outside a cycle — nothing to run. Reopen it "
-                  "in the tracker to plan it again.", file=sys.stderr)
-            return 0
+            # But the marker is a CACHE (#302 review round 4): the tracker can have
+            # REOPENED the issue since it was written, and the seed never refreshes an
+            # existing notes.json — so revalidate against the live tracker first, and
+            # a reopened issue clears the marker and proceeds to a real flow.
+            if _resolved_tracker_reopened(cfg, iid):
+                _clear_resolved_marker(d)
+                print(f"flow: issue_{iid} — the tracker issue is OPEN again; cleared "
+                      "the resolved marker and planning it.", file=sys.stderr)
+            else:
+                print(f"{state.RESOLVED}\t{d}", file=sys.stderr)
+                print("  tracker item resolved outside a cycle — nothing to run. Reopen "
+                      "it in the tracker (a reachable GitHub tracker is then picked up "
+                      "here automatically; otherwise remove the `resolved` key from "
+                      "notes.json) to plan it again.", file=sys.stderr)
+                return 0
         if not d.exists():
             d.mkdir(parents=True)
         final = flow.flow(cfg, iid, csv=args.from_csv,
@@ -806,10 +895,14 @@ def _act_log(cfg: Config, args: argparse.Namespace) -> int:
     if not entries:
         print("no frozen cycles to review (need COMPLETE bundles)", file=sys.stderr)
         return 1
-    act.register_signals(cfg, entries, args.date)  # track recurring signals (#149)
     text = act.scaffold_entry(entries, act.patterns(entries), date=args.date,
                               recs=act.recurrences(cfg, entries))
     if args.append:
+        # Recording is the ONLY writing path (#298 review): the ledger registration
+        # (#149) rides --append with the entry, so a plain `act log` stays the safe,
+        # read-only preview the help promises. The scaffold itself doesn't change —
+        # patterns/recurrences never read the open entries registration adds.
+        act.register_signals(cfg, entries, args.date)  # track recurring signals (#149)
         log = act.append_entry(cfg, text)
         act.mark_reviewed(cfg)  # a manual Act review resets the flow cadence too (#109)
         print(f"appended entry to {log}")
@@ -823,8 +916,12 @@ def _act_resolve(cfg: Config, args: argparse.Namespace) -> int:
     date = args.date or datetime.date.today().isoformat()
     raw = act.resolve(cfg, args.signal, args.location, date)
     if raw is None:
+        # The registration path is --append (a plain `act log` is a read-only preview,
+        # #298 review) — the recovery hint must name the WRITING invocation, or the
+        # operator follows it and the next resolve fails identically.
         print(f"act resolve: no open ledger signal matching '{args.signal}' — run "
-              f"`pdca act log` to register recurring signals first", file=sys.stderr)
+              f"`pdca act log --date <ISO> --append` to register recurring signals first",
+              file=sys.stderr)
         return 1
     print(f"marked applied ({date}): {raw}")
     return 0

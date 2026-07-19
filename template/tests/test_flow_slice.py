@@ -47,6 +47,11 @@ def _stub_config(root: Path) -> Config:
         publisher=LeafConfig(mode="stub", family="claude", interactive=True),
         act=LeafConfig(mode="stub", family="claude", interactive=True),
         act_cadence=1,  # most flow tests assert Act runs after a flow; cadence #109 tested separately
+        # Hermetic: pin the toy target to a path inside this test's tmp root (absent →
+        # worktree isolation legitimately doesn't apply, gates run in place). The sibling
+        # convention would resolve to the SHARED `/tmp/example-repo`, where a stray leftover
+        # dir with a broken .git flips gates to a fail-closed WorktreeError (#296).
+        repo_checkouts={"example-org/example-repo": str(root / "example-repo")},
     )
 
 
@@ -562,6 +567,57 @@ class CliSurface(unittest.TestCase):
         self.assertEqual(cli.main(["act", "index"]), 0)  # frozen-cycle index (empty is fine)
         # `act log` routes through and reports "no frozen cycles" (return 1) — proves the group.
         self.assertEqual(cli.main(["act", "log", "--date", "2026-01-01"]), 1)
+
+    def _freeze_with_candidate(self, iid: str) -> None:
+        d = Path("results") / f"issue_{iid}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        (d / "patch.diff").write_text("diff --git a/x b/x\n", encoding="utf-8")
+        (d / "check-gates.json").write_text("{}", encoding="utf-8")
+        (d / "SUMMARY.md").write_text(
+            "# Result\n\n## 9. Check sign-off\n- Outcome: accepted\n"
+            "- By / date: T / 2026-07-01\n\n## 10. Act candidates\n"
+            "- [ ] tighten the repro gate for flaky suites\n", encoding="utf-8")
+
+    def test_act_log_preview_is_read_only_append_writes_ledger(self) -> None:
+        # #298 review: the help promises `act log` without --append is a SAFE preview,
+        # so the #149 ledger registration must ride --append — a preview that dirties
+        # process/act-ledger.json contradicts the printed contract.
+        for iid in ("1", "2"):                       # two cycles → a recurring signal
+            self._freeze_with_candidate(iid)
+        ledger = Path("process") / "act-ledger.json"
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["act", "log", "--date", "2026-07-19"]), 0)
+        self.assertFalse(ledger.exists())            # preview wrote nothing
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(
+                ["act", "log", "--date", "2026-07-19", "--append"]), 0)
+        self.assertTrue(ledger.exists())             # recording registers signals
+
+    def test_act_help_documents_the_out_of_turn_workflow(self) -> None:
+        # #298: the CLI help is the operator's contract for the out-of-turn Act review —
+        # it must carry the load-bearing facts, not leave them to module docstrings.
+        buf = io.StringIO()
+        with redirect_stdout(buf), self.assertRaises(SystemExit) as ctx:
+            cli.main(["act", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        text = buf.getvalue()
+        for phrase in ("no cadence gate", "COMPLETE", ".act-reviewed",
+                       "log --date", "resolve", "irreducible human work"):
+            self.assertIn(phrase, text)
+
+    def test_act_log_help_documents_the_append_side_effect(self) -> None:
+        # #298: `--append` also stamps process/.act-reviewed (resets the flow cadence) —
+        # omitting that makes an operator fear double-reviewing or hand-edit the marker.
+        buf = io.StringIO()
+        with redirect_stdout(buf), self.assertRaises(SystemExit) as ctx:
+            cli.main(["act", "log", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn(".act-reviewed", buf.getvalue())
+        buf = io.StringIO()
+        with redirect_stdout(buf), self.assertRaises(SystemExit):
+            cli.main(["act", "resolve", "--help"])
+        self.assertIn("act-ledger.json", buf.getvalue())
 
     def test_flow_requires_ids_or_csv(self) -> None:
         self.assertEqual(cli.main(["flow"]), 2)  # no ids and no --from-csv → usage error
