@@ -94,6 +94,38 @@ class PlanAdvisory(unittest.TestCase):
         self.assertFalse(leaves.plan_advisory_artifact(low, "plan-reviewer").exists())
         self.assertFalse((low / "plan-advisory-benefit.json").exists())
 
+    def test_unavailable_review_never_triggers_the_revision_pass(self) -> None:
+        # #301 review round 3: a NOT-COMPLETED placeholder's NEEDS-HUMAN line reports
+        # infrastructure, not the brief — it must not count as a finding, trigger the
+        # planner revision, or pollute the benefit telemetry. It still folds into §6.
+        cfg = _cfg(self.tmp, plan_advisory=[_REVIEWER],
+                   planner=LeafConfig(mode="command", family="claude", interactive=True,
+                                      argv=["claude"]))
+        d = _brief(cfg, "UNAV")
+        with mock.patch.object(leaves, "_stub_plan_advisory",
+                               side_effect=lambda dd, spec, lid:
+                               leaves._plan_advisory_unavailable(dd, lid, "leaf failed")), \
+                mock.patch.object(leaves, "_invoke") as inv:
+            leaves.run_plan_advisory(d, cfg)
+        inv.assert_not_called()                           # no revision over an outage
+        benefit = json.loads((d / "plan-advisory-benefit.json").read_text(encoding="utf-8"))
+        self.assertEqual(benefit["findings"], 0)
+        self.assertFalse(benefit["revised"])
+
+    def test_failed_revision_pass_never_crashes_the_plan_beat(self) -> None:
+        # #301 review round 3: the revision is an opt-in advisory step — a planner that
+        # exits non-zero there must not fail the Plan beat or skip the benefit records.
+        cfg = _cfg(self.tmp, plan_advisory=[_REVIEWER],
+                   planner=LeafConfig(mode="command", family="claude", interactive=True,
+                                      argv=["claude"]))
+        d = _brief(cfg, "RFAIL")
+        with mock.patch.object(leaves, "_invoke",
+                               side_effect=RuntimeError("planner died")):
+            leaves.run_plan_advisory(d, cfg)              # no raise
+        benefit = json.loads((d / "plan-advisory-benefit.json").read_text(encoding="utf-8"))
+        self.assertFalse(benefit["revised"])              # briefs left as authored
+        self.assertGreaterEqual(benefit["findings"], 1)
+
     def test_revision_pass_records_revised_true(self) -> None:
         # Command-mode planner + findings → ONE revision invocation; a changed brief
         # hashes different → revised: true.

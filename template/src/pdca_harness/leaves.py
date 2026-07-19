@@ -1591,13 +1591,22 @@ def _brief_sha(d: Path) -> str:
 
 
 def _plan_findings(d: Path) -> int:
-    """NEEDS-HUMAN findings across this bundle's plan-advisory artifacts (the
-    decorrelation note is a selection lapse, not a brief finding — excluded)."""
+    """SUBSTANTIVE findings across this bundle's plan-advisory artifacts.
+
+    Excluded: the decorrelation note (a selection lapse, not a brief finding) and any
+    NOT-COMPLETED placeholder — its NEEDS-HUMAN line reports infrastructure, not the
+    brief (#301 review round 3): counting it triggered a planner revision (and
+    ``findings: 1`` telemetry) over a missing CLI or transient outage. Placeholders
+    carry the machine-readable leaf-status marker (#278), the same signal §6 uses;
+    they still fold into §6 for the human, they just never drive the revision pass."""
     count = 0
     for p in sorted(d.glob("plan-advisory-*.md")):
         if p.name == "plan-advisory-decorrelation.md":
             continue
-        count += sum(1 for line in p.read_text(encoding="utf-8").splitlines()
+        text = p.read_text(encoding="utf-8")
+        if assemble.leaf_status(text):
+            continue  # a placeholder, not a review
+        count += sum(1 for line in text.splitlines()
                      if line.lstrip().startswith("- NEEDS-HUMAN"))
     return count
 
@@ -1753,7 +1762,16 @@ def run_plan_advisory_batch(cfg: Config, bundles: list[Path]) -> None:
     before = {d: _brief_sha(d) for d in ran}
     with_findings = [d for d in ran if _plan_findings(d) > 0]
     if with_findings and cfg.planner.mode == "command":
-        _invoke(cfg.planner, cfg.root, _plan_revision_prompt(cfg, with_findings), cfg=cfg)
+        # Contained like the advisory leaves themselves (#301 review round 3): the
+        # revision is an OPT-IN advisory step, and a planner that exits non-zero here
+        # must not fail an otherwise completed Plan beat (or skip the benefit records
+        # below). The original briefs are untouched on failure → revised stays False.
+        try:
+            _invoke(cfg.planner, cfg.root, _plan_revision_prompt(cfg, with_findings), cfg=cfg)
+        except Exception as exc:  # noqa: BLE001 — advisory: never crash the Plan beat
+            print(f"leaves: plan-advisory revision pass failed ({type(exc).__name__}: "
+                  f"{exc}); briefs left as authored — findings stay open in §6",
+                  file=sys.stderr)
     for d, ids in ran.items():
         after = _brief_sha(d)
         (d / PLAN_ADVISORY_BENEFIT).write_text(json.dumps({
