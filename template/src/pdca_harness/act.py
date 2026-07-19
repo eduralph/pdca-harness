@@ -193,6 +193,44 @@ def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "
             _unlock(fh)
 
 
+def unmark_reviewed(cfg: Config, d: Path) -> None:
+    """Drop ONE bundle from the review frontier (#299 review round 4).
+
+    Called when revalidation records a DELTA on a frozen cycle: that delta is new Act
+    signal (a frozen PASS→FAIL regression especially), so the bundle must re-enter the
+    default ``act index``/``act log`` scope instead of hiding behind the frontier
+    until another bundle happens to freeze. Same lock + atomic-write discipline as
+    :func:`mark_reviewed`; a legacy/absent marker (no frontier) is a no-op — the
+    bundle is already in scope there."""
+    marker = cfg.process_dir / _CADENCE_MARKER
+    if not marker.exists():
+        return
+    lock = marker.with_name(marker.name + ".lock")
+    with lock.open("w") as fh:
+        _lock_exclusive(fh)
+        try:
+            m = _load_marker(cfg)
+            if m["reviewed"] is None or d.name not in m["reviewed"]:
+                return
+            covered = sorted(m["reviewed"] - {d.name})
+            payload = {"count": len(covered), "reviewed": covered,
+                       "last_review_date": _load_marker_date(cfg)}
+            tmp = marker.with_name(f"{marker.name}.tmp.{os.getpid()}")
+            tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            os.replace(tmp, marker)
+        finally:
+            _unlock(fh)
+
+
+def _load_marker_date(cfg: Config) -> str:
+    """The marker's recorded last_review_date, or "" (tolerant read)."""
+    try:
+        data = json.loads((cfg.process_dir / _CADENCE_MARKER).read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return ""
+    return str(data.get("last_review_date", "") or "") if isinstance(data, dict) else ""
+
+
 def cycles_since_review(cfg: Config) -> int:
     """How many frozen cycles the last Act did not cover (issue #109).
 

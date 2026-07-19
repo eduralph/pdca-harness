@@ -152,6 +152,20 @@ class MarkerFormat(unittest.TestCase):
         self.assertEqual(data["reviewed"], ["issue_10", "issue_20"])
         self.assertEqual(list(self.cfg.process_dir.glob(".act-reviewed.tmp*")), [])
 
+    def test_revalidation_delta_reopens_the_reviewed_bundle(self) -> None:
+        # #299 review round 4: a revalidation DELTA on a frozen cycle is new Act signal
+        # — the bundle must re-enter the default scope instead of hiding behind the
+        # frontier until an unrelated bundle happens to freeze.
+        from pdca_harness import revalidate
+        d = _freeze(self.cfg, "40")
+        act.mark_reviewed(self.cfg, date="2026-07-19")
+        self.assertEqual(act.unreviewed_bundles(self.cfg), [])
+        res = revalidate.revalidate(self.cfg, d, "2026-07-20")   # stub re-gate ⇒ deltas
+        self.assertTrue(res["changed"])
+        self.assertEqual([b.name for b in act.unreviewed_bundles(self.cfg)],
+                         ["issue_40"])
+        self.assertEqual(act.cycles_since_review(self.cfg), 1)   # cadence sees it too
+
     def test_out_of_order_freeze_surfaces_as_unreviewed(self) -> None:
         # The observed coverage-gap case: issue_20 froze AROUND a review that covered
         # issue_10 and issue_30 — a count marker hides it; the frontier does not.

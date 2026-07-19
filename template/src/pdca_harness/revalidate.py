@@ -75,6 +75,13 @@ def revalidate(cfg: Config, d: Path, date: str) -> dict:
     }
     (d / f"revalidation-{date}.json").write_text(
         json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    if result["changed"]:
+        # A delta on a frozen cycle is NEW Act signal (#299 review round 4) — a
+        # frozen PASS→FAIL regression especially. A bundle behind the review frontier
+        # would otherwise never re-enter the default `act index`/`act log` scope, so
+        # the delta stayed invisible unless the operator happened to pass --all.
+        from . import act  # lazy: act imports revalidate (deltas) — avoid the cycle
+        act.unmark_reviewed(cfg, d)
     return result
 
 
