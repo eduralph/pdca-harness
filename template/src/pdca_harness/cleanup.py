@@ -144,6 +144,14 @@ def _discontinue(cfg: Config, d: Path, remote: dict, *, by: str, today: str) -> 
                    date=today, delta=f"tracker issue closed upstream ({reason}, "
                                      f"{remote.get('closedAt', '') or 'no date'}) — pdca cleanup")
     driver.run_issue(d, cfg)
+    # VERIFY the transition (#300 review round 7): a malformed/customized SUMMARY.md
+    # without the canonical §9 fields makes signoff.record substitute nothing and
+    # run_issue leave the bundle AWAITING_SIGNOFF — reporting success would let
+    # `cleanup --apply` exit 0 over a bundle it did not actually reconcile.
+    if state.state(d) != state.DISCONTINUED:
+        print(f"cleanup: {d.name}: discontinue did not take (SUMMARY.md is missing the "
+              f"canonical §9 fields?) — bundle left {state.state(d)}", file=sys.stderr)
+        return False
     return True
 
 
@@ -363,7 +371,15 @@ def run(cfg: Config, ids: list[str], *, apply: bool = False, repo: str = "",
         prefix = "" if (apply and r.apply) else ("would: " if r.apply else "note: ")
         print(f"{r.bundle} [{r.local} / tracker {r.remote}] — {prefix}{r.plan}")
         if apply and r.apply:
-            ok = all(fn() for fn in r.apply)
+            # One damaged bundle (unwritable notes.json, an artifact read blowing up
+            # mid-close) must be REPORTED as failed, never abort the sweep past the
+            # remaining healthy rows (#300 review round 7) — the same isolation
+            # contract the flow gives per-bundle steps.
+            try:
+                ok = all(fn() for fn in r.apply)
+            except Exception as exc:  # noqa: BLE001 — isolate the row, keep sweeping
+                ok = False
+                print(f"  ✗ {r.bundle}: {type(exc).__name__}: {exc}", file=sys.stderr)
             if not ok:
                 failed += 1
                 print(f"  ✗ {r.bundle}: action failed (see above)", file=sys.stderr)

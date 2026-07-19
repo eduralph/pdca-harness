@@ -166,6 +166,44 @@ class ClosedIssueSide(CleanupBase):
         self.assertEqual(state.state(d), state.BUILT)      # untouched
 
 
+class ApplyFailureHonesty(CleanupBase):
+    def test_discontinue_that_does_not_take_is_a_reported_failure(self) -> None:
+        # #300 review round 7: a customized SUMMARY.md without the canonical §9
+        # fields makes signoff.record substitute nothing and run_issue leave the
+        # bundle AWAITING_SIGNOFF — cleanup must report that, not exit 0 as though
+        # it were discontinued.
+        d = self._staged("61", signoff_action=None)
+        (d / "SUMMARY.md").write_text("# custom summary — no canonical section 9\n",
+                                      encoding="utf-8")
+        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
+        self.issue_states["61"] = _CLOSED
+        rc, _out, err = self._run(apply=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("did not take", err)
+        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)  # honestly reported
+
+    def test_one_raising_row_does_not_abort_the_sweep(self) -> None:
+        # #300 review round 7: an exception from one row's action (permission/disk
+        # error mid-write) is isolated to that row — reported as its failure while
+        # the remaining healthy bundles still reconcile.
+        self._tracker("95")
+        b = self._tracker("96")
+        self.issue_states["95"] = _CLOSED
+        self.issue_states["96"] = _CLOSED
+        real = cleanup._mark_resolved
+
+        def boom(d, remote, today):
+            if d.name == "issue_95":
+                raise RuntimeError("disk full")
+            return real(d, remote, today)
+
+        with mock.patch.object(cleanup, "_mark_resolved", side_effect=boom):
+            rc, _out, err = self._run(apply=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("RuntimeError", err)
+        self.assertEqual(state.state(b), state.RESOLVED)   # sibling still reconciled
+
+
 class OpenIssueSide(CleanupBase):
     def test_complete_with_merged_pr_closes_completed_with_comment_attached(self) -> None:
         # #300 review: comment + close is ONE gh call, so a transient failure never
