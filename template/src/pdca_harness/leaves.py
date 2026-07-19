@@ -1651,6 +1651,12 @@ def _pinned_plan_target(d: Path, cfg: Config):
         return
     primary, base_ref = tgt
     worktree._git(primary, "fetch", cfg.base_remote)  # best-effort refresh of the base
+    if base_ref.startswith("origin/") and cfg.base_remote != "origin":
+        # A stacked base lives on origin (#123): with base_remote = "upstream", fetching
+        # only it leaves origin/<parent-branch> stale/absent, the worktree add fails and
+        # the review silently grounds on the sibling checkout instead of the stacked
+        # base (#301 review round 4). Mirror worktree.ensure's dual fetch.
+        worktree._git(primary, "fetch", "origin")
     tmp = tempfile.mkdtemp(prefix="pdca-plan-target-")
     pinned = Path(tmp) / "target"
     if worktree._git(primary, "worktree", "add", "--detach", str(pinned), base_ref) != 0:
