@@ -13,12 +13,18 @@ not a git checkout, or whose base can't be resolved silently falls back to in-pl
 reused** per cycle (reset to the base before each Do), keyed by lane slot so concurrent
 lanes get private worktrees (never ``cp`` a worktree — its ``.git`` is an absolute
 pointer; each is created in place by ``git worktree add``).
+
+The lane is a warm *checkout* cache, never a trusted *content* cache: a gating read
+(:func:`for_gate`) always reconstructs ``base + patch.diff`` rather than trust what Do
+left behind, and fails closed on any mismatch (issue #296).
 """
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,6 +33,30 @@ from pathlib import Path
 
 from . import lane
 from .config import Config
+
+# Cross-platform advisory file lock (#296 review round 2, same rationale as act.py):
+# ``fcntl`` is Unix-only and cli.py imports this module at load time, so a hard import
+# would break every installed command on Windows (scripts/install.ps1 is a supported
+# bootstrap). ``msvcrt.locking`` is the Windows equivalent; LK_NBLCK raises at once
+# when contended, matching flock's LOCK_NB.
+if os.name == "nt":  # pragma: no cover — exercised only on Windows
+    import msvcrt
+
+    def _lock_file(fh, *, wait: bool) -> None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK if wait else msvcrt.LK_NBLCK, 1)
+
+    def _unlock_file(fh) -> None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    def _lock_file(fh, *, wait: bool) -> None:
+        fcntl.flock(fh, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+
+    def _unlock_file(fh) -> None:
+        fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 class WorktreeError(Exception):
@@ -113,26 +143,95 @@ def path(d: Path, cfg: Config) -> Path | None:
     return wt if (wt / ".git").exists() else None
 
 
-def resync(d: Path, cfg: Config) -> Path | None:
-    """The worktree for this bundle/lane, guaranteed to reflect *this* bundle — for a gate.
+# A patch that changes a submodule gitlink (mode 160000). Plain `git apply` exits 0
+# for these while leaving the submodule checkout untouched, so a reconstruction that
+# "succeeded" would still not be base + patch.diff — the exact lie #296 forbids.
+# Keyed on the DIFF HEADERS that declare the 160000 mode (index/old mode/new mode/new
+# file mode/deleted file mode lines), never on hunk text alone (#296 review round 2):
+# an ordinary text file may legitimately contain a `Subproject commit …` line, and
+# misclassifying it would fail-close a patch `git apply` materializes correctly.
+_GITLINK_RE = re.compile(
+    r"^(?:index [0-9a-f]+\.\.[0-9a-f]+|old mode|new mode|new file mode|deleted file mode)"
+    r" 160000$",
+    re.MULTILINE)
 
-    The per-lane worktree is reset-and-reused across bundles but swept only before each Do
-    (:func:`ensure`). So a gate that reads it OUTSIDE the Do→Check cadence — a standalone
-    ``pdca gates`` re-run, or the next bundle's gate before its own Do in a shared lane —
-    can see a *different* bundle's leftover net-new edits and false-red on an orphan file
-    that this bundle never touched (issue #224). This heals that window: when the tree is
-    owned by another bundle (or is unstamped, from an older run), reset it to the base,
-    clean it, re-apply THIS bundle's ``patch.diff``, and take ownership — so the gate sees
-    exactly this bundle's change over a clean base, never a foreign orphan.
 
-    When the tree is already this bundle's (the normal Do→Check path, owner stamped by
-    :func:`ensure`), it is returned untouched so Check still tests the tree Do built. Like
-    :func:`path`, best-effort: isolation off / unresolved target / no worktree on disk / a
-    git failure returns None, and the gate falls back to the primary checkout as it does
-    when isolation is off. If this bundle's ``patch.diff`` no longer applies to the base,
-    the tree can't be reconstructed as this bundle's build, so it clears the stamp and
-    returns None rather than present a clean base as if it were patched. No fetch — the base
-    ref is already present from Do's ensure.
+@contextlib.contextmanager
+def lane_lock(d: Path, cfg: Config, *, wait: bool):
+    """Advisory per-lane exclusive lock (#296 review) — the lane lifecycle guard.
+
+    The owner stamp names which bundle's Do last populated a lane; it cannot say
+    whether that Do (or a gate) is STILL RUNNING there. Without a lifecycle guard, an
+    out-of-band gate read (``pdca gates <id>``) overlapping an in-flight Do for the
+    same bundle would reconstruct the lane under the builder — destroying its
+    uncommitted work — and two concurrent gate reads could clean each other's outputs
+    mid-run. Both the Do band (ensure → builder invocation) and the gate read
+    (reconstruction → gate commands) therefore hold this ``flock`` on a per-lane
+    ``.lock`` sidecar for their whole critical section.
+
+    ``wait=True`` blocks (Do waits out a transient gate read); ``wait=False`` raises
+    :class:`WorktreeError` when the lane is busy — the gate then fails CLOSED with a
+    reason instead of clobbering a live tree. No-op (yields) where isolation doesn't
+    apply. flock serializes across processes AND across same-process file handles.
+    """
+    if not cfg.worktree:
+        yield
+        return
+    tgt = _target(d, cfg)
+    if tgt is None:
+        yield
+        return
+    wt = _wt_dir(tgt[0])
+    try:
+        # The open itself can fail (read-only parent, fd exhaustion) — that too must
+        # surface as WorktreeError, not a raw OSError: gates only catch WorktreeError,
+        # and a raw escape would abort the run instead of the fail-closed red
+        # (#296 review round 3).
+        fh = wt.with_name(wt.name + ".lock").open("w")
+    except OSError as exc:
+        raise WorktreeError(
+            f"{d.name}: cannot create the lane lock next to {wt.name} ({exc}) — "
+            "failing closed; fix the checkout's parent directory, then retry.") from exc
+    try:
+        _lock_file(fh, wait=wait)
+    except OSError as exc:
+        fh.close()
+        raise WorktreeError(
+            f"{d.name}: lane {wt.name} is busy (another Do or gate run holds it) — "
+            "refusing to reconstruct under a live run; retry when it finishes.") from exc
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            _unlock_file(fh)
+        fh.close()
+
+
+def rebuild_for_gate(d: Path, cfg: Config) -> Path | None:
+    """Reconstruct the lane worktree as ``base + patch.diff`` — the tree a gate may trust.
+
+    The per-lane worktree is reset-and-reused, historically swept only before each Do
+    (:func:`ensure`) and trusted by content between Do and Check. Issue #296 showed why
+    that trust is misplaced: an interrupted re-populate (host standby mid-Do) left the
+    PREVIOUS iteration's tree in the lane with a correct-looking owner stamp — the stamp
+    names the bundle, and iterate-do reuses the same bundle dir — and a *gating* C4 green
+    then attested code that was not the patch under review. There is also no robust
+    equality predicate to *verify* the tree against ``patch.diff`` (the builder authors
+    the diff directly; context width / hunk order / whitespace legitimately differ from
+    ``git diff`` output). So the gate read does not verify — it RECONSTRUCTS: reset to
+    the base, clean (``-x`` — ignored build outputs too, issue #237), re-apply THIS
+    bundle's ``patch.diff``, re-stamp. By construction a green then attests exactly
+    ``base + patch.diff`` — the same artifact publish ships (issue #224 subsumed).
+
+    Fail CLOSED (issue #235 precedent): once the target is a real git checkout, any step
+    that fails — reset, clean, a ``patch.diff`` that no longer applies — raises
+    :class:`WorktreeError` (stamp cleared first) rather than degrade to running the gate
+    in the primary checkout or over a mismatched tree; a red with a reason always beats
+    a green for the wrong content. Returns ``None`` only where isolation legitimately
+    doesn't apply (disabled / unresolved target / non-git checkout — unchanged
+    best-effort contract). A missing lane is created off the base (crash/standby
+    self-heal: the next gate run rebuilds from scratch). No fetch on the warm path —
+    the base ref must stay the one Do built against.
     """
     if not cfg.worktree:
         return None
@@ -142,29 +241,47 @@ def resync(d: Path, cfg: Config) -> Path | None:
     primary, base_ref = tgt
     wt = _wt_dir(primary)
     if not (wt / ".git").exists():
-        return None
-    if owner_of(wt) == d.name:
-        return wt  # already this bundle's build (normal Do→Check) — leave Do's tree intact
-    # A foreign / unstamped tree: heal it to THIS bundle's state before the gate reads it.
-    # ``-x`` also removes IGNORED files, so a prior bundle's ignored build outputs (dist/,
-    # caches, generated assets) can't linger and contaminate this bundle's gate (issue #237).
-    if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-fdxq") != 0:
-        print(f"worktree: could not resync {wt} to {base_ref} for {d.name}; the gate "
-              "falls back to the primary checkout", file=sys.stderr)
-        return None
+        _git(primary, "fetch", cfg.base_remote)  # best-effort refresh of the base
+        if base_ref.startswith("origin/") and cfg.base_remote != "origin":
+            _git(primary, "fetch", "origin")  # a stacked base lives on origin (#123)
+        if _git(primary, "worktree", "add", "--force", str(wt), base_ref) != 0:
+            raise WorktreeError(
+                f"{d.name}: could not create worktree {wt} off '{base_ref}' for the gate "
+                "read. Failing closed — a gate must attest base + patch.diff, never the "
+                "primary checkout. Fix the brief's base (or fetch it), then retry.")
+    # ``-ff``: git-clean(1) preserves an untracked NESTED REPOSITORY under a single -f,
+    # so a stale lane carrying one would survive the sweep and the reconstructed tree
+    # would still hold files outside base + patch.diff (#296 review round 3).
+    if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-ffdxq") != 0:
+        _owner_file(wt).unlink(missing_ok=True)
+        raise WorktreeError(
+            f"{d.name}: could not reset {wt} to '{base_ref}' before the gate read. "
+            "Failing closed — the tree cannot be shown to match patch.diff.")
     patch = d / "patch.diff"
-    if patch.is_file() and patch.read_text(encoding="utf-8").strip():
-        if _git(wt, "apply", str(patch.resolve())) != 0:
-            # The patch no longer applies to the base (it drifted since Do, or is corrupt):
-            # the tree is now clean base, NOT this bundle's build. Do NOT hand it to the gate
-            # (it would test an unpatched tree and could pass), and do NOT claim ownership —
-            # a later resync would then match the stamp and skip re-applying, silently
-            # greening a clean base. Clear the stamp and fall back to in-place (best-effort).
-            print(f"worktree: {d.name}'s patch.diff did not apply onto {base_ref} in {wt}; "
-                  "not using the worktree (gates run in place)", file=sys.stderr)
+    patch_text = patch.read_text(encoding="utf-8") if patch.is_file() else ""
+    if patch_text.strip():
+        if _GITLINK_RE.search(patch_text):
+            # A submodule gitlink hunk: plain `git apply` exits 0 while ignoring it, so
+            # the "reconstructed" tree would carry the wrong submodule revision under a
+            # valid owner stamp — precisely the mismatched-green this path exists to
+            # prevent. The reconstruction cannot materialize submodule state; fail
+            # CLOSED rather than certify it (#296 review).
             _owner_file(wt).unlink(missing_ok=True)
-            return None
-    _stamp_owner(wt, d)  # this bundle now owns the healed tree
+            raise WorktreeError(
+                f"{d.name}: patch.diff changes a submodule gitlink (mode 160000), which "
+                "this reconstruction cannot materialize — `git apply` would silently "
+                "skip it and a green would attest the wrong submodule revision (#296). "
+                "Gate this bundle against a checkout with the submodule updated by hand.")
+        if _git(wt, "apply", str(patch.resolve())) != 0:
+            # The patch no longer applies to the base (drifted since Do, or corrupt): the
+            # tree is clean base, NOT this bundle's build. Do NOT hand it to the gate (it
+            # would test an unpatched tree and could pass) and do NOT claim ownership.
+            _owner_file(wt).unlink(missing_ok=True)
+            raise WorktreeError(
+                f"{d.name}: patch.diff did not apply onto '{base_ref}' in {wt}. Failing "
+                "closed — a green over a tree that does not match patch.diff would attest "
+                "the wrong code (#296). Rebase/regenerate the patch, then retry.")
+    _stamp_owner(wt, d)  # this bundle owns the reconstructed tree
     return wt
 
 
@@ -179,7 +296,8 @@ def stage(d: Path, cfg: Config) -> Path | None:
     worktree. Deterministic: ``patch.diff`` is Do's canonical output. Best-effort — isolation
     off / unresolved target / non-git checkout / a ``patch.diff`` that no longer applies onto
     the base returns None (``pdca try`` then reports no launchable tree). Mirrors the gate's
-    :func:`resync` reconstruction (issue #224), extended to create the tree when it is absent.
+    :func:`rebuild_for_gate` reconstruction (issues #224/#296), but stays best-effort — a
+    human-paced ``pdca try`` can afford a "nothing to try" where a gating read cannot.
 
     NB: like Do's :func:`ensure`, it hard-resets the shared per-lane worktree — so it must not
     run while a lane's Do is mid-build on the same tree (``pdca try`` is a between-cycles,
@@ -204,7 +322,7 @@ def stage(d: Path, cfg: Config) -> Path | None:
     # files, so another bundle's ignored build outputs (dist/, caches, generated assets) can't
     # survive and get launched alongside this bundle's source patch — which would defeat the
     # owner check and let a reviewer sign off the wrong build (issue #237).
-    if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-fdxq") != 0:
+    if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-ffdxq") != 0:
         print(f"worktree: could not reset {wt} to {base_ref} for {d.name}; nothing to try",
               file=sys.stderr)
         return None
@@ -253,7 +371,7 @@ def ensure(d: Path, cfg: Config) -> Path | None:
                 "then retry.")
         if (wt / ".git").exists():
             # Reuse: drop the prior cycle's edits, return to a clean base.
-            if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-fdq") != 0:
+            if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-ffdq") != 0:
                 print(f"worktree: could not reset {wt} to {base_ref}; running in place",
                       file=sys.stderr)
                 return None
@@ -284,8 +402,9 @@ def _stamp_owner(wt: Path, d: Path) -> None:
 
 # ----------------------------------------------------------------------------
 # Overflow worktrees (issue #226) — ephemeral spillover for a gate read whose cached
-# lane is owned by a DIFFERENT bundle. Rather than mutate that lane (the resync heal),
-# hand the read its OWN throwaway tree, off the base + this bundle's patch, removed after.
+# lane is owned by a DIFFERENT bundle. Rather than mutate that lane (the in-lane
+# reconstruction), hand the read its OWN throwaway tree, off the base + this bundle's
+# patch, removed after.
 # Config-gated by ``[driver].overflow`` (0 ⇒ disabled, heal in place as before).
 # ----------------------------------------------------------------------------
 _OVF_SUFFIX = ".pdca-wt-ovf-"
@@ -330,17 +449,26 @@ def sweep_overflow(primary: Path) -> None:
 
 def _overflow_create(d: Path, primary: Path, base_ref: str) -> Path | None:
     """Add a fresh overflow worktree off ``base_ref`` and apply this bundle's patch — the
-    exceptional-read equivalent of :func:`resync`, but on its own tree (never a shared lane).
-    Best-effort: a git-add / patch-apply failure returns None (the caller falls back to the
-    in-place heal) and cleans up any partial tree. No fetch — the lane's Do already refreshed
-    the base."""
+    exceptional-read equivalent of :func:`rebuild_for_gate`, but on its own tree (never a
+    shared lane). Best-effort: a git-add / patch-apply failure returns None (the caller
+    falls through to the in-lane reconstruction, which fails closed) and cleans up any
+    partial tree. No fetch — the lane's Do already refreshed the base."""
     ovf = _overflow_path(primary)
     try:
         _git(primary, "worktree", "prune")  # drop admin entries for any vanished trees first
         if _git(primary, "worktree", "add", "--force", str(ovf), base_ref) != 0:
             return None
         patch = d / "patch.diff"
-        if patch.is_file() and patch.read_text(encoding="utf-8").strip():
+        patch_text = patch.read_text(encoding="utf-8") if patch.is_file() else ""
+        if patch_text.strip():
+            if _GITLINK_RE.search(patch_text):
+                # Same gitlink fail-closed as rebuild_for_gate (#296 review round 2):
+                # plain `git apply` exits 0 while skipping the gitlink, so this tree
+                # would carry the wrong submodule revision. Decline the overflow; the
+                # caller falls through to rebuild_for_gate, which raises the loud
+                # WorktreeError → the fail-closed gating red.
+                overflow_remove(primary, ovf)
+                return None
             if _git(ovf, "apply", str(patch.resolve())) != 0:
                 overflow_remove(primary, ovf)  # patch didn't apply → not this bundle's build
                 return None
@@ -350,20 +478,33 @@ def _overflow_create(d: Path, primary: Path, base_ref: str) -> Path | None:
         return None
 
 
-def for_gate(d: Path, cfg: Config) -> tuple[Path | None, Path | None]:
-    """Resolve the worktree a gate should read for bundle ``d`` (issue #226).
+def for_gate(d: Path, cfg: Config,
+             hold: contextlib.ExitStack | None = None) -> tuple[Path | None, Path | None]:
+    """Resolve the worktree a gate should read for bundle ``d`` (issues #226, #296).
 
     Returns ``(worktree_path, overflow_primary)``:
     * ``worktree_path`` is the tree to run the gate in (or None → run in the primary
-      checkout, as when isolation is off — same fallback :func:`resync` uses); and
+      checkout, as when isolation is off — same fallback :func:`rebuild_for_gate` uses); and
     * ``overflow_primary`` is non-None ONLY when ``worktree_path`` is an ephemeral overflow
       tree the caller MUST tear down (``overflow_remove(overflow_primary, worktree_path)``)
       once the gate has run.
 
-    The cached lane (owned by this bundle — the normal Do→Check path) is returned warm and
-    untouched. A lane owned by a DIFFERENT bundle is the exceptional read: with overflow
-    enabled and under the cap it gets its own throwaway tree; otherwise it falls back to the
-    in-place :func:`resync` heal (``overflow_primary`` None)."""
+    The lane is a warm *checkout* cache, never a trusted *content* cache (#296): even when
+    this bundle owns it, the gate read reconstructs ``base + patch.diff`` via
+    :func:`rebuild_for_gate` — an owner stamp attests what Do intended, not what the tree
+    is, and a standby-interrupted re-populate left a stale tree under a correct-looking
+    stamp. A lane owned by a DIFFERENT bundle still prefers an overflow tree (with overflow
+    enabled and under the cap) over clobbering a lane whose Do may be mid-flight; a failed
+    overflow create falls through to the reconstruction, which fails closed
+    (:class:`WorktreeError`) rather than hand the gate a mismatched tree.
+
+    Touching the lane requires the :func:`lane_lock` (#296 review) — an in-flight Do (or
+    another gate run) holding it means the tree is LIVE, and reconstruction would destroy
+    its work; the lock is tried non-blocking and a busy lane raises. Pass ``hold`` (an
+    ``ExitStack``) to keep the lock for the whole gate run — gates do, so a concurrent
+    reconstruction can't clean their outputs mid-command; without it the lock guards only
+    the reconstruction itself (direct/test callers). The overflow spill path never locks
+    the lane — it never touches it."""
     if not cfg.worktree:
         return None, None
     tgt = _target(d, cfg)
@@ -371,21 +512,22 @@ def for_gate(d: Path, cfg: Config) -> tuple[Path | None, Path | None]:
         return None, None
     primary, base_ref = tgt
     wt = _wt_dir(primary)
-    if not (wt / ".git").exists():
-        return resync(d, cfg), None  # no cached lane yet → resync's own fallback (None here)
-    if owner_of(wt) == d.name:
-        return wt, None  # cached lane, warm — leave Do's tree intact
-    # Foreign / unstamped lane: prefer an overflow tree over mutating a lane another bundle
-    # may still want — but only up to the configured cap; else heal the lane in place. The
-    # count-check and the create are held under one lock so concurrent Check threads can't
-    # both pass the cap before either dir exists (#241); the gate itself runs after this
-    # returns, so gates still execute concurrently — only the brief reservation serializes.
-    if cfg.overflow > 0:
+    # Foreign-owned lane: prefer an overflow tree over mutating a lane another bundle may
+    # still want — but only up to the configured cap. The count-check and the create are
+    # held under one lock so concurrent Check threads can't both pass the cap before either
+    # dir exists (#241); the gate itself runs after this returns, so gates still execute
+    # concurrently — only the brief reservation serializes.
+    lane_owner = owner_of(wt) if (wt / ".git").exists() else None
+    if lane_owner is not None and lane_owner != d.name and cfg.overflow > 0:
         with _ovf_cap_lock:
             ovf = (_overflow_create(d, primary, base_ref)
                    if len(_overflow_dirs(primary)) < cfg.overflow else None)
         if ovf is not None:
             print(f"worktree: {d.name} gate read spilled to an overflow tree {ovf.name} "
-                  f"(lane owned by {owner_of(wt)})", file=sys.stderr)
+                  f"(lane owned by {lane_owner})", file=sys.stderr)
             return ovf, primary
-    return resync(d, cfg), None
+    if hold is not None:
+        hold.enter_context(lane_lock(d, cfg, wait=False))
+        return rebuild_for_gate(d, cfg), None
+    with lane_lock(d, cfg, wait=False):
+        return rebuild_for_gate(d, cfg), None
