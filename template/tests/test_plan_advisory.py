@@ -259,12 +259,30 @@ class PinnedTarget(unittest.TestCase):
         self.assertEqual((self.primary / "file.txt").read_text(encoding="utf-8"),
                          "LOCAL WIP EDIT\n")
 
-    def test_unresolvable_target_falls_back_to_reviewer_target(self) -> None:
+    def test_unresolvable_target_falls_back_to_the_primary_checkout_only(self) -> None:
         d = self.cfg.bundle("NOTGT")
         d.mkdir(parents=True)
         (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")  # no target
         with leaves._pinned_plan_target(d, self.cfg) as target:
-            self.assertEqual(target, leaves._reviewer_target(d, self.cfg))
+            self.assertIsNone(target)                     # no target ⇒ no grounding
+
+    def test_fallback_never_grounds_on_a_lane_worktree(self) -> None:
+        # #301 review round 7: when the pinned add fails (missing base ref), the
+        # fallback must be the PRIMARY checkout — never _reviewer_target's preferred
+        # lane worktree, which pre-Do still holds its last user's content (another
+        # bundle's patch, or a prior attempt after iterate-to-Plan) and would make
+        # the antagonist revise the new brief against the wrong source.
+        d = self.cfg.bundle("LANE")
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Repo + branch target:** org/repo @ no-such-branch\n",
+            encoding="utf-8")
+        lane = self.tmp / "stale-lane-worktree"
+        lane.mkdir()
+        with mock.patch.object(leaves.worktree, "path", return_value=lane):
+            with leaves._pinned_plan_target(d, self.cfg) as target:
+                self.assertNotEqual(target, lane)         # never the shared lane
+                self.assertEqual(target, self.primary)    # the primary checkout
 
 
 class BatchAndAssemble(unittest.TestCase):

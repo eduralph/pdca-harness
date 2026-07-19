@@ -1658,21 +1658,47 @@ def _dependency_manifest(d: Path, cfg: Config) -> dict:
     return out
 
 
+def _plan_fallback_target(d: Path, cfg: Config) -> Path | None:
+    """The PRIMARY sibling checkout for grounding a plan review when no pinned tree
+    can be made — NEVER the lane worktree :func:`_reviewer_target` prefers (#301
+    review round 7): pre-Do that lane holds whatever its LAST user left there —
+    another bundle's patch, or this bundle's prior attempt after an iterate-to-Plan —
+    and the antagonist would fault (and revise the new brief against) the wrong
+    source. The human's checkout can at worst lag or carry WIP (which is why the
+    pinned detached tree is preferred), but it never contains a foreign patched
+    state. Best-effort; ``None`` ⇒ the review grounds on the plan inputs alone."""
+    from . import publish  # lazy: publish imports leaves, avoid an import cycle
+    try:
+        repo_spec, _base, _slug = publish._resolve_target(d)
+        if not repo_spec:
+            return None
+        p = publish._checkout_path(cfg, repo_spec)
+        if not p.exists():
+            return None
+        # Refresh refs so a lagging sibling doesn't drift the grounding; never touch
+        # the working tree (it is the human's checkout). Best-effort.
+        subprocess.run(["git", "-C", str(p), "fetch", cfg.base_remote],
+                       capture_output=True, text=True)
+        return p
+    except Exception:  # noqa: BLE001 — grounding is best-effort, never fatal
+        return None
+
+
 @contextlib.contextmanager
 def _pinned_plan_target(d: Path, cfg: Config):
     """A read-only checkout PINNED to the brief's resolved base ref, for grounding the
     plan review (#301 review round 2).
 
-    Pre-Do there is no per-cycle worktree, so :func:`_reviewer_target` falls back to
-    the human's sibling checkout — which may sit on another branch or carry local
-    edits, and the antagonist would then fault (and trigger brief revisions against)
-    code that is not the plan's target. This materializes a temp DETACHED worktree at
-    the exact ``base_ref`` the brief resolves to (the drift.py pattern), removed after
-    the review. Unresolvable target / failed add ⇒ the sibling-checkout fallback (a
-    loosely-grounded review still beats none — this is advisory, never a gate)."""
+    Pre-Do there is no per-cycle worktree the review may trust, so this materializes
+    a temp DETACHED worktree at the exact ``base_ref`` the brief resolves to (the
+    drift.py pattern), removed after the review. Unresolvable target / failed add ⇒
+    :func:`_plan_fallback_target` — the primary sibling checkout, deliberately NOT
+    :func:`_reviewer_target`, whose lane-worktree preference could hand the
+    antagonist another bundle's patched tree (#301 review round 7). A
+    loosely-grounded review still beats none — this is advisory, never a gate."""
     tgt = worktree._target(d, cfg)
     if tgt is None:
-        yield _reviewer_target(d, cfg)
+        yield _plan_fallback_target(d, cfg)
         return
     primary, base_ref = tgt
     worktree._git(primary, "fetch", cfg.base_remote)  # best-effort refresh of the base
@@ -1686,7 +1712,7 @@ def _pinned_plan_target(d: Path, cfg: Config):
     pinned = Path(tmp) / "target"
     if worktree._git(primary, "worktree", "add", "--detach", str(pinned), base_ref) != 0:
         shutil.rmtree(tmp, ignore_errors=True)
-        yield _reviewer_target(d, cfg)
+        yield _plan_fallback_target(d, cfg)
         return
     try:
         yield pinned

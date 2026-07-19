@@ -236,6 +236,21 @@ class SandboxDeps(unittest.TestCase):
         self.assertNotIn("leaf sandbox", out)
         self.assertEqual(rc, 0)
 
+    def test_a_plan_advisory_leaf_alone_needs_no_sandbox_deps(self) -> None:
+        """#301 review round 7. The plan-advisory runner never calls
+        `_seed_sandbox_settings`/`_sandbox_argv` (the Check grants don't extend to
+        plan reviews), so no bounded sandbox is ever seeded for it — an instance
+        whose ONLY claude-family review leaf is a plan advisory must not fail
+        --strict over dependencies that run would never use."""
+        cfg = self._cfg('mode = "stub"\n',
+                        self._EXEMPTION +
+                        '[[leaves.plan_advisory]]\nid = "pr"\nmode = "command"\n'
+                        'family = "claude"\nargv = ["claude", "-p"]\n')
+        with self._deps(False):
+            rc, out = self._run(cfg)
+        self.assertNotIn("leaf sandbox", out)
+        self.assertEqual(rc, 0)
+
     def test_a_stub_leaf_spawns_nothing_to_sandbox(self) -> None:
         # An exemption configured, but every leaf is a stub: no leaf runs, so no sandbox is
         # seeded and no dependency is used.

@@ -99,12 +99,18 @@ def _sandbox_expected(cfg: Config) -> bool:
 
     The operator's own ambient sandbox (their user-scope `~/.claude/settings.json`) is theirs,
     not the harness's claim, so it is not checked here.
+
+    Plan-advisory leaves deliberately DON'T count (#301 review round 7): their runner
+    never calls `_seed_sandbox_settings`/`_sandbox_argv` (the Check grants don't extend
+    to plan reviews), so no bounded sandbox is ever seeded for them — an instance whose
+    only claude-family review leaf is a plan advisory must not fail `--strict` over
+    dependencies that run would never use.
     """
     if not getattr(cfg, "leaf_unsandboxed_commands", None):
         return False
     return any(cfg.profile(leaf).settings_scope_argv
                for role, leaf in _command_leaves(cfg).items()
-               if role == "reviewer" or role.startswith(("advisory:", "plan-advisory:")))
+               if role == "reviewer" or role.startswith("advisory:"))
 
 
 def _auth_probe(family: str) -> tuple[str, str] | None:
