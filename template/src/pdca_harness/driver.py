@@ -249,6 +249,9 @@ def _archive_iteration(d: Path, n: int, *, include_brief: bool) -> None:
     names += [p.name for p in d.glob("*.error.log")]
     if include_brief:
         names.append("brief.md")
+        # The plan-advisory artifacts + benefit record reviewed THAT brief (#301) —
+        # archive them with it so the re-plan (and its fresh review) starts clean.
+        names += [p.name for p in d.glob("plan-advisory-*")]
     if (d / "brief.md").exists():
         for tf in brief.test_files(d / "brief.md"):
             p = d / tf
