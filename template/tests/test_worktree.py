@@ -72,6 +72,18 @@ class WorktreeFallback(unittest.TestCase):
         d = _bundle(self.cfg, "PLAIN", target="org/repo @ main")
         self.assertIsNone(worktree.ensure(d, self.cfg))
 
+    def test_gate_rebuild_none_when_isolation_cannot_apply(self) -> None:
+        # The gate read keeps the best-effort contract ONLY where isolation legitimately
+        # doesn't apply (disabled / no target) — same cases as ensure/path (#296).
+        self.cfg.worktree = False
+        d = _bundle(self.cfg, "OFF2", target="org/repo @ main")
+        self.assertIsNone(worktree.rebuild_for_gate(d, self.cfg))
+        self.cfg.worktree = True
+        d2 = self.cfg.bundle("NOTGT2")
+        d2.mkdir(parents=True)
+        (d2 / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")  # no target
+        self.assertIsNone(worktree.rebuild_for_gate(d2, self.cfg))
+
 
 class WorktreeRealGit(unittest.TestCase):
     """The host's primary checkout is never mutated; the worktree is off the base and
@@ -157,33 +169,36 @@ class WorktreeRealGit(unittest.TestCase):
         "@@ -1 +1,2 @@\n base\n+patched\n"
     )
 
-    def test_resync_heals_a_foreign_owned_worktree(self) -> None:
+    def test_rebuild_heals_a_foreign_owned_worktree(self) -> None:
         # #224: a shared lane worktree still holds a DIFFERENT bundle's net-new orphan when
-        # this bundle's gate reads it. resync must reset+clean the orphan, re-apply THIS
+        # this bundle's gate reads it. The rebuild must reset+clean the orphan, re-apply THIS
         # bundle's patch, and take ownership — so the gate sees only this bundle's change.
         other = _bundle(self.cfg, "OTHER", target="org/repo @ main")
         wt = worktree.ensure(other, self.cfg)                       # lane tree owned by OTHER
         (wt / "orphan.rs").write_text("stray net-new from OTHER\n", encoding="utf-8")
         (self.d / "patch.diff").write_text(self._PATCH, encoding="utf-8")
-        healed = worktree.resync(self.d, self.cfg)
+        healed = worktree.rebuild_for_gate(self.d, self.cfg)
         self.assertEqual(healed, wt)
         self.assertFalse((wt / "orphan.rs").exists())               # foreign orphan swept
         self.assertEqual((wt / "file.txt").read_text(encoding="utf-8"), "base\npatched\n")  # our patch
         self.assertEqual(worktree.owner_of(wt), "issue_WT")         # ownership taken
 
-    def test_resync_is_a_noop_for_its_own_worktree(self) -> None:
-        # The normal Do→Check path: the tree is already this bundle's, so resync leaves Do's
-        # in-place edits intact (it must NOT reset the tree Check is meant to test).
-        wt = worktree.ensure(self.d, self.cfg)                      # owned by WT, Do edits it
-        (wt / "file.txt").write_text("base\ndo edit\n", encoding="utf-8")
-        (wt / "built.rs").write_text("new file from Do\n", encoding="utf-8")
+    def test_rebuild_reconstructs_even_its_own_worktree(self) -> None:
+        # #296: the incident tree carried a correct-looking owner stamp (iterate-do reuses
+        # the bundle dir) around STALE content — a standby-interrupted re-populate. The gate
+        # read must therefore never trust the stamp: even this bundle's own lane is rebuilt
+        # to base + patch.diff, so a gating green can only ever attest the patch under review.
+        wt = worktree.ensure(self.d, self.cfg)                      # owned by WT
+        (wt / "file.txt").write_text("previous iteration's code\n", encoding="utf-8")
+        (wt / "stale.rs").write_text("leftover from iteration N-1\n", encoding="utf-8")
         (self.d / "patch.diff").write_text(self._PATCH, encoding="utf-8")
-        same = worktree.resync(self.d, self.cfg)
-        self.assertEqual(same, wt)
-        self.assertEqual((wt / "file.txt").read_text(encoding="utf-8"), "base\ndo edit\n")
-        self.assertTrue((wt / "built.rs").exists())                 # Do's tree untouched
+        rebuilt = worktree.rebuild_for_gate(self.d, self.cfg)
+        self.assertEqual(rebuilt, wt)
+        self.assertEqual((wt / "file.txt").read_text(encoding="utf-8"), "base\npatched\n")
+        self.assertFalse((wt / "stale.rs").exists())                # stale content swept
+        self.assertEqual(worktree.owner_of(wt), "issue_WT")
 
-    def test_resync_sweeps_ignored_artifacts_from_a_foreign_build(self) -> None:
+    def test_rebuild_sweeps_ignored_artifacts_from_a_foreign_build(self) -> None:
         # #237: `git clean -fd` leaves IGNORED files, so a foreign bundle's ignored build
         # outputs (dist/, caches, generated assets) would survive the heal and contaminate
         # THIS bundle's gate. -x must remove them so the gate sees only this bundle's change.
@@ -193,26 +208,107 @@ class WorktreeRealGit(unittest.TestCase):
         (wt / "build").mkdir()
         (wt / "build" / "leftover.o").write_text("OTHER's compiled output\n", encoding="utf-8")
         (self.d / "patch.diff").write_text(self._PATCH, encoding="utf-8")
-        healed = worktree.resync(self.d, self.cfg)
+        healed = worktree.rebuild_for_gate(self.d, self.cfg)
         self.assertEqual(healed, wt)
         self.assertFalse((wt / "build" / "leftover.o").exists())    # ignored artifact swept (-x)
         self.assertEqual((wt / "file.txt").read_text(encoding="utf-8"), "base\npatched\n")
 
-    def test_resync_none_when_no_worktree_on_disk(self) -> None:
-        # No worktree yet (isolation on, but Do hasn't run) → None, gate falls back in place.
-        self.assertIsNone(worktree.resync(self.d, self.cfg))
+    def test_rebuild_creates_worktree_when_absent(self) -> None:
+        # No lane on disk (crash / standby wiped it, or Do never ran here): the gate read
+        # creates it off the base and applies the patch — it never runs in the primary.
+        (self.d / "patch.diff").write_text(self._PATCH, encoding="utf-8")
+        wt = worktree.rebuild_for_gate(self.d, self.cfg)
+        self.assertIsNotNone(wt)
+        self.assertEqual((wt / "file.txt").read_text(encoding="utf-8"), "base\npatched\n")
+        self.assertEqual(self._porcelain(self.primary), "")         # primary untouched
 
-    def test_resync_falls_back_when_patch_does_not_apply(self) -> None:
-        # #225 review (P1): if this bundle's patch no longer applies to the base, resync must
-        # NOT present the clean-base tree as this bundle's build, and must NOT claim ownership
-        # — else a later resync matches the stamp, skips re-applying, and silently greens a
-        # clean base. It returns None (gate runs in place) and clears the stamp.
+    def test_rebuild_fails_closed_on_a_submodule_gitlink_patch(self) -> None:
+        # #296 review: plain `git apply` exits 0 for a gitlink (mode 160000) hunk while
+        # leaving the submodule checkout untouched — the "reconstructed" tree would carry
+        # the wrong submodule revision under a valid stamp. Fail CLOSED instead.
+        worktree.ensure(self.d, self.cfg)
+        (self.d / "patch.diff").write_text(
+            "diff --git a/vendor/lib b/vendor/lib\nindex 1111111..2222222 160000\n"
+            "--- a/vendor/lib\n+++ b/vendor/lib\n@@ -1 +1 @@\n"
+            "-Subproject commit 1111111111111111111111111111111111111111\n"
+            "+Subproject commit 2222222222222222222222222222222222222222\n",
+            encoding="utf-8")
+        with self.assertRaises(worktree.WorktreeError) as ctx:
+            worktree.rebuild_for_gate(self.d, self.cfg)
+        self.assertIn("gitlink", str(ctx.exception))
+        wt = self.tmp / "checkout.pdca-wt"
+        self.assertIsNone(worktree.owner_of(wt))            # never stamped as valid
+
+    def test_text_mention_of_subproject_commit_is_not_a_gitlink(self) -> None:
+        # #296 review round 2: detection keys on the 160000 mode headers, never hunk
+        # text — a docs/test-fixture line reading "Subproject commit …" must still
+        # reconstruct normally, not fail closed.
+        worktree.ensure(self.d, self.cfg)
+        (self.d / "patch.diff").write_text(
+            "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n"
+            "@@ -1 +1,2 @@\n base\n+Subproject commit deadbeef documented here\n",
+            encoding="utf-8")
+        wt = worktree.rebuild_for_gate(self.d, self.cfg)
+        self.assertIsNotNone(wt)
+        self.assertIn("Subproject commit deadbeef",
+                      (wt / "file.txt").read_text(encoding="utf-8"))
+
+    def test_rebuild_removes_a_nested_repository(self) -> None:
+        # #296 review round 3: `git clean` preserves an untracked NESTED REPOSITORY
+        # under a single -f, so a stale lane carrying one would survive reconstruction
+        # and the tree would not be base + patch.diff. The double-force sweep removes it.
+        wt = worktree.ensure(self.d, self.cfg)
+        nested = wt / "vendor-scratch"
+        sp.run(["git", "init", "-q", str(nested)], check=True)
+        (nested / "junk.txt").write_text("stale nested repo\n", encoding="utf-8")
+        (self.d / "patch.diff").write_text(self._PATCH, encoding="utf-8")
+        rebuilt = worktree.rebuild_for_gate(self.d, self.cfg)
+        self.assertEqual(rebuilt, wt)
+        self.assertFalse(nested.exists())                   # nested repo swept (-ff)
+        self.assertEqual((wt / "file.txt").read_text(encoding="utf-8"), "base\npatched\n")
+
+    def test_unopenable_lane_lock_fails_closed_not_raw_oserror(self) -> None:
+        # #296 review round 3: the lock sidecar's open() can itself fail; that must
+        # surface as WorktreeError (the fail-closed gating red), never a raw OSError
+        # that aborts the whole run. A directory squatting on the lock path forces it.
+        (self.tmp / "checkout.pdca-wt.lock").mkdir()
+        (self.d / "patch.diff").write_text(self._PATCH, encoding="utf-8")
+        with self.assertRaises(worktree.WorktreeError) as ctx:
+            worktree.for_gate(self.d, self.cfg)
+        self.assertIn("lane lock", str(ctx.exception))
+
+    def test_busy_lane_fails_the_gate_read_closed(self) -> None:
+        # #296 review: an owner stamp cannot say whether that Do is STILL RUNNING —
+        # while the lane lock is held (an in-flight Do / another gate run), a gate read
+        # must fail closed ("lane busy") instead of reconstructing under the live run.
+        (self.d / "patch.diff").write_text(self._PATCH, encoding="utf-8")
+        with worktree.lane_lock(self.d, self.cfg, wait=True):   # simulate the live Do
+            with self.assertRaises(worktree.WorktreeError) as ctx:
+                worktree.for_gate(self.d, self.cfg)
+            self.assertIn("busy", str(ctx.exception))
+        wt, ovf = worktree.for_gate(self.d, self.cfg)           # released → proceeds
+        self.assertIsNotNone(wt)
+        self.assertEqual((wt / "file.txt").read_text(encoding="utf-8"), "base\npatched\n")
+
+    def test_lane_lock_is_a_noop_where_isolation_cannot_apply(self) -> None:
+        self.cfg.worktree = False
+        with worktree.lane_lock(self.d, self.cfg, wait=False):
+            pass                                            # yields without a lock file
+        self.cfg.worktree = True
+
+    def test_rebuild_fails_closed_when_patch_does_not_apply(self) -> None:
+        # #296 (supersedes the #225 best-effort fallback): if this bundle's patch no longer
+        # applies to the base, the tree CANNOT be made to match patch.diff. The gate read
+        # must fail CLOSED (WorktreeError → synthetic gating red), never fall back to the
+        # primary checkout or present a clean base as the build, and must not claim
+        # ownership (a later read would match the stamp and silently green a clean base).
         other = _bundle(self.cfg, "OTHER", target="org/repo @ main")
         wt = worktree.ensure(other, self.cfg)                       # foreign-owned lane tree
         (self.d / "patch.diff").write_text(                          # context that isn't on base
             "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n"
             "@@ -1 +1 @@\n-not the base line\n+changed\n", encoding="utf-8")
-        self.assertIsNone(worktree.resync(self.d, self.cfg))        # not used for the gate
+        with self.assertRaises(worktree.WorktreeError):
+            worktree.rebuild_for_gate(self.d, self.cfg)
         self.assertIsNone(worktree.owner_of(wt))                    # stamp cleared → re-attempted
 
     def test_stage_creates_tree_from_patch_when_absent(self) -> None:

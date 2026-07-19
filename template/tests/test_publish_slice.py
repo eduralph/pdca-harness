@@ -19,7 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from pdca_harness import cli, gates, leaves, publish, signoff, state
+from pdca_harness import cli, flow, gates, leaves, publish, signoff, state
 from pdca_harness.config import Config, LeafConfig
 
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
@@ -43,6 +43,12 @@ def _cfg(root: Path) -> Config:
         publisher=LeafConfig(mode="stub", interactive=True),
         act=LeafConfig(mode="stub", interactive=True),
         gates_checks=[],
+        # Hermetic: pin the toy target to a path inside this test's tmp root. Without a
+        # mapping, the sibling convention resolves to `<tmp>/../example-repo` — a SHARED
+        # /tmp path a stray dir (e.g. an earlier run's leftover with a broken .git) can
+        # occupy, turning the deterministic "no checkout → run in place" fallback into a
+        # fail-closed WorktreeError (#296) depending on host state.
+        repo_checkouts={"example-org/example-repo": str(root / "example-repo")},
     )
 
 
@@ -673,6 +679,111 @@ class PublishSlice(unittest.TestCase):
         self.cfg.gates_checks = echo_gate
         row2 = next(r for r in gates.run_gates(d2, self.cfg)["rows"] if r["element"] == "C4")
         self.assertEqual(row2["path_line"].strip(), "BASE=")
+
+
+class DraftTexts(unittest.TestCase):
+    """#295: the text-drafting pre-pass — every accepted bundle's publishing texts are
+    generated and T4-gated BEFORE any git/gh mechanics, per bundle, no mechanics here."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _cfg(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_accepted_bundle_drafts_both_artifacts_idempotently(self) -> None:
+        d = _bundle(self.cfg, "D1", brief_body=_FIX_BRIEF, accepted=True)
+        with redirect_stderr(io.StringIO()):
+            self.assertTrue(publish.draft_texts(self.cfg, d))
+        first = {n: (d / n).read_text(encoding="utf-8")
+                 for n in ("commit-msg.txt", "pr-description.md")}
+        self.assertTrue(all(first.values()))
+        with redirect_stderr(io.StringIO()):
+            self.assertTrue(publish.draft_texts(self.cfg, d))   # second call: only-if-missing
+        for n, text in first.items():
+            self.assertEqual((d / n).read_text(encoding="utf-8"), text)
+
+    def test_nothing_to_draft_cases_are_ready_without_artifacts(self) -> None:
+        # No target → non-contributing cycle; close/no-fix (whitespace patch) → nothing
+        # to contribute; not COMPLETE → publish()'s guard will speak. All True, and the
+        # publisher leaf is never invoked.
+        no_target = _bundle(self.cfg, "D2", brief_body="- **Slug:** s\n", accepted=True)
+        close = _bundle(self.cfg, "D3", brief_body=_FIX_BRIEF, accepted=True)
+        (close / "patch.diff").write_text("   \n", encoding="utf-8")
+        unaccepted = _bundle(self.cfg, "D4", brief_body=_FIX_BRIEF, accepted=False)
+        with mock.patch.object(publish.leaves, "run_publish") as run_pub:
+            for d in (no_target, close, unaccepted):
+                self.assertTrue(publish.draft_texts(self.cfg, d), d.name)
+                self.assertFalse((d / "commit-msg.txt").exists(), d.name)
+        run_pub.assert_not_called()
+
+    def test_t4_failure_blocks_readiness(self) -> None:
+        self.cfg.gates_checks = [{"id": "T4-x", "tier": "T4", "cmd": "exit 1", "scope": "bundle"}]
+        d = _bundle(self.cfg, "D5", brief_body=_FIX_BRIEF, accepted=True)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertFalse(publish.draft_texts(self.cfg, d))
+        self.assertIn("T4 contribution gate FAILED", err.getvalue())
+
+    def test_prevalidated_mechanics_never_rerun_t4(self) -> None:
+        # #295 review: a transient/stateful T4 that passed the pre-pass but failed the
+        # in-publish re-run would recreate the half-published wave. With
+        # texts_prevalidated the mechanics phase runs NO second T4; the direct path
+        # (no flag) still gates.
+        self.cfg.gates_checks = [{"id": "T4-x", "tier": "T4", "cmd": "exit 1", "scope": "bundle"}]
+        d = _bundle(self.cfg, "D6", brief_body=_FIX_BRIEF, accepted=True)
+        (d / "commit-msg.txt").write_text("feat: x\n\nFixes #6\n", encoding="utf-8")
+        (d / "pr-description.md").write_text("body\n", encoding="utf-8")
+        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            self.assertEqual(publish.publish(self.cfg, "D6", dry_run=True), 1)  # gated
+            self.assertEqual(publish.publish(self.cfg, "D6", dry_run=True,
+                                             texts_prevalidated=True), 0)       # mechanics-only
+
+    def test_prevalidated_still_refuses_vanished_texts(self) -> None:
+        # Defensive: prevalidation promises the texts exist; if one vanished between the
+        # pre-pass and mechanics, refuse rather than push without a commit message.
+        _bundle(self.cfg, "D7", brief_body=_FIX_BRIEF, accepted=True)
+        with mock.patch.object(publish.leaves, "run_publish") as run_pub, \
+                redirect_stderr(io.StringIO()):
+            rc = publish.publish(self.cfg, "D7", dry_run=True, texts_prevalidated=True)
+        self.assertEqual(rc, 1)
+        run_pub.assert_not_called()                        # mechanics-only: no drafting
+
+    def test_wave_drafts_all_texts_before_any_mechanics(self) -> None:
+        # Two-bundle wave: BOTH pre-pass drafts precede the FIRST publish call, and a
+        # failed draft blocks only its own bundle — the sibling still publishes, loudly.
+        for iid in ("O1", "O2"):
+            d = self.cfg.bundle(iid)
+            d.mkdir(parents=True)
+            (d / "brief.md").write_text(_FIX_BRIEF, encoding="utf-8")
+        calls: list[tuple[str, str]] = []
+
+        def fake_draft(_cfg, d):
+            calls.append(("draft", d.name))
+            return d.name != "issue_O1"                 # O1's texts fail the pre-pass
+
+        def fake_publish(_cfg, issue_id, **kw):
+            calls.append(("publish", f"issue_{issue_id}"))
+            # The wave's mechanics phase must declare the pre-pass validation (#295
+            # review) so publish never re-runs T4 mid-wave.
+            self.assertTrue(kw.get("texts_prevalidated"))
+            return 0
+
+        err = io.StringIO()
+        with mock.patch.object(flow.publish, "draft_texts", side_effect=fake_draft), \
+                mock.patch.object(flow.publish, "publish", side_effect=fake_publish), \
+                redirect_stderr(err), redirect_stdout(io.StringIO()):
+            results = flow.flow_ids(self.cfg, ["O1", "O2"], do_publish=True, do_act=False,
+                                    today="2026-07-18")
+        self.assertEqual(set(results.values()), {state.COMPLETE})
+        drafts = [i for i, c in enumerate(calls) if c[0] == "draft"]
+        publishes = [i for i, c in enumerate(calls) if c[0] == "publish"]
+        self.assertEqual(len(drafts), 2)
+        self.assertTrue(publishes and max(drafts) < min(publishes))  # all drafts first
+        self.assertEqual([calls[i][1] for i in publishes], ["issue_O2"])  # O1 blocked
+        self.assertIn("issue_O1 — publish texts not ready", err.getvalue())
+        self.assertIn("pdca publish O1", err.getvalue())
 
 
 class ContributionTemplates(unittest.TestCase):

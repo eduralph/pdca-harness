@@ -693,7 +693,11 @@ def do_build(d: Path, cfg: Config) -> None:
     # log was already cleared above — so a post-mortem was back to terminal scrollback for the
     # one failure mode most likely to hit a whole wave (#286 review).
     try:
-        _do_build_command(d, cfg, builder, n)
+        # The lane lock (#296 review) spans ensure + the whole builder invocation, so an
+        # out-of-band gate read can never reconstruct the lane under the builder's feet
+        # (it fails closed "lane busy" instead). Blocking: Do waits out a transient gate.
+        with worktree.lane_lock(d, cfg, wait=True):
+            _do_build_command(d, cfg, builder, n)
     except Exception as exc:  # noqa: BLE001 — capture, then re-raise for the caller
         try:
             error_log.write_text(_format_leaf_attempt(exc, 1), encoding="utf-8")
