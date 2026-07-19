@@ -408,6 +408,25 @@ class CliScope(unittest.TestCase):
         self.assertEqual([b.name for b in act.unreviewed_bundles(self.cfg)],
                          ["issue_1"])          # the delta'd cycle stays in scope
 
+    def test_manual_append_respects_the_act_session_lock(self) -> None:
+        # #299 review round 12: `act log --append` overlapping a flow's auto-Act
+        # would log-and-mark the very snapshot the leaf is still reviewing — the
+        # manual writing path holds the SAME session lock and refuses while it is
+        # taken, instead of relying on the marker union to undo a duplicate entry.
+        _freeze(self.cfg, "1")
+        self.cfg.process_dir.mkdir(parents=True, exist_ok=True)
+        with act.act_session(self.cfg) as held:            # the "running" auto-Act
+            self.assertTrue(held)
+            rc, _out, err = self._main(["act", "log", "--date", "2026-07-19",
+                                        "--append"])
+        self.assertEqual(rc, 1)
+        self.assertIn("another Act session is running", err)
+        self.assertFalse((self.cfg.process_dir / "act-log.md").exists())
+        # Released → the append proceeds normally.
+        rc, _out, _err = self._main(["act", "log", "--date", "2026-07-19", "--append"])
+        self.assertEqual(rc, 0)
+        self.assertTrue((self.cfg.process_dir / "act-log.md").exists())
+
     def test_append_transaction_rescopes_under_the_lock(self) -> None:
         # #299 review round 10: two overlapping default appends must not both log
         # the same cycles — the loser re-scopes INSIDE the marker critical section,

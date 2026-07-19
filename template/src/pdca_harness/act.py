@@ -14,6 +14,7 @@ contribution's disposition, run the validator/suite, or author the next brief.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -31,9 +32,9 @@ from .config import Config
 if os.name == "nt":  # pragma: no cover — exercised only on Windows
     import msvcrt
 
-    def _lock_exclusive(fh) -> None:
+    def _lock_exclusive(fh, *, wait: bool = True) -> None:
         fh.seek(0)
-        msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK if wait else msvcrt.LK_NBLCK, 1)
 
     def _unlock(fh) -> None:
         fh.seek(0)
@@ -41,8 +42,8 @@ if os.name == "nt":  # pragma: no cover — exercised only on Windows
 else:
     import fcntl
 
-    def _lock_exclusive(fh) -> None:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+    def _lock_exclusive(fh, *, wait: bool = True) -> None:
+        fcntl.flock(fh, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
 
     def _unlock(fh) -> None:
         fcntl.flock(fh, fcntl.LOCK_UN)
@@ -97,6 +98,41 @@ def frozen_bundles(cfg: Config) -> list[Path]:
 # toward re-review, never toward silent skips — the same failure direction.
 # ----------------------------------------------------------------------------
 _CADENCE_MARKER = ".act-reviewed"
+_SESSION_LOCK = ".act-session.lock"
+
+
+@contextlib.contextmanager
+def act_session(cfg: Config):
+    """The cross-process Act SESSION lock (#299 review rounds 11/12); yields whether
+    it was acquired (non-blocking — the loser reports and retries later).
+
+    EVERY writing Act path holds it: the flow's auto-Act (``leaves.run_act``) for its
+    whole review, and ``act log --append`` for its transaction — otherwise a manual
+    append overlapping an automatic review could log-and-mark the same snapshot the
+    leaf is still reviewing, and the leaf would then append a duplicate entry the
+    frontier union cannot undo. Deliberately a SEPARATE sidecar from the marker lock:
+    ``mark_reviewed``/``append_reviewed`` re-acquire that inside the session, and a
+    concurrent ``pdca revalidate`` must not block behind a whole interactive review.
+    An unopenable lock file yields False (skip, never crash an Act path)."""
+    cfg.process_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        fh = (cfg.process_dir / _SESSION_LOCK).open("w")
+    except OSError:
+        yield False
+        return
+    try:
+        try:
+            _lock_exclusive(fh, wait=False)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            with contextlib.suppress(OSError):
+                _unlock(fh)
+    finally:
+        fh.close()
 
 
 def _load_marker(cfg: Config) -> dict:

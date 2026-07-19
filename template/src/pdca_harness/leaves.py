@@ -2025,62 +2025,44 @@ def signoff_rationale(d: Path) -> str:
 # Leaf 4 — Act (act, interactive): review frozen cycles, suggest deltas if sensible.
 # ----------------------------------------------------------------------------
 def run_act(cfg: Config, date: str) -> None:
-    # Concurrent auto-Act sessions SERIALIZE via a non-blocking session lock (#299
-    # review round 11): two flows completing at once both pass act_due before either
-    # advances the marker, and the frontier union cannot undo two leaves appending
-    # duplicate act-log entries over the same snapshot. The whole session holds
-    # `.act-session.lock` (never the marker lock — mark_reviewed re-acquires that,
-    # and revalidate must not block for a whole interactive review); the loser skips
-    # loudly, and its unreviewed cycles stay in scope for the next due Act.
-    cfg.process_dir.mkdir(parents=True, exist_ok=True)
-    session = cfg.process_dir / ".act-session.lock"
-    try:
-        fh = session.open("w")
-    except OSError as exc:
-        print(f"leaves: cannot open the Act session lock ({exc}); Act skipped this "
-              "run — its cycles stay unreviewed", file=sys.stderr)
-        return
-    try:
-        try:
-            worktree._lock_file(fh, wait=False)
-        except OSError:
+    # Concurrent Act WRITERS serialize via the shared session lock (#299 review
+    # rounds 11/12): two flows completing at once both pass act_due before either
+    # advances the marker — and a manual `act log --append` takes the SAME lock —
+    # so the frontier union is never asked to undo duplicate act-log entries over
+    # one snapshot. The loser skips loudly; its cycles stay in scope for the next
+    # due Act.
+    with act_mod.act_session(cfg) as held:
+        if not held:
             print("leaves: another Act session is already running — skipped (cycles "
                   "it does not cover stay unreviewed for the next due Act)",
                   file=sys.stderr)
             return
-        try:
-            # Re-check the cadence UNDER the session lock: the other session may have
-            # just finished and advanced the frontier past our threshold — reviewing
-            # again would duplicate its entry over the same cycles.
-            if not act_mod.act_due(cfg):
-                print("leaves: Act no longer due — a concurrent session advanced the "
-                      "review frontier; skipped", file=sys.stderr)
-                return
-            # Snapshot the frozen set BEFORE the session (#299 review round 5): the
-            # review can only have covered what existed when it started — a bundle
-            # freezing mid-session must stay unreviewed, and re-globbing afterwards
-            # would push it past the frontier unseen.
-            covered = act_mod.frozen_bundles(cfg)
-            started = time.time()
-            if cfg.act.mode == "command":
-                _invoke(cfg.act, cfg.root, _act_prompt(cfg, date), cfg=cfg)
-            else:
-                _stub_act(cfg, date)
+        # Re-check the cadence UNDER the session lock: the other session may have
+        # just finished and advanced the frontier past our threshold — reviewing
+        # again would duplicate its entry over the same cycles.
+        if not act_mod.act_due(cfg):
+            print("leaves: Act no longer due — a concurrent session advanced the "
+                  "review frontier; skipped", file=sys.stderr)
+            return
+        # Snapshot the frozen set BEFORE the session (#299 review round 5): the
+        # review can only have covered what existed when it started — a bundle
+        # freezing mid-session must stay unreviewed, and re-globbing afterwards
+        # would push it past the frontier unseen.
+        covered = act_mod.frozen_bundles(cfg)
+        started = time.time()
+        if cfg.act.mode == "command":
+            _invoke(cfg.act, cfg.root, _act_prompt(cfg, date), cfg=cfg)
+        else:
+            _stub_act(cfg, date)
 
-            # Advance the review frontier (issues #109/#299) whenever the Act beat
-            # runs — even if a command-mode Act judged "no delta" and wrote no
-            # act-log entry, the review happened, over exactly the pre-session
-            # snapshot. delta_guard applies the mid-session delta protection INSIDE
-            # the marker's critical section (#299 review round 7 — a scan out here
-            # would race revalidate's unmark_reviewed); the stamp's `changed`
-            # verdict decides, so a confirming revalidation doesn't withhold.
-            act_mod.mark_reviewed(cfg, reviewed=covered, date=date,
-                                  delta_guard=started)
-        finally:
-            with contextlib.suppress(OSError):
-                worktree._unlock_file(fh)
-    finally:
-        fh.close()
+        # Advance the review frontier (issues #109/#299) whenever the Act beat
+        # runs — even if a command-mode Act judged "no delta" and wrote no act-log
+        # entry, the review happened, over exactly the pre-session snapshot.
+        # delta_guard applies the mid-session delta protection INSIDE the marker's
+        # critical section (#299 review round 7 — a scan out here would race
+        # revalidate's unmark_reviewed); the stamp's `changed` verdict decides, so
+        # a confirming revalidation doesn't withhold.
+        act_mod.mark_reviewed(cfg, reviewed=covered, date=date, delta_guard=started)
 
 
 def _act_prompt(cfg: Config, date: str) -> str:

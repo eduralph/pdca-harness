@@ -865,40 +865,56 @@ def _act_log(cfg: Config, args: argparse.Namespace) -> int:
         # read-only preview the help promises — over the FULL signal history (#299).
         # Log first, frontier second: a crash between the two re-reviews the cycles
         # next time — never silently skips them. The marker write itself is atomic.
-        act.register_signals(cfg, all_entries, args.date)  # track recurring signals (#149)
-        if full:
-            # Explicit --all/--since re-review: duplicating coverage is the point.
-            # delta_guard still applies the in-session delta protection (#299 r6/7).
-            log = act.append_entry(cfg, text)
-            withheld = act.mark_reviewed(cfg, reviewed=[e.bundle for e in entries],
-                                         date=args.date, delta_guard=started)
-        else:
-            # Default frontier scope: re-check + append + advance under ONE marker
-            # critical section (#299 review round 10) — two overlapping appends must
-            # not both log the same cycles; the loser re-scopes to what is STILL
-            # unreviewed (re-rendering the entry) or records nothing at all.
-            log, kept, withheld = act.append_reviewed(
-                cfg, entries,
-                lambda kept: act.scaffold_entry(kept, act.patterns(all_entries),
-                                                date=args.date,
-                                                recs=act.recurrences(cfg, all_entries)),
-                date=args.date, delta_guard=started)
-            if log is None:
-                print("act: a concurrent Act covered these cycles while this entry "
-                      "was prepared — nothing left to record (rerun to preview the "
-                      "new scope)", file=sys.stderr)
+        # The whole write rides the SHARED Act session lock (#299 review round 12):
+        # a manual append overlapping a flow's auto-Act would otherwise log-and-mark
+        # the very snapshot the automatic leaf is still reviewing, and the leaf
+        # would then append a duplicate entry the frontier union cannot undo.
+        with act.act_session(cfg) as held:
+            if not held:
+                print("act: another Act session is running (a flow's auto-Act or a "
+                      "concurrent append) — retry when it finishes", file=sys.stderr)
                 return 1
-            if len(kept) < len(entries):
-                print(f"act: {len(entries) - len(kept)} cycle(s) were covered by a "
-                      f"concurrent Act — logged the remaining {len(kept)}",
-                      file=sys.stderr)
-        if withheld:
-            print(f"act: {len(withheld)} cycle(s) got a revalidation delta while "
-                  "this entry was written — left unreviewed for the next Act",
-                  file=sys.stderr)
-        print(f"appended entry to {log}")
+            return _act_log_append(cfg, args, entries, all_entries, text, full,
+                                   started)
+    print(text)
+    return 0
+
+
+def _act_log_append(cfg: Config, args: argparse.Namespace, entries, all_entries,
+                    text: str, full: bool, started: float) -> int:
+    """The writing half of ``act log --append`` — runs INSIDE the Act session lock."""
+    act.register_signals(cfg, all_entries, args.date)  # track recurring signals (#149)
+    if full:
+        # Explicit --all/--since re-review: duplicating coverage is the point.
+        # delta_guard still applies the in-session delta protection (#299 r6/7).
+        log = act.append_entry(cfg, text)
+        withheld = act.mark_reviewed(cfg, reviewed=[e.bundle for e in entries],
+                                     date=args.date, delta_guard=started)
     else:
-        print(text)
+        # Default frontier scope: re-check + append + advance under ONE marker
+        # critical section (#299 review round 10) — two overlapping appends must
+        # not both log the same cycles; the loser re-scopes to what is STILL
+        # unreviewed (re-rendering the entry) or records nothing at all.
+        log, kept, withheld = act.append_reviewed(
+            cfg, entries,
+            lambda kept: act.scaffold_entry(kept, act.patterns(all_entries),
+                                            date=args.date,
+                                            recs=act.recurrences(cfg, all_entries)),
+            date=args.date, delta_guard=started)
+        if log is None:
+            print("act: a concurrent Act covered these cycles while this entry "
+                  "was prepared — nothing left to record (rerun to preview the "
+                  "new scope)", file=sys.stderr)
+            return 1
+        if len(kept) < len(entries):
+            print(f"act: {len(entries) - len(kept)} cycle(s) were covered by a "
+                  f"concurrent Act — logged the remaining {len(kept)}",
+                  file=sys.stderr)
+    if withheld:
+        print(f"act: {len(withheld)} cycle(s) got a revalidation delta while "
+              "this entry was written — left unreviewed for the next Act",
+              file=sys.stderr)
+    print(f"appended entry to {log}")
     return 0
 
 
