@@ -129,7 +129,8 @@ def _targeted(patched: list[Path]) -> list[tuple[Path, str, str]]:
     return out
 
 
-def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False
+def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+         locks: contextlib.ExitStack | None = None
          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
     """Fold the cumulative accepted bundles' patches onto a per-target integration branch.
 
@@ -147,6 +148,14 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False
     Dry-run (offline rehearse / CI, where the publisher leaf is stubbed) prints each group's
     git plan and returns the branches with ``None`` worktrees — no worktree, no push — so the
     next wave falls back to the target base, which is what an offline rehearse wants.
+
+    ``locks`` (#297 review round 10): when the caller passes an ``ExitStack``, each
+    target's :func:`integ_lock` is entered on IT and stays held after fold returns —
+    covering the caller's re-gate window, so no gap exists in which another flow's
+    publish-boundary sweep could remove the tree (or another fold rewrite it) between
+    the fold and ``gates.run_integration`` attesting it. The caller releases every
+    lock by exiting the stack; ``None`` keeps the per-group scope (lock released when
+    the group's build finishes).
     """
     targeted = _targeted([d for d in accepted if _has_patch(d)])
     if not targeted:
@@ -178,7 +187,11 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False
         # The whole build holds the worktree's lifecycle lock (#297 review round 6):
         # a concurrent sweep must not remove the tree mid-fold, and two concurrent
         # folds of the same target serialize instead of fighting over `checkout -B`.
-        with integ_lock(_integ_worktree(repo, base)) as held:
+        # With a caller-supplied ``locks`` stack the lock OUTLIVES this block and
+        # keeps covering the caller's re-gate (#297 review round 10).
+        with contextlib.ExitStack() as scope:
+            holder = locks if locks is not None else scope
+            held = holder.enter_context(integ_lock(_integ_worktree(repo, base)))
             if not held:
                 # Fail CLOSED (#297 review round 7): proceeding unserialized could
                 # apply/push a mixed stack interleaved with another fold's commits.

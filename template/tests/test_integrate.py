@@ -200,6 +200,21 @@ class FoldGit(unittest.TestCase):
                 integrate.fold(self.cfg, [b])
         self.assertFalse(self._pushed("pdca-integration/main"))  # nothing left origin
 
+    def test_caller_stack_keeps_the_lock_held_after_fold(self) -> None:
+        # #297 review round 10: with a caller-supplied ExitStack the integ lock
+        # SURVIVES fold's return, covering the re-gate window — a concurrent sweep's
+        # non-blocking probe finds the tree busy until the stack exits, so no gap
+        # exists between fold and the re-gate attesting the tree.
+        import contextlib as ctx
+        b = self._bundle("K1", self._modify_patch("one\n"))
+        with ctx.ExitStack() as locks:
+            folded = integrate.fold(self.cfg, [b], locks=locks)
+            _branch, wt = folded[("org/repo", "main")]
+            with integrate.integ_lock(wt, wait=False) as held:
+                self.assertFalse(held)               # still held by the stack
+        with integrate.integ_lock(wt, wait=False) as held:
+            self.assertTrue(held)                    # released with the stack
+
     def test_run_integration_fails_closed_when_the_integ_lock_is_unavailable(self) -> None:
         # Same contract for the between-waves re-gate: a result read from a tree a
         # concurrent fold could be rewriting would attest nothing.

@@ -464,12 +464,18 @@ def _pid_alive(pid: int) -> bool:
     if os.name == "nt":  # pragma: no cover — exercised only on Windows
         import ctypes
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        handle = ctypes.windll.kernel32.OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        ERROR_INVALID_PARAMETER = 87  # "no such process" for OpenProcess
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if handle:
-            ctypes.windll.kernel32.CloseHandle(handle)
+            kernel32.CloseHandle(handle)
             return True
-        return False
+        # A null handle does not prove absence (#297 review round 10): OpenProcess
+        # also fails ACCESS_DENIED for a live protected / other-user process — the
+        # exact mistake the POSIX branch's PermissionError arm avoids. Only the
+        # nonexistent-pid error proves death; every other failure reads alive, so
+        # the sweep leaves that overflow tree for its (possibly live) owner.
+        return ctypes.get_last_error() != ERROR_INVALID_PARAMETER
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

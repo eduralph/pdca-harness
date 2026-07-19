@@ -19,6 +19,7 @@ rebuilds; ``iterate-plan`` re-opens Plan) and bounded so a cycle can't spin fore
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import sys
 import threading
@@ -713,35 +714,37 @@ def _drive_and_act(
                           file=sys.stderr)
                     break
             else:  # default: stack — fold onto a per-target integration branch
-                try:
-                    folded = integrate.fold(cfg, accepted, dry_run=dry)
-                except integrate.IntegrationError as exc:
-                    print(f"flow: wave {k} did not integrate ({exc}); STOPPING — later "
-                          f"waves not run.", file=sys.stderr)
-                    break
-                if folded and not dry:
-                    integ = {tgt: branch for tgt, (branch, _wt) in folded.items()}
-                    # Optional re-gate (#wave-model): validate EACH folded combination over
-                    # its integration tip before the next wave builds on it; any red ⇒ STOP.
-                    if cfg.regate_between_waves:
-                        try:
-                            regate_red = any(
+                # ONE lock scope covers fold AND re-gate (#297 review round 10): the
+                # locks stack keeps every target's integ lock held between the two,
+                # so no gap exists in which another flow's publish-boundary sweep
+                # could remove the tree — or another fold rewrite it — before the
+                # re-gate attests it.
+                stop_wave = False
+                with contextlib.ExitStack() as locks:
+                    try:
+                        folded = integrate.fold(cfg, accepted, dry_run=dry, locks=locks)
+                    except integrate.IntegrationError as exc:
+                        print(f"flow: wave {k} did not integrate ({exc}); STOPPING — "
+                              f"later waves not run.", file=sys.stderr)
+                        break
+                    if folded and not dry:
+                        integ = {tgt: branch for tgt, (branch, _wt) in folded.items()}
+                        # Optional re-gate (#wave-model): validate EACH folded
+                        # combination over its integration tip before the next wave
+                        # builds on it; any red ⇒ STOP. hold_lock=False: the locks
+                        # stack already holds this tree's lock (re-acquiring would
+                        # deadlock on our own flock).
+                        if cfg.regate_between_waves and any(
                                 wt is not None
-                                and gates.run_integration(cfg, wt).get("overall") == "fail"
-                                for _tgt, (_branch, wt) in folded.items())
-                        except integrate.IntegrationError as exc:
-                            # The re-gate failing CLOSED (unattainable integ lock, #297
-                            # review round 7) stops the run like a red would — never
-                            # crashes the flow past the accepted bundles' states.
-                            print(f"flow: wave {k} integration re-gate could not run "
-                                  f"({exc}); STOPPING (later waves not run).",
-                                  file=sys.stderr)
-                            break
-                        if regate_red:
+                                and gates.run_integration(cfg, wt, hold_lock=False)
+                                        .get("overall") == "fail"
+                                for _tgt, (_branch, wt) in folded.items()):
                             print(f"flow: wave {k} integration re-gate FAILED — a "
                                   f"combination is red though each fix was green alone; "
                                   f"STOPPING (later waves not run).", file=sys.stderr)
-                            break
+                            stop_wave = True
+                if stop_wave:
+                    break
 
     _sweep_quietly(cfg, bundles)  # publish/freeze boundary — reclaim footprint (#297)
     results = {d.name.replace("issue_", ""): state.state(d) for d in bundles}
