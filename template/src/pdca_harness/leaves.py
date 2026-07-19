@@ -449,11 +449,19 @@ def _reject_resolved_briefs(cfg: Config, resolved_before: set[str]) -> None:
         b = cfg.bundle_root / name
         bp = b / "brief.md"
         if bp.exists() and state.state(b) != state.RESOLVED:
-            bp.rename(b / "brief.superseded-by-resolution.md")
+            # A UNIQUE destination per rejection (#302 review round 3): a later session
+            # re-briefing the same resolved tracker must not overwrite the first
+            # set-aside artifact (or raise where rename can't replace) — every
+            # rejection stays inspectable.
+            aside = b / "brief.superseded-by-resolution.md"
+            n = 2
+            while aside.exists():
+                aside = b / f"brief.superseded-by-resolution-{n}.md"
+                n += 1
+            bp.rename(aside)
             print(f"plan: {name} — the session briefed a RESOLVED tracker item; the brief "
-                  "was set aside as brief.superseded-by-resolution.md (the issue was "
-                  "settled in the tracker; reopen it there to plan it again)",
-                  file=sys.stderr)
+                  f"was set aside as {aside.name} (the issue was settled in the tracker; "
+                  "reopen it there to plan it again)", file=sys.stderr)
 
 
 def _warn_unseeded_briefs(cfg: Config, before: set[str]) -> None:

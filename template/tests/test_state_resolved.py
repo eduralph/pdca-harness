@@ -174,6 +174,32 @@ class PlanNeverReopensResolved(unittest.TestCase):
         self.assertFalse((d / "brief.md").exists())
         self.assertTrue((d / "brief.superseded-by-resolution.md").exists())  # kept, aside
         self.assertEqual(state.state(d), state.RESOLVED)
+        # A second offending session gets its own destination (#302 review round 3) —
+        # the first rejection artifact is never overwritten.
+        with mock.patch.object(leaves, "_invoke", side_effect=fake_invoke):
+            leaves.do_plan_batch(self.cfg)
+        self.assertTrue((d / "brief.superseded-by-resolution.md").exists())
+        self.assertTrue((d / "brief.superseded-by-resolution-2.md").exists())
+        self.assertEqual(state.state(d), state.RESOLVED)
+
+    def test_single_id_flow_exits_zero_on_a_resolved_bundle(self) -> None:
+        # #302 review round 3: parity with the multi-id path — a settled tracker item
+        # correctly skipped is a successful no-op, not a failed flow.
+        import io
+        import os
+        from contextlib import redirect_stderr, redirect_stdout
+        self._resolved("25")
+        (self.tmp / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n',
+                                            encoding="utf-8")
+        cwd = Path.cwd()
+        os.chdir(self.tmp)
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+                rc = cli.main(["flow", "25"])
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 0)
+        self.assertIn("resolved outside a cycle", err.getvalue())
 
 
 if __name__ == "__main__":
