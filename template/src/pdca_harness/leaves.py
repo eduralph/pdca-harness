@@ -444,11 +444,25 @@ def _reject_resolved_briefs(cfg: Config, resolved_before: set[str]) -> None:
     up-front id filter cannot protect a resolved tracker; an authored brief would
     override the marker and re-open the settled ticket for Do/Check. The brief is set
     aside (not deleted — the planner's work stays inspectable), loudly, so the bundle
-    reads RESOLVED again before the drive set is built."""
+    reads RESOLVED again before the drive set is built.
+
+    Revalidated first (#302 review round 6): the marker is a CACHE of the closure, and
+    on this path no up-front id filter ever checked the live tracker — the planner may
+    have briefed the item precisely BECAUSE the tracker reopened it. Discarding that
+    brief would lock the reopened issue out of every batch run until someone hand-edits
+    notes.json. Only the bundles the session actually briefed are checked (one tracker
+    call each), never the whole RESOLVED population."""
     for name in sorted(resolved_before):
         b = cfg.bundle_root / name
         bp = b / "brief.md"
         if bp.exists() and state.state(b) != state.RESOLVED:
+            if sources.tracker_issue_reopened(cfg, name.removeprefix("issue_")):
+                sources.clear_resolved_marker(b)  # sets closure-era notes.json aside
+                print(f"plan: {name} — the tracker issue is OPEN again; kept the "
+                      "session's brief and cleared the stale resolved marker (the "
+                      "closure-era notes were set aside — refresh the seed if the "
+                      "reopen thread matters to the brief)", file=sys.stderr)
+                continue
             # A UNIQUE destination per rejection (#302 review round 3): a later session
             # re-briefing the same resolved tracker must not overwrite the first
             # set-aside artifact (or raise where rename can't replace) — every
