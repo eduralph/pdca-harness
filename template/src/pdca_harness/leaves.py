@@ -488,12 +488,9 @@ def _reject_resolved_briefs(cfg: Config, resolved_before: set[str]) -> None:
                 # UNPLANNED, and set THIS brief aside too — the next Plan seeds the
                 # fresh thread and re-briefs with the reopen context in view.
                 cleared = sources.clear_resolved_marker(b)  # closure-era notes aside
-                aside = b / "brief.stale-reopen-context.md"
-                n = 2
-                while aside.exists():
-                    aside = b / f"brief.stale-reopen-context-{n}.md"
-                    n += 1
-                bp.rename(aside)
+                aside = _brief_aside(bp, "brief.stale-reopen-context")
+                if aside is None:
+                    continue  # _brief_aside printed the manual-intervention line
                 if cleared:
                     print(f"plan: {name} — the tracker issue is OPEN again, but this "
                           f"session's brief was authored from the closure-era notes; "
@@ -511,19 +508,47 @@ def _reject_resolved_briefs(cfg: Config, resolved_before: set[str]) -> None:
                           "bundle remains RESOLVED — fix the bundle directory, then "
                           "re-run", file=sys.stderr)
                 continue
-            # A UNIQUE destination per rejection (#302 review round 3): a later session
-            # re-briefing the same resolved tracker must not overwrite the first
-            # set-aside artifact (or raise where rename can't replace) — every
-            # rejection stays inspectable.
-            aside = b / "brief.superseded-by-resolution.md"
-            n = 2
-            while aside.exists():
-                aside = b / f"brief.superseded-by-resolution-{n}.md"
-                n += 1
-            bp.rename(aside)
+            aside = _brief_aside(bp, "brief.superseded-by-resolution")
+            if aside is None:
+                continue  # _brief_aside printed the manual-intervention line
             print(f"plan: {name} — the session briefed a RESOLVED tracker item; the brief "
                   f"was set aside as {aside.name} (the issue was settled in the tracker; "
                   "reopen it there to plan it again)", file=sys.stderr)
+
+
+def _brief_aside(bp: Path, stem: str) -> Path | None:
+    """Move ``bp`` out of the active brief slot, FAIL CLOSED (#302 review round 14).
+
+    A unique destination per rejection (#302 review round 3) keeps every set-aside
+    artifact inspectable. When the rename fails (locked file on Windows, an I/O
+    error) the brief is DELETED instead — losing the planner's inspectable copy
+    beats the alternative, where an authored brief survives the failed rejection,
+    shadows the still-present resolved marker as PLANNED on the next run, and drives
+    stale/settled work through Do/Check. Only when even the unlink fails is ``None``
+    returned, after a loud manual-intervention line — and the caller skips its
+    success message, never claiming a rejection that did not happen. Contained
+    per-bundle: a failure here must not abort the batch Plan session's remaining
+    bundles."""
+    aside = bp.with_name(f"{stem}.md")
+    n = 2
+    while aside.exists():
+        aside = bp.with_name(f"{stem}-{n}.md")
+        n += 1
+    try:
+        bp.rename(aside)
+        return aside
+    except OSError:
+        try:
+            bp.unlink()
+            print(f"plan: {bp.parent.name} — could not set the brief aside (rename "
+                  f"failed); it was DELETED instead so it cannot drive settled/stale "
+                  "work", file=sys.stderr)
+        except OSError as exc:
+            print(f"plan: {bp.parent.name} — could not set aside OR remove the "
+                  f"active brief ({exc}); MANUAL INTERVENTION required: the bundle "
+                  f"will read PLANNED over a resolved tracker item until {bp} is "
+                  "moved out of the way", file=sys.stderr)
+        return None  # either way the helper said what happened; no success message
 
 
 def _warn_unseeded_briefs(cfg: Config, before: set[str]) -> None:
