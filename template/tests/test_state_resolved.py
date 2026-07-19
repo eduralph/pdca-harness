@@ -292,6 +292,23 @@ class PlanNeverReopensResolved(unittest.TestCase):
         self.assertIn("DELETED", err.getvalue())
         self.assertEqual(state.state(d), state.RESOLVED)   # fail-closed terminal
 
+    def test_reopen_keeps_the_marker_when_the_brief_cannot_be_set_aside(self) -> None:
+        # #302 review round 15: brief FIRST, marker SECOND — clearing the marker
+        # while the stale brief could not be moved would read PLANNED and drive the
+        # stale context this deferral exists to keep out.
+        from types import SimpleNamespace
+        d = self._resolved("37")
+        (d / "brief.md").write_text("- **Slug:** stale\n", encoding="utf-8")
+        gh_open = SimpleNamespace(returncode=0, stdout=json.dumps({"state": "OPEN"}),
+                                  stderr="")
+        with mock.patch.object(leaves, "_brief_aside", return_value=None), \
+                mock.patch.object(sources.subprocess, "run", return_value=gh_open), \
+                mock.patch.object(sources.shutil, "which", return_value="/usr/bin/gh"):
+            leaves._reject_resolved_briefs(self.cfg, {"issue_37"})
+        self.assertTrue((d / "notes.json").exists())       # marker NOT cleared
+        data = json.loads((d / "notes.json").read_text(encoding="utf-8"))
+        self.assertIn("resolved", data)                    # terminal state retained
+
     def test_reopen_probe_refuses_without_a_derivable_repo(self) -> None:
         # No tracker URL to derive the repo from → the probe cannot know WHICH repo's
         # issue to read, so it refuses (conservative False) instead of letting gh

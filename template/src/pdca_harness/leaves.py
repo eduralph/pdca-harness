@@ -484,13 +484,19 @@ def _reject_resolved_briefs(cfg: Config, resolved_before: set[str]) -> None:
                 # while the closure-era notes.json was still in place — it never saw
                 # the reopen discussion, and keeping it would carry that stale
                 # context through Do/Check (and possibly publish) in this very run.
-                # Clear the marker + set the notes aside so the bundle reads
-                # UNPLANNED, and set THIS brief aside too — the next Plan seeds the
-                # fresh thread and re-briefs with the reopen context in view.
-                cleared = sources.clear_resolved_marker(b)  # closure-era notes aside
+                # Set THIS brief aside, clear the marker + set the notes aside, and
+                # the bundle reads UNPLANNED — the next Plan seeds the fresh thread
+                # and re-briefs with the reopen context in view.
+                # Brief FIRST, marker SECOND (#302 review round 15): clearing the
+                # marker while the stale brief could not be moved would leave the
+                # bundle reading PLANNED — straight into this run's drive set with
+                # the stale context the deferral exists to keep out.
                 aside = _brief_aside(bp, "brief.stale-reopen-context")
                 if aside is None:
-                    continue  # _brief_aside printed the manual-intervention line
+                    # The helper printed what happened; the marker was NOT touched,
+                    # so the bundle stays terminal (RESOLVED) — fail closed.
+                    continue
+                cleared = sources.clear_resolved_marker(b)  # closure-era notes aside
                 if cleared:
                     print(f"plan: {name} — the tracker issue is OPEN again, but this "
                           f"session's brief was authored from the closure-era notes; "
