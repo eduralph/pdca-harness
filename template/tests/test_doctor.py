@@ -96,6 +96,35 @@ class Doctor(unittest.TestCase):
         _rc, out = self._run(cfg)
         self.assertNotIn("free disk space", out)
 
+    def test_free_space_measures_each_target_filesystem(self) -> None:
+        # #297 review round 7: a target checkout can sit on ANOTHER filesystem than
+        # the harness root — lane worktrees and gate build output fill THAT fs, so
+        # the preflight must measure it too, not only cfg.root.
+        from types import SimpleNamespace
+        cfg = _load(self.tmp, "[doctor]\nmin_free_gb = 10.0\n")
+        other = self.tmp / "elsewhere-checkout"
+        other.mkdir()
+        big = SimpleNamespace(free=100 * 1024 ** 3, total=1, used=1)
+        small = SimpleNamespace(free=1 * 1024 ** 3, total=1, used=1)
+        with mock.patch.object(doctor, "_space_roots",
+                               return_value=[cfg.root, other]), \
+                mock.patch.object(doctor.shutil, "disk_usage",
+                                  side_effect=lambda p: small if Path(p) == other
+                                  else big):
+            rc, out = self._run(cfg)
+        self.assertEqual(rc, 0)                            # WARN, not fatal
+        self.assertIn("free disk space (elsewhere-checkout)", out)
+        self.assertIn("pdca sweep", out)
+
+    def test_space_roots_dedupe_by_filesystem(self) -> None:
+        # Same-device targets collapse to one measurement (statvfs per FILESYSTEM,
+        # not per checkout); the root always leads.
+        cfg = _load(self.tmp, "[doctor]\nmin_free_gb = 10.0\n")
+        checkout = self.tmp / "checkout"
+        (checkout / ".git").mkdir(parents=True)            # same fs as cfg.root
+        cfg.repo_checkouts = {"org/x": str(checkout)}
+        self.assertEqual(doctor._space_roots(cfg), [cfg.root])
+
     @staticmethod
     def _dead_pid() -> int:
         """A pid that provably no longer exists (a reaped child) — the orphan case."""

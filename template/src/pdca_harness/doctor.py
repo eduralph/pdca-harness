@@ -84,6 +84,29 @@ def _footprint_counts(cfg: Config) -> tuple[int, int, int]:
     return lanes, integs, ovfs
 
 
+def _space_roots(cfg: Config) -> list[Path]:
+    """One representative path per DISTINCT filesystem the harness writes on (#297
+    review round 7): ``cfg.root`` plus each target checkout. Lane worktrees and their
+    gate build output live NEXT TO the checkouts, which may sit on another filesystem
+    than the harness root — measuring only ``cfg.root`` could report ample space while
+    the filesystem the gates actually fill is nearly full (the exact false-red the
+    free-space row exists to preempt). Deduped by ``st_dev``; an unstat-able path is
+    kept so its row WARNs instead of vanishing."""
+    from . import sweep  # lazy: doctor stays import-light
+    roots: list[Path] = []
+    seen: set[int] = set()
+    for where in [cfg.root, *sweep.target_checkouts(cfg)]:
+        try:
+            dev = where.stat().st_dev
+        except OSError:
+            roots.append(where)
+            continue
+        if dev not in seen:
+            seen.add(dev)
+            roots.append(where)
+    return roots
+
+
 # What Claude Code's Linux sandbox needs on PATH before it will actually engage. Missing any
 # of these, it does not fail — it disables the sandbox and runs unconfined (#289).
 # binary on PATH -> (what it is, the PACKAGE that provides it). The two differ for bubblewrap:
@@ -318,15 +341,18 @@ def run(cfg: Config, *, strict: bool = False) -> int:
     # human traces it. Surface it HERE, before a run — statvfs is O(1); never `du` a
     # multi-hundred-GB tree.
     if cfg.doctor_min_free_gb > 0:
-        try:
-            free_gb = shutil.disk_usage(cfg.root).free / (1024 ** 3)
-            low = free_gb < cfg.doctor_min_free_gb
-            r.row(WARN if low else OK, "free disk space",
-                  f"{free_gb:.1f} GiB free < {cfg.doctor_min_free_gb:g} GiB threshold — "
-                  "gate runs will false-red on quota; run 'pdca sweep' "
-                  "(or 'pdca sweep --remove')" if low else f"{free_gb:.1f} GiB free")
-        except OSError as exc:
-            r.row(WARN, "free disk space", f"could not stat {cfg.root}: {exc}")
+        for where in _space_roots(cfg):
+            label = ("free disk space" if where == cfg.root
+                     else f"free disk space ({where.name})")
+            try:
+                free_gb = shutil.disk_usage(where).free / (1024 ** 3)
+                low = free_gb < cfg.doctor_min_free_gb
+                r.row(WARN if low else OK, label,
+                      f"{free_gb:.1f} GiB free < {cfg.doctor_min_free_gb:g} GiB threshold "
+                      "— gate runs will false-red on quota; run 'pdca sweep' "
+                      "(or 'pdca sweep --remove')" if low else f"{free_gb:.1f} GiB free")
+            except OSError as exc:
+                r.row(WARN, label, f"could not stat {where}: {exc}")
     lanes_n, integs, ovfs = _footprint_counts(cfg)
     if ovfs:
         r.row(WARN, "harness worktree footprint",

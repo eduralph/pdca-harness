@@ -184,7 +184,13 @@ def run_integration(cfg: Config, worktree_path: Path) -> dict:
     ``pdca sweep`` — or another flow's publish-boundary sweep — must not remove the
     worktree mid-gate and invalidate this re-gate's result."""
     from . import integrate  # lazy: gates is imported by integrate's callers
-    with integrate.integ_lock(worktree_path):
+    with integrate.integ_lock(worktree_path) as held:
+        if not held:
+            # Fail CLOSED (#297 review round 7): an unserialized re-gate could read a
+            # tree a concurrent fold is rewriting — the result would attest nothing.
+            raise integrate.IntegrationError(
+                f"could not take the integration lock next to {worktree_path.name} — "
+                f"the re-gate cannot attest an unserialized tree")
         rows = _run_checks(cfg, cwd=worktree_path, bundle=None, scopes=("repo",),
                            worktree_override=worktree_path)
     return _finalize(rows, name="integration", write_to=None)

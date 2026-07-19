@@ -183,6 +183,38 @@ class FoldGit(unittest.TestCase):
         self.assertTrue((wt / "feature.txt").is_file())
         self.assertTrue(self._pushed(branch))
 
+    def test_fold_fails_closed_when_the_integ_lock_is_unavailable(self) -> None:
+        # #297 review rounds 6/7: the build runs under the worktree's lifecycle lock;
+        # an unattainable lock ABORTS the fold — proceeding unserialized could
+        # apply/push a mixed stack interleaved with another fold's commits.
+        import contextlib as ctx
+        from unittest import mock
+        b = self._bundle("L1", self._modify_patch("one\n"))
+
+        @ctx.contextmanager
+        def unheld(wt, **kw):
+            yield False
+
+        with mock.patch.object(integrate, "integ_lock", unheld):
+            with self.assertRaises(integrate.IntegrationError):
+                integrate.fold(self.cfg, [b])
+        self.assertFalse(self._pushed("pdca-integration/main"))  # nothing left origin
+
+    def test_run_integration_fails_closed_when_the_integ_lock_is_unavailable(self) -> None:
+        # Same contract for the between-waves re-gate: a result read from a tree a
+        # concurrent fold could be rewriting would attest nothing.
+        import contextlib as ctx
+        from unittest import mock
+        from pdca_harness import gates
+
+        @ctx.contextmanager
+        def unheld(wt, **kw):
+            yield False
+
+        with mock.patch.object(integrate, "integ_lock", unheld):
+            with self.assertRaises(integrate.IntegrationError):
+                gates.run_integration(self.cfg, self.primary)
+
     def test_overlap_raises_integration_error(self) -> None:
         # Two patches that each rewrite base.txt's only line — the second can't apply onto
         # the first, an undeclared cross-wave overlap → a loud STOP.

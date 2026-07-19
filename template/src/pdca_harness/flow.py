@@ -723,14 +723,25 @@ def _drive_and_act(
                     integ = {tgt: branch for tgt, (branch, _wt) in folded.items()}
                     # Optional re-gate (#wave-model): validate EACH folded combination over
                     # its integration tip before the next wave builds on it; any red ⇒ STOP.
-                    if cfg.regate_between_waves and any(
-                            wt is not None
-                            and gates.run_integration(cfg, wt).get("overall") == "fail"
-                            for _tgt, (_branch, wt) in folded.items()):
-                        print(f"flow: wave {k} integration re-gate FAILED — a combination is "
-                              f"red though each fix was green alone; STOPPING (later waves "
-                              f"not run).", file=sys.stderr)
-                        break
+                    if cfg.regate_between_waves:
+                        try:
+                            regate_red = any(
+                                wt is not None
+                                and gates.run_integration(cfg, wt).get("overall") == "fail"
+                                for _tgt, (_branch, wt) in folded.items())
+                        except integrate.IntegrationError as exc:
+                            # The re-gate failing CLOSED (unattainable integ lock, #297
+                            # review round 7) stops the run like a red would — never
+                            # crashes the flow past the accepted bundles' states.
+                            print(f"flow: wave {k} integration re-gate could not run "
+                                  f"({exc}); STOPPING (later waves not run).",
+                                  file=sys.stderr)
+                            break
+                        if regate_red:
+                            print(f"flow: wave {k} integration re-gate FAILED — a "
+                                  f"combination is red though each fix was green alone; "
+                                  f"STOPPING (later waves not run).", file=sys.stderr)
+                            break
 
     _sweep_quietly(cfg, bundles)  # publish/freeze boundary — reclaim footprint (#297)
     results = {d.name.replace("issue_", ""): state.state(d) for d in bundles}

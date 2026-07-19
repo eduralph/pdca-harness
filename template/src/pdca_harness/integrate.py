@@ -93,9 +93,10 @@ def integ_lock(wt: Path, *, wait: bool = True):
     NEXT TO the worktree (same convention as the lane lock), so it survives worktree
     removal and two processes racing over a recreated tree still serialize. Blocking
     for users (concurrent folds of the same target serialize instead of clobbering
-    each other's ``checkout -B``); never raises — an unopenable lock file yields
-    False, and the sweeper's own guard fails not-held in the same environment, so
-    the tree is left alone rather than raced over."""
+    each other's ``checkout -B``); never raises itself — an unopenable/untakeable
+    lock yields False and the CALLER decides (#297 review round 7): fold and the
+    re-gate fail CLOSED with :class:`IntegrationError`, the sweeper leaves the tree
+    alone."""
     from . import worktree  # lazy: keep integrate importable without the lock helpers
     try:
         fh = wt.with_name(wt.name + ".lock").open("w")
@@ -177,7 +178,14 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False
         # The whole build holds the worktree's lifecycle lock (#297 review round 6):
         # a concurrent sweep must not remove the tree mid-fold, and two concurrent
         # folds of the same target serialize instead of fighting over `checkout -B`.
-        with integ_lock(_integ_worktree(repo, base)):
+        with integ_lock(_integ_worktree(repo, base)) as held:
+            if not held:
+                # Fail CLOSED (#297 review round 7): proceeding unserialized could
+                # apply/push a mixed stack interleaved with another fold's commits.
+                raise IntegrationError(
+                    f"could not take the integration lock next to "
+                    f"{_integ_worktree(repo, base).name} — fix the checkout's parent "
+                    f"directory (permissions?), then re-run")
             wt = _prepare_worktree(repo, base_remote, base)
             if _git(wt, "checkout", "-B", branch, f"{base_remote}/{base}") != 0:
                 raise IntegrationError(f"could not start {branch} off {base_remote}/{base}")
