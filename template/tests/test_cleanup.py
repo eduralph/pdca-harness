@@ -299,6 +299,29 @@ class GuardsAndScope(CleanupBase):
         view = next(c for c in self.gh_calls if c[1:3] == ["issue", "view"])
         self.assertIn("org/tracker-repo", view)
 
+    def test_tracker_source_type_is_normalized_like_sources_py(self) -> None:
+        # #300 review round 4: `type = "GitHub"` is a valid tracker source for
+        # sources.seed — an exact compare here dropped its repo and pointed gh at the
+        # CURRENT repository's same-numbered issues.
+        self.cfg.tracker_system = "github"
+        self.cfg.plan_sources = [{"type": " GitHub ", "role": "Tracker",
+                                  "repo": "org/tracker-repo"}]
+        self._tracker("82")
+        self.issue_states["82"] = _CLOSED
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        view = next(c for c in self.gh_calls if c[1:3] == ["issue", "view"])
+        self.assertIn("org/tracker-repo", view)            # the configured repo, not cwd
+
+    def test_repeated_explicit_ids_are_deduplicated(self) -> None:
+        # #300 review round 4: `cleanup 21 21 --apply` must not run the close twice.
+        self._staged("83", signoff_action="accept", pr_url=_PR)
+        self.issue_states["83"] = _OPEN
+        self.pr_states[_PR] = "MERGED"
+        rc, _out, _err = self._run(ids=["83", "83"], apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self._closes()), 1)           # one mutation, not two
+
     def test_reopened_issue_clears_the_resolved_marker(self) -> None:
         # #300 review: RESOLVED is in HALTED, so a tracker REOPEN after resolution
         # would otherwise be suppressed forever. Cleanup re-checks the remote and,

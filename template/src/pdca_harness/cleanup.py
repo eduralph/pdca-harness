@@ -107,10 +107,14 @@ def _github_tracker(cfg: Config) -> tuple[bool, str]:
     issue that merely shares the numeric id. Fallback: the legacy ``[tracker].system``
     setting."""
     for src in cfg.plan_sources:
-        if (isinstance(src, dict) and src.get("type") == "github"
+        # Same normalization as sources.py (#300 review round 4): `type = "GitHub"` is
+        # a valid tracker source there, and an exact compare here would silently drop
+        # its `repo` — pointing gh at the CURRENT repository's same-numbered issues.
+        if (isinstance(src, dict)
+                and (src.get("type") or "").strip().lower() == "github"
                 and (src.get("role") or "").strip().lower() == "tracker"):
             return True, str(src.get("repo", "") or "")
-    return cfg.tracker_system == "github", ""
+    return (cfg.tracker_system or "").strip().lower() == "github", ""
 
 
 def _empty_patch(d: Path) -> bool:
@@ -294,6 +298,10 @@ def run(cfg: Config, ids: list[str], *, apply: bool = False, repo: str = "",
     """Reconcile bundles against the tracker; report (default) or ``--apply``."""
     today = today or datetime.date.today().isoformat()
     if ids:
+        # Dedupe, order-preserving (#300 review round 4): `cleanup 21 21 --apply` would
+        # otherwise plan and RUN the close mutation twice — duplicating the closing
+        # comment or failing after the first action already succeeded.
+        ids = list(dict.fromkeys(ids))
         # find_bundle resolves the archived completed/ path too (#171 convention).
         bundles = [cfg.find_bundle(i) for i in ids]
         missing = [d.name for d in bundles if not d.is_dir()]
