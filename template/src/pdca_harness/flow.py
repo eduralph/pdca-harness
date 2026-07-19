@@ -660,9 +660,13 @@ def _drive_and_act(
                                         lambda d=d: publish.draft_texts(cfg, d,
                                                                         run_t4=False))
                        for d in to_publish}
+            # Validation-only (draft=False, #295 review round 4): a text missing HERE
+            # means a later leaf deleted it — re-drafting would invoke a publisher
+            # leaf mid-validation, reopening the mutation window; fail that bundle.
             ready = {d.name: bool(drafted.get(d.name))
                              and bool(_isolate(d, "validate publish texts (T4)",
-                                               lambda d=d: publish.draft_texts(cfg, d)))
+                                               lambda d=d: publish.draft_texts(
+                                                   cfg, d, draft=False)))
                      for d in to_publish}
             for d in to_publish:
                 if ready.get(d.name):

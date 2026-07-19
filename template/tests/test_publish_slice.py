@@ -760,6 +760,21 @@ class DraftTexts(unittest.TestCase):
             self.assertTrue((d / "commit-msg.txt").exists())
             self.assertFalse(publish.draft_texts(self.cfg, d))               # T4 phase gates
 
+    def test_validation_phase_never_redrafts_a_deleted_text(self) -> None:
+        # #295 review round 4: a text missing at VALIDATION means a later leaf deleted
+        # it — re-drafting would invoke the publisher leaf mid-validation, reopening
+        # the shared-root mutation window. Validation fails the bundle instead.
+        d = _bundle(self.cfg, "D9", brief_body=_FIX_BRIEF, accepted=True)
+        with redirect_stderr(io.StringIO()):
+            self.assertTrue(publish.draft_texts(self.cfg, d, run_t4=False))  # drafted
+        (d / "pr-description.md").unlink()             # a later leaf "deleted" it
+        err = io.StringIO()
+        with mock.patch.object(publish.leaves, "run_publish") as run_pub, \
+                redirect_stderr(err):
+            self.assertFalse(publish.draft_texts(self.cfg, d, draft=False))
+        run_pub.assert_not_called()                    # never re-drafts mid-validation
+        self.assertIn("NOT re-drafting", err.getvalue())
+
     def test_wave_drafts_all_then_validates_all_before_any_mechanics(self) -> None:
         # Two-bundle wave, three phases (#295 review round 2): EVERY draft precedes any
         # T4 validation (a later bundle's leaf may touch an earlier bundle's artifacts —
@@ -771,8 +786,11 @@ class DraftTexts(unittest.TestCase):
             (d / "brief.md").write_text(_FIX_BRIEF, encoding="utf-8")
         calls: list[tuple[str, str]] = []
 
-        def fake_draft(_cfg, d, run_t4=True):
-            calls.append(("validate" if run_t4 else "draft", d.name))
+        def fake_draft(_cfg, d, run_t4=True, draft=True):
+            kind = "validate" if run_t4 else "draft"
+            if kind == "validate":
+                self.assertFalse(draft)  # validation never re-drafts (#295 review r4)
+            calls.append((kind, d.name))
             return True if not run_t4 else d.name != "issue_O1"  # O1 fails validation
 
         def fake_publish(_cfg, issue_id, **kw):

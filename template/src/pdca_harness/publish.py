@@ -55,7 +55,7 @@ def _ensure_texts(cfg: Config, d: Path) -> bool:
     return True
 
 
-def draft_texts(cfg: Config, d: Path, *, run_t4: bool = True) -> bool:
+def draft_texts(cfg: Config, d: Path, *, run_t4: bool = True, draft: bool = True) -> bool:
     """Pre-pass (issue #295): make bundle ``d`` text-ready for publishing — NO git/gh.
 
     Drafts the two contribution artifacts (``commit-msg.txt`` / ``pr-description.md``)
@@ -68,6 +68,12 @@ def draft_texts(cfg: Config, d: Path, *, run_t4: bool = True) -> bool:
     leaves run from the shared project root, so a later bundle's leaf can touch an
     earlier bundle's artifacts — validation is therefore a separate pass the flow runs
     only after EVERY leaf has finished, so T4 always judges the final contents.
+
+    ``draft=False`` is the flow's VALIDATION-ONLY phase (#295 review round 4): a
+    missing artifact there means a later leaf DELETED it, and re-drafting would invoke
+    the publisher leaf again mid-validation — reopening the exact shared-root mutation
+    window the phase split closes (in a ≥3-bundle wave, the re-draft can mutate a
+    bundle T4 already passed). Validation fails on missing files instead.
 
     Returns True when the phase succeeded — including the cases where there is
     legitimately nothing to draft (not COMPLETE, a close/no-fix empty patch, no usable
@@ -84,7 +90,13 @@ def draft_texts(cfg: Config, d: Path, *, run_t4: bool = True) -> bool:
     repo_spec, base, _slug = _resolve_target(d)
     if not repo_spec or not base:
         return True                                  # non-contributing cycle
-    if not _ensure_texts(cfg, d):
+    if draft:
+        if not _ensure_texts(cfg, d):
+            return False
+    elif not ((d / COMMIT_MSG).is_file() and (d / PR_BODY).is_file()):
+        print(f"publish: {COMMIT_MSG} / {PR_BODY} missing at validation for {d.name} — "
+              "a later draft removed them? NOT re-drafting mid-validation; the bundle "
+              "is not ready.", file=sys.stderr)
         return False
     if run_t4 and not _t4_passes(cfg, d):
         print(f"publish: T4 contribution gate FAILED on {COMMIT_MSG} / {PR_BODY} for "
