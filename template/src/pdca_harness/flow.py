@@ -811,9 +811,12 @@ def flow_ids(
         b = cfg.bundle(iid)
         if (b.exists() and state.state(b) == state.RESOLVED
                 and sources.tracker_issue_reopened(cfg, iid)):
-            sources.clear_resolved_marker(b)
-            print(f"flow: issue_{iid} — the tracker issue is OPEN again; cleared the "
-                  "resolved marker and planning it.", file=sys.stderr)
+            if sources.clear_resolved_marker(b):
+                print(f"flow: issue_{iid} — the tracker issue is OPEN again; cleared "
+                      "the resolved marker and planning it.", file=sys.stderr)
+            # else: clear_resolved_marker printed the failure (#302 review round 11);
+            # the bundle stays RESOLVED and the drive-set filter below skips it with
+            # its own terminal note — loud, never a silent "planned" claim.
 
     # Optional Plan pre-pass (#65): brief the UNPLANNED ids in one shared session, before
     # the drive set is filtered, so the un-briefed ones become drivable. A csv enables it too.
