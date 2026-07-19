@@ -53,6 +53,7 @@ from . import gates
 from . import guard
 from . import progress
 from . import sources
+from . import state
 from . import worktree
 from .config import Config, LeafConfig
 
@@ -396,12 +397,13 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
     :func:`ensure_notes`; the flow then drives exactly those ids (``flow.flow_ids``).
     """
     cfg.bundle_root.mkdir(parents=True, exist_ok=True)
-    # Snapshot the briefed set so the #301 plan-advisory pass covers exactly the bundles
-    # THIS session briefs (a pre-existing brief was reviewed when it was written). An
-    # unfilled template copy is NOT briefed (#301 review round 2 — the same placeholder
-    # semantics as state.state(), #113): the session replaces it with a real brief, and
-    # that fresh brief must get its plan review, not be snapshot-excluded.
-    briefed_before = {d.name for d in cfg.bundle_root.glob("issue_*")
+    # Snapshot the briefed set BY CONTENT HASH so the #301 plan-advisory pass covers
+    # exactly the bundles THIS session briefed or REWROTE (#301 review round 5 — a
+    # name-only snapshot skipped the review when a rerun session updated an existing
+    # brief; unchanged resumptions still skip). An unfilled template copy is NOT
+    # briefed (round 2 — the same placeholder semantics as state.state(), #113): the
+    # session replaces it with a real brief that must get its plan review.
+    briefed_before = {d.name: _brief_sha(d) for d in cfg.bundle_root.glob("issue_*")
                       if (d / "brief.md").exists()
                       and not brief.is_placeholder(d / "brief.md")}
     for iid in ids or []:
@@ -418,10 +420,13 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
             _warn_unseeded_briefs(cfg, before)
     else:
         _stub_plan_batch(cfg, ids)
-    # #301: one advisory pass over the freshly briefed bundles, then ONE revision session
-    # if any review found something. No-op unless [[leaves.plan_advisory]] is configured.
+    # #301: one advisory pass over the freshly briefed OR rewritten bundles, then ONE
+    # revision session if any review found something. No-op unless
+    # [[leaves.plan_advisory]] is configured.
     fresh = sorted(d for d in cfg.bundle_root.glob("issue_*")
-                   if (d / "brief.md").exists() and d.name not in briefed_before)
+                   if (d / "brief.md").exists()
+                   and (d.name not in briefed_before
+                        or _brief_sha(d) != briefed_before[d.name]))
     run_plan_advisory_batch(cfg, fresh)
 
 
@@ -1539,7 +1544,9 @@ def _plan_advisory_prompt(spec: dict, leaf_id: str) -> str:
         "match the tracker thread in notes.json/sources (wrong root-cause framing?); is "
         "the success criterion something a gate or reviewer can actually verify, or "
         "vibes; is the scope one logical fix or a hidden second change; do the repo + "
-        "branch target and any `Depends on` ids resolve; did the brief ignore a "
+        "branch target and any `Depends on` ids resolve (if dependency-state.json is "
+        "present it lists each declared prerequisite bundle's existence and state — "
+        "judge the declarations against it); did the brief ignore a "
         "load-bearing comment in the thread. "
         f"Write plan-advisory-{leaf_id}.md: a short list of findings, each a Markdown "
         "bullet prefixed '- NEEDS-HUMAN — ' with the evidence (a brief line, a thread "
@@ -1633,6 +1640,24 @@ def _run_plan_advisory_leaves(d: Path, cfg: Config) -> list[str]:
     return ran
 
 
+def _dependency_manifest(d: Path, cfg: Config) -> dict:
+    """``{dep id: {declared, exists, state}}`` for the brief's declared prerequisites
+    (#301 review round 5). The review sandbox holds only the plan inputs and
+    ``$PDCA_TARGET`` is the target repository — without this, the reviewer cannot
+    judge the ``Depends on`` / ``Depends on (merged)`` / ``Stacks on`` declarations it
+    is explicitly told to validate. ``find_bundle`` resolves archived copies too."""
+    bp = d / "brief.md"
+    out: dict[str, dict] = {}
+    for kind, ids in (("Depends on", brief.depends_on(bp)),
+                      ("Depends on (merged)", brief.depends_on_merged(bp)),
+                      ("Stacks on", brief.stacks_on(bp))):
+        for dep in ids:
+            b = cfg.find_bundle(dep)
+            out[dep] = {"declared": kind, "exists": b.is_dir(),
+                        "state": state.state(b) if b.is_dir() else None}
+    return out
+
+
 @contextlib.contextmanager
 def _pinned_plan_target(d: Path, cfg: Config):
     """A read-only checkout PINNED to the brief's resolved base ref, for grounding the
@@ -1685,6 +1710,10 @@ def _run_plan_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: d
                 shutil.copy2(d / name, sandbox / name)
         if (d / "sources").is_dir():
             shutil.copytree(d / "sources", sandbox / "sources")
+        manifest = _dependency_manifest(d, cfg)
+        if manifest:
+            (sandbox / "dependency-state.json").write_text(
+                json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         profile = cfg.profile(leaf)
         _seed_sandbox_agents(cfg, sandbox)
         seeded = _seed_sandbox_settings(cfg, sandbox, profile)

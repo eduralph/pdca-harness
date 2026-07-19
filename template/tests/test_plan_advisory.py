@@ -260,6 +260,45 @@ class BatchAndAssemble(unittest.TestCase):
             self.assertTrue((d / "plan-advisory-benefit.json").exists(), iid)
         self.assertEqual(list(pre.glob("plan-advisory-*")), [])  # pre-existing untouched
 
+    def test_rewritten_brief_gets_a_fresh_plan_review(self) -> None:
+        # #301 review round 5: the snapshot is by CONTENT HASH — a rerun session that
+        # rewrites an existing authored brief must get a fresh review, while an
+        # unchanged resumption still skips.
+        cfg = _cfg(self.tmp, plan_advisory=[_REVIEWER])
+        untouched = _brief(cfg, "U1")
+        rewritten = _brief(cfg, "RW1")
+        real_stub = leaves._stub_plan_batch
+
+        def stub_rewrites_rw1(cfg_, ids_=None):
+            real_stub(cfg_, ids_)
+            (rewritten / "brief.md").write_text(
+                "- **Slug:** rw1-v2\n- **Defect:** reframed.\n", encoding="utf-8")
+
+        with mock.patch.object(leaves, "_stub_plan_batch", side_effect=stub_rewrites_rw1):
+            leaves.do_plan_batch(cfg, ids=["N9"])          # session also briefs N9
+        self.assertTrue(leaves.plan_advisory_artifact(rewritten, "plan-reviewer").exists())
+        self.assertTrue(
+            leaves.plan_advisory_artifact(cfg.bundle("N9"), "plan-reviewer").exists())
+        self.assertEqual(list(untouched.glob("plan-advisory-*")), [])  # unchanged: skipped
+
+    def test_dependency_manifest_resolves_declared_prereqs(self) -> None:
+        # #301 review round 5: the sandbox holds only plan inputs, so the reviewer gets
+        # a read-only manifest of each declared prerequisite's existence and state.
+        cfg = _cfg(self.tmp)
+        dep = _brief(cfg, "77")                            # an existing PLANNED prereq
+        d = _brief(cfg, "M1")
+        (d / "brief.md").write_text(
+            "- **Slug:** m1\n- **Defect:** x.\n- **Depends on:** 77, 940\n",
+            encoding="utf-8")
+        manifest = leaves._dependency_manifest(d, cfg)
+        self.assertEqual(manifest["77"]["exists"], True)
+        self.assertEqual(manifest["77"]["state"], "PLANNED")
+        self.assertEqual(manifest["940"], {"declared": "Depends on", "exists": False,
+                                           "state": None})
+        self.assertIn("dependency-state.json", leaves._plan_advisory_prompt(_REVIEWER,
+                                                                            "plan-reviewer"))
+        del dep  # (fixture bookkeeping)
+
     def test_placeholder_brief_counts_as_unbriefed_in_the_snapshot(self) -> None:
         # #301 review round 2: an unfilled template copy is not "briefed" (#113) — the
         # session replaces it with a real brief, and that fresh brief must get its plan
