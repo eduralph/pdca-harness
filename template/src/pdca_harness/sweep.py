@@ -177,6 +177,14 @@ def sweep(cfg: Config, bundles: list[Path] | None = None, *,
                     if not dry_run:
                         _remove_tree(primary, lane_wt)
                 else:
+                    # The registration guard applies to CLEAN too (#297 review round 3):
+                    # `clean -fdxq` + `reset --hard` are just as destructive as removal,
+                    # and an unrelated clone/symlink squatting on the exact lane path
+                    # must never have its work stripped by them.
+                    if not _registered_worktree(primary, lane_wt):
+                        lines.append(f"sweep: left {lane_wt.name} (not a worktree "
+                                     f"registered to {primary.name} — not ours to clean)")
+                        continue
                     lines.append(f"sweep: {verb}clean lane worktree {lane_wt.name} "
                                  "(build artifacts dropped, checkout kept)")
                     if not dry_run:

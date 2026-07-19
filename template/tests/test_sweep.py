@@ -171,6 +171,20 @@ class SweepRealGit(unittest.TestCase):
         self.assertTrue(any("not ours to remove" in ln for ln in lines))
         self.assertFalse(self.lane.exists())                  # the real lane still removed
 
+    def test_standalone_clone_on_the_lane_path_is_never_cleaned(self) -> None:
+        # #297 review round 3: clean mode's `clean -fdxq` + `reset --hard` are as
+        # destructive as removal — the registration guard must gate them too. A clone
+        # squatting on the EXACT lane path keeps its untracked work.
+        d = self._seed_footprint()
+        shutil.rmtree(self.lane)                              # free the exact lane path…
+        sp.run(["git", "-C", str(self.primary), "worktree", "prune"],
+               check=True, capture_output=True)
+        sp.run(["git", "init", "-q", str(self.lane)], check=True)  # …for an unrelated clone
+        (self.lane / "precious.txt").write_text("someone's WIP\n", encoding="utf-8")
+        lines = sweep.sweep(self.cfg, [d])                    # default clean mode
+        self.assertTrue((self.lane / "precious.txt").exists())  # untouched
+        self.assertTrue(any("not ours to clean" in ln for ln in lines))
+
     def test_standalone_clone_matching_our_naming_is_never_deleted(self) -> None:
         # #297 review round 2: a standalone git CLONE named like an integ tree has a
         # .git entry, fails `git worktree remove`, and the old fallback would rmtree an
