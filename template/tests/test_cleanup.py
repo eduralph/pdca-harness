@@ -37,7 +37,9 @@ def _cfg(root: Path) -> Config:
         templates_dir=TEMPLATES,
         default_branch="main",
         tracker_system="github",
-        tracker_url="",
+        # A derivable tracker URL (#300 review round 14): issue-side reconciliation
+        # fails closed without a known repo, so the fixture supplies one.
+        tracker_url="https://github.com/example-org/example-repo/issues",
         issue_id_example="1",
         builder=LeafConfig(mode="stub"),
         reviewer=LeafConfig(mode="stub"),
@@ -227,16 +229,48 @@ class ApplyFailureHonesty(CleanupBase):
         self.assertEqual(rc, 0)                            # planned, never crashed
         del d  # (fixture bookkeeping)
 
+    def test_unknown_tracker_repo_disables_issue_side_reconciliation(self) -> None:
+        # #300 review round 14: a GitHub tracker whose repo cannot be derived must
+        # NOT let gh fall back to the checkout-default repository — under --apply
+        # that could close an unrelated same-numbered issue. Issue-side classes are
+        # skipped loudly; --repo re-enables them.
+        self.cfg.tracker_url = ""                          # nothing to derive from
+        self._tracker("87")
+        self.issue_states["87"] = _CLOSED
+        rc, _out, err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("could not be derived", err)
+        self.assertEqual(state.state(self.cfg.bundle("87")), state.UNPLANNED)  # untouched
+        rc, _out, _err = self._run(apply=True, repo="example-org/example-repo")
+        self.assertEqual(rc, 0)
+        self.assertEqual(state.state(self.cfg.bundle("87")), state.RESOLVED)  # --repo works
+
+    def test_merged_pr_evidence_beats_a_blank_patch(self) -> None:
+        # #300 review round 14: a COMPLETE bundle whose patch.diff was damaged
+        # (deleted/truncated) but whose recorded PR is MERGED shipped a real fix —
+        # close as completed with the fixed-by comment, never "not planned".
+        d = self._staged("88", signoff_action="accept", patch="   \n", pr_url=_PR)
+        self.issue_states["88"] = _OPEN
+        self.pr_states[_PR] = "MERGED"
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        close = self._closes()[0]
+        self.assertIn("completed", close)                  # not "not planned"
+        self.assertTrue(any("Fixed by" in a for a in close))
+        del d  # (fixture bookkeeping)
+
     def test_unreadable_artifact_becomes_a_report_only_row(self) -> None:
         # #300 review round 10: a non-UTF-8 patch.diff makes _plan_bundle raise while
         # rows are PLANNED — that must become the damaged bundle's own report-only
-        # row, never abort the sweep before healthy siblings are reconciled.
+        # row, never abort the sweep before healthy siblings are reconciled. (The PR
+        # is deliberately NOT merged here: a merged PR now short-circuits before the
+        # patch read, #300 review round 14 — that case has its own test.)
         broken = self._staged("93", signoff_action="accept", pr_url=_PR)
         (broken / "patch.diff").write_bytes(b"\xff\xfe not utf-8 \x00")
         healthy = self._tracker("94")
         self.issue_states["93"] = _OPEN
         self.issue_states["94"] = _CLOSED
-        self.pr_states[_PR] = "MERGED"
+        self.pr_states[_PR] = "OPEN"
         rc, out, _err = self._run(apply=True)
         self.assertEqual(rc, 0)
         self.assertIn("planning failed", out)              # the damaged row reported

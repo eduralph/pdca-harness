@@ -258,6 +258,40 @@ class PlanNeverReopensResolved(unittest.TestCase):
         self.assertIn("--repo", seen[0])
         self.assertIn("example-org/example-repo", seen[0])
 
+    def test_repo_less_github_tracker_source_derives_from_the_url(self) -> None:
+        # #302 review round 14: a documented `type = "github"` tracker source may
+        # omit `repo` (gh's default serves the SEED) — the reopen probe must then
+        # fall back to the same [tracker].url derivation as the legacy path, not
+        # permanently disable revalidation via the `not repo` guard.
+        self.cfg.plan_sources = [{"type": "github", "role": "tracker"}]
+        self.assertEqual(sources.tracker_github_repo(self.cfg),
+                         (True, "example-org/example-repo"))
+        self.cfg.tracker_url = ""                          # nothing to derive from
+        self.assertEqual(sources.tracker_github_repo(self.cfg), (True, ""))
+
+    def test_unremovable_brief_fails_closed_without_aborting_the_batch(self) -> None:
+        # #302 review round 14: when the set-aside rename fails, the authored brief
+        # must not survive (it would shadow the marker as PLANNED next run) — it is
+        # deleted instead; and when even that fails, the loud manual-intervention
+        # path continues with the REMAINING bundles instead of aborting the session.
+        import io
+        from contextlib import redirect_stderr
+        d = self._resolved("35")
+        (d / "brief.md").write_text("- **Slug:** stale\n", encoding="utf-8")
+        sibling = self._resolved("36")
+        (sibling / "brief.md").write_text("- **Slug:** stale2\n", encoding="utf-8")
+        err = io.StringIO()
+        with mock.patch.object(leaves.Path, "rename",
+                               side_effect=OSError("locked")), \
+                mock.patch.object(sources.shutil, "which", return_value=None), \
+                redirect_stderr(err):
+            leaves._reject_resolved_briefs(
+                self.cfg, {"issue_35", "issue_36"})        # no abort mid-loop
+        self.assertFalse((d / "brief.md").exists())        # deleted: cannot drive
+        self.assertFalse((sibling / "brief.md").exists())  # sibling still processed
+        self.assertIn("DELETED", err.getvalue())
+        self.assertEqual(state.state(d), state.RESOLVED)   # fail-closed terminal
+
     def test_reopen_probe_refuses_without_a_derivable_repo(self) -> None:
         # No tracker URL to derive the repo from → the probe cannot know WHICH repo's
         # issue to read, so it refuses (conservative False) instead of letting gh

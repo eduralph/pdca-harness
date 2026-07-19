@@ -119,12 +119,24 @@ def tracker_github_repo(cfg: Config) -> tuple[bool, str]:
     for spec in cfg.plan_sources:
         if isinstance(spec, dict) and _is_tracker_source(spec):
             if (spec.get("type") or "").strip().lower() == "github":
-                return True, str(spec.get("repo", "") or "")
+                # A repo-less github tracker source is documented and legal (gh's
+                # default serves the SEED, which runs from the project root) — but
+                # the reopen probe must never guess, so fall back to the same URL
+                # derivation the legacy path uses (#302 review round 14): without
+                # it, `not repo` permanently disabled revalidation for exactly
+                # these configurations.
+                return True, (str(spec.get("repo", "") or "")
+                              or _repo_from_url(cfg.tracker_url))
             return False, ""
     if (cfg.tracker_system or "").strip().lower() != "github":
         return False, ""
-    m = _GH_URL_RE.search(cfg.tracker_url or "")
-    return True, (f"{m.group(1)}/{m.group(2)}" if m else "")
+    return True, _repo_from_url(cfg.tracker_url)
+
+
+def _repo_from_url(url: str) -> str:
+    """``owner/repo`` parsed out of a GitHub tracker URL, or ""."""
+    m = _GH_URL_RE.search(url or "")
+    return f"{m.group(1)}/{m.group(2)}" if m else ""
 
 
 def tracker_issue_reopened(cfg: Config, issue_id: str) -> bool:

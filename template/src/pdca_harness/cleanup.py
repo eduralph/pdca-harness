@@ -295,6 +295,16 @@ def _plan_bundle(cfg: Config, d: Path, *, issue_side: bool, repo: str,
 
     if remote.get("state") == "OPEN":
         if st == state.COMPLETE:
+            # A recorded MERGED PR is checked FIRST (#300 review round 14): it is
+            # definitive evidence a fix shipped, while an absent/blank patch.diff may
+            # merely be damage (deleted, truncated) — closing such a bundle as "not
+            # planned" would record the wrong reason and a misleading no-fix comment.
+            if pr_url and _pr_state(pr_url) == "MERGED":
+                return _Row(d.name, st, "OPEN",
+                            "comment + close as completed (fix merged)",
+                            apply=[lambda: _close_issue(
+                                d, number, repo, reason="completed",
+                                fallback_body=f"Fixed by {pr_url} (merged).")])
             if _empty_patch(d):
                 return _Row(d.name, st, "OPEN",
                             "close as not planned (accepted close/no-fix disposition)",
@@ -303,12 +313,6 @@ def _plan_bundle(cfg: Config, d: Path, *, issue_side: bool, repo: str,
                                 fallback_body="Closed as not planned: the review "
                                               "concluded a close/no-fix disposition "
                                               "(see the cycle records).")])
-            if pr_url and _pr_state(pr_url) == "MERGED":
-                return _Row(d.name, st, "OPEN",
-                            "comment + close as completed (fix merged)",
-                            apply=[lambda: _close_issue(
-                                d, number, repo, reason="completed",
-                                fallback_body=f"Fixed by {pr_url} (merged).")])
             return _Row(d.name, st, "OPEN",
                         "PR not merged (or not published) — issue stays open until merge")
         if st == state.DISCONTINUED:
@@ -360,6 +364,17 @@ def run(cfg: Config, ids: list[str], *, apply: bool = False, repo: str = "",
         print(f"cleanup: tracker '{cfg.tracker_system or 'unset'}' is not GitHub — "
               "issue-state reconciliation skipped; PR-side checks still run",
               file=sys.stderr)
+    elif not repo:
+        # FAIL CLOSED on an unknown tracker repository (#300 review round 14):
+        # letting `gh issue view/close` fall back to the harness checkout's default
+        # repo could inspect — and under --apply CLOSE — an unrelated same-numbered
+        # issue. Issue-side reconciliation needs a derived or explicit repo.
+        print("cleanup: the GitHub tracker's repository could not be derived "
+              "([tracker].url unset/unparseable, no [[plan.source]] repo) — "
+              "issue-side reconciliation skipped; pass --repo OWNER/REPO to enable "
+              "it (gh's checkout-default repo could hold unrelated same-numbered "
+              "issues)", file=sys.stderr)
+        issue_side = False
 
     # Preflight (fail-closed, before any loop): every class needs gh.
     if shutil.which("gh") is None:
