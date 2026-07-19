@@ -440,6 +440,14 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
             print(f"{state.COMPLETE}\t{d}", file=sys.stderr)
             print(f"  already complete — nothing to run. To redo it: rm -rf {d}", file=sys.stderr)
             return 0
+        if d.exists() and state.state(d) == state.RESOLVED:
+            # A settled tracker item is a successful no-op, like COMPLETE (#302 review
+            # round 3): the multi-id path skips it and exits 0 — automation must not
+            # read this terminal state as a failed flow on the single-id path either.
+            print(f"{state.RESOLVED}\t{d}", file=sys.stderr)
+            print("  tracker item resolved outside a cycle — nothing to run. Reopen it "
+                  "in the tracker to plan it again.", file=sys.stderr)
+            return 0
         if not d.exists():
             d.mkdir(parents=True)
         final = flow.flow(cfg, iid, csv=args.from_csv,
@@ -448,7 +456,10 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
         if final == state.AWAITING_SIGNOFF:
             for it in signoff.open_needs_human(d / "SUMMARY.md"):
                 print(f"    {it}")
-        return 0 if final in (state.COMPLETE, state.AWAITING_SIGNOFF) else 1
+        # RESOLVED counts as success too: the flow can DISCOVER the resolution mid-run
+        # (the Plan seed fetches notes that carry the terminal marker, #302) — a settled
+        # ticket correctly skipped is not a failed cycle.
+        return 0 if final in (state.COMPLETE, state.AWAITING_SIGNOFF, state.RESOLVED) else 1
 
     # Several ids: batch — auto-plan unbriefed, drive concurrently, cheap-first sign-off.
     try:
