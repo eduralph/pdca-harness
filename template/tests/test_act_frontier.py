@@ -161,6 +161,7 @@ class MarkerFormat(unittest.TestCase):
         from pdca_harness.config import LeafConfig
         reviewed_early = _freeze(self.cfg, "50")
         self.cfg.act = LeafConfig(mode="stub", interactive=True)
+        self.cfg.act_cadence = 1                           # due: run_act re-checks (#299 r11)
         self.cfg.templates_dir = self.cfg.root / "no-templates"
 
         real_stub = leaves._stub_act
@@ -232,6 +233,46 @@ class MarkerFormat(unittest.TestCase):
                          ["issue_10"])
         del b  # (fixture bookkeeping)
 
+    def test_concurrent_auto_act_sessions_serialize(self) -> None:
+        # #299 review round 11: two flows completing at once both pass act_due before
+        # either advances the marker — the loser must skip (non-blocking session
+        # lock), never append a duplicate act-log entry over the same snapshot.
+        from pdca_harness import leaves, worktree
+        from pdca_harness.config import LeafConfig
+        _freeze(self.cfg, "95")
+        self.cfg.act = LeafConfig(mode="stub", interactive=True)
+        self.cfg.act_cadence = 1
+        self.cfg.templates_dir = self.cfg.root / "no-templates"
+        self.cfg.process_dir.mkdir(parents=True, exist_ok=True)
+        session = (self.cfg.process_dir / ".act-session.lock").open("w")
+        self.addCleanup(session.close)
+        worktree._lock_file(session, wait=False)           # the "other" running Act
+        err = io.StringIO()
+        try:
+            with redirect_stderr(err):
+                leaves.run_act(self.cfg, "2026-07-19")
+        finally:
+            worktree._unlock_file(session)
+        self.assertIn("another Act session", err.getvalue())
+        self.assertFalse(self.marker.exists())             # frontier untouched
+        self.assertFalse((self.cfg.process_dir / "act-log.md").exists())  # no dup entry
+
+    def test_auto_act_no_longer_due_after_a_concurrent_session_skips(self) -> None:
+        # The loser that acquires AFTER the winner finished re-checks the cadence
+        # under the session lock and skips instead of duplicating the review.
+        from pdca_harness import leaves
+        from pdca_harness.config import LeafConfig
+        _freeze(self.cfg, "96")
+        self.cfg.act = LeafConfig(mode="stub", interactive=True)
+        self.cfg.act_cadence = 1
+        self.cfg.templates_dir = self.cfg.root / "no-templates"
+        act.mark_reviewed(self.cfg, date="2026-07-19")     # the winner covered it all
+        err = io.StringIO()
+        with redirect_stderr(err):
+            leaves.run_act(self.cfg, "2026-07-19")
+        self.assertIn("no longer due", err.getvalue())
+        self.assertFalse((self.cfg.process_dir / "act-log.md").exists())
+
     def test_confirming_midsession_revalidation_still_advances_the_frontier(self) -> None:
         # #299 review round 6: the stamp's `changed` VERDICT decides, never its mtime
         # alone — a concurrent revalidation that CONFIRMED the frozen record is not
@@ -241,6 +282,7 @@ class MarkerFormat(unittest.TestCase):
         from pdca_harness.config import LeafConfig
         confirmed = _freeze(self.cfg, "70")
         self.cfg.act = LeafConfig(mode="stub", interactive=True)
+        self.cfg.act_cadence = 1                           # due: run_act re-checks (#299 r11)
         self.cfg.templates_dir = self.cfg.root / "no-templates"
         real_stub = leaves._stub_act
 
