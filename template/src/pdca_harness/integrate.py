@@ -21,6 +21,7 @@ builds on a broken base. Mechanics are deterministic ``git`` subprocesses (no mo
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
 from pathlib import Path
 
@@ -67,12 +68,54 @@ def _git(repo: Path, *args: str) -> int:
                           capture_output=True, text=True).returncode
 
 
+# The harness-owned sibling-dir infix for integration worktrees; single-sourced so the
+# footprint sweeper (issue #297) globs exactly what this module creates.
+INTEG_INFIX = ".pdca-integ-"
+
+
 def _integ_worktree(primary: Path, base: str) -> Path:
     """The dedicated worktree a target's integration branch is assembled in — a sibling of
     the primary checkout, keyed by ``base`` (injective, like the branch) so two bases on the
     same repo don't share one worktree (#187), reused (reset) across folds, never the Do/Check
     lane worktrees."""
-    return primary.parent / (primary.name + ".pdca-integ-" + _flatten_base(base))
+    return primary.parent / (primary.name + INTEG_INFIX + _flatten_base(base))
+
+
+@contextlib.contextmanager
+def integ_lock(wt: Path, *, wait: bool = True):
+    """Advisory exclusive lock on an integration worktree's LIFECYCLE (#297 review
+    round 6); yields whether it was acquired. :func:`fold`'s build (prepare →
+    apply/commit → push) and the between-waves re-gate hold it for their whole
+    critical section, and the footprint sweeper tries it non-blocking — without it, a
+    flow finishing on one base could force-remove the worktree where ANOTHER process
+    is mid-fold or mid-re-gate, failing that run or invalidating its re-gate result
+    (`_sweep_quietly` only joins its own lane threads). The ``.lock`` sidecar lives
+    NEXT TO the worktree (same convention as the lane lock), so it survives worktree
+    removal and two processes racing over a recreated tree still serialize. Blocking
+    for users (concurrent folds of the same target serialize instead of clobbering
+    each other's ``checkout -B``); never raises itself — an unopenable/untakeable
+    lock yields False and the CALLER decides (#297 review round 7): fold and the
+    re-gate fail CLOSED with :class:`IntegrationError`, the sweeper leaves the tree
+    alone."""
+    from . import worktree  # lazy: keep integrate importable without the lock helpers
+    try:
+        fh = wt.with_name(wt.name + ".lock").open("w")
+    except OSError:
+        yield False
+        return
+    try:
+        try:
+            worktree._lock_file(fh, wait=wait)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            with contextlib.suppress(OSError):
+                worktree._unlock_file(fh)
+    finally:
+        fh.close()
 
 
 def _targeted(patched: list[Path]) -> list[tuple[Path, str, str]]:
@@ -86,7 +129,8 @@ def _targeted(patched: list[Path]) -> list[tuple[Path, str, str]]:
     return out
 
 
-def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False
+def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+         locks: contextlib.ExitStack | None = None
          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
     """Fold the cumulative accepted bundles' patches onto a per-target integration branch.
 
@@ -104,6 +148,14 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False
     Dry-run (offline rehearse / CI, where the publisher leaf is stubbed) prints each group's
     git plan and returns the branches with ``None`` worktrees — no worktree, no push — so the
     next wave falls back to the target base, which is what an offline rehearse wants.
+
+    ``locks`` (#297 review round 10): when the caller passes an ``ExitStack``, each
+    target's :func:`integ_lock` is entered on IT and stays held after fold returns —
+    covering the caller's re-gate window, so no gap exists in which another flow's
+    publish-boundary sweep could remove the tree (or another fold rewrite it) between
+    the fold and ``gates.run_integration`` attesting it. The caller releases every
+    lock by exiting the stack; ``None`` keeps the per-group scope (lock released when
+    the group's build finishes).
     """
     targeted = _targeted([d for d in accepted if _has_patch(d)])
     if not targeted:
@@ -118,7 +170,13 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False
 
     base_remote = cfg.base_remote
     result: dict[tuple[str, str], tuple[str, Path | None]] = {}
-    for (repo_spec, base), bundles in groups.items():
+    # Groups are processed in SORTED (repo, base) order (#297 review round 11): with a
+    # caller-held ``locks`` stack the per-target locks accumulate, and two concurrent
+    # multi-target flows encountering their groups in opposite bundle order would
+    # otherwise deadlock (A holds target-1 waiting on target-2 while B holds target-2
+    # waiting on target-1). A globally consistent acquisition order makes them
+    # serialize instead. Stack order WITHIN each group is untouched.
+    for (repo_spec, base), bundles in sorted(groups.items()):
         branch = integration_branch(cfg, base)
         repo = publish._checkout_path(cfg, repo_spec)
         if dry_run:
@@ -132,23 +190,38 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False
             result[(repo_spec, base)] = (branch, None)
             continue
 
-        wt = _prepare_worktree(repo, base_remote, base)
-        if _git(wt, "checkout", "-B", branch, f"{base_remote}/{base}") != 0:
-            raise IntegrationError(f"could not start {branch} off {base_remote}/{base}")
-        for d in bundles:
-            patch = (d / "patch.diff").resolve()
-            if _git(wt, "apply", str(patch)) != 0:
+        # The whole build holds the worktree's lifecycle lock (#297 review round 6):
+        # a concurrent sweep must not remove the tree mid-fold, and two concurrent
+        # folds of the same target serialize instead of fighting over `checkout -B`.
+        # With a caller-supplied ``locks`` stack the lock OUTLIVES this block and
+        # keeps covering the caller's re-gate (#297 review round 10).
+        with contextlib.ExitStack() as scope:
+            holder = locks if locks is not None else scope
+            held = holder.enter_context(integ_lock(_integ_worktree(repo, base)))
+            if not held:
+                # Fail CLOSED (#297 review round 7): proceeding unserialized could
+                # apply/push a mixed stack interleaved with another fold's commits.
                 raise IntegrationError(
-                    f"{d.name}'s patch does not apply onto {branch} — an undeclared "
-                    f"cross-wave overlap; declare the conflict / re-order, then re-run")
-            _git(wt, "add", "--all")
-            if _git(wt, "commit", "-m", f"pdca-integrate: {d.name}") != 0:
-                raise IntegrationError(f"could not commit {d.name} onto {branch}")
-        # A harness-owned, rebuilt-each-run branch: a plain force is correct (every fold
-        # rewrites it off the base), and it isn't a human PR branch needing lease safety.
-        if _git(wt, "push", "--force", "origin", branch) != 0:
-            raise IntegrationError(
-                f"could not push {branch} to origin — the next wave cannot stack on it")
+                    f"could not take the integration lock next to "
+                    f"{_integ_worktree(repo, base).name} — fix the checkout's parent "
+                    f"directory (permissions?), then re-run")
+            wt = _prepare_worktree(repo, base_remote, base)
+            if _git(wt, "checkout", "-B", branch, f"{base_remote}/{base}") != 0:
+                raise IntegrationError(f"could not start {branch} off {base_remote}/{base}")
+            for d in bundles:
+                patch = (d / "patch.diff").resolve()
+                if _git(wt, "apply", str(patch)) != 0:
+                    raise IntegrationError(
+                        f"{d.name}'s patch does not apply onto {branch} — an undeclared "
+                        f"cross-wave overlap; declare the conflict / re-order, then re-run")
+                _git(wt, "add", "--all")
+                if _git(wt, "commit", "-m", f"pdca-integrate: {d.name}") != 0:
+                    raise IntegrationError(f"could not commit {d.name} onto {branch}")
+            # A harness-owned, rebuilt-each-run branch: a plain force is correct (every fold
+            # rewrites it off the base), and it isn't a human PR branch needing lease safety.
+            if _git(wt, "push", "--force", "origin", branch) != 0:
+                raise IntegrationError(
+                    f"could not push {branch} to origin — the next wave cannot stack on it")
         result[(repo_spec, base)] = (branch, wt)
     return result
 

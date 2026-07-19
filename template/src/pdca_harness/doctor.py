@@ -65,6 +65,100 @@ def _have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
+def _footprint_counts(cfg: Config) -> tuple[int, int, int]:
+    """(lane, integration, orphaned-overflow) sibling-worktree counts (issue #297) — a
+    cheap glob-count, never a size walk. Targets come from :func:`sweep.target_checkouts`
+    so the common sibling-convention setup with NO ``[publisher.checkouts]`` entries is
+    still covered (#297 review — the counts were permanently 0 there), and only overflow
+    trees whose creating process is provably gone count as orphans (a live pid may be
+    another process's in-flight gate read)."""
+    from . import integrate, sweep, worktree  # lazy: doctor stays import-light
+    lanes = integs = ovfs = 0
+    for primary in sweep.target_checkouts(cfg):
+        sibs = [p for p in primary.parent.glob(primary.name + worktree.WT_SUFFIX + "*")
+                if p.is_dir()]
+        ovfs += len(worktree.orphan_overflow_dirs(primary))
+        lanes += sum(1 for p in sibs if worktree._OVF_SUFFIX not in p.name)
+        integs += sum(1 for p in primary.parent.glob(
+            primary.name + integrate.INTEG_INFIX + "*") if p.is_dir())
+    return lanes, integs, ovfs
+
+
+def _space_roots(cfg: Config, *, dev=lambda p: p.stat().st_dev) -> list[Path]:
+    """One representative path per DISTINCT filesystem the harness writes on (#297
+    review round 7): ``cfg.root`` plus each target checkout's PARENT directory. Lane,
+    integration and overflow trees are created as SIBLINGS of the checkout — under
+    ``checkout.parent`` — so when the checkout is itself a mount point, statting the
+    checkout would measure the mounted filesystem while the sibling worktrees fill
+    the parent's (#297 review round 9). Measuring the parent covers both: same
+    filesystem in the common case, the right one when they differ. Deduped by
+    ``st_dev``; an unstat-able path is kept so its row WARNs instead of vanishing.
+    ``dev`` is injected for tests — real mount points can't be fabricated in a unit
+    suite (the ``probe`` pattern from ``cli._suspend_inhibitor_argv``)."""
+    from . import sweep  # lazy: doctor stays import-light
+    roots: list[Path] = []
+    seen: set[int] = set()
+    for where in [cfg.root, *(p.parent for p in sweep.target_checkouts(cfg))]:
+        try:
+            d = dev(where)
+        except OSError:
+            roots.append(where)
+            continue
+        if d not in seen:
+            seen.add(d)
+            roots.append(where)
+    return roots
+
+
+def _quota_free_gb(where: Path, *, runner=subprocess.run) -> float | None:
+    """Best-effort per-USER quota headroom (GiB) on the filesystem holding ``where``,
+    or ``None`` when unknowable.
+
+    ``shutil.disk_usage`` reports filesystem-wide free blocks — but the motivating
+    #297 incident was ``EDQUOT``: a shared volume showing hundreds of free GiB while
+    THIS user could no longer write (#297 review round 12). Parse linuxquota's
+    ``quota -u -w --show-mntpoint --hide-device``: one row per quota'd filesystem
+    (``<mountpoint> <blocks> <soft> <hard> …``, 1 KiB block units); the row whose
+    mountpoint is the longest prefix of ``where`` supplies the headroom against its
+    hard (else soft) limit. No ``quota`` binary, no matching row, a limit of 0 (no
+    quota) or any exec/parse oddity ⇒ ``None`` — the fs-level number then stands and
+    the row says quotas were not probed. ``runner`` is injected for tests (real
+    quotas can't be fabricated in a unit suite)."""
+    if shutil.which("quota") is None:
+        return None
+    try:
+        proc = runner(["quota", "-u", "-w", "--show-mntpoint", "--hide-device"],
+                      capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # quota exits NON-ZERO when a limit is exceeded — the output still carries the
+    # numbers, which is exactly the case this probe most needs to see.
+    try:
+        target = str(where.resolve())
+    except OSError:
+        return None
+    best: tuple[int, float] | None = None  # (mountpoint length, headroom GiB)
+    for line in (proc.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) < 4 or not parts[0].startswith("/"):
+            continue  # headers / device rows / continuation lines
+        mnt = parts[0]
+        try:
+            blocks = float(parts[1].rstrip("*"))  # '*' marks an exceeded soft limit
+            soft = float(parts[2])
+            hard = float(parts[3])
+        except ValueError:
+            continue
+        limit = hard if hard > 0 else soft
+        if limit <= 0:
+            continue  # no quota on this filesystem
+        if target == mnt or target.startswith(mnt.rstrip("/") + "/"):
+            headroom = max(0.0, limit - blocks) / (1024 ** 2)  # 1 KiB blocks → GiB
+            if best is None or len(mnt) > best[0]:
+                best = (len(mnt), headroom)
+    return best[1] if best else None
+
+
 # What Claude Code's Linux sandbox needs on PATH before it will actually engage. Missing any
 # of these, it does not fail — it disables the sandbox and runs unconfined (#289).
 # binary on PATH -> (what it is, the PACKAGE that provides it). The two differ for bubblewrap:
@@ -304,6 +398,45 @@ def run(cfg: Config, *, strict: bool = False) -> int:
                   f"sudo apt install {package} — without it the leaf sandbox silently does NOT "
                   "engage and the bounded exemption does not hold",
                   required=True)
+
+    print()
+    print("== workspace ==")
+    # Footprint preflight (issue #297): quota exhaustion mid-`cargo test` produces an
+    # arbitrary failing test name, so a gating red gets misattributed to the patch until a
+    # human traces it. Surface it HERE, before a run — statvfs is O(1); never `du` a
+    # multi-hundred-GB tree.
+    if cfg.doctor_min_free_gb > 0:
+        for where in _space_roots(cfg):
+            label = ("free disk space" if where == cfg.root
+                     else f"free disk space ({where.name})")
+            try:
+                fs_gb = shutil.disk_usage(where).free / (1024 ** 3)
+                quota_gb = _quota_free_gb(where)
+                # The EFFECTIVE headroom is the tighter of filesystem free and this
+                # user's quota (#297 review round 12): the motivating incident was
+                # EDQUOT on a shared volume that showed hundreds of fs-level GiB —
+                # disk_usage alone cannot see per-user quotas.
+                bound = quota_gb is not None and quota_gb < fs_gb
+                eff = quota_gb if bound else fs_gb
+                low = eff < cfg.doctor_min_free_gb
+                what = "user-quota headroom" if bound else "free"
+                caveat = ("" if quota_gb is not None or shutil.which("quota")
+                          else " (fs-level; per-user quotas not visible — install "
+                               "quota-tools to probe them)")
+                r.row(WARN if low else OK, label,
+                      f"{eff:.1f} GiB {what} < {cfg.doctor_min_free_gb:g} GiB "
+                      "threshold — gate runs will false-red on quota; run "
+                      "'pdca sweep' (or 'pdca sweep --remove')" if low
+                      else f"{eff:.1f} GiB {what}{caveat}")
+            except OSError as exc:
+                r.row(WARN, label, f"could not stat {where}: {exc}")
+    lanes_n, integs, ovfs = _footprint_counts(cfg)
+    if ovfs:
+        r.row(WARN, "harness worktree footprint",
+              f"{ovfs} orphaned overflow tree(s) (crash leftovers) — run 'pdca sweep'")
+    else:
+        r.row(OK, "harness worktree footprint",
+              f"{lanes_n} lane / {integs} integration worktree(s)")
 
     rows = _expand_checks(getattr(cfg, "doctor_checks", []), cfg.lanes)
     if rows:
