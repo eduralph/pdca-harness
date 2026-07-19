@@ -355,6 +355,23 @@ class MarkerFormat(unittest.TestCase):
                          ["issue_40"])
         self.assertEqual(act.cycles_since_review(self.cfg), 1)   # cadence sees it too
 
+    def test_withheld_delta_also_leaves_the_prior_frontier(self) -> None:
+        # #299 review round 20: a re-review (auto-Act / --all) of an already-covered
+        # bundle whose revalidation delta landed mid-session must not have the union
+        # re-add it from the PRIOR frontier — even when revalidate's unmark is
+        # interrupted after durably writing the stamp, the delta (a PASS→FAIL
+        # regression included) stays in the default scope.
+        d = _freeze(self.cfg, "70")
+        act.mark_reviewed(self.cfg, date="2026-07-01")     # covered in prior
+        started = time.time()
+        (d / "revalidation-2026-07-19.json").write_text(
+            json.dumps({"changed": True, "rows": []}), encoding="utf-8")
+        withheld = act.mark_reviewed(self.cfg, date="2026-07-19",
+                                     delta_guard=started)  # the re-review
+        self.assertEqual(withheld, ["issue_70"])
+        self.assertEqual([b.name for b in act.unreviewed_bundles(self.cfg)],
+                         ["issue_70"])                     # dropped from prior too
+
     def test_fingerprint_is_line_ending_invariant(self) -> None:
         # #299 review round 19: a frontier shared between checkouts with different
         # core.autocrlf settings must not read unchanged content as a new

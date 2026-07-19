@@ -297,7 +297,13 @@ def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "
                 withheld = sorted(d.name for d in src if delta_since(d, delta_guard))
                 src = [d for d in src if d.name not in withheld]
             new = {d.name for d in src}
-            covered = sorted((prior | new) & frozen_names)
+            # Withheld names leave the PRIOR frontier too (#299 review round 20): a
+            # re-review (auto-Act, --all) of an already-covered bundle whose delta
+            # landed mid-session must not be re-added by the union — revalidate's
+            # own unmark_reviewed can be interrupted after durably writing the
+            # stamp, and the unchanged SUMMARY fingerprint would then keep the new
+            # delta (a PASS→FAIL regression included) covered indefinitely.
+            covered = sorted(((prior - set(withheld)) | new) & frozen_names)
             # Fingerprints (#299 review round 16): newly covered names get the hash
             # THIS review saw; retained names keep the hash THEIR review saw (a
             # recreated bundle must not be re-attested by a review that never read
@@ -684,7 +690,7 @@ def append_reviewed(cfg: Config, entries: list[ActEntry], render, *, date: str,
             new = {e.bundle.name for e in kept} - set(withheld)
             frozen = frozen_bundles(cfg)
             frozen_names = {d.name for d in frozen}
-            covered = sorted((prior | new) & frozen_names)
+            covered = sorted(((prior - set(withheld)) | new) & frozen_names)  # (#299 r20)
             by_name = {d.name: d for d in frozen}
             # The entries carry the hash captured when their SUMMARY was extracted
             # (#299 review round 17) — attest the logged content, never whatever a
