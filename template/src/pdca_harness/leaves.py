@@ -487,18 +487,29 @@ def _reject_resolved_briefs(cfg: Config, resolved_before: set[str]) -> None:
                 # Clear the marker + set the notes aside so the bundle reads
                 # UNPLANNED, and set THIS brief aside too — the next Plan seeds the
                 # fresh thread and re-briefs with the reopen context in view.
-                sources.clear_resolved_marker(b)  # sets closure-era notes.json aside
+                cleared = sources.clear_resolved_marker(b)  # closure-era notes aside
                 aside = b / "brief.stale-reopen-context.md"
                 n = 2
                 while aside.exists():
                     aside = b / f"brief.stale-reopen-context-{n}.md"
                     n += 1
                 bp.rename(aside)
-                print(f"plan: {name} — the tracker issue is OPEN again, but this "
-                      f"session's brief was authored from the closure-era notes; "
-                      f"cleared the stale resolved marker, set the notes and the "
-                      f"brief aside ({aside.name}), and DEFERRED the bundle — the "
-                      "next Plan re-briefs it from the fresh thread", file=sys.stderr)
+                if cleared:
+                    print(f"plan: {name} — the tracker issue is OPEN again, but this "
+                          f"session's brief was authored from the closure-era notes; "
+                          f"cleared the stale resolved marker, set the notes and the "
+                          f"brief aside ({aside.name}), and DEFERRED the bundle — the "
+                          "next Plan re-briefs it from the fresh thread",
+                          file=sys.stderr)
+                else:
+                    # #302 review round 11: never claim "cleared" over a failed
+                    # rename — the bundle honestly remains RESOLVED (the stale brief
+                    # is still set aside: it must not drive in any case).
+                    print(f"plan: {name} — the tracker issue is OPEN again, but the "
+                          f"closure-era notes could not be set aside; the stale-"
+                          f"context brief was set aside ({aside.name}) and the "
+                          "bundle remains RESOLVED — fix the bundle directory, then "
+                          "re-run", file=sys.stderr)
                 continue
             # A UNIQUE destination per rejection (#302 review round 3): a later session
             # re-briefing the same resolved tracker must not overwrite the first

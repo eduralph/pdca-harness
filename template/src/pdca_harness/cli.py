@@ -486,7 +486,11 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
             # existing notes.json — so revalidate against the live tracker first, and
             # a reopened issue clears the marker and proceeds to a real flow.
             if sources.tracker_issue_reopened(cfg, iid):
-                sources.clear_resolved_marker(d)
+                if not sources.clear_resolved_marker(d):
+                    # clear_resolved_marker printed the why (#302 review round 11):
+                    # claiming "planning it" over a still-resolved bundle would
+                    # silently suppress the reopened work — fail loudly instead.
+                    return 1
                 print(f"flow: issue_{iid} — the tracker issue is OPEN again; cleared "
                       "the resolved marker and planning it.", file=sys.stderr)
             else:
@@ -520,14 +524,19 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
 
 
 def _report_batch(results: dict[str, str]) -> int:
-    """Print a batch result map and return a process code (0 iff all COMPLETE)."""
+    """Print a batch result map and return a process code (0 iff every bundle reached
+    a SUCCESSFUL terminal — COMPLETE, or RESOLVED (#302 review round 11): a tracker
+    item settled outside the cycle is a successful no-op on the batch path exactly as
+    it is on the single-id path; automation must not read it as a failed flow."""
     if not results:
         print("flow: nothing to drive — no in-flight briefs among the ids.", file=sys.stderr)
         return 0
     for iid, st in sorted(results.items()):
         print(f"{st}\t{iid}")
-    done = sum(1 for s in results.values() if s == state.COMPLETE)
-    print(f"flow: {done}/{len(results)} complete")
+    done = sum(1 for s in results.values() if s in (state.COMPLETE, state.RESOLVED))
+    resolved = sum(1 for s in results.values() if s == state.RESOLVED)
+    tail = f" ({resolved} resolved in the tracker)" if resolved else ""
+    print(f"flow: {done}/{len(results)} complete{tail}")
     return 0 if done == len(results) else 1
 
 

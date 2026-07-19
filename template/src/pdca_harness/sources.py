@@ -155,7 +155,7 @@ def tracker_issue_reopened(cfg: Config, issue_id: str) -> bool:
     return isinstance(data, dict) and data.get("state") == "OPEN"
 
 
-def clear_resolved_marker(d: Path) -> None:
+def clear_resolved_marker(d: Path) -> bool:
     """The tracker REOPENED a resolved item: retire the closure-era notes entirely.
 
     Deleting only the ``resolved`` key would leave the stale notes.json in place, and
@@ -163,10 +163,15 @@ def clear_resolved_marker(d: Path) -> None:
     notes.json — the planner would then brief on the pre-closure thread, missing every
     comment added at reopen (#302 review round 5). The whole file is set aside under a
     unique name (kept inspectable, never deleted), so the next Plan seed re-fetches
-    the fresh thread and the bundle reads UNPLANNED again."""
+    the fresh thread and the bundle reads UNPLANNED again.
+
+    Returns whether the marker is actually GONE (#302 review round 11, filed on PR
+    #308): a failed rename leaves the bundle RESOLVED, and a caller announcing
+    "cleared — planning it" over that would silently suppress the reopened work.
+    The failure itself is printed here (with the why); callers decide the outcome."""
     notes = d / "notes.json"
     if not notes.exists():
-        return
+        return True
     aside = d / "notes.superseded-by-reopen.json"
     n = 2
     while aside.exists():
@@ -174,8 +179,12 @@ def clear_resolved_marker(d: Path) -> None:
         n += 1
     try:
         notes.rename(aside)
-    except OSError:
-        pass  # best-effort: an unmovable file keeps the terminal no-op, never a crash
+    except OSError as exc:
+        print(f"sources: {d.name} — could not set the closure-era notes.json aside "
+              f"({exc}); the resolved marker STAYS and the reopened issue is not "
+              "planned — fix the bundle directory, then re-run", file=sys.stderr)
+        return False
+    return True
 
 
 def _tracker_dest(d: Path, sources_dir: Path, spec: dict, default_name: str) -> Path:

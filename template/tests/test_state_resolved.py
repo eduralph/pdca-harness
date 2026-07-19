@@ -280,6 +280,39 @@ class PlanNeverReopensResolved(unittest.TestCase):
                 self.assertFalse(sources.tracker_issue_reopened(self.cfg, "31"),
                                  payload)
 
+    def test_report_batch_counts_resolved_as_success(self) -> None:
+        # #302 review round 11: a bundle ending RESOLVED mid-batch is a successful
+        # terminal exactly as on the single-id path — automation must not read the
+        # batch flow as failed over it.
+        import io
+        from contextlib import redirect_stdout
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = cli._report_batch({"1": state.COMPLETE, "2": state.RESOLVED})
+        self.assertEqual(rc, 0)
+        self.assertIn("2/2 complete (1 resolved in the tracker)", out.getvalue())
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = cli._report_batch({"1": state.COMPLETE, "2": state.PLANNED})
+        self.assertEqual(rc, 1)                            # genuine non-terminal fails
+
+    def test_failed_marker_clear_is_reported_not_swallowed(self) -> None:
+        # #302 review round 11 (filed on PR #308): an un-renamable notes.json must
+        # surface as False + a loud line — callers would otherwise announce
+        # "cleared — planning it" while the bundle silently stays RESOLVED.
+        import io
+        import os
+        from contextlib import redirect_stderr
+        d = self._resolved("33")
+        os.chmod(d, 0o555)                                 # rename must fail
+        self.addCleanup(os.chmod, d, 0o755)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            ok = sources.clear_resolved_marker(d)
+        self.assertFalse(ok)
+        self.assertIn("STAYS", err.getvalue())
+        self.assertEqual(state.state(d), state.RESOLVED)   # honestly still resolved
+
     def test_single_id_flow_exits_zero_on_a_resolved_bundle(self) -> None:
         # #302 review round 3: parity with the multi-id path — a settled tracker item
         # correctly skipped is a successful no-op, not a failed flow.
