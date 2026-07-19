@@ -124,6 +124,23 @@ class SweepRealGit(unittest.TestCase):
         self.assertTrue((self.lane / "stray.txt").exists())   # nothing touched
         self.assertTrue((self.tmp / "checkout.pdca-integ-main").exists())
         self.assertTrue(self.ovf.exists())
+        # #297 review round 9: "reports without touching" includes the lifecycle
+        # sidecars — the dry-run contention probe must not CREATE .lock files.
+        self.assertEqual(list(self.tmp.glob("*.lock")), [])
+
+    def test_dry_run_still_reports_a_busy_lane(self) -> None:
+        # The non-mutating probe still detects real contention: a held lane lock
+        # shows as busy in the dry-run report, and the sidecar is left as-is.
+        d = self._seed_footprint()
+        lock = self.lane.with_name(self.lane.name + ".lock").open("w")
+        self.addCleanup(lock.close)
+        worktree._lock_file(lock, wait=True)
+        try:
+            lines = sweep.sweep(self.cfg, [d], mode="remove", dry_run=True)
+        finally:
+            worktree._unlock_file(lock)
+        self.assertTrue(any("busy" in ln for ln in lines))
+        self.assertTrue(self.lane.exists())
 
     def test_live_owner_overflow_tree_is_left_alone(self) -> None:
         # #297 review: an overflow name embeds its creator pid; a LIVE pid may be

@@ -116,6 +116,18 @@ class Doctor(unittest.TestCase):
         self.assertIn("free disk space (elsewhere-checkout)", out)
         self.assertIn("pdca sweep", out)
 
+    def test_space_roots_measure_the_checkout_parent_filesystem(self) -> None:
+        # #297 review round 9: lane/integ/overflow siblings are created under
+        # checkout.PARENT — when the checkout is itself a mount point, statting the
+        # checkout measures the mounted fs while the siblings fill the parent's.
+        cfg = _load(self.tmp, "[doctor]\nmin_free_gb = 10.0\n")
+        mount = self.tmp / "mnt" / "checkout"
+        (mount / ".git").mkdir(parents=True)
+        cfg.repo_checkouts = {"org/x": str(mount)}
+        devs = {cfg.root: 1, mount.parent: 2, mount: 3}  # the mount differs from both
+        roots = doctor._space_roots(cfg, dev=lambda p: devs[p])
+        self.assertEqual(roots, [cfg.root, mount.parent])  # the parent, never the mount
+
     def test_space_roots_dedupe_by_filesystem(self) -> None:
         # Same-device targets collapse to one measurement (statvfs per FILESYSTEM,
         # not per checkout); the root always leads.

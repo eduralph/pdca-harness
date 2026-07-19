@@ -84,25 +84,28 @@ def _footprint_counts(cfg: Config) -> tuple[int, int, int]:
     return lanes, integs, ovfs
 
 
-def _space_roots(cfg: Config) -> list[Path]:
+def _space_roots(cfg: Config, *, dev=lambda p: p.stat().st_dev) -> list[Path]:
     """One representative path per DISTINCT filesystem the harness writes on (#297
-    review round 7): ``cfg.root`` plus each target checkout. Lane worktrees and their
-    gate build output live NEXT TO the checkouts, which may sit on another filesystem
-    than the harness root — measuring only ``cfg.root`` could report ample space while
-    the filesystem the gates actually fill is nearly full (the exact false-red the
-    free-space row exists to preempt). Deduped by ``st_dev``; an unstat-able path is
-    kept so its row WARNs instead of vanishing."""
+    review round 7): ``cfg.root`` plus each target checkout's PARENT directory. Lane,
+    integration and overflow trees are created as SIBLINGS of the checkout — under
+    ``checkout.parent`` — so when the checkout is itself a mount point, statting the
+    checkout would measure the mounted filesystem while the sibling worktrees fill
+    the parent's (#297 review round 9). Measuring the parent covers both: same
+    filesystem in the common case, the right one when they differ. Deduped by
+    ``st_dev``; an unstat-able path is kept so its row WARNs instead of vanishing.
+    ``dev`` is injected for tests — real mount points can't be fabricated in a unit
+    suite (the ``probe`` pattern from ``cli._suspend_inhibitor_argv``)."""
     from . import sweep  # lazy: doctor stays import-light
     roots: list[Path] = []
     seen: set[int] = set()
-    for where in [cfg.root, *sweep.target_checkouts(cfg)]:
+    for where in [cfg.root, *(p.parent for p in sweep.target_checkouts(cfg))]:
         try:
-            dev = where.stat().st_dev
+            d = dev(where)
         except OSError:
             roots.append(where)
             continue
-        if dev not in seen:
-            seen.add(dev)
+        if d not in seen:
+            seen.add(d)
             roots.append(where)
     return roots
 

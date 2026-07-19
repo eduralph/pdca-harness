@@ -146,6 +146,34 @@ def _lane_busy_guard(wt: Path):
         fh.close()
 
 
+def _lock_busy(wt: Path) -> bool:
+    """Non-mutating contention probe for ``--dry-run`` (#297 review round 9): report
+    whether a lifecycle ``.lock`` sidecar is currently held WITHOUT creating or
+    truncating it — the dry run promises to touch nothing, and ``open("w")`` would
+    create a missing sidecar (or truncate an existing one) in the target workspace.
+    A missing sidecar means no holder (every holder creates it on acquire); an
+    unopenable one reads as busy — the same conservative answer the real sweep's
+    guard would give."""
+    from . import worktree as wt_mod
+    lockp = wt.with_name(wt.name + ".lock")
+    if not lockp.exists():
+        return False
+    try:
+        fh = lockp.open("r+")
+    except OSError:
+        return True
+    try:
+        try:
+            wt_mod._lock_file(fh, wait=False)
+        except OSError:
+            return True
+        with contextlib.suppress(OSError):
+            wt_mod._unlock_file(fh)
+        return False
+    finally:
+        fh.close()
+
+
 def _remove_tree(primary: Path, wt: Path) -> bool:
     """``git worktree remove`` with the rmtree + prune fallback (the drift.py pattern),
     plus the owner sidecar. Refuses (False) anything not REGISTERED as a worktree of
@@ -213,14 +241,20 @@ def sweep(cfg: Config, bundles: list[Path] | None = None, *,
                 # mid-fold or mid-re-gate in this tree (integrate.fold /
                 # gates.run_integration hold integ_lock for their critical section) —
                 # removing it under them fails that run or invalidates its re-gate.
+                # Dry-run probes WITHOUT opening the sidecar for write (#297 review
+                # round 9): "reports without touching" must not create lock files.
+                if dry_run:
+                    lines.append(f"sweep: left {integ.name} (busy — another flow "
+                                 "holds its integration lock)" if _lock_busy(integ)
+                                 else f"sweep: would remove integration tree {integ.name}")
+                    continue
                 with integrate.integ_lock(integ, wait=False) as held:
                     if not held:
                         lines.append(f"sweep: left {integ.name} (busy — another flow "
                                      "holds its integration lock)")
                         continue
-                    lines.append(f"sweep: {verb}remove integration tree {integ.name}")
-                    if not dry_run:
-                        _remove_tree(primary, integ)
+                    lines.append(f"sweep: remove integration tree {integ.name}")
+                    _remove_tree(primary, integ)
             for lane_wt in _lane_dirs(primary):
                 # The registration guard applies to CLEAN too (#297 review round 3):
                 # `clean` + `reset --hard` are just as destructive as removal, and an
@@ -230,32 +264,42 @@ def sweep(cfg: Config, bundles: list[Path] | None = None, *,
                     lines.append(f"sweep: left {lane_wt.name} (not a worktree "
                                  f"registered to {primary.name} — not ours to touch)")
                     continue
+                # Dry-run probes contention without opening the sidecar for write
+                # (#297 review round 9) — see the integ loop above.
+                if dry_run:
+                    if _lock_busy(lane_wt):
+                        lines.append(f"sweep: left {lane_wt.name} (busy — another "
+                                     "Do/gate run holds its lane lock)")
+                    elif mode == "remove":
+                        lines.append(f"sweep: would remove lane worktree {lane_wt.name}")
+                    else:
+                        lines.append(f"sweep: would clean lane worktree {lane_wt.name} "
+                                     "(build artifacts dropped, checkout kept)")
+                    continue
                 with _lane_busy_guard(lane_wt) as held:
                     if not held:
                         lines.append(f"sweep: left {lane_wt.name} (busy — another "
                                      "Do/gate run holds its lane lock)")
                         continue
                     if mode == "remove":
-                        lines.append(f"sweep: {verb}remove lane worktree {lane_wt.name}")
-                        if not dry_run:
-                            _remove_tree(primary, lane_wt)
+                        lines.append(f"sweep: remove lane worktree {lane_wt.name}")
+                        _remove_tree(primary, lane_wt)
                     else:
-                        lines.append(f"sweep: {verb}clean lane worktree {lane_wt.name} "
+                        lines.append(f"sweep: clean lane worktree {lane_wt.name} "
                                      "(build artifacts dropped, checkout kept)")
-                        if not dry_run:
-                            # ``-ff``: a single -f preserves untracked NESTED
-                            # REPOSITORIES (git-clean(1)) — vendor checkouts would
-                            # survive every sweep and keep the disk (#297 review r5).
-                            if (_git(lane_wt, "clean", "-ffdxq") != 0
-                                    or _git(lane_wt, "reset", "--hard") != 0):
-                                lines.append(f"sweep: {lane_wt.name}: clean/reset "
-                                             "failed (left as is)")
-                            else:
-                                # The reset stripped the bundle's patch, so the owner
-                                # stamp no longer describes the tree's CONTENT — a
-                                # later gate read trusting it would false-green
-                                # against the unpatched base (#297 review round 2).
-                                worktree._owner_file(lane_wt).unlink(missing_ok=True)
+                        # ``-ff``: a single -f preserves untracked NESTED
+                        # REPOSITORIES (git-clean(1)) — vendor checkouts would
+                        # survive every sweep and keep the disk (#297 review r5).
+                        if (_git(lane_wt, "clean", "-ffdxq") != 0
+                                or _git(lane_wt, "reset", "--hard") != 0):
+                            lines.append(f"sweep: {lane_wt.name}: clean/reset "
+                                         "failed (left as is)")
+                        else:
+                            # The reset stripped the bundle's patch, so the owner
+                            # stamp no longer describes the tree's CONTENT — a
+                            # later gate read trusting it would false-green
+                            # against the unpatched base (#297 review round 2).
+                            worktree._owner_file(lane_wt).unlink(missing_ok=True)
             if not dry_run:
                 _git(primary, "worktree", "prune")
         except Exception as exc:  # noqa: BLE001 — teardown must never fail a run
