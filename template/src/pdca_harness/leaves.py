@@ -311,6 +311,14 @@ def ensure_notes(cfg: Config, d: Path) -> None:
 def do_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
     d.mkdir(parents=True, exist_ok=True)
     sources.seed(cfg, d)  # seed notes.json + sources/ from the configured providers (#65/#102)
+    # The seed above can be what FIRST writes notes.json — including a tracker item
+    # already settled in-issue (#302 review). Re-check AFTER seeding: a RESOLVED bundle
+    # is terminal, and invoking the planner would author a brief that overrides the
+    # marker, letting a settled ticket be built and published.
+    if state.state(d) == state.RESOLVED:
+        print(f"leaves: {d.name} — tracker item is resolved (notes.json `resolved`); "
+              "skipping Plan (terminal, #302)", file=sys.stderr)
+        return
     if cfg.planner.mode == "command":
         _invoke(cfg.planner, cfg.root, _plan_prompt(cfg, csv, d), cfg=cfg)
     else:
@@ -408,6 +416,25 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
                       and not brief.is_placeholder(d / "brief.md")}
     for iid in ids or []:
         sources.seed(cfg, cfg.bundle(iid))  # seed notes.json + sources/ per bundle (#65/#102)
+    # RESOLVED trackers are terminal and must not enter the Plan session (#302 review):
+    # an authored brief deliberately overrides the marker, so a batch planner briefing
+    # one would re-open a settled ticket for Do/Check. Ids are filtered up front (the
+    # seed just above may be what first resolved them); the CSV/default path — where the
+    # planner picks ids MID-session — is guarded after the session below.
+    if ids is not None:
+        kept = []
+        for iid in ids:
+            if state.state(cfg.bundle(iid)) == state.RESOLVED:
+                print(f"plan: issue_{iid} — tracker item is resolved; excluded from the "
+                      "Plan session (terminal, #302)", file=sys.stderr)
+            else:
+                kept.append(iid)
+        if not kept:
+            print("plan: every listed issue is resolved — nothing to brief", file=sys.stderr)
+            return
+        ids = kept
+    resolved_before = {b.name for b in cfg.bundle_root.glob("issue_*")
+                       if state.state(b) == state.RESOLVED}
     if cfg.planner.mode == "command":
         # On the CSV/default path the planner CHOOSES the ids mid-session, so the per-bundle
         # seed above never ran for them. Snapshot which bundles ALREADY HAD a brief so we can
@@ -420,6 +447,10 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
             _warn_unseeded_briefs(cfg, before)
     else:
         _stub_plan_batch(cfg, ids)
+    # RESOLVED rejection runs BEFORE the plan-advisory pass: a brief set aside here no
+    # longer exists, so the advisory batch never reviews (or revises against) a brief
+    # the resolution guard is about to retract.
+    _reject_resolved_briefs(cfg, resolved_before)
     # #301: one advisory pass over the freshly briefed OR rewritten bundles, then ONE
     # revision session if any review found something. No-op unless
     # [[leaves.plan_advisory]] is configured.
@@ -428,6 +459,108 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
                    and (d.name not in briefed_before
                         or _brief_sha(d) != briefed_before[d.name]))
     run_plan_advisory_batch(cfg, fresh)
+
+
+def _reject_resolved_briefs(cfg: Config, resolved_before: set[str]) -> None:
+    """Reject a brief the Plan session authored for a bundle that was RESOLVED going in
+    (#302 review). On the CSV/default path the planner picks ids MID-session, so the
+    up-front id filter cannot protect a resolved tracker; an authored brief would
+    override the marker and re-open the settled ticket for Do/Check. The brief is set
+    aside (not deleted — the planner's work stays inspectable), loudly, so the bundle
+    reads RESOLVED again before the drive set is built.
+
+    Revalidated first (#302 review round 6): the marker is a CACHE of the closure, and
+    on this path no up-front id filter ever checked the live tracker — the planner may
+    have briefed the item precisely BECAUSE the tracker reopened it. Discarding that
+    brief would lock the reopened issue out of every batch run until someone hand-edits
+    notes.json. Only the bundles the session actually briefed are checked (one tracker
+    call each), never the whole RESOLVED population."""
+    for name in sorted(resolved_before):
+        b = cfg.bundle_root / name
+        bp = b / "brief.md"
+        if bp.exists() and state.state(b) != state.RESOLVED:
+            if sources.tracker_issue_reopened(cfg, name.removeprefix("issue_")):
+                # DEFER, don't drive (#302 review round 10): this brief was authored
+                # while the closure-era notes.json was still in place — it never saw
+                # the reopen discussion, and keeping it would carry that stale
+                # context through Do/Check (and possibly publish) in this very run.
+                # Set THIS brief aside, clear the marker + set the notes aside, and
+                # the bundle reads UNPLANNED — the next Plan seeds the fresh thread
+                # and re-briefs with the reopen context in view.
+                # Brief FIRST, marker SECOND (#302 review round 15): clearing the
+                # marker while the stale brief could not be moved would leave the
+                # bundle reading PLANNED — straight into this run's drive set with
+                # the stale context the deferral exists to keep out.
+                aside = _brief_aside(bp, "brief.stale-reopen-context")
+                if aside is None:
+                    # The helper printed what happened; the marker was NOT touched,
+                    # so the bundle stays terminal (RESOLVED) — fail closed.
+                    continue
+                cleared = sources.clear_resolved_marker(b)  # closure-era notes aside
+                brief_note = ("the brief aside (" + aside.name + ")"
+                              if aside is not bp else "the brief removed")
+                if cleared:
+                    print(f"plan: {name} — the tracker issue is OPEN again, but this "
+                          f"session's brief was authored from the closure-era notes; "
+                          f"cleared the stale resolved marker, set the notes aside / "
+                          f"{brief_note}, and DEFERRED the bundle — the next Plan "
+                          "re-briefs it from the fresh thread", file=sys.stderr)
+                else:
+                    # #302 review round 11: never claim "cleared" over a failed
+                    # rename — the bundle honestly remains RESOLVED (the stale brief
+                    # is still set aside: it must not drive in any case).
+                    print(f"plan: {name} — the tracker issue is OPEN again, but the "
+                          f"closure-era notes could not be set aside; {brief_note} "
+                          "and the bundle remains RESOLVED — fix the bundle "
+                          "directory, then re-run", file=sys.stderr)
+                continue
+            aside = _brief_aside(bp, "brief.superseded-by-resolution")
+            if aside is None or aside is bp:
+                continue  # the helper printed what happened (or the DELETED line)
+            print(f"plan: {name} — the session briefed a RESOLVED tracker item; the brief "
+                  f"was set aside as {aside.name} (the issue was settled in the tracker; "
+                  "reopen it there to plan it again)", file=sys.stderr)
+
+
+def _brief_aside(bp: Path, stem: str) -> Path | None:
+    """Move ``bp`` out of the active brief slot, FAIL CLOSED (#302 review round 14).
+
+    A unique destination per rejection (#302 review round 3) keeps every set-aside
+    artifact inspectable. When the rename fails (locked file on Windows, an I/O
+    error) the brief is DELETED instead — losing the planner's inspectable copy
+    beats the alternative, where an authored brief survives the failed rejection,
+    shadows the still-present resolved marker as PLANNED on the next run, and drives
+    stale/settled work through Do/Check.
+
+    Returns the set-aside path on a successful rename; ``bp`` ITSELF when the
+    fallback deletion emptied the slot (#302 review round 16 — the slot IS empty, so
+    a reopen deferral may still proceed to clear the marker; renaming being
+    unavailable must not keep suppressing the reopened issue run after run); and
+    ``None`` only when the slot could NOT be emptied, after a loud
+    manual-intervention line. The helper prints what happened on every non-rename
+    path; contained per-bundle — a failure must not abort the batch Plan session's
+    remaining bundles."""
+    aside = bp.with_name(f"{stem}.md")
+    n = 2
+    while aside.exists():
+        aside = bp.with_name(f"{stem}-{n}.md")
+        n += 1
+    try:
+        bp.rename(aside)
+        return aside
+    except OSError:
+        try:
+            bp.unlink()
+            print(f"plan: {bp.parent.name} — could not set the brief aside (rename "
+                  f"failed); it was DELETED instead so it cannot drive settled/stale "
+                  "work", file=sys.stderr)
+            return bp  # slot emptied — the caller's deferral/rejection proceeds
+        except OSError as exc:
+            print(f"plan: {bp.parent.name} — could not set aside OR remove the "
+                  f"active brief ({exc}); MANUAL INTERVENTION required: the bundle "
+                  f"will read PLANNED over a resolved tracker item until {bp} is "
+                  "moved out of the way", file=sys.stderr)
+            return None
 
 
 def _warn_unseeded_briefs(cfg: Config, before: set[str]) -> None:

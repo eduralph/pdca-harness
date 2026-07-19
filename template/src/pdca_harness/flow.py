@@ -19,13 +19,15 @@ rebuilds; ``iterate-plan`` re-opens Plan) and bounded so a cycle can't spin fore
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import sys
 import threading
 from pathlib import Path
 
 from . import (act, assemble, autoiterate, brief, driver, gates, integrate, lane, leaves,
-               merge, merged, preflight, publish, queue, signoff, state, waves)
+               merge, merged, preflight, publish, queue, signoff, sources, state, sweep,
+               waves)
 from .config import Config
 
 
@@ -270,6 +272,7 @@ def flow(
         if rc:
             print(f"flow: issue_{issue_id} is COMPLETE but publish did not complete "
                   f"(rc {rc}) — NOT published; run `pdca publish {issue_id}`.", file=sys.stderr)
+    _sweep_quietly(cfg, [d])  # publish/freeze boundary — reclaim footprint (#297)
     if do_act:
         _maybe_run_act(cfg, today, any_complete=(final == state.COMPLETE))
     return final
@@ -396,6 +399,25 @@ def _run_beat_round_pooled(
     return progressed[0]
 
 
+def _sweep_quietly(cfg: Config, bundles: list[Path]) -> None:
+    """Reclaim the harness's worktree/build footprint at the end of a run (issue #297).
+
+    Runs only after every lane thread has joined (the callers sit past the drive loops),
+    so it never races a live Do. Best-effort by contract: a sweep failure must never
+    fail a run that already produced its results — one stderr summary, never a raise.
+    """
+    try:
+        lines = sweep.sweep(cfg, bundles)
+        if lines:
+            print(f"flow: footprint sweep — {len(lines)} action(s) "
+                  f"([driver].sweep_worktrees = {cfg.sweep_worktrees}):", file=sys.stderr)
+            for line in lines:
+                print(f"  {line}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 — teardown must never fail the run
+        print(f"flow: footprint sweep failed ({type(exc).__name__}: {exc}); "
+              "run `pdca sweep` manually", file=sys.stderr)
+
+
 def _publish_bundle(cfg: Config, d: Path, *, by: str, today: str,
                     texts_prevalidated: bool = False) -> None:
     """Publish one COMPLETE bundle (Check's closing step), isolated so a single failure
@@ -483,10 +505,11 @@ def _audit_wave_overlap(wave: list[Path]) -> None:
                       f"conflict; review before merge.", file=sys.stderr)
 
 
-# Terminal: finished (COMPLETE) or deliberately abandoned (DISCONTINUED). A bundle left in
-# ANY other state when the driver stops driving it is work in flight — it will not be
-# published, and nothing else advances it this run.
-_TERMINAL = (state.COMPLETE, state.DISCONTINUED)
+# Terminal: finished (COMPLETE), deliberately abandoned (DISCONTINUED), or settled in the
+# tracker outside a cycle (RESOLVED, #302). A bundle left in ANY other state when the driver
+# stops driving it is work in flight — it will not be published, and nothing else advances
+# it this run.
+_TERMINAL = (state.COMPLETE, state.DISCONTINUED, state.RESOLVED)
 
 
 def _warn_abandoned(bundles: list[Path], *, why: str) -> None:
@@ -576,7 +599,7 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
             for d in chunk:
                 _isolate(d, "sign-off", lambda d=d: _apply_decision(
                     cfg, d, by=by, today=today, apply_now=False))
-        if all(state.state(d) in (state.COMPLETE, state.DISCONTINUED) for d in wave):
+        if all(state.state(d) in _TERMINAL for d in wave):
             return
     # Budget spent with work still in flight. An `iterate-do` recorded on the last allowed
     # pass defers its rebuild to "the next pass's build-all" — which never comes.
@@ -693,25 +716,39 @@ def _drive_and_act(
                           file=sys.stderr)
                     break
             else:  # default: stack — fold onto a per-target integration branch
-                try:
-                    folded = integrate.fold(cfg, accepted, dry_run=dry)
-                except integrate.IntegrationError as exc:
-                    print(f"flow: wave {k} did not integrate ({exc}); STOPPING — later "
-                          f"waves not run.", file=sys.stderr)
-                    break
-                if folded and not dry:
-                    integ = {tgt: branch for tgt, (branch, _wt) in folded.items()}
-                    # Optional re-gate (#wave-model): validate EACH folded combination over
-                    # its integration tip before the next wave builds on it; any red ⇒ STOP.
-                    if cfg.regate_between_waves and any(
-                            wt is not None
-                            and gates.run_integration(cfg, wt).get("overall") == "fail"
-                            for _tgt, (_branch, wt) in folded.items()):
-                        print(f"flow: wave {k} integration re-gate FAILED — a combination is "
-                              f"red though each fix was green alone; STOPPING (later waves "
-                              f"not run).", file=sys.stderr)
+                # ONE lock scope covers fold AND re-gate (#297 review round 10): the
+                # locks stack keeps every target's integ lock held between the two,
+                # so no gap exists in which another flow's publish-boundary sweep
+                # could remove the tree — or another fold rewrite it — before the
+                # re-gate attests it.
+                stop_wave = False
+                with contextlib.ExitStack() as locks:
+                    try:
+                        folded = integrate.fold(cfg, accepted, dry_run=dry, locks=locks)
+                    except integrate.IntegrationError as exc:
+                        print(f"flow: wave {k} did not integrate ({exc}); STOPPING — "
+                              f"later waves not run.", file=sys.stderr)
                         break
+                    if folded and not dry:
+                        integ = {tgt: branch for tgt, (branch, _wt) in folded.items()}
+                        # Optional re-gate (#wave-model): validate EACH folded
+                        # combination over its integration tip before the next wave
+                        # builds on it; any red ⇒ STOP. hold_lock=False: the locks
+                        # stack already holds this tree's lock (re-acquiring would
+                        # deadlock on our own flock).
+                        if cfg.regate_between_waves and any(
+                                wt is not None
+                                and gates.run_integration(cfg, wt, hold_lock=False)
+                                        .get("overall") == "fail"
+                                for _tgt, (_branch, wt) in folded.items()):
+                            print(f"flow: wave {k} integration re-gate FAILED — a "
+                                  f"combination is red though each fix was green alone; "
+                                  f"STOPPING (later waves not run).", file=sys.stderr)
+                            stop_wave = True
+                if stop_wave:
+                    break
 
+    _sweep_quietly(cfg, bundles)  # publish/freeze boundary — reclaim footprint (#297)
     results = {d.name.replace("issue_", ""): state.state(d) for d in bundles}
     if do_act:
         _maybe_run_act(cfg, today,
@@ -745,12 +782,13 @@ def flow_batch(
 
     leaves.do_plan_batch(cfg, csv)
     # Resume set: every bundle with a brief that isn't finished. UNPLANNED (skipped /
-    # un-briefed), COMPLETE (done) and DISCONTINUED (deliberately abandoned)
-    # are excluded, so a re-run is idempotent and a discontinued bundle stays out of the sweep.
+    # un-briefed), COMPLETE (done), DISCONTINUED (deliberately abandoned) and RESOLVED
+    # (settled in the tracker, #302) are excluded, so a re-run is idempotent and a
+    # discontinued or resolved bundle stays out of the sweep.
     bundles = sorted(
         (cfg.bundle_root / name for name in _bundle_dirs(cfg)
          if state.state(cfg.bundle_root / name)
-         not in (state.COMPLETE, state.UNPLANNED, state.DISCONTINUED)),
+         not in (state.COMPLETE, state.UNPLANNED, state.DISCONTINUED, state.RESOLVED)),
         key=lambda p: p.name,
     )
     if not bundles:
@@ -800,6 +838,22 @@ def flow_ids(
     """
     today = today or datetime.date.today().isoformat()
 
+    # A cached RESOLVED marker may be stale (#302 review round 5): revalidate the
+    # explicitly listed ids against the live tracker, exactly like the single-id CLI
+    # path — a REOPENED issue clears its marker (and sets the closure-era notes aside)
+    # BEFORE the plan-missing set is computed, so the bundle re-enters this very run
+    # instead of being skipped as terminal forever.
+    for iid in ids:
+        b = cfg.bundle(iid)
+        if (b.exists() and state.state(b) == state.RESOLVED
+                and sources.tracker_issue_reopened(cfg, iid)):
+            if sources.clear_resolved_marker(b):
+                print(f"flow: issue_{iid} — the tracker issue is OPEN again; cleared "
+                      "the resolved marker and planning it.", file=sys.stderr)
+            # else: clear_resolved_marker printed the failure (#302 review round 11);
+            # the bundle stays RESOLVED and the drive-set filter below skips it with
+            # its own terminal note — loud, never a silent "planned" claim.
+
     # Optional Plan pre-pass (#65): brief the UNPLANNED ids in one shared session, before
     # the drive set is filtered, so the un-briefed ones become drivable. A csv enables it too.
     if plan_missing or csv:
@@ -817,7 +871,7 @@ def flow_ids(
         if not d.exists() or s == state.UNPLANNED:
             print(f"flow: {d.name} — no brief.md, skipped (brief it at Plan first)", file=sys.stderr)
             continue
-        if s in (state.COMPLETE, state.DISCONTINUED):
+        if s in _TERMINAL:
             print(f"flow: {d.name} — already terminal ({s}), skipped", file=sys.stderr)
             continue
         bundles.append(d)

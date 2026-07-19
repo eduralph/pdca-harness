@@ -19,8 +19,9 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from . import (act, brief, doctor, drift, driver, flow, gates, manual_test, merged, publish,
-               queue, registry, revalidate, revert, signoff, state, waves, worktree)
+from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, manual_test, merged,
+               publish, queue, registry, revalidate, revert, signoff, sources, state, sweep,
+               waves, worktree)
 from .config import Config
 
 
@@ -49,6 +50,7 @@ _STATE_ORDER = [
     state.ITERATE_PLAN,
     state.COMPLETE,
     state.DISCONTINUED,
+    state.RESOLVED,
 ]
 
 
@@ -295,6 +297,38 @@ def main(argv: list[str] | None = None) -> int:
     p_actres.add_argument("--location", default="", help="where the delta landed (path:line / rule)")
     p_actres.add_argument("--date", help="applied date (ISO; default today)")
 
+    # Tracker reconciliation (issue #300): bundles and the issue tracker drift out of
+    # sync; cleanup reports the discrepancies (dry-run default) and --apply acts.
+    p_cleanup = sub.add_parser(
+        "cleanup",
+        help="reconcile bundle state with the issue tracker (dry-run; --apply acts; #300)",
+        description="Match each bundle's state against its tracker issue: a closed issue "
+                    "resolves its notes-only tracker bundle (RESOLVED, #302) or "
+                    "discontinues one awaiting sign-off; a COMPLETE/DISCONTINUED bundle "
+                    "whose issue is still open gets it commented and closed; a merged PR "
+                    "on an unaccepted bundle is reported (never auto-accepted — the C6 "
+                    "verdict stays human). Dry-run by default; --apply executes.")
+    p_cleanup.add_argument("issue_ids", nargs="*",
+                           help="bundle ids to reconcile (default: every issue_* bundle)")
+    p_cleanup.add_argument("--apply", action="store_true",
+                           help="execute the planned actions (default: report only)")
+    p_cleanup.add_argument("--repo", default="",
+                           help="GitHub repo of the tracker issues (OWNER/REPO; default: "
+                                "the [[plan.source]] github provider's repo, or gh's default)")
+    p_cleanup.add_argument("--by", default="", help="§9 attribution for discontinue records")
+
+    # Footprint reclaim (issue #297): the on-demand counterpart of the flow's end-of-run
+    # sweep. Distinct from tracker cleanup — this touches only harness-named sibling
+    # worktrees of target checkouts, never bundles.
+    p_sweep = sub.add_parser("sweep",
+                             help="reclaim harness worktree/build footprint (lane, "
+                                  "integration, overflow trees; #297)")
+    p_sweep.add_argument("--remove", action="store_true",
+                         help="remove lane worktrees entirely (default: clean their build "
+                              "state, keep the checkouts warm)")
+    p_sweep.add_argument("--dry-run", action="store_true",
+                         help="report what would be reclaimed without touching anything")
+
     p_signoff = sub.add_parser("signoff", help="record the human Check sign-off (§9)")
     p_signoff.add_argument("issue_id")
     g = p_signoff.add_mutually_exclusive_group(required=True)
@@ -391,8 +425,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "publish":
         return publish.publish(cfg, args.issue_id, dry_run=args.dry_run,
                                open_pr=not args.no_pr, by=args.by, pending_id=args.no_issue)
+    if args.cmd == "cleanup":
+        return cleanup.run(cfg, args.issue_ids, apply=args.apply, repo=args.repo, by=args.by)
     if args.cmd == "doctor":
         return doctor.run(cfg, strict=args.strict)
+    if args.cmd == "sweep":
+        # Explicit mode so the manual command works even under sweep_worktrees = "off".
+        lines = sweep.sweep(cfg, mode="remove" if args.remove else "clean",
+                            dry_run=args.dry_run)
+        for line in lines:
+            print(line)
+        if not lines:
+            print("sweep: nothing to reclaim (no harness worktrees found)")
+        return 0
     if args.cmd == "revert":
         return revert.revert(cfg, args.issue_id, dry_run=args.dry_run, by=args.by)
     return 2
@@ -490,6 +535,34 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
             print(f"{state.COMPLETE}\t{d}", file=sys.stderr)
             print(f"  already complete — nothing to run. To redo it: rm -rf {d}", file=sys.stderr)
             return 0
+        if d.exists() and state.state(d) == state.RESOLVED:
+            # A settled tracker item is a successful no-op, like COMPLETE (#302 review
+            # round 3): the multi-id path skips it and exits 0 — automation must not
+            # read this terminal state as a failed flow on the single-id path either.
+            # But the marker is a CACHE (#302 review round 4): the tracker can have
+            # REOPENED the issue since it was written, and the seed never refreshes an
+            # existing notes.json — so revalidate against the live tracker first, and
+            # a reopened issue clears the marker and proceeds to a real flow.
+            if sources.tracker_issue_reopened(cfg, iid):
+                if not sources.clear_resolved_marker(d):
+                    # clear_resolved_marker printed the why (#302 review round 11):
+                    # claiming "planning it" over a still-resolved bundle would
+                    # silently suppress the reopened work — fail loudly instead.
+                    return 1
+                print(f"flow: issue_{iid} — the tracker issue is OPEN again; cleared "
+                      "the resolved marker and planning it.", file=sys.stderr)
+            else:
+                print(f"{state.RESOLVED}\t{d}", file=sys.stderr)
+                # The manual remediation names the WHOLE file (#302 review round 15):
+                # deleting only the `resolved` key would leave the closure-era
+                # notes.json in place, and ensure_notes refuses to re-fetch while it
+                # exists — Plan would brief from the pre-reopen thread.
+                print("  tracker item resolved outside a cycle — nothing to run. Reopen "
+                      "it in the tracker (a reachable GitHub tracker is then picked up "
+                      "here automatically; otherwise rename notes.json away — e.g. to "
+                      "notes.superseded-by-reopen.json — so the next Plan re-fetches "
+                      "the fresh thread) to plan it again.", file=sys.stderr)
+                return 0
         if not d.exists():
             d.mkdir(parents=True)
         final = flow.flow(cfg, iid, csv=args.from_csv,
@@ -498,7 +571,10 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
         if final == state.AWAITING_SIGNOFF:
             for it in signoff.open_needs_human(d / "SUMMARY.md"):
                 print(f"    {it}")
-        return 0 if final in (state.COMPLETE, state.AWAITING_SIGNOFF) else 1
+        # RESOLVED counts as success too: the flow can DISCOVER the resolution mid-run
+        # (the Plan seed fetches notes that carry the terminal marker, #302) — a settled
+        # ticket correctly skipped is not a failed cycle.
+        return 0 if final in (state.COMPLETE, state.AWAITING_SIGNOFF, state.RESOLVED) else 1
 
     # Several ids: batch — auto-plan unbriefed, drive concurrently, cheap-first sign-off.
     try:
@@ -511,14 +587,19 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
 
 
 def _report_batch(results: dict[str, str]) -> int:
-    """Print a batch result map and return a process code (0 iff all COMPLETE)."""
+    """Print a batch result map and return a process code (0 iff every bundle reached
+    a SUCCESSFUL terminal — COMPLETE, or RESOLVED (#302 review round 11): a tracker
+    item settled outside the cycle is a successful no-op on the batch path exactly as
+    it is on the single-id path; automation must not read it as a failed flow."""
     if not results:
         print("flow: nothing to drive — no in-flight briefs among the ids.", file=sys.stderr)
         return 0
     for iid, st in sorted(results.items()):
         print(f"{st}\t{iid}")
-    done = sum(1 for s in results.values() if s == state.COMPLETE)
-    print(f"flow: {done}/{len(results)} complete")
+    done = sum(1 for s in results.values() if s in (state.COMPLETE, state.RESOLVED))
+    resolved = sum(1 for s in results.values() if s == state.RESOLVED)
+    tail = f" ({resolved} resolved in the tracker)" if resolved else ""
+    print(f"flow: {done}/{len(results)} complete{tail}")
     return 0 if done == len(results) else 1
 
 
@@ -552,11 +633,29 @@ def _waves(cfg: Config, ids: list[str]) -> int:
     (#wave-model). With no ids, schedules every in-flight briefed bundle. An unschedulable
     graph (cycle / unresolved dep) is reported, not run."""
     if ids:
-        bundles = [cfg.bundle(i) for i in ids if (cfg.bundle(i) / "brief.md").exists()]
+        # The explicit-id branch applies the SAME terminal filter as the no-id scan
+        # (#302 review rounds 3/9): `pdca flow <id>` skips a terminal bundle, so the
+        # preview must agree instead of reporting settled work as a runnable wave.
+        bundles = []
+        for i in ids:
+            d = cfg.bundle(i)
+            if not (d / "brief.md").exists():
+                continue
+            s = state.state(d)
+            if s in (state.COMPLETE, state.DISCONTINUED, state.RESOLVED):
+                print(f"waves: {d.name} — already terminal ({s}), excluded",
+                      file=sys.stderr)
+                continue
+            bundles.append(d)
     elif cfg.bundle_root.exists():
+        # RESOLVED is terminal too (#302 review round 2, mirrored round 8): a resolved
+        # bundle with a stray placeholder brief has brief.md on disk, so the file test
+        # alone would schedule settled work — filter on the terminal set, not just
+        # COMPLETE/DISCONTINUED; the preview must match the flow's drive set.
         bundles = sorted((d for d in cfg.bundle_root.glob("issue_*")
                           if d.is_dir() and (d / "brief.md").exists()
-                          and state.state(d) not in (state.COMPLETE, state.DISCONTINUED)),
+                          and state.state(d) not in (state.COMPLETE, state.DISCONTINUED,
+                                                     state.RESOLVED)),
                          key=lambda p: p.name)
     else:
         bundles = []
