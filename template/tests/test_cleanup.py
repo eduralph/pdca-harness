@@ -245,6 +245,18 @@ class ApplyFailureHonesty(CleanupBase):
         self.assertEqual(rc, 0)
         self.assertEqual(state.state(self.cfg.bundle("87")), state.RESOLVED)  # --repo works
 
+    def test_unreadable_pr_state_defers_the_empty_patch_close(self) -> None:
+        # #300 review round 15: a recorded pr_url whose state cannot be read (a
+        # transient gh failure) must be report-only — the PR may in fact be merged
+        # and the blank patch mere local damage; falling through would close the
+        # issue as 'not planned' with a wrong reason and misleading comment.
+        self._staged("89", signoff_action="accept", patch="   \n", pr_url=_PR)
+        self.issue_states["89"] = _OPEN                    # pr_states LACKS _PR → rc 1
+        rc, out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("unreadable", out)                   # report-only row
+        self.assertEqual(self._closes(), [])               # nothing closed
+
     def test_merged_pr_evidence_beats_a_blank_patch(self) -> None:
         # #300 review round 14: a COMPLETE bundle whose patch.diff was damaged
         # (deleted/truncated) but whose recorded PR is MERGED shipped a real fix —

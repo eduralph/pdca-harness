@@ -299,12 +299,22 @@ def _plan_bundle(cfg: Config, d: Path, *, issue_side: bool, repo: str,
             # definitive evidence a fix shipped, while an absent/blank patch.diff may
             # merely be damage (deleted, truncated) — closing such a bundle as "not
             # planned" would record the wrong reason and a misleading no-fix comment.
-            if pr_url and _pr_state(pr_url) == "MERGED":
+            pr_state = _pr_state(pr_url) if pr_url else ""
+            if pr_state == "MERGED":
                 return _Row(d.name, st, "OPEN",
                             "comment + close as completed (fix merged)",
                             apply=[lambda: _close_issue(
                                 d, number, repo, reason="completed",
                                 fallback_body=f"Fixed by {pr_url} (merged).")])
+            if pr_url and not pr_state:
+                # An UNREADABLE PR state with a recorded pr_url is report-only (#300
+                # review round 15): the PR may in fact be merged and the blank patch
+                # mere local damage — a transient gh failure must never route this
+                # bundle into the destructive not-planned close below.
+                return _Row(d.name, st, "OPEN",
+                            "recorded PR state unreadable (gh failed) — no action; "
+                            "retry (a merged PR closes as completed, never "
+                            "'not planned')")
             if _empty_patch(d):
                 return _Row(d.name, st, "OPEN",
                             "close as not planned (accepted close/no-fix disposition)",
