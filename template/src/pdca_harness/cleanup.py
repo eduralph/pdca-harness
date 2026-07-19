@@ -87,14 +87,18 @@ def _issue_state(number: str, repo: str) -> dict | None:
 
 def _pr_state(url: str) -> str:
     """``MERGED`` / ``OPEN`` / ``CLOSED`` for a recorded PR url, or ``""`` (unknown).
-    The same probe revert.py uses; fail-closed."""
+    The same probe revert.py uses; fail-closed — including a successful ``gh`` (or
+    shim) emitting valid NON-OBJECT JSON (``null``, ``[]``), which must read as
+    unknown instead of an AttributeError aborting the whole sweep mid-plan
+    (#300 review round 8; mirrors ``_issue_state``'s shape check)."""
     proc = _gh(["pr", "view", url, "--json", "state"])
     if proc.returncode != 0:
         return ""
     try:
-        return str(json.loads(proc.stdout).get("state", "") or "")
+        data = json.loads(proc.stdout)
     except ValueError:
         return ""
+    return str(data.get("state", "") or "") if isinstance(data, dict) else ""
 
 
 def _github_tracker(cfg: Config) -> tuple[bool, str]:

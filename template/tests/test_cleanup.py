@@ -182,6 +182,27 @@ class ApplyFailureHonesty(CleanupBase):
         self.assertIn("did not take", err)
         self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)  # honestly reported
 
+    def test_non_object_pr_json_reads_as_unknown(self) -> None:
+        # #300 review round 8: a successful gh (or shim) emitting `null`/`[]` for
+        # `pr view` must read as "unknown" (no row action), never an AttributeError
+        # aborting the whole sweep while rows are being planned.
+        d = self._staged("97", signoff_action=None, pr_url=_PR)
+        self.issue_states["97"] = _OPEN
+        real = self._fake_run
+
+        def null_pr(cmd, **kw):
+            if cmd[1:3] == ["pr", "view"]:
+                return SimpleNamespace(returncode=0, stdout="null", stderr="")
+            return real(cmd, **kw)
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(cleanup.subprocess, "run", side_effect=null_pr), \
+                mock.patch.object(cleanup.shutil, "which", return_value="/usr/bin/gh"), \
+                redirect_stdout(out), redirect_stderr(err):
+            rc = cleanup.run(self.cfg, [], today="2026-07-18")
+        self.assertEqual(rc, 0)                            # planned, never crashed
+        del d  # (fixture bookkeeping)
+
     def test_one_raising_row_does_not_abort_the_sweep(self) -> None:
         # #300 review round 7: an exception from one row's action (permission/disk
         # error mid-write) is isolated to that row — reported as its failure while
