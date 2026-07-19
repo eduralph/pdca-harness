@@ -16,7 +16,7 @@ __pycache__/
 .obsidian/
 
 # Personal Claude Code permissions overlay; the shared settings.json is tracked.
-.claude/settings.local.json
+.claude/settings.local.json*
 
 # Local tool/editor state — not part of the template.
 .claude/worktrees/
