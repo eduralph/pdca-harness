@@ -16,7 +16,7 @@ from pathlib import Path
 
 from unittest import mock
 
-from pdca_harness import cli, driver, flow, leaves, state
+from pdca_harness import cli, driver, flow, leaves, sources, state
 from pdca_harness.config import Config, LeafConfig
 
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
@@ -169,18 +169,45 @@ class PlanNeverReopensResolved(unittest.TestCase):
             (d / "brief.md").write_text("- **Slug:** reopened\n- **Defect:** x.\n",
                                         encoding="utf-8")
 
-        with mock.patch.object(leaves, "_invoke", side_effect=fake_invoke):
+        # No gh on PATH → the reopen revalidation stays conservative (False) offline.
+        with mock.patch.object(leaves, "_invoke", side_effect=fake_invoke), \
+                mock.patch.object(sources.shutil, "which", return_value=None):
             leaves.do_plan_batch(self.cfg)
         self.assertFalse((d / "brief.md").exists())
         self.assertTrue((d / "brief.superseded-by-resolution.md").exists())  # kept, aside
         self.assertEqual(state.state(d), state.RESOLVED)
         # A second offending session gets its own destination (#302 review round 3) —
         # the first rejection artifact is never overwritten.
-        with mock.patch.object(leaves, "_invoke", side_effect=fake_invoke):
+        with mock.patch.object(leaves, "_invoke", side_effect=fake_invoke), \
+                mock.patch.object(sources.shutil, "which", return_value=None):
             leaves.do_plan_batch(self.cfg)
         self.assertTrue((d / "brief.superseded-by-resolution.md").exists())
         self.assertTrue((d / "brief.superseded-by-resolution-2.md").exists())
         self.assertEqual(state.state(d), state.RESOLVED)
+
+    def test_csv_session_brief_for_a_reopened_tracker_is_kept(self) -> None:
+        # #302 review round 6: the CSV/zero-id path has no up-front id filter and the
+        # marker is a cache — when the live tracker says OPEN, the brief the session
+        # authored must SURVIVE (marker cleared, closure-era notes aside), or batch
+        # users can never resume a reopened issue without hand-editing notes.json.
+        from types import SimpleNamespace
+        d = self._resolved("29")
+        self.cfg.planner = LeafConfig(mode="command", interactive=True, argv=["x"])
+
+        def fake_invoke(leaf, cwd, prompt, **kw):
+            (d / "brief.md").write_text("- **Slug:** reopened\n- **Defect:** x.\n",
+                                        encoding="utf-8")
+
+        gh_open = SimpleNamespace(returncode=0, stdout=json.dumps({"state": "OPEN"}),
+                                  stderr="")
+        with mock.patch.object(leaves, "_invoke", side_effect=fake_invoke), \
+                mock.patch.object(sources.subprocess, "run", return_value=gh_open), \
+                mock.patch.object(sources.shutil, "which", return_value="/usr/bin/gh"):
+            leaves.do_plan_batch(self.cfg)
+        self.assertTrue((d / "brief.md").exists())          # the fresh brief is kept
+        self.assertFalse((d / "notes.json").exists())       # stale closure notes aside
+        self.assertTrue((d / "notes.superseded-by-reopen.json").exists())
+        self.assertNotEqual(state.state(d), state.RESOLVED)  # re-enters the drive set
 
     def test_single_id_flow_exits_zero_on_a_resolved_bundle(self) -> None:
         # #302 review round 3: parity with the multi-id path — a settled tracker item
