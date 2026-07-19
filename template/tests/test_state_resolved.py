@@ -300,14 +300,16 @@ class PlanNeverReopensResolved(unittest.TestCase):
         # #302 review round 11 (filed on PR #308): an un-renamable notes.json must
         # surface as False + a loud line — callers would otherwise announce
         # "cleared — planning it" while the bundle silently stays RESOLVED.
+        # The failure is MOCKED, not chmod'd (#302 review round 12): root — the
+        # common containerized-CI user — ignores mode bits, so a permissions-based
+        # setup silently inverts the test there.
         import io
-        import os
         from contextlib import redirect_stderr
         d = self._resolved("33")
-        os.chmod(d, 0o555)                                 # rename must fail
-        self.addCleanup(os.chmod, d, 0o755)
         err = io.StringIO()
-        with redirect_stderr(err):
+        with mock.patch.object(sources.Path, "rename",
+                               side_effect=OSError("read-only bundle dir")), \
+                redirect_stderr(err):
             ok = sources.clear_resolved_marker(d)
         self.assertFalse(ok)
         self.assertIn("STAYS", err.getvalue())
