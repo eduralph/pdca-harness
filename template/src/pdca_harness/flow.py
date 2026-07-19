@@ -651,8 +651,22 @@ def _drive_and_act(
             # failure can no longer leave half the wave pushed. Isolated per bundle
             # (testbed #3): one bundle's weak texts block only that bundle, never a
             # sibling's accepted green work.
-            ready = {d.name: _isolate(d, "draft publish texts",
-                                      lambda d=d: publish.draft_texts(cfg, d))
+            # Two sub-phases (#295 review round 2): every publisher leaf finishes BEFORE
+            # any T4 runs. The leaves execute from the shared project root, so a later
+            # bundle's leaf can touch an earlier bundle's artifacts — interleaving
+            # draft→T4 per bundle would let post-validation edits reach mechanics
+            # unvalidated. T4 over the final contents only.
+            drafted = {d.name: _isolate(d, "draft publish texts",
+                                        lambda d=d: publish.draft_texts(cfg, d,
+                                                                        run_t4=False))
+                       for d in to_publish}
+            # Validation-only (draft=False, #295 review round 4): a text missing HERE
+            # means a later leaf deleted it — re-drafting would invoke a publisher
+            # leaf mid-validation, reopening the mutation window; fail that bundle.
+            ready = {d.name: bool(drafted.get(d.name))
+                             and bool(_isolate(d, "validate publish texts (T4)",
+                                               lambda d=d: publish.draft_texts(
+                                                   cfg, d, draft=False)))
                      for d in to_publish}
             for d in to_publish:
                 if ready.get(d.name):
