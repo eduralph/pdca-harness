@@ -47,7 +47,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import brief, driver, publish, signoff, state
+from . import brief, driver, publish, signoff, sources, state
 from .config import Config
 
 _MID_FLIGHT = (state.PLANNED, state.BUILT, state.CHECKED,
@@ -100,21 +100,13 @@ def _pr_state(url: str) -> str:
 def _github_tracker(cfg: Config) -> tuple[bool, str]:
     """(issue-side reconciliation possible, default --repo).
 
-    Only a github ``[[plan.source]]`` that DECLARES ``role = "tracker"`` is canonical
-    (#300 review) — that is exactly the meaning ``sources._is_tracker`` reserves for the
-    role. A github source WITHOUT it is supplementary reading material (a linked spec
-    repo, a mirror), and reconciling against it could comment on or close an unrelated
-    issue that merely shares the numeric id. Fallback: the legacy ``[tracker].system``
-    setting."""
-    for src in cfg.plan_sources:
-        # Same normalization as sources.py (#300 review round 4): `type = "GitHub"` is
-        # a valid tracker source there, and an exact compare here would silently drop
-        # its `repo` — pointing gh at the CURRENT repository's same-numbered issues.
-        if (isinstance(src, dict)
-                and (src.get("type") or "").strip().lower() == "github"
-                and (src.get("role") or "").strip().lower() == "tracker"):
-            return True, str(src.get("repo", "") or "")
-    return (cfg.tracker_system or "").strip().lower() == "github", ""
+    Delegates to :func:`sources.tracker_github_repo` (#300 review round 5) — the single
+    resolution both cleanup and the flow's reopen revalidation use. Key semantics: a
+    tracker-role plan.source is canonical and SUPPRESSES the legacy ``[tracker].system``
+    fallback whatever its type (a gitlab tracker-role source means the tracker is
+    gitlab even if ``[tracker].system`` still says github), and all comparisons use the
+    normalization ``sources.seed`` applies."""
+    return sources.tracker_github_repo(cfg)
 
 
 def _empty_patch(d: Path) -> bool:
@@ -156,18 +148,33 @@ def _discontinue(cfg: Config, d: Path, remote: dict, *, by: str, today: str) -> 
 
 
 def _close_issue(d: Path, number: str, repo: str, *, reason: str, fallback_body: str) -> bool:
-    """Close the issue with the comment ATTACHED — one ``gh issue close --comment`` call
-    (#300 review). The two-step comment-then-close left a partial state on a transient
-    close failure: the comment was already posted, and a ``--apply`` retry posted it
-    again — spamming the tracker and breaking the advertised idempotence. A single call
-    either does everything or (on failure) has posted nothing to retry around. The
-    bundle's ``tracker-comment.md`` is preferred as the body, else the fallback."""
+    """Close the issue with the comment attached, idempotently under retries.
+
+    One ``gh issue close --comment`` call (#300 review) — but that is still TWO API
+    operations under the hood, not a transaction (#300 review round 5): the comment can
+    land and the close still fail transiently. So before closing, probe the issue's
+    existing comments for OUR exact body; when it is already there, close WITHOUT the
+    comment — a ``--apply`` retry never reposts. The bundle's ``tracker-comment.md`` is
+    preferred as the body, else the fallback. A failing probe degrades to posting (one
+    possible duplicate only in the double-failure case — fail toward completing the
+    close, never toward losing the comment)."""
     repo_args = ["--repo", repo] if repo else []
     comment = d / "tracker-comment.md"
     body = fallback_body
     if comment.is_file() and comment.read_text(encoding="utf-8").strip():
         body = comment.read_text(encoding="utf-8").strip()
-    r = _gh(["issue", "close", number, *repo_args, "--reason", reason, "--comment", body])
+    already = False
+    probe = _gh(["issue", "view", number, *repo_args, "--json", "comments"])
+    if probe.returncode == 0:
+        try:
+            already = any((c.get("body") or "").strip() == body
+                          for c in json.loads(probe.stdout).get("comments", []) or [])
+        except ValueError:
+            pass
+    args = ["issue", "close", number, *repo_args, "--reason", reason]
+    if not already:
+        args += ["--comment", body]
+    r = _gh(args)
     if r.returncode != 0:
         print(f"cleanup: issue_{number}: close failed: {r.stderr.strip()}", file=sys.stderr)
         return False

@@ -313,6 +313,34 @@ class GuardsAndScope(CleanupBase):
         view = next(c for c in self.gh_calls if c[1:3] == ["issue", "view"])
         self.assertIn("org/tracker-repo", view)            # the configured repo, not cwd
 
+    def test_non_github_tracker_role_source_suppresses_legacy_fallback(self) -> None:
+        # #300 review round 5: sources.py treats ANY tracker-role source as canonical —
+        # a gitlab tracker-role source means the tracker is gitlab even when a stale
+        # [tracker].system = "github" remains, and falling back would close the current
+        # GitHub repo's same-numbered issue.
+        self.cfg.tracker_system = "github"                 # stale legacy setting
+        self.cfg.plan_sources = [{"type": "gitlab", "role": "tracker"}]
+        self._tracker("84")
+        rc, _out, err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("not GitHub", err)                   # issue side skipped
+        self.assertFalse(any(c[1:3] == ["issue", "view"] for c in self.gh_calls))
+
+    def test_close_retry_never_reposts_an_existing_comment(self) -> None:
+        # #300 review round 5: `gh issue close --comment` is two API operations — the
+        # comment can land while the close fails. A retry probes for our exact body
+        # and closes WITHOUT the comment when it is already there.
+        self._staged("185", signoff_action="accept", pr_url=_PR)
+        self.issue_states["185"] = dict(_OPEN)
+        # Simulate the partial state: the closing comment already exists on the issue.
+        self.issue_states["185"]["comments"] = [
+            {"body": f"Fixed by {_PR} (merged)."}]
+        self.pr_states[_PR] = "MERGED"
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        close = self._closes()[0]
+        self.assertNotIn("--comment", close)               # no repost on the retry
+
     def test_repeated_explicit_ids_are_deduplicated(self) -> None:
         # #300 review round 4: `cleanup 21 21 --apply` must not run the close twice.
         self._staged("83", signoff_action="accept", pr_url=_PR)
