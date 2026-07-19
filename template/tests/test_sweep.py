@@ -200,7 +200,7 @@ class SweepRealGit(unittest.TestCase):
         (self.lane / "precious.txt").write_text("someone's WIP\n", encoding="utf-8")
         lines = sweep.sweep(self.cfg, [d])                    # default clean mode
         self.assertTrue((self.lane / "precious.txt").exists())  # untouched
-        self.assertTrue(any("not ours to clean" in ln for ln in lines))
+        self.assertTrue(any("not ours to touch" in ln for ln in lines))
 
     def test_standalone_clone_matching_our_naming_is_never_deleted(self) -> None:
         # #297 review round 2: a standalone git CLONE named like an integ tree has a
@@ -233,6 +233,46 @@ class SweepRealGit(unittest.TestCase):
         lines = sweep.sweep(self.cfg)                         # no bundles argument
         self.assertTrue(lines)
         self.assertFalse((self.lane / "stray.txt").exists())  # target still discovered
+
+    def test_busy_lane_is_left_untouched(self) -> None:
+        # #297 review round 5: an out-of-process Do/gate holds the per-lane .lock for
+        # its whole critical section — the sweep must try it non-blocking and leave a
+        # busy lane alone, in every mode.
+        d = self._seed_footprint()
+        lock = self.lane.with_name(self.lane.name + ".lock").open("w")
+        self.addCleanup(lock.close)
+        worktree._lock_file(lock, wait=True)               # simulate the live run
+        try:
+            lines = sweep.sweep(self.cfg, [d], mode="remove")
+        finally:
+            worktree._unlock_file(lock)
+        self.assertTrue(self.lane.exists())                # not removed
+        self.assertTrue((self.lane / "stray.txt").exists())  # not cleaned either
+        self.assertTrue(any("busy" in ln for ln in lines))
+
+    def test_symlinked_lane_path_is_never_followed(self) -> None:
+        # #297 review round 5: a symlink aliasing the primary (or any registered tree)
+        # would pass a resolving registration check — the destructive git commands must
+        # never follow it. Symlinks on harness paths are rejected outright.
+        d = self._seed_footprint()
+        shutil.rmtree(self.lane)
+        sp.run(["git", "-C", str(self.primary), "worktree", "prune"],
+               check=True, capture_output=True)
+        self.lane.symlink_to(self.primary)                 # alias the PRIMARY checkout
+        (self.primary / "wip.txt").write_text("operator's WIP\n", encoding="utf-8")
+        lines = sweep.sweep(self.cfg, [d])                 # default clean mode
+        self.assertTrue((self.primary / "wip.txt").exists())  # primary never touched
+        self.assertTrue(any("not ours to touch" in ln for ln in lines))
+
+    def test_clean_sweeps_nested_repositories(self) -> None:
+        # #297 review round 5: a single -f preserves untracked nested repositories —
+        # vendor checkouts would survive every sweep and keep the disk. -ff removes them.
+        d = self._seed_footprint()
+        nested = self.lane / "vendor-scratch"
+        sp.run(["git", "init", "-q", str(nested)], check=True)
+        (nested / "junk.txt").write_text("vendored\n", encoding="utf-8")
+        sweep.sweep(self.cfg, [d])
+        self.assertFalse(nested.exists())
 
     def test_second_sweep_is_a_quiet_noop_for_removed_trees(self) -> None:
         d = self._seed_footprint()

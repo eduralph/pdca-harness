@@ -28,6 +28,7 @@ same lanes (the flow's own call sites run after all lane threads join).
 
 from __future__ import annotations
 
+import contextlib
 import re
 import shutil
 import subprocess
@@ -95,7 +96,14 @@ def _registered_worktree(primary: Path, wt: Path) -> bool:
     --porcelain`). A ``.git`` entry alone proves nothing (#297 review round 2): a
     standalone clone that merely matches our sibling naming has a ``.git`` DIRECTORY,
     fails ``git worktree remove``, and the rmtree fallback would eat an unrelated
-    repository. Registration is the authoritative "the harness created this here"."""
+    repository. Registration is the authoritative "the harness created this here".
+
+    A SYMLINK on the harness path is rejected outright (#297 review round 5): resolving
+    it would compare the TARGET's path — a link aliasing the primary checkout or another
+    registered worktree would pass, and the destructive git commands would follow the
+    link into a tree the harness must never touch."""
+    if wt.is_symlink():
+        return False
     proc = subprocess.run(["git", "-C", str(primary), "worktree", "list", "--porcelain"],
                           capture_output=True, text=True)
     if proc.returncode != 0:
@@ -107,6 +115,35 @@ def _registered_worktree(primary: Path, wt: Path) -> bool:
     except OSError:
         return False
     return any(target == str(Path(p).resolve()) for p in registered)
+
+
+@contextlib.contextmanager
+def _lane_busy_guard(wt: Path):
+    """The lane lifecycle lock, tried NON-BLOCKING (#297 review round 5); yields
+    whether it was acquired. The flow only joins its OWN lane threads — an
+    out-of-process Do or `pdca gates` holds the per-lane ``.lock`` for its whole
+    critical section (worktree.lane_lock), and cleaning/removing the lane under it
+    would reset the checkout mid-command and corrupt that run's result. A busy lane
+    is left untouched, in every mode."""
+    from . import worktree as wt_mod
+    try:
+        fh = wt.with_name(wt.name + ".lock").open("w")
+    except OSError:
+        yield False
+        return
+    try:
+        try:
+            wt_mod._lock_file(fh, wait=False)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            with contextlib.suppress(OSError):
+                wt_mod._unlock_file(fh)
+    finally:
+        fh.close()
 
 
 def _remove_tree(primary: Path, wt: Path) -> bool:
@@ -175,36 +212,40 @@ def sweep(cfg: Config, bundles: list[Path] | None = None, *,
                 if not dry_run:
                     _remove_tree(primary, integ)
             for lane_wt in _lane_dirs(primary):
-                if mode == "remove":
-                    if not _registered_worktree(primary, lane_wt):
-                        lines.append(f"sweep: left {lane_wt.name} (not a worktree "
-                                     f"registered to {primary.name} — not ours to remove)")
+                # The registration guard applies to CLEAN too (#297 review round 3):
+                # `clean` + `reset --hard` are just as destructive as removal, and an
+                # unrelated clone/symlink squatting on the exact lane path must never
+                # have its work stripped by them.
+                if not _registered_worktree(primary, lane_wt):
+                    lines.append(f"sweep: left {lane_wt.name} (not a worktree "
+                                 f"registered to {primary.name} — not ours to touch)")
+                    continue
+                with _lane_busy_guard(lane_wt) as held:
+                    if not held:
+                        lines.append(f"sweep: left {lane_wt.name} (busy — another "
+                                     "Do/gate run holds its lane lock)")
                         continue
-                    lines.append(f"sweep: {verb}remove lane worktree {lane_wt.name}")
-                    if not dry_run:
-                        _remove_tree(primary, lane_wt)
-                else:
-                    # The registration guard applies to CLEAN too (#297 review round 3):
-                    # `clean -fdxq` + `reset --hard` are just as destructive as removal,
-                    # and an unrelated clone/symlink squatting on the exact lane path
-                    # must never have its work stripped by them.
-                    if not _registered_worktree(primary, lane_wt):
-                        lines.append(f"sweep: left {lane_wt.name} (not a worktree "
-                                     f"registered to {primary.name} — not ours to clean)")
-                        continue
-                    lines.append(f"sweep: {verb}clean lane worktree {lane_wt.name} "
-                                 "(build artifacts dropped, checkout kept)")
-                    if not dry_run:
-                        if (_git(lane_wt, "clean", "-fdxq") != 0
-                                or _git(lane_wt, "reset", "--hard") != 0):
-                            lines.append(f"sweep: {lane_wt.name}: clean/reset failed "
-                                         "(left as is)")
-                        else:
-                            # The reset stripped the bundle's patch, so the owner stamp
-                            # no longer describes the tree's CONTENT — a later gate read
-                            # trusting it would false-green against the unpatched base
-                            # (#297 review round 2). Clear it; the next read re-populates.
-                            worktree._owner_file(lane_wt).unlink(missing_ok=True)
+                    if mode == "remove":
+                        lines.append(f"sweep: {verb}remove lane worktree {lane_wt.name}")
+                        if not dry_run:
+                            _remove_tree(primary, lane_wt)
+                    else:
+                        lines.append(f"sweep: {verb}clean lane worktree {lane_wt.name} "
+                                     "(build artifacts dropped, checkout kept)")
+                        if not dry_run:
+                            # ``-ff``: a single -f preserves untracked NESTED
+                            # REPOSITORIES (git-clean(1)) — vendor checkouts would
+                            # survive every sweep and keep the disk (#297 review r5).
+                            if (_git(lane_wt, "clean", "-ffdxq") != 0
+                                    or _git(lane_wt, "reset", "--hard") != 0):
+                                lines.append(f"sweep: {lane_wt.name}: clean/reset "
+                                             "failed (left as is)")
+                            else:
+                                # The reset stripped the bundle's patch, so the owner
+                                # stamp no longer describes the tree's CONTENT — a
+                                # later gate read trusting it would false-green
+                                # against the unpatched base (#297 review round 2).
+                                worktree._owner_file(lane_wt).unlink(missing_ok=True)
             if not dry_run:
                 _git(primary, "worktree", "prune")
         except Exception as exc:  # noqa: BLE001 — teardown must never fail a run

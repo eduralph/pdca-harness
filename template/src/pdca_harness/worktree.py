@@ -454,6 +454,31 @@ def sweep_overflow(primary: Path) -> None:
         overflow_remove(primary, d)
 
 
+def _pid_alive(pid: int) -> bool:
+    """Non-destructive process-existence probe (#297 review round 5).
+
+    On Windows ``os.kill(pid, 0)`` is NOT the harmless POSIX probe — CPython routes
+    non-console signals through ``TerminateProcess``, so probing a live gate process
+    would KILL it. ``OpenProcess`` with query-limited rights is the safe equivalent.
+    Anything unknowable reads as alive (never reclaim what can't be classified)."""
+    if os.name == "nt":  # pragma: no cover — exercised only on Windows
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True  # exists (another user's) / unknowable → treat as live
+    return True
+
+
 def orphan_overflow_dirs(primary: Path) -> list[Path]:
     """Overflow trees whose creating process is provably gone (#297 review).
 
@@ -465,14 +490,8 @@ def orphan_overflow_dirs(primary: Path) -> list[Path]:
     out: list[Path] = []
     for p in _overflow_dirs(primary):
         pid_s = p.name.split(_OVF_SUFFIX, 1)[1].split("-", 1)[0]
-        if not pid_s.isdigit():
-            continue
-        try:
-            os.kill(int(pid_s), 0)
-        except ProcessLookupError:
+        if pid_s.isdigit() and not _pid_alive(int(pid_s)):
             out.append(p)  # provably dead → a crash leftover
-        except (PermissionError, OSError):
-            continue  # exists (another user's) / unknowable → treat as live
     return out
 
 
