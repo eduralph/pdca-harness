@@ -396,12 +396,16 @@ def _run_beat_round_pooled(
     return progressed[0]
 
 
-def _publish_bundle(cfg: Config, d: Path, *, by: str, today: str) -> None:
+def _publish_bundle(cfg: Config, d: Path, *, by: str, today: str,
+                    texts_prevalidated: bool = False) -> None:
     """Publish one COMPLETE bundle (Check's closing step), isolated so a single failure
-    can't abort the batch (testbed #3); a non-zero return is loud, never silent (#97)."""
+    can't abort the batch (testbed #3); a non-zero return is loud, never silent (#97).
+    ``texts_prevalidated`` (#295 review): the wave pre-pass already drafted + T4-gated
+    the texts, so publish runs mechanics-only (no second T4 run mid-wave)."""
     rc = _isolate(d, "publish", lambda: publish.publish(
         cfg, d.name.removeprefix("issue_"),
-        dry_run=cfg.publisher.mode == "stub", by=by, today=today, skip_if_no_target=True))
+        dry_run=cfg.publisher.mode == "stub", by=by, today=today, skip_if_no_target=True,
+        texts_prevalidated=texts_prevalidated))
     if rc not in (0, None):  # None ⇒ _isolate already logged an exception
         print(f"flow: {d.name} is COMPLETE but publish did not complete (rc {rc}) — NOT "
               f"published; run `pdca publish {d.name.removeprefix('issue_')}`.", file=sys.stderr)
@@ -640,10 +644,27 @@ def _drive_and_act(
                     if state.state(d) == state.COMPLETE]
         _audit_wave_overlap(complete)
         if do_publish:
-            for d in complete:
-                if d.name not in published:
-                    _publish_bundle(cfg, d, by=by, today=today)
-                    published.add(d.name)
+            to_publish = [d for d in complete if d.name not in published]
+            # #295: draft ALL publishing texts (commit-msg.txt + pr-description.md) and
+            # gate them (T4) BEFORE any git/gh mechanics run, so text generation and
+            # mechanical publishing are two distinct phases — a mid-wave drafting/T4
+            # failure can no longer leave half the wave pushed. Isolated per bundle
+            # (testbed #3): one bundle's weak texts block only that bundle, never a
+            # sibling's accepted green work.
+            ready = {d.name: _isolate(d, "draft publish texts",
+                                      lambda d=d: publish.draft_texts(cfg, d))
+                     for d in to_publish}
+            for d in to_publish:
+                if ready.get(d.name):
+                    # Mechanics-only: the pre-pass drafted AND T4-gated the texts — a
+                    # second T4 run here could transiently fail AFTER siblings pushed,
+                    # recreating the half-published wave (#295 review).
+                    _publish_bundle(cfg, d, by=by, today=today, texts_prevalidated=True)
+                else:
+                    print(f"flow: {d.name} — publish texts not ready (draft/T4 failed); "
+                          f"NOT published this run; fix and run `pdca publish "
+                          f"{d.name.removeprefix('issue_')}`.", file=sys.stderr)
+                published.add(d.name)
         accepted += complete
         # Carry this wave's accepted work to the NEXT wave's base (skipped on the final
         # wave, and by --no-publish). Default "stack": fold onto a run-scoped integration

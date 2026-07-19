@@ -72,8 +72,10 @@ worktree = true
 # out-of-cadence or contended read) — by spinning up a throwaway worktree off the base +
 # that bundle's patch, running there, and removing it, instead of mutating a lane another
 # bundle may still want. It's correct by construction (a fresh tree can't carry a foreign
-# orphan, the #224 class of bug) but a COLD checkout (no build cache), so it's reserved for
-# that exceptional path; at the cap it falls back to healing the lane in place. Leave at 0
+# orphan, the #224 class of bug). Note every gating read now reconstructs base + patch.diff
+# in the lane anyway (#296 — the lane is a warm checkout cache, not a trusted content
+# cache); overflow's job is purely to avoid clobbering a lane another bundle still owns.
+# At the cap it falls back to reconstructing in the lane in place. Leave at 0
 # unless you actually run out-of-band gate/verify reads against in-flight lanes (the common
 # serial / one-bundle-per-lane flow never contends, so 0 costs nothing). Each overflow is a
 # full checkout — size the cap to your disk headroom; spillover is logged when it happens.
