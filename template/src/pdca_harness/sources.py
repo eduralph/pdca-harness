@@ -32,7 +32,9 @@ project that sets neither sees no change.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -94,6 +96,115 @@ def _is_tracker_source(spec: dict) -> bool:
     "tracker"``) — a github/gitlab/command source that supplies the canonical
     ``notes.json``, making the legacy ``notes_cmd`` redundant (#132)."""
     return (spec.get("role") or "").strip().lower() == "tracker"
+
+
+# owner/repo out of a GitHub tracker URL (https/ssh, optional .git / trailing path).
+_GH_URL_RE = re.compile(r"github\.com[:/]([\w.-]+)/([\w.-]+?)(?:\.git)?(?:[/?#]|$)")
+
+
+def tracker_github_repo(cfg: Config) -> tuple[bool, str]:
+    """``(the canonical tracker is GitHub, its --repo override)``.
+
+    A tracker-role plan.source is CANONICAL (#132) and SUPPRESSES the legacy
+    ``[tracker].system`` fallback WHATEVER its type (#300 review round 5): a gitlab
+    tracker-role source means the tracker is gitlab even if ``[tracker].system`` still
+    says github — falling back would point ``gh`` at the wrong repository's
+    same-numbered issues. Comparisons use the same normalization ``seed`` applies.
+
+    On the legacy path the repo is DERIVED from ``[tracker].url`` (#302 review round
+    7): the rendered config supplies a URL but no repo key, and returning "" would
+    leave ``gh`` on its default repository — when the harness checkout is not the
+    tracker repo, that queries a wrong same-numbered issue. An unparseable/absent URL
+    yields "" and the reopen probe refuses to guess."""
+    for spec in cfg.plan_sources:
+        if isinstance(spec, dict) and _is_tracker_source(spec):
+            kind = (spec.get("type") or "").strip().lower()
+            if kind == "github":
+                # A repo-less github tracker source is documented and legal (gh's
+                # default serves the SEED, which runs from the project root) — but
+                # the reopen probe must never guess, so fall back to the same URL
+                # derivation the legacy path uses (#302 review round 14): without
+                # it, `not repo` permanently disabled revalidation for exactly
+                # these configurations.
+                return True, (str(spec.get("repo", "") or "")
+                              or _repo_from_url(cfg.tracker_url))
+            if kind == "command":
+                # An opaque command source says nothing about the tracker's
+                # IDENTITY — it is just the fetch mechanism (#300 review round 15;
+                # e.g. a GitHub notes_cmd moved into a Plan source). Fall through
+                # to the [tracker].system metadata below, or reopened issues stay
+                # terminal forever and cleanup skips issue-side reconciliation.
+                break
+            return False, ""  # an explicitly different provider (gitlab): not GitHub
+    if (cfg.tracker_system or "").strip().lower() != "github":
+        return False, ""
+    return True, _repo_from_url(cfg.tracker_url)
+
+
+def _repo_from_url(url: str) -> str:
+    """``owner/repo`` parsed out of a GitHub tracker URL, or ""."""
+    m = _GH_URL_RE.search(url or "")
+    return f"{m.group(1)}/{m.group(2)}" if m else ""
+
+
+def tracker_issue_reopened(cfg: Config, issue_id: str) -> bool:
+    """True iff the tracker issue is verifiably OPEN again (#302 review rounds 4/5).
+
+    A ``resolved`` marker in notes.json is a CACHE of the closure — the tracker can
+    reopen the issue afterwards, and no seed refreshes an existing notes.json.
+    Conservative: only a GitHub canonical tracker with a KNOWN repository, a numeric
+    id and a working ``gh`` can prove a reopen; anything unknowable is False (never a
+    crash). The repo is always passed explicitly (#302 review round 7) — ``gh``'s
+    checkout-default repository could hold a wrong same-numbered issue, and a wrong
+    OPEN there would clear a genuine resolution."""
+    if not issue_id.isdigit():
+        return False
+    is_github, repo = tracker_github_repo(cfg)
+    if not is_github or not repo or shutil.which("gh") is None:
+        return False
+    rc, text = _run_capture(
+        ["gh", "issue", "view", issue_id, "--json", "state", "--repo", repo], cfg.root)
+    if rc != 0:
+        return False
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return False
+    # gh (or a shim) can emit valid non-object JSON (`null`, `[]`) — .get on it would
+    # crash the flow instead of the promised "unknown ⇒ False" (#302 review round 7).
+    return isinstance(data, dict) and data.get("state") == "OPEN"
+
+
+def clear_resolved_marker(d: Path) -> bool:
+    """The tracker REOPENED a resolved item: retire the closure-era notes entirely.
+
+    Deleting only the ``resolved`` key would leave the stale notes.json in place, and
+    both ``ensure_notes`` and the tracker-role seed refuse to replace an existing
+    notes.json — the planner would then brief on the pre-closure thread, missing every
+    comment added at reopen (#302 review round 5). The whole file is set aside under a
+    unique name (kept inspectable, never deleted), so the next Plan seed re-fetches
+    the fresh thread and the bundle reads UNPLANNED again.
+
+    Returns whether the marker is actually GONE (#302 review round 11, filed on PR
+    #308): a failed rename leaves the bundle RESOLVED, and a caller announcing
+    "cleared — planning it" over that would silently suppress the reopened work.
+    The failure itself is printed here (with the why); callers decide the outcome."""
+    notes = d / "notes.json"
+    if not notes.exists():
+        return True
+    aside = d / "notes.superseded-by-reopen.json"
+    n = 2
+    while aside.exists():
+        aside = d / f"notes.superseded-by-reopen-{n}.json"
+        n += 1
+    try:
+        notes.rename(aside)
+    except OSError as exc:
+        print(f"sources: {d.name} — could not set the closure-era notes.json aside "
+              f"({exc}); the resolved marker STAYS and the reopened issue is not "
+              "planned — fix the bundle directory, then re-run", file=sys.stderr)
+        return False
+    return True
 
 
 def _tracker_dest(d: Path, sources_dir: Path, spec: dict, default_name: str) -> Path:
