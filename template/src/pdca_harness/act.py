@@ -159,7 +159,8 @@ def unreviewed_bundles(cfg: Config, frozen: list[Path] | None = None) -> list[Pa
     return [d for d in frozen if d.name not in reviewed]
 
 
-def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "") -> None:
+def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "",
+                  delta_guard: float | None = None) -> list[str]:
     """Advance the review frontier: union the covered bundles into the marker (#109/#299).
 
     ``reviewed=None`` ⇒ every currently frozen bundle (what a full auto-Act covers).
@@ -169,7 +170,15 @@ def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "
     serialize instead of one overwriting the other's reviewed set — and the temp file
     is per-writer (pid-suffixed) so one writer's ``os.replace`` can never consume
     another's. Each write stays crash-atomic (temp sibling + ``os.replace``).
-    """
+
+    ``delta_guard`` (the review's start instant) applies the in-session delta
+    protection INSIDE this same critical section (#299 review round 7): a bundle with
+    a :func:`delta_since` real delta is dropped from the union. Scanning outside the
+    lock would race ``unmark_reviewed`` — revalidate could finish its removal between
+    a caller's stale scan and this write, and the stale union would re-hide the
+    delta. Revalidate writes the stamp BEFORE calling ``unmark_reviewed`` (which
+    takes this same lock), so whichever side enters the critical section second sees
+    the other's effect. Returns the withheld bundle names (callers report them)."""
     cfg.process_dir.mkdir(parents=True, exist_ok=True)
     marker = cfg.process_dir / _CADENCE_MARKER
     lock = marker.with_name(marker.name + ".lock")
@@ -183,12 +192,18 @@ def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "
             # skip. Older cycles stay in the default scope until reviewed once more —
             # fail toward re-review, never toward skipping.
             prior = _reviewed_names(cfg)
-            new = {d.name for d in (reviewed if reviewed is not None else frozen)}
+            src = list(reviewed if reviewed is not None else frozen)
+            withheld: list[str] = []
+            if delta_guard is not None:
+                withheld = sorted(d.name for d in src if delta_since(d, delta_guard))
+                src = [d for d in src if d.name not in withheld]
+            new = {d.name for d in src}
             covered = sorted((prior | new) & frozen_names)
             payload = {"count": len(covered), "reviewed": covered, "last_review_date": date}
             tmp = marker.with_name(f"{marker.name}.tmp.{os.getpid()}")
             tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
             os.replace(tmp, marker)
+            return withheld
         finally:
             _unlock(fh)
 
@@ -249,6 +264,15 @@ def act_due(cfg: Config) -> bool:
     return cycles_since_review(cfg) >= cfg.act_cadence
 
 
+# File mtimes and time.time() live in different clock domains: filesystems truncate
+# or round timestamps (ext4 nanosecond fields still disagree with the Python clock by
+# milliseconds; FAT rounds to 2 s), so a stamp written moments AFTER `started` can
+# carry an mtime just BEFORE it (#299 review round 7). The slack errs toward
+# re-review: a stamp from just before the review started is re-examined, never a
+# fresh one skipped.
+_MTIME_SLACK = 2.0
+
+
 def delta_since(d: Path, started: float) -> bool:
     """True iff a revalidation stamp recording a REAL delta (``changed: true``) landed
     on ``d`` at/after ``started`` — the "did new Act signal arrive while this review
@@ -262,10 +286,11 @@ def delta_since(d: Path, started: float) -> bool:
     false``) is not new signal, and withholding its bundle would inflate
     ``cycles_since_review`` into a redundant extra Act. An unreadable stamp counts
     as a delta — re-review over skip. A bundle deleted mid-review globs empty:
-    nothing left to protect."""
+    nothing left to protect. Mtimes are compared with :data:`_MTIME_SLACK` (#299
+    review round 7) — filesystem and wall-clock timestamps are not the same clock."""
     for p in d.glob("revalidation-*.json"):
         try:
-            if p.stat().st_mtime < started:
+            if p.stat().st_mtime < started - _MTIME_SLACK:
                 continue
             if json.loads(p.read_text(encoding="utf-8")).get("changed"):
                 return True

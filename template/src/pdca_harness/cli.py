@@ -807,11 +807,17 @@ def _act_scope(cfg: Config, args: argparse.Namespace) -> tuple[list, list, bool]
     freezing between two globs would enter the scoped set (and be marked reviewed on
     --append) while missing from the signal history — its recurring signals never
     registered yet its cycles pushed past the frontier.
+
+    ``all_entries`` is NEVER date-filtered (#299 review round 7): ``--since``
+    narrows only the narrative scope — a signal seen once before the requested date
+    and once after must still register as recurring under ``--since --append``.
     """
     frozen = act.frozen_bundles(cfg)
-    all_entries = act.index(cfg, since=args.since, bundles=frozen)
+    all_entries = act.index(cfg, bundles=frozen)          # full signal history, always
     if args.all or args.since:
-        return all_entries, all_entries, True
+        scoped = ([e for e in all_entries if e.date and e.date >= args.since]
+                  if args.since else all_entries)
+        return scoped, all_entries, True
     if not act.has_frontier(cfg):
         # A legacy count marker records no names — cover the full history once,
         # loudly; the first --append then records a real frontier (#299 review r3).
@@ -861,18 +867,18 @@ def _act_log(cfg: Config, args: argparse.Namespace) -> int:
         # next time — never silently skips them. The marker write itself is atomic.
         act.register_signals(cfg, all_entries, args.date)  # track recurring signals (#149)
         log = act.append_entry(cfg, text)
-        # The auto-Act in-session delta protection, mirrored (#299 review round 6): a
-        # `pdca revalidate` recording a REAL delta between the scaffold's index and
-        # this frontier write was not in the entry just logged — unioning its bundle
-        # back in would undo unmark_reviewed and hide even a PASS→FAIL regression
-        # from the next default `act index`/`act log`.
-        covered = [e.bundle for e in entries
-                   if not act.delta_since(e.bundle, started)]
-        act.mark_reviewed(cfg, reviewed=covered, date=args.date)
-        if len(covered) < len(entries):
-            print(f"act: {len(entries) - len(covered)} cycle(s) got a revalidation "
-                  "delta while this entry was written — left unreviewed for the next "
-                  "Act", file=sys.stderr)
+        # The auto-Act in-session delta protection, mirrored (#299 review rounds
+        # 6/7): a `pdca revalidate` recording a REAL delta between the scaffold's
+        # index and the frontier write was not in the entry just logged — unioning
+        # its bundle back in would undo unmark_reviewed and hide even a PASS→FAIL
+        # regression. delta_guard runs the scan INSIDE the marker's critical
+        # section, so it cannot race revalidate's own frontier removal.
+        withheld = act.mark_reviewed(cfg, reviewed=[e.bundle for e in entries],
+                                     date=args.date, delta_guard=started)
+        if withheld:
+            print(f"act: {len(withheld)} cycle(s) got a revalidation delta while "
+                  "this entry was written — left unreviewed for the next Act",
+                  file=sys.stderr)
         print(f"appended entry to {log}")
     else:
         print(text)

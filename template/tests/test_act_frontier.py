@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -177,6 +178,33 @@ class MarkerFormat(unittest.TestCase):
         names = [d.name for d in act.unreviewed_bundles(self.cfg)]
         self.assertIn("issue_60", names)                # mid-session freeze not marked
         self.assertIn("issue_50", names)                # mid-session delta not re-hidden
+
+    def test_delta_since_tolerates_filesystem_clock_skew(self) -> None:
+        # #299 review round 7: fs mtimes and time.time() are different clocks — a
+        # stamp written moments AFTER `started` can carry an mtime just before it.
+        # The slack errs toward re-review; a genuinely old stamp still doesn't count.
+        d = _freeze(self.cfg, "80")
+        stamp = d / "revalidation-2026-07-19.json"
+        stamp.write_text(json.dumps({"changed": True, "rows": []}), encoding="utf-8")
+        st = stamp.stat().st_mtime
+        self.assertTrue(act.delta_since(d, st + 1.0))       # within slack: a delta
+        self.assertFalse(act.delta_since(d, st + act._MTIME_SLACK + 5))  # well past
+
+    def test_mark_reviewed_delta_guard_withholds_inside_the_critical_section(self) -> None:
+        # #299 review round 7: the delta scan runs INSIDE mark_reviewed's flock'd
+        # section (a scan outside it races revalidate's unmark_reviewed); the
+        # withheld names come back so callers can report them.
+        a = _freeze(self.cfg, "10")
+        b = _freeze(self.cfg, "20")
+        started = time.time()
+        (a / "revalidation-2026-07-19.json").write_text(
+            json.dumps({"changed": True, "rows": []}), encoding="utf-8")
+        withheld = act.mark_reviewed(self.cfg, reviewed=[a, b], date="2026-07-19",
+                                     delta_guard=started)
+        self.assertEqual(withheld, ["issue_10"])
+        self.assertEqual([d.name for d in act.unreviewed_bundles(self.cfg)],
+                         ["issue_10"])
+        del b  # (fixture bookkeeping)
 
     def test_confirming_midsession_revalidation_still_advances_the_frontier(self) -> None:
         # #299 review round 6: the stamp's `changed` VERDICT decides, never its mtime
@@ -345,6 +373,23 @@ class CliScope(unittest.TestCase):
         self.assertIn("2× tighten the repro gate", out)   # signal history preserved
         self.assertIn("Process-delta ledger", out)
         self.assertIn("tighten the repro gate", out.split("Process-delta ledger")[1])
+
+    def test_since_append_still_registers_cross_date_recurrences(self) -> None:
+        # #299 review round 7: --since narrows only the NARRATIVE scope — a signal
+        # seen once before the requested date and once after must still register as
+        # recurring when --since rides --append.
+        _freeze(self.cfg, "1", date="2026-07-01",
+                candidate="tighten the repro gate for flaky suites")
+        _freeze(self.cfg, "2", date="2026-07-15",
+                candidate="tighten the repro gate for flaky suites")
+        rc, _out, _err = self._main(["act", "log", "--date", "2026-07-19",
+                                     "--since", "2026-07-10", "--append"])
+        self.assertEqual(rc, 0)
+        log = (self.cfg.process_dir / "act-log.md").read_text(encoding="utf-8")
+        self.assertIn("cycles considered: 2\n", log)        # narrative: post-date only
+        ledger = act.load_ledger(self.cfg)                  # history: full, recurring
+        self.assertTrue(any("tighten the repro gate" in e.get("raw", "")
+                            for e in ledger))
 
     def test_pattern_history_spans_the_frontier(self) -> None:
         # A signal seen once BEFORE the frontier and once after must still register as

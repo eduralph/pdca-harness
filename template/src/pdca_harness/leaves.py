@@ -1603,12 +1603,11 @@ def run_act(cfg: Config, date: str) -> None:
 
     # Advance the review frontier (issues #109/#299) whenever the Act beat runs — even
     # if a command-mode Act judged "no delta" and wrote no act-log entry, the review
-    # happened, over exactly the pre-session snapshot. A bundle whose revalidation
-    # recorded a REAL delta mid-session stays out (act.delta_since — the stamp's
-    # `changed` verdict decides, so a confirming revalidation doesn't withhold it).
-    act_mod.mark_reviewed(
-        cfg, reviewed=[d for d in covered if not act_mod.delta_since(d, started)],
-        date=date)
+    # happened, over exactly the pre-session snapshot. delta_guard applies the
+    # mid-session delta protection INSIDE the marker's critical section (#299 review
+    # round 7 — a scan out here would race revalidate's unmark_reviewed); the stamp's
+    # `changed` verdict decides, so a confirming revalidation doesn't withhold.
+    act_mod.mark_reviewed(cfg, reviewed=covered, date=date, delta_guard=started)
 
 
 def _act_prompt(cfg: Config, date: str) -> str:
