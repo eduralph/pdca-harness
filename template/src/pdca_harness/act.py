@@ -15,6 +15,7 @@ contribution's disposition, run the validator/suite, or author the next brief.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -152,42 +153,70 @@ def act_session(cfg: Config, *, wait: bool = False):
 
 
 def _load_marker(cfg: Config) -> dict:
-    """The parsed review marker: ``{"count": int, "reviewed": set[str] | None}``.
+    """The parsed review marker:
+    ``{"count": int, "reviewed": set[str] | None, "fingerprints": dict[str, str]}``.
 
     ``reviewed is None`` ⇒ legacy count-only or absent/garbage marker (callers apply
-    the name-sorted-prefix heuristic). Defensive like :func:`load_ledger` — any
-    unreadable/malformed content is "nothing reviewed", never a crash.
+    the name-sorted-prefix heuristic). ``fingerprints`` maps a reviewed name to the
+    SUMMARY.md hash the review covered (#299 review round 16) — tolerant: absent or
+    malformed reads as ``{}`` (name-only semantics). Defensive like
+    :func:`load_ledger` — any unreadable/malformed content is "nothing reviewed",
+    never a crash.
     """
+    nothing = {"count": 0, "reviewed": None, "fingerprints": {}}
     marker = cfg.process_dir / _CADENCE_MARKER
     if not marker.exists():
-        return {"count": 0, "reviewed": None}
+        return dict(nothing)
     try:
         data = json.loads(marker.read_text(encoding="utf-8"))
     except (ValueError, OSError):
-        return {"count": 0, "reviewed": None}
+        return dict(nothing)
     if isinstance(data, bool):  # bool is an int subclass; a `true` marker means nothing
-        return {"count": 0, "reviewed": None}
+        return dict(nothing)
     if isinstance(data, int):  # legacy bare-int marker (pre-#299)
-        return {"count": max(0, data), "reviewed": None}
+        return {"count": max(0, data), "reviewed": None, "fingerprints": {}}
     if isinstance(data, dict):
         reviewed = data.get("reviewed")
         if isinstance(reviewed, list) and all(isinstance(n, str) for n in reviewed):
-            return {"count": len(reviewed), "reviewed": set(reviewed)}
+            fps_raw = data.get("fingerprints")
+            fps = ({k: v for k, v in fps_raw.items()
+                    if isinstance(k, str) and isinstance(v, str)}
+                   if isinstance(fps_raw, dict) else {})
+            return {"count": len(reviewed), "reviewed": set(reviewed),
+                    "fingerprints": fps}
         count = data.get("count")
         # bool is an int subclass here too (#299 review): a malformed `{"count": true}`
         # must read as "nothing reviewed", not as one covered bundle.
         if isinstance(count, int) and not isinstance(count, bool):
-            return {"count": max(0, count), "reviewed": None}
-        return {"count": 0, "reviewed": None}
-    return {"count": 0, "reviewed": None}
+            return {"count": max(0, count), "reviewed": None, "fingerprints": {}}
+        return dict(nothing)
+    return dict(nothing)
 
 
-def _reviewed_names(cfg: Config) -> set[str]:
-    """The frontier as bundle names. A legacy count marker carries NO name information
-    (#299 review round 3) — no prefix inference: names it cannot prove reviewed are
-    unreviewed, so nothing is ever silently skipped."""
-    m = _load_marker(cfg)
-    return m["reviewed"] if m["reviewed"] is not None else set()
+def _fingerprint(d: Path) -> str:
+    """Identity of a frozen bundle's reviewed CONTENT — sha256 of its SUMMARY.md
+    (#299 review round 16). The documented redo path (``rm -rf`` + rerun) recreates
+    a bundle under the SAME name; a name-only frontier would treat the new
+    generation as already reviewed and silently omit it from every default scope
+    and from the cadence. "" when the summary is unreadable."""
+    try:
+        return hashlib.sha256((d / "SUMMARY.md").read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _covered_names(m: dict, bundles: list[Path]) -> set[str]:
+    """Which of ``bundles`` the marker proves reviewed: name membership AND, when a
+    fingerprint was recorded, an unchanged SUMMARY.md hash (#299 review round 16).
+    A recorded-but-mismatching fingerprint reads UNREVIEWED (the recreated
+    generation was never seen); a name with no recorded fingerprint (a transitional
+    marker) counts by name alone."""
+    if m["reviewed"] is None:
+        return set()
+    fps = m["fingerprints"]
+    return {d.name for d in bundles
+            if d.name in m["reviewed"]
+            and (d.name not in fps or fps[d.name] == _fingerprint(d))}
 
 
 def has_frontier(cfg: Config) -> bool:
@@ -207,8 +236,8 @@ def unreviewed_bundles(cfg: Config, frozen: list[Path] | None = None) -> list[Pa
     """
     if frozen is None:
         frozen = frozen_bundles(cfg)
-    reviewed = _reviewed_names(cfg)
-    return [d for d in frozen if d.name not in reviewed]
+    covered = _covered_names(_load_marker(cfg), frozen)
+    return [d for d in frozen if d.name not in covered]
 
 
 def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "",
@@ -243,7 +272,9 @@ def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "
             # can't say WHICH bundles it covered, and inferring would risk a permanent
             # skip. Older cycles stay in the default scope until reviewed once more —
             # fail toward re-review, never toward skipping.
-            prior = _reviewed_names(cfg)
+            m = _load_marker(cfg)
+            prior = m["reviewed"] if m["reviewed"] is not None else set()
+            prior_fps = m["fingerprints"]
             src = list(reviewed if reviewed is not None else frozen)
             withheld: list[str] = []
             if delta_guard is not None:
@@ -251,7 +282,15 @@ def mark_reviewed(cfg: Config, reviewed: list[Path] | None = None, date: str = "
                 src = [d for d in src if d.name not in withheld]
             new = {d.name for d in src}
             covered = sorted((prior | new) & frozen_names)
-            payload = {"count": len(covered), "reviewed": covered, "last_review_date": date}
+            # Fingerprints (#299 review round 16): newly covered names get the hash
+            # THIS review saw; retained names keep the hash THEIR review saw (a
+            # recreated bundle must not be re-attested by a review that never read
+            # it). A retained name without one (transitional marker) stays name-only.
+            by_name = {d.name: d for d in frozen}
+            fps = {nm: (_fingerprint(by_name[nm]) if nm in new else prior_fps[nm])
+                   for nm in covered if nm in new or nm in prior_fps}
+            payload = {"count": len(covered), "reviewed": covered,
+                       "fingerprints": fps, "last_review_date": date}
             tmp = marker.with_name(f"{marker.name}.tmp.{os.getpid()}")
             tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
             os.replace(tmp, marker)
@@ -292,6 +331,8 @@ def unmark_reviewed(cfg: Config, d: Path) -> None:
                 return
             covered = sorted(m["reviewed"] - {d.name})
             payload = {"count": len(covered), "reviewed": covered,
+                       "fingerprints": {k: v for k, v in m["fingerprints"].items()
+                                        if k in covered},
                        "last_review_date": _load_marker_date(cfg)}
             tmp = marker.with_name(f"{marker.name}.tmp.{os.getpid()}")
             tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -319,7 +360,7 @@ def cycles_since_review(cfg: Config) -> int:
     m = _load_marker(cfg)
     if m["reviewed"] is None:
         return max(0, len(frozen) - m["count"])
-    return sum(1 for d in frozen if d.name not in m["reviewed"])
+    return len(frozen) - len(_covered_names(m, frozen))
 
 
 def act_due(cfg: Config) -> bool:
@@ -611,8 +652,11 @@ def append_reviewed(cfg: Config, entries: list[ActEntry], render, *, date: str,
     with lock.open("w") as fh:
         _lock_exclusive(fh)
         try:
-            prior = _reviewed_names(cfg)
-            kept = [e for e in entries if e.bundle.name not in prior]
+            m = _load_marker(cfg)
+            prior = m["reviewed"] if m["reviewed"] is not None else set()
+            prior_fps = m["fingerprints"]
+            covered_now = _covered_names(m, [e.bundle for e in entries])
+            kept = [e for e in entries if e.bundle.name not in covered_now]
             if not kept:
                 return None, [], []
             log = append_entry(cfg, render(kept))
@@ -620,10 +664,14 @@ def append_reviewed(cfg: Config, entries: list[ActEntry], render, *, date: str,
                               if delta_guard is not None
                               and delta_since(e.bundle, delta_guard))
             new = {e.bundle.name for e in kept} - set(withheld)
-            frozen_names = {d.name for d in frozen_bundles(cfg)}
+            frozen = frozen_bundles(cfg)
+            frozen_names = {d.name for d in frozen}
             covered = sorted((prior | new) & frozen_names)
+            by_name = {d.name: d for d in frozen}
+            fps = {nm: (_fingerprint(by_name[nm]) if nm in new else prior_fps[nm])
+                   for nm in covered if nm in new or nm in prior_fps}
             payload = {"count": len(covered), "reviewed": covered,
-                       "last_review_date": date}
+                       "fingerprints": fps, "last_review_date": date}
             tmp = marker.with_name(f"{marker.name}.tmp.{os.getpid()}")
             tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
             os.replace(tmp, marker)

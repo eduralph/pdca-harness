@@ -355,6 +355,23 @@ class MarkerFormat(unittest.TestCase):
                          ["issue_40"])
         self.assertEqual(act.cycles_since_review(self.cfg), 1)   # cadence sees it too
 
+    def test_recreated_bundle_is_unreviewed_again(self) -> None:
+        # #299 review round 16: the documented redo (rm -rf + rerun) recreates
+        # issue_X under the SAME name — the frontier keys coverage on the frozen
+        # record's fingerprint, so the new generation re-enters the default scope
+        # and the cadence instead of being silently treated as reviewed.
+        d = _freeze(self.cfg, "50", date="2026-07-01")
+        act.mark_reviewed(self.cfg, date="2026-07-02")
+        self.assertEqual(act.unreviewed_bundles(self.cfg), [])
+        shutil.rmtree(d)
+        _freeze(self.cfg, "50", date="2026-07-10")         # the redo generation
+        self.assertEqual([b.name for b in act.unreviewed_bundles(self.cfg)],
+                         ["issue_50"])
+        self.assertEqual(act.cycles_since_review(self.cfg), 1)  # auto-Act due again
+        # Reviewing the new generation records ITS fingerprint and covers it.
+        act.mark_reviewed(self.cfg, date="2026-07-11")
+        self.assertEqual(act.unreviewed_bundles(self.cfg), [])
+
     def test_out_of_order_freeze_surfaces_as_unreviewed(self) -> None:
         # The observed coverage-gap case: issue_20 froze AROUND a review that covered
         # issue_10 and issue_30 — a count marker hides it; the frontier does not.
