@@ -83,6 +83,30 @@ class PlanAdvisory(unittest.TestCase):
         leaves.run_plan_advisory(d, cfg)
         self.assertEqual(list(d.glob("plan-advisory-*")), [])
 
+    def test_check_only_sandbox_grants_are_withheld_from_the_plan_review(self) -> None:
+        # #301 review round 6: [leaves.sandbox] network_access / unsandboxed_commands
+        # are CHECK-leaf opt-ins (Docker-backed gates, the reviewer's prior-art fetch).
+        # A plan review only reads the brief + pinned target, so neither grant may
+        # reach the reviewer leaf — it runs under the vendor's default sandbox.
+        reviewer = {"id": "codex-lens", "mode": "command", "family": "codex",
+                    "argv": ["codex"]}
+        cfg = _cfg(self.tmp, plan_advisory=[reviewer])
+        cfg.leaf_network_access = True
+        cfg.leaf_unsandboxed_commands = ["cargo xtask conformance"]
+        d = _brief(cfg, "GRANTS")
+        seen: dict[str, list[str]] = {}
+
+        def fake(leaf, cwd, prompt, **kw):
+            seen["extra"] = list(kw.get("extra_argv") or [])
+            return None
+
+        with mock.patch.object(leaves, "_invoke_leaf_resilient", side_effect=fake), \
+                mock.patch.object(leaves, "_seed_sandbox_settings") as seed:
+            leaves.run_plan_advisory(d, cfg)
+        seed.assert_not_called()                          # no seeded Check exemptions
+        self.assertNotIn("sandbox_workspace_write.network_access=true",
+                         seen["extra"])                   # no codex network grant
+
     def test_when_gates_on_a_brief_field(self) -> None:
         gated = {**_REVIEWER, "when": {"field": "difficulty", "substring": "high"}}
         cfg = _cfg(self.tmp, plan_advisory=[gated])
@@ -259,6 +283,22 @@ class BatchAndAssemble(unittest.TestCase):
             self.assertTrue(leaves.plan_advisory_artifact(d, "plan-reviewer").exists(), iid)
             self.assertTrue((d / "plan-advisory-benefit.json").exists(), iid)
         self.assertEqual(list(pre.glob("plan-advisory-*")), [])  # pre-existing untouched
+
+    def test_stale_artifacts_from_a_prior_review_are_cleared(self) -> None:
+        # #301 review round 6: a rewritten brief (or a changed `when` selection) must
+        # not inherit the previous review's artifacts — stale findings would re-enter
+        # §6/_plan_findings and could gate a brief they never reviewed. Cleared even
+        # when the new brief matches NO leaf.
+        gated = {**_REVIEWER, "when": {"field": "difficulty", "substring": "high"}}
+        cfg = _cfg(self.tmp, plan_advisory=[gated])
+        d = _brief(cfg, "STALE", difficulty="high")
+        leaves.run_plan_advisory(d, cfg)
+        self.assertTrue(leaves.plan_advisory_artifact(d, "plan-reviewer").exists())
+        (d / "brief.md").write_text(                       # rewritten: now low difficulty
+            "- **Slug:** stale-v2\n- **Defect:** y.\n- **Difficulty:** low\n",
+            encoding="utf-8")
+        leaves.run_plan_advisory(d, cfg)
+        self.assertEqual(list(d.glob("plan-advisory-*")), [])  # nothing stale survives
 
     def test_rewritten_brief_gets_a_fresh_plan_review(self) -> None:
         # #301 review round 5: the snapshot is by CONTENT HASH — a rerun session that

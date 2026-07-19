@@ -1716,11 +1716,19 @@ def _run_plan_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: d
                 json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         profile = cfg.profile(leaf)
         _seed_sandbox_agents(cfg, sandbox)
-        seeded = _seed_sandbox_settings(cfg, sandbox, profile)
+        # DELIBERATELY no _seed_sandbox_settings / _sandbox_argv here (#301 review
+        # round 6): those carry the CHECK-leaf sandbox grants ([leaves.sandbox]
+        # network_access / unsandboxed_commands / seeded network keys) an operator
+        # opted into for Docker-backed gates and the reviewer's prior-art fetch. A
+        # plan review needs none of that — it reads the brief, notes/sources and the
+        # pinned read-only target — so the leaf runs under the vendor's default
+        # (most restrictive) sandbox; granting Check's exemptions to an additional
+        # pre-Do leaf would widen a risk the operator never accepted. (Omitting the
+        # claude confinement flag is also required for safety: without a seeded
+        # settings file it would drop the ambient sandbox entirely, #290.)
         env = {"PDCA_TARGET": str(target)} if target else None
         extra = ([profile.grounding_flag, str(target)]
                  if target and profile.grounding_flag else [])
-        extra += _sandbox_argv(cfg, profile, seeded=seeded)
         out = sandbox / f"plan-advisory-{leaf_id}.md"
         error_log = d / f"plan-advisory-{leaf_id}.error.log"
         err = _invoke_leaf_resilient(
@@ -1793,6 +1801,13 @@ def run_plan_advisory_batch(cfg: Config, bundles: list[Path]) -> None:
                 if (d / "brief.md").exists() and not brief.is_placeholder(d / "brief.md")]
     ran: dict[Path, list[str]] = {}
     for d in reviewed:
+        # A rewritten brief (or a changed pool/`when` selection) must not inherit the
+        # PREVIOUS review's artifacts (#301 review round 6): stale findings would
+        # re-enter _plan_findings and §6 and could trigger a revision — or block
+        # sign-off — against a brief they never reviewed. Cleared BEFORE selection,
+        # so they vanish even when the new brief matches no leaf.
+        for stale in d.glob("plan-advisory-*"):
+            stale.unlink(missing_ok=True)
         ids = _run_plan_advisory_leaves(d, cfg)
         if ids:
             ran[d] = ids
