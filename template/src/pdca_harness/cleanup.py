@@ -182,9 +182,13 @@ def _close_issue(d: Path, number: str, repo: str, *, reason: str, fallback_body:
 
 
 def _unresolve(d: Path) -> bool:
-    """Drop the ``resolved`` marker from notes.json — the tracker REOPENED the issue, so
-    the terminal resolution no longer holds and the bundle must return to the pending
-    set (#300 review). Tolerant read; False when there is nothing safe to change."""
+    """The tracker REOPENED the issue: retire the closure-era notes.json WHOLESALE via
+    :func:`sources.clear_resolved_marker` (#300 review round 6). Deleting only the
+    ``resolved`` key would leave the stale pre-reopen file in place — ``ensure_notes``
+    and the tracker-role seed refuse to replace an existing notes.json, so the next
+    Plan would brief from the thread that PRECEDED the reopen and miss the very
+    comments that caused it. Tolerant read; False when there is nothing safe to
+    change (or the set-aside rename could not be performed)."""
     notes = d / "notes.json"
     try:
         data = json.loads(notes.read_text(encoding="utf-8"))
@@ -192,9 +196,8 @@ def _unresolve(d: Path) -> bool:
         return False
     if not isinstance(data, dict) or "resolved" not in data:
         return False
-    del data["resolved"]
-    notes.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    return True
+    sources.clear_resolved_marker(d)          # unique set-aside name, kept inspectable
+    return not notes.exists()
 
 
 def _plan_bundle(cfg: Config, d: Path, *, issue_side: bool, repo: str,

@@ -362,9 +362,15 @@ class GuardsAndScope(CleanupBase):
         rc, out, _err = self._run(apply=True)
         self.assertEqual(rc, 0)
         self.assertEqual(state.state(d), state.UNPLANNED)  # pending again
-        data = json.loads((d / "notes.json").read_text(encoding="utf-8"))
-        self.assertNotIn("resolved", data)
-        self.assertEqual(data["title"], "q")               # the rest untouched
+        # #300 review round 6: the WHOLE closure-era notes.json is set aside (the
+        # sources.clear_resolved_marker contract) — a surviving stale file would make
+        # ensure_notes refuse the re-fetch and Plan would brief pre-reopen context.
+        self.assertFalse((d / "notes.json").exists())
+        aside = d / "notes.superseded-by-reopen.json"
+        self.assertTrue(aside.exists())
+        data = json.loads(aside.read_text(encoding="utf-8"))
+        self.assertIn("resolved", data)                    # kept inspectable, unedited
+        self.assertEqual(data["title"], "q")
         # Still-closed stays in sync (no row, no write).
         self.issue_states["91"] = _CLOSED
         self._run(apply=True)
