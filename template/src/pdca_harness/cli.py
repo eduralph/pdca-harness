@@ -985,10 +985,16 @@ def _act_log_append(cfg: Config, args: argparse.Namespace, entries, all_entries,
     act.register_signals(cfg, all_entries, args.date)  # track recurring signals (#149)
     if full:
         # Explicit --all/--since re-review: duplicating coverage is the point.
-        # delta_guard still applies the in-session delta protection (#299 r6/7).
+        # delta_guard still applies the in-session delta protection (#299 r6/7),
+        # and the entries' EXTRACTION-time fingerprints ride along (#299 review
+        # round 18) — a bundle recreated between the scaffold and this write must
+        # not have its new generation attested by a post-append hash.
         log = act.append_entry(cfg, text)
-        withheld = act.mark_reviewed(cfg, reviewed=[e.bundle for e in entries],
-                                     date=args.date, delta_guard=started)
+        withheld = act.mark_reviewed(
+            cfg, reviewed=[e.bundle for e in entries], date=args.date,
+            delta_guard=started,
+            fingerprints={e.bundle.name: e.fingerprint
+                          for e in entries if e.fingerprint})
     else:
         # Default frontier scope: re-check + append + advance under ONE marker
         # critical section (#299 review round 10) — two overlapping appends must

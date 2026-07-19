@@ -510,6 +510,27 @@ class CliScope(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue((self.cfg.process_dir / "act-log.md").exists())
 
+    def test_full_scope_append_attests_the_extracted_generation(self) -> None:
+        # #299 review round 18: `act log --all --append` must attest the entries'
+        # EXTRACTION-time fingerprints — a bundle recreated between the scaffold and
+        # the frontier write is a new generation the logged review never read, so it
+        # must remain unreviewed afterwards.
+        d = _freeze(self.cfg, "1", date="2026-07-01")
+        real_append = act.append_entry
+
+        def append_and_recreate(cfg_, text_):
+            out = real_append(cfg_, text_)
+            shutil.rmtree(d)
+            _freeze(self.cfg, "1", date="2026-07-12")      # generation B, mid-append
+            return out
+
+        with mock.patch.object(act, "append_entry", side_effect=append_and_recreate):
+            rc, _out, _err = self._main(["act", "log", "--date", "2026-07-19",
+                                         "--all", "--append"])
+        self.assertEqual(rc, 0)
+        self.assertEqual([b.name for b in act.unreviewed_bundles(self.cfg)],
+                         ["issue_1"])                      # gen B was never attested
+
     def test_append_transaction_rescopes_under_the_lock(self) -> None:
         # #299 review round 10: two overlapping default appends must not both log
         # the same cycles — the loser re-scopes INSIDE the marker critical section,
