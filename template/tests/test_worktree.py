@@ -253,6 +253,30 @@ class WorktreeRealGit(unittest.TestCase):
         self.assertIn("Subproject commit deadbeef",
                       (wt / "file.txt").read_text(encoding="utf-8"))
 
+    def test_rebuild_removes_a_nested_repository(self) -> None:
+        # #296 review round 3: `git clean` preserves an untracked NESTED REPOSITORY
+        # under a single -f, so a stale lane carrying one would survive reconstruction
+        # and the tree would not be base + patch.diff. The double-force sweep removes it.
+        wt = worktree.ensure(self.d, self.cfg)
+        nested = wt / "vendor-scratch"
+        sp.run(["git", "init", "-q", str(nested)], check=True)
+        (nested / "junk.txt").write_text("stale nested repo\n", encoding="utf-8")
+        (self.d / "patch.diff").write_text(self._PATCH, encoding="utf-8")
+        rebuilt = worktree.rebuild_for_gate(self.d, self.cfg)
+        self.assertEqual(rebuilt, wt)
+        self.assertFalse(nested.exists())                   # nested repo swept (-ff)
+        self.assertEqual((wt / "file.txt").read_text(encoding="utf-8"), "base\npatched\n")
+
+    def test_unopenable_lane_lock_fails_closed_not_raw_oserror(self) -> None:
+        # #296 review round 3: the lock sidecar's open() can itself fail; that must
+        # surface as WorktreeError (the fail-closed gating red), never a raw OSError
+        # that aborts the whole run. A directory squatting on the lock path forces it.
+        (self.tmp / "checkout.pdca-wt.lock").mkdir()
+        (self.d / "patch.diff").write_text(self._PATCH, encoding="utf-8")
+        with self.assertRaises(worktree.WorktreeError) as ctx:
+            worktree.for_gate(self.d, self.cfg)
+        self.assertIn("lane lock", str(ctx.exception))
+
     def test_busy_lane_fails_the_gate_read_closed(self) -> None:
         # #296 review: an owner stamp cannot say whether that Do is STILL RUNNING —
         # while the lane lock is held (an in-flight Do / another gate run), a gate read

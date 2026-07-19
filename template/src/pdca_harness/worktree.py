@@ -182,7 +182,16 @@ def lane_lock(d: Path, cfg: Config, *, wait: bool):
         yield
         return
     wt = _wt_dir(tgt[0])
-    fh = wt.with_name(wt.name + ".lock").open("w")
+    try:
+        # The open itself can fail (read-only parent, fd exhaustion) — that too must
+        # surface as WorktreeError, not a raw OSError: gates only catch WorktreeError,
+        # and a raw escape would abort the run instead of the fail-closed red
+        # (#296 review round 3).
+        fh = wt.with_name(wt.name + ".lock").open("w")
+    except OSError as exc:
+        raise WorktreeError(
+            f"{d.name}: cannot create the lane lock next to {wt.name} ({exc}) — "
+            "failing closed; fix the checkout's parent directory, then retry.") from exc
     try:
         _lock_file(fh, wait=wait)
     except OSError as exc:
@@ -240,7 +249,10 @@ def rebuild_for_gate(d: Path, cfg: Config) -> Path | None:
                 f"{d.name}: could not create worktree {wt} off '{base_ref}' for the gate "
                 "read. Failing closed — a gate must attest base + patch.diff, never the "
                 "primary checkout. Fix the brief's base (or fetch it), then retry.")
-    if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-fdxq") != 0:
+    # ``-ff``: git-clean(1) preserves an untracked NESTED REPOSITORY under a single -f,
+    # so a stale lane carrying one would survive the sweep and the reconstructed tree
+    # would still hold files outside base + patch.diff (#296 review round 3).
+    if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-ffdxq") != 0:
         _owner_file(wt).unlink(missing_ok=True)
         raise WorktreeError(
             f"{d.name}: could not reset {wt} to '{base_ref}' before the gate read. "
@@ -310,7 +322,7 @@ def stage(d: Path, cfg: Config) -> Path | None:
     # files, so another bundle's ignored build outputs (dist/, caches, generated assets) can't
     # survive and get launched alongside this bundle's source patch — which would defeat the
     # owner check and let a reviewer sign off the wrong build (issue #237).
-    if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-fdxq") != 0:
+    if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-ffdxq") != 0:
         print(f"worktree: could not reset {wt} to {base_ref} for {d.name}; nothing to try",
               file=sys.stderr)
         return None
@@ -359,7 +371,7 @@ def ensure(d: Path, cfg: Config) -> Path | None:
                 "then retry.")
         if (wt / ".git").exists():
             # Reuse: drop the prior cycle's edits, return to a clean base.
-            if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-fdq") != 0:
+            if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-ffdq") != 0:
                 print(f"worktree: could not reset {wt} to {base_ref}; running in place",
                       file=sys.stderr)
                 return None
