@@ -449,6 +449,31 @@ argv = []
 # [leaves.advisory_selection]
 # mode = "vendor-complement"
 
+# Plan-beat advisory reviewers (issue #301) — the same open-list mechanism at PLAN: right
+# after the planner writes brief.md, each [[leaves.plan_advisory]] leaf reviews the BRIEF
+# (brief + notes + sources — no patch exists yet) as an ANTAGONIST of the plan: wrong
+# root-cause framing, an unverifiable success criterion, hidden scope, an unresolvable
+# target/dependency, ignored tracker context. Findings are `- NEEDS-HUMAN —` bullets in
+# plan-advisory-<id>.md; the planner then gets ONE bounded revision pass, and the bundle
+# records plan-advisory-benefit.json (findings count + whether the brief was revised) —
+# surfaced in SUMMARY §10 so Act can judge over cycles whether plan reviews pay off, and
+# as a §6 item when findings were left unrevised. Add extra vendor entries (a codex/gemini
+# `family` + argv) to build a VENDOR POOL; with the selection below the driver runs the
+# single leaf whose family differs from the PLANNER's (the brief's author — pre-Do there
+# is no builder telemetry), so plan validation is cross-vendor automatically; no
+# different-family leaf ⇒ same-vendor fallback + a decorrelation note. Advisory — never
+# gates; off (commented) by default.
+# [[leaves.plan_advisory]]
+# id = "plan-reviewer"
+# role = "refute the brief: wrong root cause, untestable success criterion, hidden scope"
+# mode = "{{ leaves_mode }}"
+# family = "claude"
+# argv = ["claude", "-p", "--agent", "plan-reviewer", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
+# when = { field = "difficulty", substring = "high" }
+#
+# [leaves.plan_advisory_selection]
+# mode = "vendor-complement"   # anchor: the PLANNER family (the brief's author)
+
 # Sandbox exemptions for the Check leaves (issue #276). The reviewer / advisory leaves run
 # under Claude Code's sandbox, which denies the DOCKER SOCKET. So a conformance gate that
 # brings up a live cluster (`docker compose` → etcd / TiKV / FDB) is permission-denied inside

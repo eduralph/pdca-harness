@@ -323,6 +323,30 @@ class SandboxDeps(unittest.TestCase):
         self.assertNotIn("leaf sandbox", out)
         self.assertEqual(rc, 0)
 
+    def test_a_claude_plan_advisory_leaf_requires_the_sandbox_deps(self) -> None:
+        """#301 review round 8. The plan-advisory runner seeds a MINIMAL fail-closed
+        sandbox for every confinable family — with NO [leaves.sandbox] exemption
+        involved — so a claude plan reviewer needs bwrap/socat even when no
+        exemption is configured (the seeded failIfUnavailable makes it REFUSE
+        without them)."""
+        cfg = self._cfg('mode = "stub"\n',
+                        '[[leaves.plan_advisory]]\nid = "pr"\nmode = "command"\n'
+                        'family = "claude"\nargv = ["claude", "-p"]\n')
+        with self._deps(False):
+            rc, out = self._run(cfg)
+        self.assertIn("leaf sandbox", out)
+        self.assertEqual(rc, 1)                            # REQUIRED failure
+
+    def test_a_codex_plan_advisory_leaf_needs_no_claude_deps(self) -> None:
+        # codex's sandbox is its own (argv-configured); nothing is seeded for it.
+        cfg = self._cfg('mode = "stub"\n',
+                        '[[leaves.plan_advisory]]\nid = "pr"\nmode = "command"\n'
+                        'family = "codex"\nargv = ["codex", "exec"]\n')
+        with self._deps(False):
+            rc, out = self._run(cfg)
+        self.assertNotIn("leaf sandbox", out)
+        self.assertEqual(rc, 0)
+
     def test_a_stub_leaf_spawns_nothing_to_sandbox(self) -> None:
         # An exemption configured, but every leaf is a stub: no leaf runs, so no sandbox is
         # seeded and no dependency is used.
