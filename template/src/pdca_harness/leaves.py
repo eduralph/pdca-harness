@@ -497,26 +497,26 @@ def _reject_resolved_briefs(cfg: Config, resolved_before: set[str]) -> None:
                     # so the bundle stays terminal (RESOLVED) — fail closed.
                     continue
                 cleared = sources.clear_resolved_marker(b)  # closure-era notes aside
+                brief_note = ("the brief aside (" + aside.name + ")"
+                              if aside is not bp else "the brief removed")
                 if cleared:
                     print(f"plan: {name} — the tracker issue is OPEN again, but this "
                           f"session's brief was authored from the closure-era notes; "
-                          f"cleared the stale resolved marker, set the notes and the "
-                          f"brief aside ({aside.name}), and DEFERRED the bundle — the "
-                          "next Plan re-briefs it from the fresh thread",
-                          file=sys.stderr)
+                          f"cleared the stale resolved marker, set the notes aside / "
+                          f"{brief_note}, and DEFERRED the bundle — the next Plan "
+                          "re-briefs it from the fresh thread", file=sys.stderr)
                 else:
                     # #302 review round 11: never claim "cleared" over a failed
                     # rename — the bundle honestly remains RESOLVED (the stale brief
                     # is still set aside: it must not drive in any case).
                     print(f"plan: {name} — the tracker issue is OPEN again, but the "
-                          f"closure-era notes could not be set aside; the stale-"
-                          f"context brief was set aside ({aside.name}) and the "
-                          "bundle remains RESOLVED — fix the bundle directory, then "
-                          "re-run", file=sys.stderr)
+                          f"closure-era notes could not be set aside; {brief_note} "
+                          "and the bundle remains RESOLVED — fix the bundle "
+                          "directory, then re-run", file=sys.stderr)
                 continue
             aside = _brief_aside(bp, "brief.superseded-by-resolution")
-            if aside is None:
-                continue  # _brief_aside printed the manual-intervention line
+            if aside is None or aside is bp:
+                continue  # the helper printed what happened (or the DELETED line)
             print(f"plan: {name} — the session briefed a RESOLVED tracker item; the brief "
                   f"was set aside as {aside.name} (the issue was settled in the tracker; "
                   "reopen it there to plan it again)", file=sys.stderr)
@@ -530,11 +530,16 @@ def _brief_aside(bp: Path, stem: str) -> Path | None:
     error) the brief is DELETED instead — losing the planner's inspectable copy
     beats the alternative, where an authored brief survives the failed rejection,
     shadows the still-present resolved marker as PLANNED on the next run, and drives
-    stale/settled work through Do/Check. Only when even the unlink fails is ``None``
-    returned, after a loud manual-intervention line — and the caller skips its
-    success message, never claiming a rejection that did not happen. Contained
-    per-bundle: a failure here must not abort the batch Plan session's remaining
-    bundles."""
+    stale/settled work through Do/Check.
+
+    Returns the set-aside path on a successful rename; ``bp`` ITSELF when the
+    fallback deletion emptied the slot (#302 review round 16 — the slot IS empty, so
+    a reopen deferral may still proceed to clear the marker; renaming being
+    unavailable must not keep suppressing the reopened issue run after run); and
+    ``None`` only when the slot could NOT be emptied, after a loud
+    manual-intervention line. The helper prints what happened on every non-rename
+    path; contained per-bundle — a failure must not abort the batch Plan session's
+    remaining bundles."""
     aside = bp.with_name(f"{stem}.md")
     n = 2
     while aside.exists():
@@ -549,12 +554,13 @@ def _brief_aside(bp: Path, stem: str) -> Path | None:
             print(f"plan: {bp.parent.name} — could not set the brief aside (rename "
                   f"failed); it was DELETED instead so it cannot drive settled/stale "
                   "work", file=sys.stderr)
+            return bp  # slot emptied — the caller's deferral/rejection proceeds
         except OSError as exc:
             print(f"plan: {bp.parent.name} — could not set aside OR remove the "
                   f"active brief ({exc}); MANUAL INTERVENTION required: the bundle "
                   f"will read PLANNED over a resolved tracker item until {bp} is "
                   "moved out of the way", file=sys.stderr)
-        return None  # either way the helper said what happened; no success message
+            return None
 
 
 def _warn_unseeded_briefs(cfg: Config, before: set[str]) -> None:

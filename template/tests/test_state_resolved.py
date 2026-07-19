@@ -305,6 +305,29 @@ class PlanNeverReopensResolved(unittest.TestCase):
         self.assertIn("DELETED", err.getvalue())
         self.assertEqual(state.state(d), state.RESOLVED)   # fail-closed terminal
 
+    def test_reopen_deletion_fallback_still_clears_the_marker(self) -> None:
+        # #302 review round 16: when the rename fails but the fallback DELETION
+        # empties the brief slot, the deferral has succeeded — the marker is
+        # cleared and the fresh thread can re-seed, instead of the reopened issue
+        # staying terminal whenever renaming is unavailable.
+        from types import SimpleNamespace
+        d = self._resolved("38")
+        (d / "brief.md").write_text("- **Slug:** stale\n", encoding="utf-8")
+        gh_open = SimpleNamespace(returncode=0, stdout=json.dumps({"state": "OPEN"}),
+                                  stderr="")
+
+        def delete_only(bp, stem):
+            bp.unlink()
+            return bp                                      # the deletion-fallback result
+
+        with mock.patch.object(leaves, "_brief_aside", side_effect=delete_only), \
+                mock.patch.object(sources.subprocess, "run", return_value=gh_open), \
+                mock.patch.object(sources.shutil, "which", return_value="/usr/bin/gh"):
+            leaves._reject_resolved_briefs(self.cfg, {"issue_38"})
+        self.assertFalse((d / "notes.json").exists())      # marker CLEARED
+        self.assertTrue((d / "notes.superseded-by-reopen.json").exists())
+        self.assertEqual(state.state(d), state.UNPLANNED)  # deferred, re-seedable
+
     def test_reopen_keeps_the_marker_when_the_brief_cannot_be_set_aside(self) -> None:
         # #302 review round 15: brief FIRST, marker SECOND — clearing the marker
         # while the stale brief could not be moved would read PLANNED and drive the
