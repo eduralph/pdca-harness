@@ -201,6 +201,37 @@ class PlanNeverReopensResolved(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("resolved outside a cycle", err.getvalue())
 
+    def test_single_id_flow_revalidates_a_reopened_tracker(self) -> None:
+        # #302 review round 4: the marker is a cache — the seed never refreshes an
+        # existing notes.json, so `pdca flow <id>` revalidates against the live tracker
+        # and a REOPENED issue clears the marker and proceeds to a real flow.
+        import io
+        import os
+        from contextlib import redirect_stderr, redirect_stdout
+        from types import SimpleNamespace
+        d = self._resolved("26")
+        (self.tmp / "pdca.toml").write_text(
+            '[paths]\nbundle_root = "results"\n[tracker]\nsystem = "github"\n',
+            encoding="utf-8")
+        cwd = Path.cwd()
+        os.chdir(self.tmp)
+        os.environ["PDCA_NO_INHIBIT"] = "1"   # the mocked which/run must not fake an inhibitor
+        gh_open = SimpleNamespace(returncode=0, stdout=json.dumps({"state": "OPEN"}),
+                                  stderr="")
+        try:
+            with mock.patch.object(cli.subprocess, "run", return_value=gh_open), \
+                    mock.patch.object(cli.shutil, "which", return_value="/usr/bin/gh"), \
+                    redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+                rc = cli.main(["flow", "26", "--no-publish"])
+        finally:
+            os.chdir(cwd)
+            os.environ.pop("PDCA_NO_INHIBIT", None)
+        self.assertEqual(rc, 0)
+        self.assertIn("OPEN again", err.getvalue())
+        data = json.loads((d / "notes.json").read_text(encoding="utf-8"))
+        self.assertNotIn("resolved", data)                 # marker cleared…
+        self.assertTrue((d / "brief.md").exists())         # …and the flow really planned it
+
 
 if __name__ == "__main__":
     unittest.main()
