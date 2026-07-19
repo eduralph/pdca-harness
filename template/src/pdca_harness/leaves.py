@@ -1601,21 +1601,14 @@ def run_act(cfg: Config, date: str) -> None:
     else:
         _stub_act(cfg, date)
 
-    def _delta_during_session(d: Path) -> bool:
-        # A revalidation delta stamped WHILE the session ran was not in the reviewed
-        # index; re-marking that bundle would hide the new delta behind the frontier
-        # (#299 review round 5 — preserve unmark_reviewed's effect).
-        try:
-            return any(p.stat().st_mtime >= started
-                       for p in d.glob("revalidation-*.json"))
-        except OSError:
-            return False
-
     # Advance the review frontier (issues #109/#299) whenever the Act beat runs — even
     # if a command-mode Act judged "no delta" and wrote no act-log entry, the review
-    # happened, over exactly the pre-session snapshot.
+    # happened, over exactly the pre-session snapshot. A bundle whose revalidation
+    # recorded a REAL delta mid-session stays out (act.delta_since — the stamp's
+    # `changed` verdict decides, so a confirming revalidation doesn't withhold it).
     act_mod.mark_reviewed(
-        cfg, reviewed=[d for d in covered if not _delta_during_session(d)], date=date)
+        cfg, reviewed=[d for d in covered if not act_mod.delta_since(d, started)],
+        date=date)
 
 
 def _act_prompt(cfg: Config, date: str) -> str:

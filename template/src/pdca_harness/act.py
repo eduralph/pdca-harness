@@ -249,6 +249,31 @@ def act_due(cfg: Config) -> bool:
     return cycles_since_review(cfg) >= cfg.act_cadence
 
 
+def delta_since(d: Path, started: float) -> bool:
+    """True iff a revalidation stamp recording a REAL delta (``changed: true``) landed
+    on ``d`` at/after ``started`` — the "did new Act signal arrive while this review
+    ran?" predicate shared by auto-Act and ``act log --append`` (#299 review rounds
+    5/6). Such a bundle must stay OUT of the review frontier: the review's index was
+    built before the delta, so re-marking it would hide even a frozen PASS→FAIL
+    regression behind the frontier (it would undo ``unmark_reviewed``'s effect).
+
+    The stamp's recorded verdict decides, never its mtime alone (#299 review round
+    6): a concurrent revalidation that CONFIRMED the frozen record (``changed:
+    false``) is not new signal, and withholding its bundle would inflate
+    ``cycles_since_review`` into a redundant extra Act. An unreadable stamp counts
+    as a delta — re-review over skip. A bundle deleted mid-review globs empty:
+    nothing left to protect."""
+    for p in d.glob("revalidation-*.json"):
+        try:
+            if p.stat().st_mtime < started:
+                continue
+            if json.loads(p.read_text(encoding="utf-8")).get("changed"):
+                return True
+        except (ValueError, OSError):
+            return True  # fail toward re-review, never toward skipping the signal
+    return False
+
+
 # ----------------------------------------------------------------------------
 # Process-delta ledger (issue #149): make Act self-auditing. A recurring signal is
 # REGISTERED (open); the human marks it APPLIED once a delta lands; a later Act flags it

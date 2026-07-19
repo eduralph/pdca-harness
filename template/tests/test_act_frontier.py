@@ -178,6 +178,29 @@ class MarkerFormat(unittest.TestCase):
         self.assertIn("issue_60", names)                # mid-session freeze not marked
         self.assertIn("issue_50", names)                # mid-session delta not re-hidden
 
+    def test_confirming_midsession_revalidation_still_advances_the_frontier(self) -> None:
+        # #299 review round 6: the stamp's `changed` VERDICT decides, never its mtime
+        # alone — a concurrent revalidation that CONFIRMED the frozen record is not
+        # new Act signal, and withholding its bundle would inflate
+        # cycles_since_review into a redundant extra Act run.
+        from pdca_harness import leaves
+        from pdca_harness.config import LeafConfig
+        confirmed = _freeze(self.cfg, "70")
+        self.cfg.act = LeafConfig(mode="stub", interactive=True)
+        self.cfg.templates_dir = self.cfg.root / "no-templates"
+        real_stub = leaves._stub_act
+
+        def stub_with_confirming_reval(cfg_, date_):
+            real_stub(cfg_, date_)
+            (confirmed / "revalidation-2026-07-19.json").write_text(
+                json.dumps({"date": "2026-07-19", "changed": False, "rows": []}),
+                encoding="utf-8")
+
+        with mock.patch.object(leaves, "_stub_act",
+                               side_effect=stub_with_confirming_reval):
+            leaves.run_act(self.cfg, "2026-07-19")
+        self.assertEqual(act.unreviewed_bundles(self.cfg), [])  # frontier advanced
+
     def test_revalidation_delta_reopens_the_reviewed_bundle(self) -> None:
         # #299 review round 4: a revalidation DELTA on a frozen cycle is new Act signal
         # — the bundle must re-enter the default scope instead of hiding behind the
@@ -262,6 +285,51 @@ class CliScope(unittest.TestCase):
         self.assertIn("2026-07-19 — cycles considered: 2, 3", log)  # scoped entry only
         data = json.loads((self.cfg.process_dir / ".act-reviewed").read_text("utf-8"))
         self.assertEqual(data["reviewed"], ["issue_1", "issue_2", "issue_3"])
+
+    def test_append_leaves_a_midwrite_delta_unreviewed(self) -> None:
+        # #299 review round 6: a `pdca revalidate` recording a REAL delta between the
+        # scaffold's index and the frontier write was not in the entry just logged —
+        # unioning its bundle back in would undo unmark_reviewed and hide even a
+        # frozen PASS→FAIL regression from the next default `act index`/`act log`.
+        d1 = _freeze(self.cfg, "1")
+        _freeze(self.cfg, "2")
+        real_append = act.append_entry
+
+        def append_and_race(cfg_, text_):
+            out = real_append(cfg_, text_)
+            (d1 / "revalidation-2026-07-19.json").write_text(
+                json.dumps({"date": "2026-07-19", "changed": True,
+                            "rows": [{"check": "C4", "old": "pass", "new": "fail",
+                                      "changed": True, "gating": True}]}),
+                encoding="utf-8")
+            act.unmark_reviewed(cfg_, d1)      # exactly what revalidate.revalidate does
+            return out
+
+        with mock.patch.object(act, "append_entry", side_effect=append_and_race):
+            rc, _out, err = self._main(["act", "log", "--date", "2026-07-19", "--append"])
+        self.assertEqual(rc, 0)
+        self.assertIn("left unreviewed", err)
+        self.assertEqual([b.name for b in act.unreviewed_bundles(self.cfg)],
+                         ["issue_1"])          # the delta'd cycle stays in scope
+
+    def test_append_still_covers_a_confirming_midwrite_revalidation(self) -> None:
+        # The mirror case (#299 review round 6): a confirming stamp (changed: false)
+        # landing mid-append is not new signal and must not withhold the frontier.
+        d1 = _freeze(self.cfg, "1")
+        real_append = act.append_entry
+
+        def append_and_confirm(cfg_, text_):
+            out = real_append(cfg_, text_)
+            (d1 / "revalidation-2026-07-19.json").write_text(
+                json.dumps({"date": "2026-07-19", "changed": False, "rows": []}),
+                encoding="utf-8")
+            return out
+
+        with mock.patch.object(act, "append_entry", side_effect=append_and_confirm):
+            rc, _out, err = self._main(["act", "log", "--date", "2026-07-19", "--append"])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("left unreviewed", err)
+        self.assertEqual(act.unreviewed_bundles(self.cfg), [])
 
     def test_fully_reviewed_index_still_renders_the_signal_history(self) -> None:
         # #299 review: an empty SCOPED set ("everything reviewed") must not discard the

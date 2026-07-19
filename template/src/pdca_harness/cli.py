@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -841,6 +842,7 @@ def _act_log(cfg: Config, args: argparse.Namespace) -> int:
     irreducible human work. Default scope resumes from the review frontier (#299);
     --append advances the frontier past the covered cycles.
     """
+    started = time.time()  # before the scaffold's index is built (#299 review round 6)
     entries, all_entries, full = _act_scope(cfg, args)
     if not all_entries:
         print("no frozen cycles to review (need COMPLETE bundles)", file=sys.stderr)
@@ -859,7 +861,18 @@ def _act_log(cfg: Config, args: argparse.Namespace) -> int:
         # next time — never silently skips them. The marker write itself is atomic.
         act.register_signals(cfg, all_entries, args.date)  # track recurring signals (#149)
         log = act.append_entry(cfg, text)
-        act.mark_reviewed(cfg, reviewed=[e.bundle for e in entries], date=args.date)
+        # The auto-Act in-session delta protection, mirrored (#299 review round 6): a
+        # `pdca revalidate` recording a REAL delta between the scaffold's index and
+        # this frontier write was not in the entry just logged — unioning its bundle
+        # back in would undo unmark_reviewed and hide even a PASS→FAIL regression
+        # from the next default `act index`/`act log`.
+        covered = [e.bundle for e in entries
+                   if not act.delta_since(e.bundle, started)]
+        act.mark_reviewed(cfg, reviewed=covered, date=args.date)
+        if len(covered) < len(entries):
+            print(f"act: {len(entries) - len(covered)} cycle(s) got a revalidation "
+                  "delta while this entry was written — left unreviewed for the next "
+                  "Act", file=sys.stderr)
         print(f"appended entry to {log}")
     else:
         print(text)
