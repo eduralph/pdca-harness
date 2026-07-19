@@ -341,10 +341,11 @@ class CliScope(unittest.TestCase):
         self.assertEqual(data["reviewed"], ["issue_1", "issue_2", "issue_3"])
 
     def test_append_leaves_a_midwrite_delta_unreviewed(self) -> None:
-        # #299 review round 6: a `pdca revalidate` recording a REAL delta between the
-        # scaffold's index and the frontier write was not in the entry just logged —
-        # unioning its bundle back in would undo unmark_reviewed and hide even a
-        # frozen PASS→FAIL regression from the next default `act index`/`act log`.
+        # #299 review rounds 6/10: a `pdca revalidate` recording a REAL delta while
+        # the append transaction runs was not in the entry just logged — the in-lock
+        # delta_guard scan must withhold its bundle from the frontier. (Revalidate's
+        # own unmark_reviewed blocks on the same lock until the transaction ends —
+        # the stamp, written before it calls unmark, is what the scan sees.)
         d1 = _freeze(self.cfg, "1")
         _freeze(self.cfg, "2")
         real_append = act.append_entry
@@ -356,7 +357,6 @@ class CliScope(unittest.TestCase):
                             "rows": [{"check": "C4", "old": "pass", "new": "fail",
                                       "changed": True, "gating": True}]}),
                 encoding="utf-8")
-            act.unmark_reviewed(cfg_, d1)      # exactly what revalidate.revalidate does
             return out
 
         with mock.patch.object(act, "append_entry", side_effect=append_and_race):
@@ -365,6 +365,31 @@ class CliScope(unittest.TestCase):
         self.assertIn("left unreviewed", err)
         self.assertEqual([b.name for b in act.unreviewed_bundles(self.cfg)],
                          ["issue_1"])          # the delta'd cycle stays in scope
+
+    def test_append_transaction_rescopes_under_the_lock(self) -> None:
+        # #299 review round 10: two overlapping default appends must not both log
+        # the same cycles — the loser re-scopes INSIDE the marker critical section,
+        # re-renders for the surviving cycles only, and appends nothing when none
+        # survive.
+        a = _freeze(self.cfg, "1")
+        _freeze(self.cfg, "2")
+        entries = act.index(self.cfg)
+        act.mark_reviewed(self.cfg, reviewed=[a], date="2026-07-19")  # winner landed
+        log, kept, _withheld = act.append_reviewed(
+            self.cfg, entries,
+            lambda kept: "entry for " + ", ".join(e.bundle.name for e in kept),
+            date="2026-07-19")
+        self.assertEqual([e.bundle.name for e in kept], ["issue_2"])
+        text = log.read_text(encoding="utf-8")
+        self.assertIn("issue_2", text)
+        self.assertNotIn("entry for issue_1", text)        # not double-logged
+        self.assertEqual(act.unreviewed_bundles(self.cfg), [])
+        # Everything now covered → nothing at all is appended.
+        log2, kept2, _ = act.append_reviewed(
+            self.cfg, entries, lambda kept: "duplicate entry", date="2026-07-19")
+        self.assertIsNone(log2)
+        self.assertEqual(kept2, [])
+        self.assertNotIn("duplicate entry", log.read_text(encoding="utf-8"))
 
     def test_append_still_covers_a_confirming_midwrite_revalidation(self) -> None:
         # The mirror case (#299 review round 6): a confirming stamp (changed: false)

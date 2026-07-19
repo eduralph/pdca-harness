@@ -531,6 +531,55 @@ def append_entry(cfg: Config, entry_text: str) -> Path:
     return log
 
 
+def append_reviewed(cfg: Config, entries: list[ActEntry], render, *, date: str,
+                    delta_guard: float | None = None,
+                    ) -> tuple[Path | None, list[ActEntry], list[str]]:
+    """The default-scope ``act log --append`` TRANSACTION (#299 review round 10):
+    re-check the frontier, append the entry, and advance the frontier under ONE
+    marker critical section.
+
+    Two overlapping default-scope appends both scaffold the same unreviewed set
+    outside any lock; ``mark_reviewed``'s union keeps the FRONTIER correct, but the
+    loser would still append a duplicate log entry for cycles the winner already
+    recorded. Here the loser re-scopes INSIDE the lock: entries whose bundles are
+    now reviewed are dropped, ``render(kept)`` re-scaffolds the entry for exactly
+    the surviving cycles, and nothing at all is appended when none survive
+    (``(None, [], [])`` — the caller reports "already covered").
+
+    Ordering inside the critical section: log first, marker second — a crash
+    between the two re-reviews the cycles next time, never silently skips them
+    (the ``mark_reviewed`` contract). ``delta_guard`` applies the in-session
+    delta protection to the same write (see :func:`mark_reviewed`); withheld names
+    are returned for reporting. The ``--all``/``--since`` full-scope append stays
+    on the plain ``append_entry`` + ``mark_reviewed`` path — an explicit re-review
+    deliberately duplicates coverage."""
+    cfg.process_dir.mkdir(parents=True, exist_ok=True)
+    marker = cfg.process_dir / _CADENCE_MARKER
+    lock = marker.with_name(marker.name + ".lock")
+    with lock.open("w") as fh:
+        _lock_exclusive(fh)
+        try:
+            prior = _reviewed_names(cfg)
+            kept = [e for e in entries if e.bundle.name not in prior]
+            if not kept:
+                return None, [], []
+            log = append_entry(cfg, render(kept))
+            withheld = sorted(e.bundle.name for e in kept
+                              if delta_guard is not None
+                              and delta_since(e.bundle, delta_guard))
+            new = {e.bundle.name for e in kept} - set(withheld)
+            frozen_names = {d.name for d in frozen_bundles(cfg)}
+            covered = sorted((prior | new) & frozen_names)
+            payload = {"count": len(covered), "reviewed": covered,
+                       "last_review_date": date}
+            tmp = marker.with_name(f"{marker.name}.tmp.{os.getpid()}")
+            tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            os.replace(tmp, marker)
+            return log, kept, withheld
+        finally:
+            _unlock(fh)
+
+
 # ----------------------------------------------------------------------------
 def _extract(summary: Path, bundle: Path) -> ActEntry:
     if not summary.exists():

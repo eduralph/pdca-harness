@@ -866,15 +866,32 @@ def _act_log(cfg: Config, args: argparse.Namespace) -> int:
         # Log first, frontier second: a crash between the two re-reviews the cycles
         # next time — never silently skips them. The marker write itself is atomic.
         act.register_signals(cfg, all_entries, args.date)  # track recurring signals (#149)
-        log = act.append_entry(cfg, text)
-        # The auto-Act in-session delta protection, mirrored (#299 review rounds
-        # 6/7): a `pdca revalidate` recording a REAL delta between the scaffold's
-        # index and the frontier write was not in the entry just logged — unioning
-        # its bundle back in would undo unmark_reviewed and hide even a PASS→FAIL
-        # regression. delta_guard runs the scan INSIDE the marker's critical
-        # section, so it cannot race revalidate's own frontier removal.
-        withheld = act.mark_reviewed(cfg, reviewed=[e.bundle for e in entries],
-                                     date=args.date, delta_guard=started)
+        if full:
+            # Explicit --all/--since re-review: duplicating coverage is the point.
+            # delta_guard still applies the in-session delta protection (#299 r6/7).
+            log = act.append_entry(cfg, text)
+            withheld = act.mark_reviewed(cfg, reviewed=[e.bundle for e in entries],
+                                         date=args.date, delta_guard=started)
+        else:
+            # Default frontier scope: re-check + append + advance under ONE marker
+            # critical section (#299 review round 10) — two overlapping appends must
+            # not both log the same cycles; the loser re-scopes to what is STILL
+            # unreviewed (re-rendering the entry) or records nothing at all.
+            log, kept, withheld = act.append_reviewed(
+                cfg, entries,
+                lambda kept: act.scaffold_entry(kept, act.patterns(all_entries),
+                                                date=args.date,
+                                                recs=act.recurrences(cfg, all_entries)),
+                date=args.date, delta_guard=started)
+            if log is None:
+                print("act: a concurrent Act covered these cycles while this entry "
+                      "was prepared — nothing left to record (rerun to preview the "
+                      "new scope)", file=sys.stderr)
+                return 1
+            if len(kept) < len(entries):
+                print(f"act: {len(entries) - len(kept)} cycle(s) were covered by a "
+                      f"concurrent Act — logged the remaining {len(kept)}",
+                      file=sys.stderr)
         if withheld:
             print(f"act: {len(withheld)} cycle(s) got a revalidation delta while "
                   "this entry was written — left unreviewed for the next Act",
