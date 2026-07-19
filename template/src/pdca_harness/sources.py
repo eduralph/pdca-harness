@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -97,6 +98,10 @@ def _is_tracker_source(spec: dict) -> bool:
     return (spec.get("role") or "").strip().lower() == "tracker"
 
 
+# owner/repo out of a GitHub tracker URL (https/ssh, optional .git / trailing path).
+_GH_URL_RE = re.compile(r"github\.com[:/]([\w.-]+)/([\w.-]+?)(?:\.git)?(?:[/?#]|$)")
+
+
 def tracker_github_repo(cfg: Config) -> tuple[bool, str]:
     """``(the canonical tracker is GitHub, its --repo override)``.
 
@@ -104,13 +109,22 @@ def tracker_github_repo(cfg: Config) -> tuple[bool, str]:
     ``[tracker].system`` fallback WHATEVER its type (#300 review round 5): a gitlab
     tracker-role source means the tracker is gitlab even if ``[tracker].system`` still
     says github — falling back would point ``gh`` at the wrong repository's
-    same-numbered issues. Comparisons use the same normalization ``seed`` applies."""
+    same-numbered issues. Comparisons use the same normalization ``seed`` applies.
+
+    On the legacy path the repo is DERIVED from ``[tracker].url`` (#302 review round
+    7): the rendered config supplies a URL but no repo key, and returning "" would
+    leave ``gh`` on its default repository — when the harness checkout is not the
+    tracker repo, that queries a wrong same-numbered issue. An unparseable/absent URL
+    yields "" and the reopen probe refuses to guess."""
     for spec in cfg.plan_sources:
         if isinstance(spec, dict) and _is_tracker_source(spec):
             if (spec.get("type") or "").strip().lower() == "github":
                 return True, str(spec.get("repo", "") or "")
             return False, ""
-    return (cfg.tracker_system or "").strip().lower() == "github", ""
+    if (cfg.tracker_system or "").strip().lower() != "github":
+        return False, ""
+    m = _GH_URL_RE.search(cfg.tracker_url or "")
+    return True, (f"{m.group(1)}/{m.group(2)}" if m else "")
 
 
 def tracker_issue_reopened(cfg: Config, issue_id: str) -> bool:
@@ -118,23 +132,27 @@ def tracker_issue_reopened(cfg: Config, issue_id: str) -> bool:
 
     A ``resolved`` marker in notes.json is a CACHE of the closure — the tracker can
     reopen the issue afterwards, and no seed refreshes an existing notes.json.
-    Conservative: only a GitHub canonical tracker, a numeric id and a working ``gh``
-    can prove a reopen; anything unknowable is False (never a crash)."""
+    Conservative: only a GitHub canonical tracker with a KNOWN repository, a numeric
+    id and a working ``gh`` can prove a reopen; anything unknowable is False (never a
+    crash). The repo is always passed explicitly (#302 review round 7) — ``gh``'s
+    checkout-default repository could hold a wrong same-numbered issue, and a wrong
+    OPEN there would clear a genuine resolution."""
     if not issue_id.isdigit():
         return False
     is_github, repo = tracker_github_repo(cfg)
-    if not is_github or shutil.which("gh") is None:
+    if not is_github or not repo or shutil.which("gh") is None:
         return False
-    cmd = ["gh", "issue", "view", issue_id, "--json", "state"]
-    if repo:
-        cmd += ["--repo", repo]
-    rc, text = _run_capture(cmd, cfg.root)
+    rc, text = _run_capture(
+        ["gh", "issue", "view", issue_id, "--json", "state", "--repo", repo], cfg.root)
     if rc != 0:
         return False
     try:
-        return json.loads(text).get("state") == "OPEN"
+        data = json.loads(text)
     except ValueError:
         return False
+    # gh (or a shim) can emit valid non-object JSON (`null`, `[]`) — .get on it would
+    # crash the flow instead of the promised "unknown ⇒ False" (#302 review round 7).
+    return isinstance(data, dict) and data.get("state") == "OPEN"
 
 
 def clear_resolved_marker(d: Path) -> None:
