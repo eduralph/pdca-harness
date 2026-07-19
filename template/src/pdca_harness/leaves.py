@@ -2051,9 +2051,9 @@ def run_act(cfg: Config, date: str) -> None:
         covered = act_mod.frozen_bundles(cfg)
         started = time.time()
         if cfg.act.mode == "command":
-            _invoke(cfg.act, cfg.root, _act_prompt(cfg, date), cfg=cfg)
+            _invoke(cfg.act, cfg.root, _act_prompt(cfg, date, bundles=covered), cfg=cfg)
         else:
-            _stub_act(cfg, date)
+            _stub_act(cfg, date, bundles=covered)
 
         # Advance the review frontier (issues #109/#299) whenever the Act beat
         # runs — even if a command-mode Act judged "no delta" and wrote no act-log
@@ -2065,8 +2065,12 @@ def run_act(cfg: Config, date: str) -> None:
         act_mod.mark_reviewed(cfg, reviewed=covered, date=date, delta_guard=started)
 
 
-def _act_prompt(cfg: Config, date: str) -> str:
-    entries = act_mod.index(cfg)
+def _act_prompt(cfg: Config, date: str, bundles: list[Path] | None = None) -> str:
+    # `bundles` is run_act's pre-session snapshot (#299 review round 13): indexing
+    # here must describe EXACTLY the set the frontier will advance over — a bundle
+    # freezing between the snapshot and this call would otherwise be reviewed (and
+    # logged) now, left out of the frontier, and reviewed AGAIN next cadence.
+    entries = act_mod.index(cfg, bundles=bundles)
     act_mod.register_signals(cfg, entries, date)  # track recurring signals (#149)
     recs = act_mod.recurrences(cfg, entries)
     index_md = act_mod.render_index(entries, act_mod.patterns(entries),
@@ -2081,8 +2085,9 @@ def _act_prompt(cfg: Config, date: str) -> str:
     )
 
 
-def _stub_act(cfg: Config, date: str) -> None:
-    entries = act_mod.index(cfg)
+def _stub_act(cfg: Config, date: str, bundles: list[Path] | None = None) -> None:
+    # Same snapshot rule as _act_prompt (#299 review round 13).
+    entries = act_mod.index(cfg, bundles=bundles)
     act_mod.register_signals(cfg, entries, date)  # track recurring signals (#149)
     recs = act_mod.recurrences(cfg, entries)
     text = act_mod.scaffold_entry(entries, act_mod.patterns(entries), date=date, recs=recs)

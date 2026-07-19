@@ -166,8 +166,8 @@ class MarkerFormat(unittest.TestCase):
 
         real_stub = leaves._stub_act
 
-        def stub_with_midrun_events(cfg_, date_):
-            real_stub(cfg_, date_)
+        def stub_with_midrun_events(cfg_, date_, bundles=None):
+            real_stub(cfg_, date_, bundles=bundles)
             _freeze(self.cfg, "60")                     # froze while the session ran
             (reviewed_early / "revalidation-2026-07-19.json").write_text(
                 json.dumps({"date": "2026-07-19", "rows": [
@@ -233,6 +233,37 @@ class MarkerFormat(unittest.TestCase):
                          ["issue_10"])
         del b  # (fixture bookkeeping)
 
+    def test_review_content_matches_the_frontier_snapshot(self) -> None:
+        # #299 review round 13: a bundle freezing between run_act's snapshot and the
+        # leaf's indexing must not enter the LOGGED review either — the reviewed
+        # content and the advanced frontier must describe the SAME snapshot, or the
+        # next cadence reviews and logs the bundle a second time.
+        from pdca_harness import leaves
+        from pdca_harness.config import LeafConfig
+        _freeze(self.cfg, "40")
+        self.cfg.act = LeafConfig(mode="stub", interactive=True)
+        self.cfg.act_cadence = 1
+        self.cfg.templates_dir = self.cfg.root / "no-templates"
+        calls = {"n": 0}
+        real_frozen = act.frozen_bundles
+
+        def snap_then_freeze(cfg_):
+            # Call 1 = run_act's act_due check; call 2 = the covered snapshot —
+            # freeze issue_41 immediately AFTER that snapshot was taken.
+            calls["n"] += 1
+            out = real_frozen(cfg_)
+            if calls["n"] == 2:
+                _freeze(self.cfg, "41")
+            return out
+
+        with mock.patch.object(act, "frozen_bundles", side_effect=snap_then_freeze):
+            leaves.run_act(self.cfg, "2026-07-19")
+        log = (self.cfg.process_dir / "act-log.md").read_text(encoding="utf-8")
+        self.assertIn("cycles considered: 40\n", log)      # exactly the snapshot
+        self.assertNotIn("41", log.split("##")[0])         # 41 absent from the header
+        self.assertEqual([b.name for b in act.unreviewed_bundles(self.cfg)],
+                         ["issue_41"])                     # covered next cadence
+
     def test_concurrent_auto_act_sessions_serialize(self) -> None:
         # #299 review round 11: two flows completing at once both pass act_due before
         # either advances the marker — the loser must skip (non-blocking session
@@ -286,8 +317,8 @@ class MarkerFormat(unittest.TestCase):
         self.cfg.templates_dir = self.cfg.root / "no-templates"
         real_stub = leaves._stub_act
 
-        def stub_with_confirming_reval(cfg_, date_):
-            real_stub(cfg_, date_)
+        def stub_with_confirming_reval(cfg_, date_, bundles=None):
+            real_stub(cfg_, date_, bundles=bundles)
             (confirmed / "revalidation-2026-07-19.json").write_text(
                 json.dumps({"date": "2026-07-19", "changed": False, "rows": []}),
                 encoding="utf-8")
