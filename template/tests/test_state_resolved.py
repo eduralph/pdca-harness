@@ -258,6 +258,19 @@ class PlanNeverReopensResolved(unittest.TestCase):
         self.assertIn("--repo", seen[0])
         self.assertIn("example-org/example-repo", seen[0])
 
+    def test_command_tracker_source_keeps_the_configured_tracker_system(self) -> None:
+        # #300 review round 15 (filed on PR #308): a `type = "command"` tracker
+        # source is just the FETCH mechanism (a GitHub notes_cmd moved into a Plan
+        # source) — it must not suppress [tracker].system, or reopened RESOLVED
+        # issues stay terminal forever and cleanup skips issue-side reconciliation.
+        self.cfg.plan_sources = [{"type": "command", "role": "tracker",
+                                  "cmd": "scrape {id}"}]
+        self.assertEqual(sources.tracker_github_repo(self.cfg),
+                         (True, "example-org/example-repo"))
+        # An explicitly different provider still suppresses github.
+        self.cfg.plan_sources = [{"type": "gitlab", "role": "tracker"}]
+        self.assertEqual(sources.tracker_github_repo(self.cfg), (False, ""))
+
     def test_repo_less_github_tracker_source_derives_from_the_url(self) -> None:
         # #302 review round 14: a documented `type = "github"` tracker source may
         # omit `repo` (gh's default serves the SEED) — the reopen probe must then

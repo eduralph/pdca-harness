@@ -118,7 +118,8 @@ def tracker_github_repo(cfg: Config) -> tuple[bool, str]:
     yields "" and the reopen probe refuses to guess."""
     for spec in cfg.plan_sources:
         if isinstance(spec, dict) and _is_tracker_source(spec):
-            if (spec.get("type") or "").strip().lower() == "github":
+            kind = (spec.get("type") or "").strip().lower()
+            if kind == "github":
                 # A repo-less github tracker source is documented and legal (gh's
                 # default serves the SEED, which runs from the project root) — but
                 # the reopen probe must never guess, so fall back to the same URL
@@ -127,7 +128,14 @@ def tracker_github_repo(cfg: Config) -> tuple[bool, str]:
                 # these configurations.
                 return True, (str(spec.get("repo", "") or "")
                               or _repo_from_url(cfg.tracker_url))
-            return False, ""
+            if kind == "command":
+                # An opaque command source says nothing about the tracker's
+                # IDENTITY — it is just the fetch mechanism (#300 review round 15;
+                # e.g. a GitHub notes_cmd moved into a Plan source). Fall through
+                # to the [tracker].system metadata below, or reopened issues stay
+                # terminal forever and cleanup skips issue-side reconciliation.
+                break
+            return False, ""  # an explicitly different provider (gitlab): not GitHub
     if (cfg.tracker_system or "").strip().lower() != "github":
         return False, ""
     return True, _repo_from_url(cfg.tracker_url)
