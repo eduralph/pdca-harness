@@ -21,6 +21,7 @@ builds on a broken base. Mechanics are deterministic ``git`` subprocesses (no mo
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
 from pathlib import Path
 
@@ -80,6 +81,42 @@ def _integ_worktree(primary: Path, base: str) -> Path:
     return primary.parent / (primary.name + INTEG_INFIX + _flatten_base(base))
 
 
+@contextlib.contextmanager
+def integ_lock(wt: Path, *, wait: bool = True):
+    """Advisory exclusive lock on an integration worktree's LIFECYCLE (#297 review
+    round 6); yields whether it was acquired. :func:`fold`'s build (prepare →
+    apply/commit → push) and the between-waves re-gate hold it for their whole
+    critical section, and the footprint sweeper tries it non-blocking — without it, a
+    flow finishing on one base could force-remove the worktree where ANOTHER process
+    is mid-fold or mid-re-gate, failing that run or invalidating its re-gate result
+    (`_sweep_quietly` only joins its own lane threads). The ``.lock`` sidecar lives
+    NEXT TO the worktree (same convention as the lane lock), so it survives worktree
+    removal and two processes racing over a recreated tree still serialize. Blocking
+    for users (concurrent folds of the same target serialize instead of clobbering
+    each other's ``checkout -B``); never raises — an unopenable lock file yields
+    False, and the sweeper's own guard fails not-held in the same environment, so
+    the tree is left alone rather than raced over."""
+    from . import worktree  # lazy: keep integrate importable without the lock helpers
+    try:
+        fh = wt.with_name(wt.name + ".lock").open("w")
+    except OSError:
+        yield False
+        return
+    try:
+        try:
+            worktree._lock_file(fh, wait=wait)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            with contextlib.suppress(OSError):
+                worktree._unlock_file(fh)
+    finally:
+        fh.close()
+
+
 def _targeted(patched: list[Path]) -> list[tuple[Path, str, str]]:
     """``(bundle, repo_spec, base)`` for each patched bundle that resolves a usable
     upstream target; bundles with no target (non-contributing cycles) are dropped."""
@@ -137,23 +174,27 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False
             result[(repo_spec, base)] = (branch, None)
             continue
 
-        wt = _prepare_worktree(repo, base_remote, base)
-        if _git(wt, "checkout", "-B", branch, f"{base_remote}/{base}") != 0:
-            raise IntegrationError(f"could not start {branch} off {base_remote}/{base}")
-        for d in bundles:
-            patch = (d / "patch.diff").resolve()
-            if _git(wt, "apply", str(patch)) != 0:
+        # The whole build holds the worktree's lifecycle lock (#297 review round 6):
+        # a concurrent sweep must not remove the tree mid-fold, and two concurrent
+        # folds of the same target serialize instead of fighting over `checkout -B`.
+        with integ_lock(_integ_worktree(repo, base)):
+            wt = _prepare_worktree(repo, base_remote, base)
+            if _git(wt, "checkout", "-B", branch, f"{base_remote}/{base}") != 0:
+                raise IntegrationError(f"could not start {branch} off {base_remote}/{base}")
+            for d in bundles:
+                patch = (d / "patch.diff").resolve()
+                if _git(wt, "apply", str(patch)) != 0:
+                    raise IntegrationError(
+                        f"{d.name}'s patch does not apply onto {branch} — an undeclared "
+                        f"cross-wave overlap; declare the conflict / re-order, then re-run")
+                _git(wt, "add", "--all")
+                if _git(wt, "commit", "-m", f"pdca-integrate: {d.name}") != 0:
+                    raise IntegrationError(f"could not commit {d.name} onto {branch}")
+            # A harness-owned, rebuilt-each-run branch: a plain force is correct (every fold
+            # rewrites it off the base), and it isn't a human PR branch needing lease safety.
+            if _git(wt, "push", "--force", "origin", branch) != 0:
                 raise IntegrationError(
-                    f"{d.name}'s patch does not apply onto {branch} — an undeclared "
-                    f"cross-wave overlap; declare the conflict / re-order, then re-run")
-            _git(wt, "add", "--all")
-            if _git(wt, "commit", "-m", f"pdca-integrate: {d.name}") != 0:
-                raise IntegrationError(f"could not commit {d.name} onto {branch}")
-        # A harness-owned, rebuilt-each-run branch: a plain force is correct (every fold
-        # rewrites it off the base), and it isn't a human PR branch needing lease safety.
-        if _git(wt, "push", "--force", "origin", branch) != 0:
-            raise IntegrationError(
-                f"could not push {branch} to origin — the next wave cannot stack on it")
+                    f"could not push {branch} to origin — the next wave cannot stack on it")
         result[(repo_spec, base)] = (branch, wt)
     return result
 

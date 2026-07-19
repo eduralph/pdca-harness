@@ -208,9 +208,19 @@ def sweep(cfg: Config, bundles: list[Path] | None = None, *,
                     lines.append(f"sweep: left {integ.name} (not a worktree registered "
                                  f"to {primary.name} — not ours to remove)")
                     continue
-                lines.append(f"sweep: {verb}remove integration tree {integ.name}")
-                if not dry_run:
-                    _remove_tree(primary, integ)
+                # The integ lifecycle guard, non-blocking (#297 review round 6): the
+                # flow only joins its OWN lane threads, so another process may be
+                # mid-fold or mid-re-gate in this tree (integrate.fold /
+                # gates.run_integration hold integ_lock for their critical section) —
+                # removing it under them fails that run or invalidates its re-gate.
+                with integrate.integ_lock(integ, wait=False) as held:
+                    if not held:
+                        lines.append(f"sweep: left {integ.name} (busy — another flow "
+                                     "holds its integration lock)")
+                        continue
+                    lines.append(f"sweep: {verb}remove integration tree {integ.name}")
+                    if not dry_run:
+                        _remove_tree(primary, integ)
             for lane_wt in _lane_dirs(primary):
                 # The registration guard applies to CLEAN too (#297 review round 3):
                 # `clean` + `reset --hard` are just as destructive as removal, and an

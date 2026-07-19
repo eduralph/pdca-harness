@@ -250,6 +250,26 @@ class SweepRealGit(unittest.TestCase):
         self.assertTrue((self.lane / "stray.txt").exists())  # not cleaned either
         self.assertTrue(any("busy" in ln for ln in lines))
 
+    def test_busy_integration_tree_is_left_untouched(self) -> None:
+        # #297 review round 6: another process may be mid-fold / mid-re-gate in the
+        # integ tree (integrate.fold and gates.run_integration hold integ_lock for
+        # their critical section) — the sweep tries the same lock non-blocking and
+        # leaves a busy tree alone instead of removing it under a live run.
+        d = self._seed_footprint()
+        integ = self.tmp / "checkout.pdca-integ-main"
+        lock = integ.with_name(integ.name + ".lock").open("w")
+        self.addCleanup(lock.close)
+        worktree._lock_file(lock, wait=True)               # simulate the live fold
+        try:
+            lines = sweep.sweep(self.cfg, [d], mode="remove")
+        finally:
+            worktree._unlock_file(lock)
+        self.assertTrue(integ.exists())                    # not removed
+        self.assertTrue(any("integration lock" in ln for ln in lines))
+        # Released → the next sweep reclaims it.
+        lines = sweep.sweep(self.cfg, [d], mode="remove")
+        self.assertFalse(integ.exists())
+
     def test_symlinked_lane_path_is_never_followed(self) -> None:
         # #297 review round 5: a symlink aliasing the primary (or any registered tree)
         # would pass a resolving registration check — the destructive git commands must

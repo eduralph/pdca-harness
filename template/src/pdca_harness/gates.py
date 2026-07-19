@@ -178,9 +178,15 @@ def run_integration(cfg: Config, worktree_path: Path) -> dict:
     integration tip the *next* wave will build on. The gate commands run from it and see it
     as ``$PDCA_WORKTREE``, so a project's repo-scoped gate validates the *combination* of
     the waves so far: a result that is red though each fix was green alone means the
-    caller STOPs before building the next wave on it. Never writes a frozen record."""
-    rows = _run_checks(cfg, cwd=worktree_path, bundle=None, scopes=("repo",),
-                       worktree_override=worktree_path)
+    caller STOPs before building the next wave on it. Never writes a frozen record.
+
+    Runs under the tree's lifecycle lock (#297 review round 6): a concurrent
+    ``pdca sweep`` — or another flow's publish-boundary sweep — must not remove the
+    worktree mid-gate and invalidate this re-gate's result."""
+    from . import integrate  # lazy: gates is imported by integrate's callers
+    with integrate.integ_lock(worktree_path):
+        rows = _run_checks(cfg, cwd=worktree_path, bundle=None, scopes=("repo",),
+                           worktree_override=worktree_path)
     return _finalize(rows, name="integration", write_to=None)
 
 
