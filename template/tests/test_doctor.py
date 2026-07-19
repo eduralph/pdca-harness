@@ -116,6 +116,41 @@ class Doctor(unittest.TestCase):
         self.assertIn("free disk space (elsewhere-checkout)", out)
         self.assertIn("pdca sweep", out)
 
+    def test_quota_headroom_bounds_the_free_space_row(self) -> None:
+        # #297 review round 12: EDQUOT was the motivating incident — a shared volume
+        # with hundreds of fs-level GiB free while THIS user's quota is nearly
+        # exhausted. The row must report (and WARN on) the tighter bound.
+        from types import SimpleNamespace
+        cfg = _load(self.tmp, "[doctor]\nmin_free_gb = 10.0\n")
+        big = SimpleNamespace(free=500 * 1024 ** 3, total=1, used=1)
+        with mock.patch.object(doctor.shutil, "disk_usage", return_value=big), \
+                mock.patch.object(doctor, "_quota_free_gb", return_value=1.5):
+            rc, out = self._run(cfg)
+        self.assertEqual(rc, 0)                            # WARN, not fatal
+        self.assertIn("1.5 GiB user-quota headroom", out)
+        self.assertIn("pdca sweep", out)
+
+    def test_quota_probe_parses_the_matching_mountpoint(self) -> None:
+        from types import SimpleNamespace
+        text = (
+            "Disk quotas for user eddie (uid 1000):\n"
+            "     Filesystem  blocks   quota   limit   grace   files   quota   limit"
+            "   grace\n"
+            "      /          1000     0       0       0       1       0       0"
+            "       0\n"
+            "      /home      968000*  1000000 1048576 6days   12      0       0"
+            "       0\n")
+        fake = SimpleNamespace(returncode=1, stdout=text, stderr="")  # over-quota rc
+        with mock.patch.object(doctor.shutil, "which", return_value="/usr/bin/quota"):
+            gb = doctor._quota_free_gb(Path("/home/eddie/project"),
+                                       runner=lambda *a, **k: fake)
+            self.assertIsNotNone(gb)
+            self.assertAlmostEqual(gb, (1048576 - 968000) / 1024 ** 2, places=4)
+            # A path outside every quota'd mountpoint (the / row has limit 0 — no
+            # quota) → None: the fs-level number stands.
+            self.assertIsNone(doctor._quota_free_gb(Path("/srv/elsewhere"),
+                                                    runner=lambda *a, **k: fake))
+
     def test_space_roots_measure_the_checkout_parent_filesystem(self) -> None:
         # #297 review round 9: lane/integ/overflow siblings are created under
         # checkout.PARENT — when the checkout is itself a mount point, statting the

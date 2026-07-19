@@ -110,6 +110,55 @@ def _space_roots(cfg: Config, *, dev=lambda p: p.stat().st_dev) -> list[Path]:
     return roots
 
 
+def _quota_free_gb(where: Path, *, runner=subprocess.run) -> float | None:
+    """Best-effort per-USER quota headroom (GiB) on the filesystem holding ``where``,
+    or ``None`` when unknowable.
+
+    ``shutil.disk_usage`` reports filesystem-wide free blocks — but the motivating
+    #297 incident was ``EDQUOT``: a shared volume showing hundreds of free GiB while
+    THIS user could no longer write (#297 review round 12). Parse linuxquota's
+    ``quota -u -w --show-mntpoint --hide-device``: one row per quota'd filesystem
+    (``<mountpoint> <blocks> <soft> <hard> …``, 1 KiB block units); the row whose
+    mountpoint is the longest prefix of ``where`` supplies the headroom against its
+    hard (else soft) limit. No ``quota`` binary, no matching row, a limit of 0 (no
+    quota) or any exec/parse oddity ⇒ ``None`` — the fs-level number then stands and
+    the row says quotas were not probed. ``runner`` is injected for tests (real
+    quotas can't be fabricated in a unit suite)."""
+    if shutil.which("quota") is None:
+        return None
+    try:
+        proc = runner(["quota", "-u", "-w", "--show-mntpoint", "--hide-device"],
+                      capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # quota exits NON-ZERO when a limit is exceeded — the output still carries the
+    # numbers, which is exactly the case this probe most needs to see.
+    try:
+        target = str(where.resolve())
+    except OSError:
+        return None
+    best: tuple[int, float] | None = None  # (mountpoint length, headroom GiB)
+    for line in (proc.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) < 4 or not parts[0].startswith("/"):
+            continue  # headers / device rows / continuation lines
+        mnt = parts[0]
+        try:
+            blocks = float(parts[1].rstrip("*"))  # '*' marks an exceeded soft limit
+            soft = float(parts[2])
+            hard = float(parts[3])
+        except ValueError:
+            continue
+        limit = hard if hard > 0 else soft
+        if limit <= 0:
+            continue  # no quota on this filesystem
+        if target == mnt or target.startswith(mnt.rstrip("/") + "/"):
+            headroom = max(0.0, limit - blocks) / (1024 ** 2)  # 1 KiB blocks → GiB
+            if best is None or len(mnt) > best[0]:
+                best = (len(mnt), headroom)
+    return best[1] if best else None
+
+
 # What Claude Code's Linux sandbox needs on PATH before it will actually engage. Missing any
 # of these, it does not fail — it disables the sandbox and runs unconfined (#289).
 # binary on PATH -> (what it is, the PACKAGE that provides it). The two differ for bubblewrap:
@@ -361,12 +410,24 @@ def run(cfg: Config, *, strict: bool = False) -> int:
             label = ("free disk space" if where == cfg.root
                      else f"free disk space ({where.name})")
             try:
-                free_gb = shutil.disk_usage(where).free / (1024 ** 3)
-                low = free_gb < cfg.doctor_min_free_gb
+                fs_gb = shutil.disk_usage(where).free / (1024 ** 3)
+                quota_gb = _quota_free_gb(where)
+                # The EFFECTIVE headroom is the tighter of filesystem free and this
+                # user's quota (#297 review round 12): the motivating incident was
+                # EDQUOT on a shared volume that showed hundreds of fs-level GiB —
+                # disk_usage alone cannot see per-user quotas.
+                bound = quota_gb is not None and quota_gb < fs_gb
+                eff = quota_gb if bound else fs_gb
+                low = eff < cfg.doctor_min_free_gb
+                what = "user-quota headroom" if bound else "free"
+                caveat = ("" if quota_gb is not None or shutil.which("quota")
+                          else " (fs-level; per-user quotas not visible — install "
+                               "quota-tools to probe them)")
                 r.row(WARN if low else OK, label,
-                      f"{free_gb:.1f} GiB free < {cfg.doctor_min_free_gb:g} GiB threshold "
-                      "— gate runs will false-red on quota; run 'pdca sweep' "
-                      "(or 'pdca sweep --remove')" if low else f"{free_gb:.1f} GiB free")
+                      f"{eff:.1f} GiB {what} < {cfg.doctor_min_free_gb:g} GiB "
+                      "threshold — gate runs will false-red on quota; run "
+                      "'pdca sweep' (or 'pdca sweep --remove')" if low
+                      else f"{eff:.1f} GiB {what}{caveat}")
             except OSError as exc:
                 r.row(WARN, label, f"could not stat {where}: {exc}")
     lanes_n, integs, ovfs = _footprint_counts(cfg)
