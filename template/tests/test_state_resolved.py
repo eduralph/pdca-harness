@@ -30,7 +30,7 @@ def _cfg(root: Path) -> Config:
         templates_dir=TEMPLATES,
         default_branch="main",
         tracker_system="github",
-        tracker_url="",
+        tracker_url="https://github.com/example-org/example-repo/issues",
         issue_id_example="1",
         builder=LeafConfig(mode="stub"),
         reviewer=LeafConfig(mode="stub"),
@@ -209,6 +209,50 @@ class PlanNeverReopensResolved(unittest.TestCase):
         self.assertTrue((d / "notes.superseded-by-reopen.json").exists())
         self.assertNotEqual(state.state(d), state.RESOLVED)  # re-enters the drive set
 
+    def test_reopen_probe_scopes_gh_to_the_tracker_repo(self) -> None:
+        # #302 review round 7: on the legacy [tracker] path the repo is DERIVED from
+        # the tracker URL and always passed via --repo — gh's checkout-default repo
+        # could hold a wrong same-numbered issue, and a wrong OPEN there would clear
+        # a genuine resolution.
+        from types import SimpleNamespace
+        self._resolved("31")
+        self.assertEqual(sources.tracker_github_repo(self.cfg),
+                         (True, "example-org/example-repo"))
+        seen: list[list[str]] = []
+
+        def record(cmd, **kw):
+            seen.append(list(cmd))
+            return SimpleNamespace(returncode=0,
+                                   stdout=json.dumps({"state": "OPEN"}), stderr="")
+
+        with mock.patch.object(sources.subprocess, "run", side_effect=record), \
+                mock.patch.object(sources.shutil, "which", return_value="/usr/bin/gh"):
+            self.assertTrue(sources.tracker_issue_reopened(self.cfg, "31"))
+        self.assertIn("--repo", seen[0])
+        self.assertIn("example-org/example-repo", seen[0])
+
+    def test_reopen_probe_refuses_without_a_derivable_repo(self) -> None:
+        # No tracker URL to derive the repo from → the probe cannot know WHICH repo's
+        # issue to read, so it refuses (conservative False) instead of letting gh
+        # fall back to the checkout's default repository.
+        self.cfg.tracker_url = ""
+        with mock.patch.object(sources.subprocess, "run") as run, \
+                mock.patch.object(sources.shutil, "which", return_value="/usr/bin/gh"):
+            self.assertFalse(sources.tracker_issue_reopened(self.cfg, "31"))
+        run.assert_not_called()
+
+    def test_reopen_probe_tolerates_non_object_gh_json(self) -> None:
+        # #302 review round 7: a successful gh (or shim) emitting `null`/`[]` must
+        # read as "unknown ⇒ False", never crash the flow with AttributeError.
+        from types import SimpleNamespace
+        for payload in ("null", "[]", '"OPEN"'):
+            fake = SimpleNamespace(returncode=0, stdout=payload, stderr="")
+            with mock.patch.object(sources.subprocess, "run", return_value=fake), \
+                    mock.patch.object(sources.shutil, "which",
+                                      return_value="/usr/bin/gh"):
+                self.assertFalse(sources.tracker_issue_reopened(self.cfg, "31"),
+                                 payload)
+
     def test_single_id_flow_exits_zero_on_a_resolved_bundle(self) -> None:
         # #302 review round 3: parity with the multi-id path — a settled tracker item
         # correctly skipped is a successful no-op, not a failed flow.
@@ -238,7 +282,8 @@ class PlanNeverReopensResolved(unittest.TestCase):
         from types import SimpleNamespace
         d = self._resolved("26")
         (self.tmp / "pdca.toml").write_text(
-            '[paths]\nbundle_root = "results"\n[tracker]\nsystem = "github"\n',
+            '[paths]\nbundle_root = "results"\n[tracker]\nsystem = "github"\n'
+            'url = "https://github.com/example-org/example-repo/issues"\n',
             encoding="utf-8")
         cwd = Path.cwd()
         os.chdir(self.tmp)
