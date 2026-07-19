@@ -264,10 +264,13 @@ class MarkerFormat(unittest.TestCase):
         self.assertEqual([b.name for b in act.unreviewed_bundles(self.cfg)],
                          ["issue_41"])                     # covered next cadence
 
-    def test_concurrent_auto_act_sessions_serialize(self) -> None:
-        # #299 review round 11: two flows completing at once both pass act_due before
-        # either advances the marker — the loser must skip (non-blocking session
-        # lock), never append a duplicate act-log entry over the same snapshot.
+    def test_concurrent_auto_act_waits_then_reviews_what_is_left(self) -> None:
+        # #299 review rounds 11/14: two flows completing at once both pass act_due
+        # before either advances the marker — the loser WAITS for the active session
+        # (a skip would leave its newly frozen bundles without their promised
+        # automatic review until some unrelated later flow completed), then the
+        # cadence re-check decides whether anything is left.
+        import threading
         from pdca_harness import leaves, worktree
         from pdca_harness.config import LeafConfig
         _freeze(self.cfg, "95")
@@ -278,15 +281,25 @@ class MarkerFormat(unittest.TestCase):
         session = (self.cfg.process_dir / ".act-session.lock").open("w")
         self.addCleanup(session.close)
         worktree._lock_file(session, wait=False)           # the "other" running Act
+        done = threading.Event()
         err = io.StringIO()
-        try:
+
+        def run():
             with redirect_stderr(err):
                 leaves.run_act(self.cfg, "2026-07-19")
-        finally:
-            worktree._unlock_file(session)
-        self.assertIn("another Act session", err.getvalue())
-        self.assertFalse(self.marker.exists())             # frontier untouched
-        self.assertFalse((self.cfg.process_dir / "act-log.md").exists())  # no dup entry
+            done.set()
+
+        t = threading.Thread(target=run)
+        t.start()
+        self.assertFalse(done.wait(0.3))                   # waiting, not skipping
+        worktree._unlock_file(session)
+        t.join(timeout=10)
+        self.assertTrue(done.is_set())
+        # The winner had reviewed nothing here, so the waiter's re-check found the
+        # cadence still due and it ran ITS review over the still-unreviewed cycle.
+        self.assertTrue(self.marker.exists())
+        self.assertTrue((self.cfg.process_dir / "act-log.md").exists())
+        self.assertEqual(act.unreviewed_bundles(self.cfg), [])
 
     def test_auto_act_no_longer_due_after_a_concurrent_session_skips(self) -> None:
         # The loser that acquires AFTER the winner finished re-checks the cadence

@@ -2029,13 +2029,15 @@ def run_act(cfg: Config, date: str) -> None:
     # rounds 11/12): two flows completing at once both pass act_due before either
     # advances the marker — and a manual `act log --append` takes the SAME lock —
     # so the frontier union is never asked to undo duplicate act-log entries over
-    # one snapshot. The loser skips loudly; its cycles stay in scope for the next
-    # due Act.
-    with act_mod.act_session(cfg) as held:
-        if not held:
-            print("leaves: another Act session is already running — skipped (cycles "
-                  "it does not cover stay unreviewed for the next due Act)",
-                  file=sys.stderr)
+    # one snapshot. The auto path WAITS for the active session (#299 review round
+    # 14) rather than skipping: a skip would leave this flow's newly frozen
+    # bundles without their promised automatic review until some unrelated later
+    # flow completed. The cadence re-check below then decides whether anything is
+    # left to review.
+    with act_mod.act_session(cfg, wait=True) as held:
+        if not held:  # only an unopenable lock file (never contention) lands here
+            print("leaves: cannot open the Act session lock — Act skipped this run; "
+                  "its cycles stay unreviewed for the next due Act", file=sys.stderr)
             return
         # Re-check the cadence UNDER the session lock: the other session may have
         # just finished and advanced the frontier past our threshold — reviewing

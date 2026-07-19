@@ -102,9 +102,13 @@ _SESSION_LOCK = ".act-session.lock"
 
 
 @contextlib.contextmanager
-def act_session(cfg: Config):
+def act_session(cfg: Config, *, wait: bool = False):
     """The cross-process Act SESSION lock (#299 review rounds 11/12); yields whether
-    it was acquired (non-blocking — the loser reports and retries later).
+    it was acquired. Non-blocking by default (a manual append's loser reports and
+    the human retries); ``wait=True`` BLOCKS until the active session finishes —
+    the auto-Act path uses it (#299 review round 14): a flow that merely skipped
+    would leave its newly frozen bundles without their promised automatic review
+    until some unrelated later flow happened to complete.
 
     EVERY writing Act path holds it: the flow's auto-Act (``leaves.run_act``) for its
     whole review, and ``act log --append`` for its transaction — otherwise a manual
@@ -122,7 +126,7 @@ def act_session(cfg: Config):
         return
     try:
         try:
-            _lock_exclusive(fh, wait=False)
+            _lock_exclusive(fh, wait=wait)
         except OSError:
             yield False
             return
