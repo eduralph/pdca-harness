@@ -593,9 +593,10 @@ def _waves(cfg: Config, ids: list[str]) -> int:
                                                           state.DISCONTINUED,
                                                           state.RESOLVED)]
     elif cfg.bundle_root.exists():
-        # RESOLVED is terminal too (#302 review round 2): a resolved bundle with a stray
-        # placeholder brief has brief.md on disk, so the file test alone would schedule
-        # settled work — filter on the terminal set, not just COMPLETE/DISCONTINUED.
+        # RESOLVED is terminal too (#302 review round 2, mirrored round 8): a resolved
+        # bundle with a stray placeholder brief has brief.md on disk, so the file test
+        # alone would schedule settled work — filter on the terminal set, not just
+        # COMPLETE/DISCONTINUED; the preview must match the flow's drive set.
         bundles = sorted((d for d in cfg.bundle_root.glob("issue_*")
                           if d.is_dir() and (d / "brief.md").exists()
                           and state.state(d) not in (state.COMPLETE, state.DISCONTINUED,

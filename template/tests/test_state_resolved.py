@@ -56,6 +56,21 @@ class StateResolved(unittest.TestCase):
             (d / "notes.json").write_text(notes, encoding="utf-8")
         return d
 
+    def test_waves_excludes_resolved_bundles(self) -> None:
+        # #302 review round 8: `pdca waves` (no ids) must not report a terminal
+        # RESOLVED bundle (e.g. one keeping a placeholder brief) as a runnable
+        # wave — the preview must match the flow's actual drive set.
+        import io
+        from contextlib import redirect_stdout
+        d = self._bundle("9", json.dumps(_RESOLVED))
+        (d / "brief.md").write_text("- **Slug:** <fill-me>\n", encoding="utf-8")
+        self.assertEqual(state.state(d), state.RESOLVED)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = cli._waves(self.cfg, [])
+        self.assertEqual(rc, 0)
+        self.assertIn("no briefed bundles", out.getvalue())
+
     def test_briefless_with_resolved_object_is_resolved(self) -> None:
         d = self._bundle("1", json.dumps(_RESOLVED))
         self.assertEqual(state.state(d), state.RESOLVED)
