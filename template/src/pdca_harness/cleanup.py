@@ -178,11 +178,17 @@ def _close_issue(d: Path, number: str, repo: str, *, reason: str, fallback_body:
     already = False
     probe = _gh(["issue", "view", number, *repo_args, "--json", "comments"])
     if probe.returncode == 0:
+        # Shape-tolerant like every other gh probe (#300 review round 9): a
+        # successful gh (or shim) emitting non-object JSON — or a null entry inside
+        # `comments` — must degrade to `already = False` (post the comment with the
+        # close), never raise AttributeError and mark the row failed WITHOUT closing.
         try:
-            already = any((c.get("body") or "").strip() == body
-                          for c in json.loads(probe.stdout).get("comments", []) or [])
+            decoded = json.loads(probe.stdout)
         except ValueError:
-            pass
+            decoded = None
+        if isinstance(decoded, dict) and isinstance(decoded.get("comments"), list):
+            already = any(isinstance(c, dict) and (c.get("body") or "").strip() == body
+                          for c in decoded["comments"])
     args = ["issue", "close", number, *repo_args, "--reason", reason]
     if not already:
         args += ["--comment", body]

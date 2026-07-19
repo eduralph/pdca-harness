@@ -182,6 +182,30 @@ class ApplyFailureHonesty(CleanupBase):
         self.assertIn("did not take", err)
         self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)  # honestly reported
 
+    def test_non_object_comment_probe_still_closes_with_the_comment(self) -> None:
+        # #300 review round 9: a comment probe returning `null` (or null entries in
+        # `comments`) must degrade to already=False — the close proceeds WITH the
+        # comment — never AttributeError marking the row failed without closing.
+        self._staged("98", signoff_action="accept", pr_url=_PR)
+        self.issue_states["98"] = _OPEN
+        self.pr_states[_PR] = "MERGED"
+        real = self._fake_run
+
+        def null_comments(cmd, **kw):
+            if cmd[1:3] == ["issue", "view"] and "comments" in cmd[-1]:
+                return SimpleNamespace(returncode=0, stdout="null", stderr="")
+            return real(cmd, **kw)
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(cleanup.subprocess, "run", side_effect=null_comments), \
+                mock.patch.object(cleanup.shutil, "which", return_value="/usr/bin/gh"), \
+                redirect_stdout(out), redirect_stderr(err):
+            rc = cleanup.run(self.cfg, [], today="2026-07-18", apply=True)
+        self.assertEqual(rc, 0)
+        closes = self._closes()
+        self.assertEqual(len(closes), 1)
+        self.assertIn("--comment", closes[0])              # posted with the close
+
     def test_non_object_pr_json_reads_as_unknown(self) -> None:
         # #300 review round 8: a successful gh (or shim) emitting `null`/`[]` for
         # `pr view` must read as "unknown" (no row action), never an AttributeError
