@@ -216,14 +216,25 @@ def unmark_reviewed(cfg: Config, d: Path) -> None:
     default ``act index``/``act log`` scope instead of hiding behind the frontier
     until another bundle happens to freeze. Same lock + atomic-write discipline as
     :func:`mark_reviewed`; a legacy/absent marker (no frontier) is a no-op — the
-    bundle is already in scope there."""
+    bundle is already in scope there.
+
+    The lock is taken even when the marker is ABSENT (#299 review round 9): during
+    the FIRST Act review the marker only appears at ``mark_reviewed``'s final
+    ``os.replace`` — an unlocked absent-check could no-op while that writer, whose
+    in-lock delta scan predates this call's stamp, then publishes a frontier
+    containing the changed bundle. Under the lock the interleavings are safe: either
+    this runs first (still-absent marker → no-op, and the writer's in-lock
+    ``delta_guard`` scan then sees the already-written stamp — revalidate stamps
+    BEFORE calling here), or the writer runs first and the marker exists on the
+    locked re-read, so the entry is removed."""
+    cfg.process_dir.mkdir(parents=True, exist_ok=True)
     marker = cfg.process_dir / _CADENCE_MARKER
-    if not marker.exists():
-        return
     lock = marker.with_name(marker.name + ".lock")
     with lock.open("w") as fh:
         _lock_exclusive(fh)
         try:
+            if not marker.exists():
+                return
             m = _load_marker(cfg)
             if m["reviewed"] is None or d.name not in m["reviewed"]:
                 return

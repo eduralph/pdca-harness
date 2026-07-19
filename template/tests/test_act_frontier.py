@@ -179,6 +179,32 @@ class MarkerFormat(unittest.TestCase):
         self.assertIn("issue_60", names)                # mid-session freeze not marked
         self.assertIn("issue_50", names)                # mid-session delta not re-hidden
 
+    def test_unmark_serializes_with_the_first_frontier_write(self) -> None:
+        # #299 review round 9: with NO marker yet (the first-ever Act), unmark must
+        # still enter the marker's critical section — an unlocked absent-check could
+        # no-op while mark_reviewed (whose in-lock delta scan predates the stamp)
+        # publishes a frontier containing the changed bundle. Simulate the writer
+        # holding the lock: unmark must not return until it is released.
+        import threading
+        d = _freeze(self.cfg, "90")
+        self.cfg.process_dir.mkdir(parents=True, exist_ok=True)
+        self.assertFalse(self.marker.exists())             # first review: no marker
+        lock = self.marker.with_name(self.marker.name + ".lock").open("w")
+        self.addCleanup(lock.close)
+        act._lock_exclusive(lock)
+        done = threading.Event()
+
+        def run_unmark():
+            act.unmark_reviewed(self.cfg, d)
+            done.set()
+
+        t = threading.Thread(target=run_unmark)
+        t.start()
+        self.assertFalse(done.wait(0.3))                   # blocked behind the writer
+        act._unlock(lock)
+        t.join(timeout=5)
+        self.assertTrue(done.is_set())
+
     def test_delta_since_tolerates_filesystem_clock_skew(self) -> None:
         # #299 review round 7: fs mtimes and time.time() are different clocks — a
         # stamp written moments AFTER `started` can carry an mtime just before it.
