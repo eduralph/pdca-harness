@@ -99,11 +99,21 @@ def _sandbox_expected(cfg: Config) -> bool:
 
     The operator's own ambient sandbox (their user-scope `~/.claude/settings.json`) is theirs,
     not the harness's claim, so it is not checked here.
+
+    Plan-advisory leaves count UNCONDITIONALLY (#301 review round 8): their runner seeds
+    a MINIMAL fail-closed sandbox (`_seed_plan_sandbox_settings` — enabled, no Check
+    grants) for every confinable family, with no `[leaves.sandbox]` exemption involved —
+    so a claude-family plan reviewer needs the dependencies even when no exemption is
+    configured (the seeded `failIfUnavailable` makes the leaf REFUSE without them).
     """
+    leaves_map = _command_leaves(cfg)
+    if any(cfg.profile(leaf).settings_scope_argv
+           for role, leaf in leaves_map.items() if role.startswith("plan-advisory:")):
+        return True
     if not getattr(cfg, "leaf_unsandboxed_commands", None):
         return False
     return any(cfg.profile(leaf).settings_scope_argv
-               for role, leaf in _command_leaves(cfg).items()
+               for role, leaf in leaves_map.items()
                if role == "reviewer" or role.startswith("advisory:"))
 
 
@@ -140,8 +150,11 @@ def _command_leaves(cfg: Config) -> dict[str, LeafConfig]:
     out = {role: leaf for role, leaf in named.items()
            if leaf.mode == "command" and leaf.argv}
     # (kind, specs, base) — base is the leaf an omitted field inherits from (None ⇒
-    # no inheritance: advisory's own mode/argv/family).
+    # no inheritance: advisory's own mode/argv/family). Plan advisories (#301) are
+    # command leaves a real run spawns too — omitting them let --strict pass while the
+    # Plan beat later died on the missing CLI (#301 review).
     for kind, specs, base in (("advisory", cfg.advisory_leaves, None),
+                              ("plan-advisory", getattr(cfg, "plan_advisory_leaves", []), None),
                               ("variant", cfg.builder_variants, cfg.builder),
                               ("escalation", cfg.builder_escalation, cfg.builder)):
         for i, spec in enumerate(specs):
