@@ -99,11 +99,16 @@ def _target(d: Path, cfg: Config) -> tuple[Path, str] | None:
     return primary, base_ref
 
 
+# The harness-owned sibling-dir suffix for lane worktrees; single-sourced so the
+# footprint sweeper (issue #297) globs exactly what this module creates.
+WT_SUFFIX = ".pdca-wt"
+
+
 def _wt_dir(primary: Path) -> Path:
     """The worktree directory for the current lane slot — a sibling of the primary
     checkout (``<name>.pdca-wt`` / ``<name>.pdca-wt-l<lane>`` under concurrency)."""
     slot = lane.current()
-    suffix = ".pdca-wt" + (f"-l{slot}" if slot is not None else "")
+    suffix = WT_SUFFIX + (f"-l{slot}" if slot is not None else "")
     return primary.parent / (primary.name + suffix)
 
 
@@ -441,10 +446,59 @@ def overflow_remove(primary: Path, ovf: Path) -> None:
 
 def sweep_overflow(primary: Path) -> None:
     """Reclaim crash-orphaned overflow trees for ``primary``: prune git's admin entries,
-    then rmtree any leftover ``*-ovf-*`` dirs. Best-effort; safe to call before a run."""
+    then rmtree any leftover ``*-ovf-*`` dirs. Best-effort; safe to call before a run.
+    NB: removes ALL overflow trees — a caller that may overlap other live processes
+    (the footprint sweep, #297) must use :func:`orphan_overflow_dirs` instead."""
     _git(primary, "worktree", "prune")
     for d in _overflow_dirs(primary):
         overflow_remove(primary, d)
+
+
+def _pid_alive(pid: int) -> bool:
+    """Non-destructive process-existence probe (#297 review round 5).
+
+    On Windows ``os.kill(pid, 0)`` is NOT the harmless POSIX probe — CPython routes
+    non-console signals through ``TerminateProcess``, so probing a live gate process
+    would KILL it. ``OpenProcess`` with query-limited rights is the safe equivalent.
+    Anything unknowable reads as alive (never reclaim what can't be classified)."""
+    if os.name == "nt":  # pragma: no cover — exercised only on Windows
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        ERROR_INVALID_PARAMETER = 87  # "no such process" for OpenProcess
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        # A null handle does not prove absence (#297 review round 10): OpenProcess
+        # also fails ACCESS_DENIED for a live protected / other-user process — the
+        # exact mistake the POSIX branch's PermissionError arm avoids. Only the
+        # nonexistent-pid error proves death; every other failure reads alive, so
+        # the sweep leaves that overflow tree for its (possibly live) owner.
+        return ctypes.get_last_error() != ERROR_INVALID_PARAMETER
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True  # exists (another user's) / unknowable → treat as live
+    return True
+
+
+def orphan_overflow_dirs(primary: Path) -> list[Path]:
+    """Overflow trees whose creating process is provably gone (#297 review).
+
+    The overflow name embeds the creator's pid (``…-ovf-<pid>-<seq>``). A live pid —
+    including a process we lack permission to signal — means the tree may be mid-gate
+    in another process, and reclaiming it would invalidate that gate's results; only a
+    pid that positively no longer exists marks an orphan. An unparseable name proves
+    nothing, so it is skipped too (never delete what can't be classified)."""
+    out: list[Path] = []
+    for p in _overflow_dirs(primary):
+        pid_s = p.name.split(_OVF_SUFFIX, 1)[1].split("-", 1)[0]
+        if pid_s.isdigit() and not _pid_alive(int(pid_s)):
+            out.append(p)  # provably dead → a crash leftover
+    return out
 
 
 def _overflow_create(d: Path, primary: Path, base_ref: str) -> Path | None:

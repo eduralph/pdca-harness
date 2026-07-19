@@ -1104,9 +1104,9 @@ class WaveModel(unittest.TestCase):
         calls: list[list[str]] = []
         real = flow.integrate.fold
 
-        def spy(cfg: Config, accepted: list, *, dry_run: bool = False):
+        def spy(cfg: Config, accepted: list, *, dry_run: bool = False, locks=None):
             calls.append([d.name for d in accepted])
-            return real(cfg, accepted, dry_run=dry_run)
+            return real(cfg, accepted, dry_run=dry_run, locks=locks)
 
         flow.integrate.fold = spy
         try:

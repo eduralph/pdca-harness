@@ -63,27 +63,39 @@ def launch(cfg: Config, issue_id: str) -> int:
         print("[driver].worktree is off — enable worktree isolation ([driver].worktree) so "
               "`pdca try` can materialize the patched tree from patch.diff.", file=sys.stderr)
         return 1
-    wt = worktree.stage(d, cfg)
-    if wt is None:
-        print(f"could not materialize {d.name}'s patched tree — its patch.diff may not apply "
-              "onto the target base, or the target isn't a git checkout (see the worktree "
-              "messages above).", file=sys.stderr)
+    # The whole session — stage AND the interactive command — holds the lane lifecycle
+    # lock (#297 review round 8): the footprint sweeper (and any Do/gate run) tries the
+    # same lock, so it can no longer clean/reset/remove the patched tree BENEATH the
+    # application the human is validating for sign-off. Non-blocking: a busy lane means
+    # a Do or gate run owns it right now — refuse with a reason rather than corrupt it.
+    try:
+        with worktree.lane_lock(d, cfg, wait=False):
+            wt = worktree.stage(d, cfg)
+            if wt is None:
+                print(f"could not materialize {d.name}'s patched tree — its patch.diff "
+                      "may not apply onto the target base, or the target isn't a git "
+                      "checkout (see the worktree messages above).", file=sys.stderr)
+                return 1
+
+            env = {**os.environ,
+                   "PDCA_WORKTREE": str(wt), "PDCA_BUNDLE": str(d), "PDCA_TARGET": str(wt)}
+            slot = lane.current()
+            if slot is not None:
+                env["PDCA_LANE"] = str(slot)
+
+            mv = cfg.templates_dir / "MANUAL-VERIFICATION.md.tpl"
+            print(f"launching the patched build for {d.name} from {wt}", file=sys.stderr)
+            print("  edits made here are RESET on the next Do — don't rely on them.",
+                  file=sys.stderr)
+            print(f"  record what you tried in a Manual-verification note (template: {mv}).",
+                  file=sys.stderr)
+            print("  quit the app to return to the shell.", file=sys.stderr)
+
+            return subprocess.run(cfg.manual_test_cmd, shell=True, cwd=str(wt),
+                                  env=env).returncode
+    except worktree.WorktreeError as exc:
+        print(f"pdca try: {exc}", file=sys.stderr)
         return 1
-
-    env = {**os.environ,
-           "PDCA_WORKTREE": str(wt), "PDCA_BUNDLE": str(d), "PDCA_TARGET": str(wt)}
-    slot = lane.current()
-    if slot is not None:
-        env["PDCA_LANE"] = str(slot)
-
-    mv = cfg.templates_dir / "MANUAL-VERIFICATION.md.tpl"
-    print(f"launching the patched build for {d.name} from {wt}", file=sys.stderr)
-    print("  edits made here are RESET on the next Do — don't rely on them.", file=sys.stderr)
-    print(f"  record what you tried in a Manual-verification note (template: {mv}).",
-          file=sys.stderr)
-    print("  quit the app to return to the shell.", file=sys.stderr)
-
-    return subprocess.run(cfg.manual_test_cmd, shell=True, cwd=str(wt), env=env).returncode
 
 
 def _prog() -> str:
