@@ -199,11 +199,18 @@ def _fingerprint(d: Path) -> str:
     (#299 review round 16). The documented redo path (``rm -rf`` + rerun) recreates
     a bundle under the SAME name; a name-only frontier would treat the new
     generation as already reviewed and silently omit it from every default scope
-    and from the cadence. "" when the summary is unreadable."""
+    and from the cadence. "" when the summary is unreadable.
+
+    Hashed over a CANONICAL representation (#299 review round 19): tolerantly
+    decoded text with newlines normalized to ``\n`` — a frontier shared between
+    checkouts with different line-ending settings (``core.autocrlf``) must not read
+    unchanged content as a new generation and trigger duplicate reviews."""
     try:
-        return hashlib.sha256((d / "SUMMARY.md").read_bytes()).hexdigest()
+        text = (d / "SUMMARY.md").read_bytes().decode("utf-8", errors="replace")
     except OSError:
         return ""
+    canon = text.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
 
 
 def _covered_names(m: dict, bundles: list[Path]) -> set[str]:

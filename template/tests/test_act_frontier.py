@@ -355,6 +355,19 @@ class MarkerFormat(unittest.TestCase):
                          ["issue_40"])
         self.assertEqual(act.cycles_since_review(self.cfg), 1)   # cadence sees it too
 
+    def test_fingerprint_is_line_ending_invariant(self) -> None:
+        # #299 review round 19: a frontier shared between checkouts with different
+        # core.autocrlf settings must not read unchanged content as a new
+        # generation — CRLF and LF forms of the same summary hash identically,
+        # while a real content change still differs.
+        d = _freeze(self.cfg, "60")
+        lf = (d / "SUMMARY.md").read_text(encoding="utf-8")
+        base = act._fingerprint(d)
+        (d / "SUMMARY.md").write_bytes(lf.replace("\n", "\r\n").encode("utf-8"))
+        self.assertEqual(act._fingerprint(d), base)        # CRLF form: same identity
+        (d / "SUMMARY.md").write_text(lf + "changed\n", encoding="utf-8")
+        self.assertNotEqual(act._fingerprint(d), base)     # real change: differs
+
     def test_midsession_recreation_is_never_attested(self) -> None:
         # #299 review round 17: the fingerprint rides the pre-session snapshot — a
         # bundle recreated WHILE the review runs must not be attested by a hash
