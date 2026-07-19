@@ -71,8 +71,12 @@ class SweepRealGit(unittest.TestCase):
         integ = self.tmp / "checkout.pdca-integ-main"
         sp.run(["git", "-C", str(self.primary), "worktree", "add", "--force",
                 str(integ), "origin/main"], check=True, capture_output=True)
+        # The orphan is a REAL registered worktree whose creator pid is gone — the
+        # crash-leftover shape (#297 review round 4: unregistered pattern-matching
+        # dirs are never removed, so a plain mkdir would no longer model an orphan).
         self.ovf = self.tmp / f"checkout.pdca-wt-ovf-{self._dead_pid()}-0"
-        self.ovf.mkdir()
+        sp.run(["git", "-C", str(self.primary), "worktree", "add", "--force",
+                str(self.ovf), "origin/main"], check=True, capture_output=True)
         return d
 
     def test_clean_mode_strips_build_state_keeps_lane_warm(self) -> None:
@@ -170,6 +174,19 @@ class SweepRealGit(unittest.TestCase):
         self.assertTrue((fake_integ / "precious.txt").exists())  # matched, refused
         self.assertTrue(any("not ours to remove" in ln for ln in lines))
         self.assertFalse(self.lane.exists())                  # the real lane still removed
+
+    def test_unregistered_dir_matching_the_overflow_pattern_is_left(self) -> None:
+        # #297 review round 4: overflow removal gets the same registration guard as
+        # lanes/integs — a random dir matching `…-ovf-<dead-pid>-*` must never reach
+        # overflow_remove's rmtree fallback.
+        d = self._seed_footprint()
+        impostor = self.tmp / f"checkout.pdca-wt-ovf-{self._dead_pid()}-7"
+        impostor.mkdir()
+        (impostor / "precious.txt").write_text("not a worktree\n", encoding="utf-8")
+        lines = sweep.sweep(self.cfg, [d])
+        self.assertTrue((impostor / "precious.txt").exists())   # left untouched
+        self.assertFalse(self.ovf.exists())                     # the real orphan removed
+        self.assertTrue(any("not ours to remove" in ln and "-7" in ln for ln in lines))
 
     def test_standalone_clone_on_the_lane_path_is_never_cleaned(self) -> None:
         # #297 review round 3: clean mode's `clean -fdxq` + `reset --hard` are as

@@ -147,9 +147,16 @@ def sweep(cfg: Config, bundles: list[Path] | None = None, *,
         try:
             # Overflow trees: reclaim only PROVEN orphans (creator pid gone, #297
             # review) — a live pid may be another process's in-flight gate read, and
-            # deleting its working directory mid-command invalidates that gate.
-            orphans = worktree.orphan_overflow_dirs(primary)
-            live = len(worktree._overflow_dirs(primary)) - len(orphans)
+            # deleting its working directory mid-command invalidates that gate. And
+            # only REGISTERED worktrees (#297 review round 4): overflow_remove's
+            # rmtree fallback would otherwise eat an unrelated dir that merely
+            # matches the `…-ovf-<pid>-*` pattern — the same guard lanes/integs get.
+            candidates = worktree.orphan_overflow_dirs(primary)
+            orphans = [o for o in candidates if _registered_worktree(primary, o)]
+            for unowned in (o for o in candidates if o not in orphans):
+                lines.append(f"sweep: left {unowned.name} (not a worktree registered "
+                             f"to {primary.name} — not ours to remove)")
+            live = len(worktree._overflow_dirs(primary)) - len(candidates)
             if orphans:
                 lines.append(f"sweep: {verb}remove {len(orphans)} orphaned overflow "
                              f"tree(s) next to {primary.name}")
