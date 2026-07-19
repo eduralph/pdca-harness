@@ -100,16 +100,20 @@ def _sandbox_expected(cfg: Config) -> bool:
     The operator's own ambient sandbox (their user-scope `~/.claude/settings.json`) is theirs,
     not the harness's claim, so it is not checked here.
 
-    Plan-advisory leaves deliberately DON'T count (#301 review round 7): their runner
-    never calls `_seed_sandbox_settings`/`_sandbox_argv` (the Check grants don't extend
-    to plan reviews), so no bounded sandbox is ever seeded for them — an instance whose
-    only claude-family review leaf is a plan advisory must not fail `--strict` over
-    dependencies that run would never use.
+    Plan-advisory leaves count UNCONDITIONALLY (#301 review round 8): their runner seeds
+    a MINIMAL fail-closed sandbox (`_seed_plan_sandbox_settings` — enabled, no Check
+    grants) for every confinable family, with no `[leaves.sandbox]` exemption involved —
+    so a claude-family plan reviewer needs the dependencies even when no exemption is
+    configured (the seeded `failIfUnavailable` makes the leaf REFUSE without them).
     """
+    leaves_map = _command_leaves(cfg)
+    if any(cfg.profile(leaf).settings_scope_argv
+           for role, leaf in leaves_map.items() if role.startswith("plan-advisory:")):
+        return True
     if not getattr(cfg, "leaf_unsandboxed_commands", None):
         return False
     return any(cfg.profile(leaf).settings_scope_argv
-               for role, leaf in _command_leaves(cfg).items()
+               for role, leaf in leaves_map.items()
                if role == "reviewer" or role.startswith("advisory:"))
 
 

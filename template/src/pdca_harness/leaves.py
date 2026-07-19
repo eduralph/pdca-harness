@@ -1152,6 +1152,44 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path,
     return True
 
 
+def _seed_plan_sandbox_settings(sandbox: Path, profile: families.FamilyProfile) -> bool:
+    """A MINIMAL fail-closed sandbox policy for the plan reviewer (#301 review round 8).
+
+    Withholding :func:`_seed_sandbox_settings` from plan reviews (round 6 — the Check
+    opt-ins must not extend to them) left the temp cwd with NO settings file at all,
+    and claude's ``sandbox.enabled`` defaults to FALSE — so a Bash-capable
+    plan-reviewer agent ran with no sandbox and the claimed "brief/notes/sources +
+    pinned target" boundary was prose, not policy. Seed the sandbox ON with NONE of
+    the Check grants: no ``excludedCommands``, no network keys —
+    ``allowUnsandboxedCommands: false`` (the retry escape hatch stays ignored) and
+    ``failIfUnavailable: true`` (a socat-less host REFUSES rather than running
+    unconfined under a claimed boundary, #289/#290).
+
+    Returns whether the seed landed, so the caller passes the confinement flag
+    (``--setting-sources project`` — dropping the operator's user scope, whose own
+    ``excludedCommands`` would otherwise union in monotonically, #288) exactly iff
+    the seeded file exists; on a failed write the flag is withheld and the leaf
+    keeps the operator's ambient sandbox (degrade the feature, never the boundary).
+    Families without a settings mechanism (codex: its default workspace-write
+    sandbox is its own, argv-configured) need no seed: False."""
+    if not profile.settings_scope_argv:
+        return False
+    try:
+        dest = sandbox / ".claude"
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "settings.json").write_text(
+            json.dumps({"sandbox": {"enabled": True,
+                                    "allowUnsandboxedCommands": False,
+                                    "failIfUnavailable": True}}, indent=2),
+            encoding="utf-8")
+        return True
+    except OSError as exc:
+        print(f"leaves: could not seed the plan-review sandbox into {sandbox} ({exc}); "
+              "the confinement flag is withheld — the leaf keeps the operator's ambient "
+              "sandbox", file=sys.stderr)
+        return False
+
+
 def _run_review_sandboxed(d: Path, cfg: Config) -> None:
     """Run the reviewer in a temp dir holding ONLY the reviewer inputs.
 
@@ -1658,30 +1696,44 @@ def _dependency_manifest(d: Path, cfg: Config) -> dict:
     return out
 
 
-def _plan_fallback_target(d: Path, cfg: Config) -> Path | None:
-    """The PRIMARY sibling checkout for grounding a plan review when no pinned tree
-    can be made — NEVER the lane worktree :func:`_reviewer_target` prefers (#301
-    review round 7): pre-Do that lane holds whatever its LAST user left there —
-    another bundle's patch, or this bundle's prior attempt after an iterate-to-Plan —
-    and the antagonist would fault (and revise the new brief against) the wrong
-    source. The human's checkout can at worst lag or carry WIP (which is why the
-    pinned detached tree is preferred), but it never contains a foreign patched
-    state. Best-effort; ``None`` ⇒ the review grounds on the plan inputs alone."""
+@contextlib.contextmanager
+def _plan_fallback_target(d: Path, cfg: Config):
+    """A DISPOSABLE grounding checkout when the brief's exact base cannot be
+    materialized (#301 review rounds 7/8): a temp DETACHED worktree at the resolved
+    primary's HEAD, removed after the review.
+
+    Never the lane worktree :func:`_reviewer_target` prefers (round 7) — pre-Do it
+    holds whatever its LAST user left there (another bundle's patch, or this
+    bundle's prior attempt after an iterate-to-Plan), and the antagonist would
+    fault the new brief against the wrong source. And never the primary checkout
+    itself (round 8): the family grounding flag is read/WRITE for codex
+    (``--add-dir``), so exposing the operator's working tree would let a reviewer
+    command mutate their uncommitted work despite the read-only contract. HEAD may
+    lag the brief's intended base — a loosely-grounded review still beats none
+    (advisory, never a gate). Unresolvable/non-git target or a failed add ⇒ ``None``
+    (the review grounds on the plan inputs alone)."""
     from . import publish  # lazy: publish imports leaves, avoid an import cycle
     try:
         repo_spec, _base, _slug = publish._resolve_target(d)
-        if not repo_spec:
-            return None
-        p = publish._checkout_path(cfg, repo_spec)
-        if not p.exists():
-            return None
-        # Refresh refs so a lagging sibling doesn't drift the grounding; never touch
-        # the working tree (it is the human's checkout). Best-effort.
-        subprocess.run(["git", "-C", str(p), "fetch", cfg.base_remote],
-                       capture_output=True, text=True)
-        return p
+        primary = publish._checkout_path(cfg, repo_spec) if repo_spec else None
     except Exception:  # noqa: BLE001 — grounding is best-effort, never fatal
-        return None
+        primary = None
+    if primary is None or not (primary / ".git").exists():
+        yield None
+        return
+    tmp = tempfile.mkdtemp(prefix="pdca-plan-target-")
+    pinned = Path(tmp) / "target"
+    if worktree._git(primary, "worktree", "add", "--detach", str(pinned), "HEAD") != 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        yield None
+        return
+    try:
+        yield pinned
+    finally:
+        if worktree._git(primary, "worktree", "remove", "--force", str(pinned)) != 0:
+            shutil.rmtree(pinned, ignore_errors=True)
+            worktree._git(primary, "worktree", "prune")
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 @contextlib.contextmanager
@@ -1692,13 +1744,15 @@ def _pinned_plan_target(d: Path, cfg: Config):
     Pre-Do there is no per-cycle worktree the review may trust, so this materializes
     a temp DETACHED worktree at the exact ``base_ref`` the brief resolves to (the
     drift.py pattern), removed after the review. Unresolvable target / failed add ⇒
-    :func:`_plan_fallback_target` — the primary sibling checkout, deliberately NOT
-    :func:`_reviewer_target`, whose lane-worktree preference could hand the
-    antagonist another bundle's patched tree (#301 review round 7). A
-    loosely-grounded review still beats none — this is advisory, never a gate."""
+    :func:`_plan_fallback_target` — a disposable detached tree at the primary's
+    HEAD, deliberately neither :func:`_reviewer_target`'s lane worktree (another
+    bundle's patched content, round 7) nor the writable primary checkout itself
+    (round 8). A loosely-grounded review still beats none — advisory, never a
+    gate."""
     tgt = worktree._target(d, cfg)
     if tgt is None:
-        yield _plan_fallback_target(d, cfg)
+        with _plan_fallback_target(d, cfg) as fb:
+            yield fb
         return
     primary, base_ref = tgt
     worktree._git(primary, "fetch", cfg.base_remote)  # best-effort refresh of the base
@@ -1712,7 +1766,8 @@ def _pinned_plan_target(d: Path, cfg: Config):
     pinned = Path(tmp) / "target"
     if worktree._git(primary, "worktree", "add", "--detach", str(pinned), base_ref) != 0:
         shutil.rmtree(tmp, ignore_errors=True)
-        yield _plan_fallback_target(d, cfg)
+        with _plan_fallback_target(d, cfg) as fb:
+            yield fb
         return
     try:
         yield pinned
@@ -1747,14 +1802,17 @@ def _run_plan_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: d
         # network_access / unsandboxed_commands / seeded network keys) an operator
         # opted into for Docker-backed gates and the reviewer's prior-art fetch. A
         # plan review needs none of that — it reads the brief, notes/sources and the
-        # pinned read-only target — so the leaf runs under the vendor's default
-        # (most restrictive) sandbox; granting Check's exemptions to an additional
-        # pre-Do leaf would widen a risk the operator never accepted. (Omitting the
-        # claude confinement flag is also required for safety: without a seeded
-        # settings file it would drop the ambient sandbox entirely, #290.)
+        # pinned read-only target — so the leaf gets a MINIMAL fail-closed sandbox
+        # instead (#301 review round 8): _seed_plan_sandbox_settings turns the vendor
+        # sandbox ON with none of those grants (claude's sandbox.enabled defaults
+        # FALSE, so seeding nothing left a Bash-capable reviewer unconfined), and the
+        # confinement flag rides exactly iff the seed landed (#290).
+        seeded = _seed_plan_sandbox_settings(sandbox, profile)
         env = {"PDCA_TARGET": str(target)} if target else None
         extra = ([profile.grounding_flag, str(target)]
                  if target and profile.grounding_flag else [])
+        if seeded:
+            extra += list(profile.settings_scope_argv)
         out = sandbox / f"plan-advisory-{leaf_id}.md"
         error_log = d / f"plan-advisory-{leaf_id}.error.log"
         err = _invoke_leaf_resilient(

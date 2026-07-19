@@ -107,6 +107,36 @@ class PlanAdvisory(unittest.TestCase):
         self.assertNotIn("sandbox_workspace_write.network_access=true",
                          seen["extra"])                   # no codex network grant
 
+    def test_claude_plan_reviewer_gets_a_minimal_failclosed_sandbox(self) -> None:
+        # #301 review round 8: withholding the Check seed must not leave the temp
+        # cwd with NO sandbox policy — claude's sandbox.enabled defaults FALSE, so a
+        # Bash-capable plan reviewer would run unconfined. The runner seeds a
+        # MINIMAL policy (enabled, fail-closed, none of the Check grants) and passes
+        # the confinement flag exactly because the seeded file exists.
+        reviewer = {"id": "claude-lens", "mode": "command", "family": "claude",
+                    "argv": ["claude"]}
+        cfg = _cfg(self.tmp, plan_advisory=[reviewer])
+        cfg.leaf_unsandboxed_commands = ["cargo xtask conformance"]  # must NOT leak in
+        d = _brief(cfg, "MINSBX")
+        seen: dict = {}
+
+        def fake(leaf, cwd, prompt, **kw):
+            seen["extra"] = list(kw.get("extra_argv") or [])
+            seen["settings"] = json.loads(
+                (Path(cwd) / ".claude" / "settings.json").read_text(encoding="utf-8"))
+            return None
+
+        with mock.patch.object(leaves, "_invoke_leaf_resilient", side_effect=fake):
+            leaves.run_plan_advisory(d, cfg)
+        sbx = seen["settings"]["sandbox"]
+        self.assertIs(sbx["enabled"], True)
+        self.assertIs(sbx["allowUnsandboxedCommands"], False)
+        self.assertIs(sbx["failIfUnavailable"], True)     # refuse > run unconfined
+        self.assertNotIn("excludedCommands", sbx)         # Check exemptions withheld
+        self.assertNotIn("network", sbx)                  # no network grant either
+        for flag in ("--setting-sources", "project"):     # confinement flag rides
+            self.assertIn(flag, seen["extra"])
+
     def test_when_gates_on_a_brief_field(self) -> None:
         gated = {**_REVIEWER, "when": {"field": "difficulty", "substring": "high"}}
         cfg = _cfg(self.tmp, plan_advisory=[gated])
@@ -259,19 +289,19 @@ class PinnedTarget(unittest.TestCase):
         self.assertEqual((self.primary / "file.txt").read_text(encoding="utf-8"),
                          "LOCAL WIP EDIT\n")
 
-    def test_unresolvable_target_falls_back_to_the_primary_checkout_only(self) -> None:
+    def test_target_less_brief_yields_no_grounding(self) -> None:
         d = self.cfg.bundle("NOTGT")
         d.mkdir(parents=True)
         (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")  # no target
         with leaves._pinned_plan_target(d, self.cfg) as target:
             self.assertIsNone(target)                     # no target ⇒ no grounding
 
-    def test_fallback_never_grounds_on_a_lane_worktree(self) -> None:
-        # #301 review round 7: when the pinned add fails (missing base ref), the
-        # fallback must be the PRIMARY checkout — never _reviewer_target's preferred
-        # lane worktree, which pre-Do still holds its last user's content (another
-        # bundle's patch, or a prior attempt after iterate-to-Plan) and would make
-        # the antagonist revise the new brief against the wrong source.
+    def test_fallback_is_a_disposable_tree_never_a_lane_or_the_primary(self) -> None:
+        # #301 review rounds 7/8: when the pinned add fails (missing base ref), the
+        # fallback is a DISPOSABLE detached worktree at the primary's HEAD — never
+        # _reviewer_target's lane worktree (its last user's patched content), and
+        # never the primary itself (the grounding flag is read/WRITE for codex, so
+        # exposing it would let a reviewer command mutate the operator's WIP).
         d = self.cfg.bundle("LANE")
         d.mkdir(parents=True)
         (d / "brief.md").write_text(
@@ -282,7 +312,13 @@ class PinnedTarget(unittest.TestCase):
         with mock.patch.object(leaves.worktree, "path", return_value=lane):
             with leaves._pinned_plan_target(d, self.cfg) as target:
                 self.assertNotEqual(target, lane)         # never the shared lane
-                self.assertEqual(target, self.primary)    # the primary checkout
+                self.assertNotEqual(target, self.primary)  # never the writable primary
+                self.assertEqual((target / "file.txt").read_text(encoding="utf-8"),
+                                 "base\n")                # committed HEAD, not the WIP
+                kept = target
+        self.assertFalse(kept.exists())                   # disposable: removed after
+        self.assertEqual((self.primary / "file.txt").read_text(encoding="utf-8"),
+                         "LOCAL WIP EDIT\n")              # operator's tree untouched
 
 
 class BatchAndAssemble(unittest.TestCase):

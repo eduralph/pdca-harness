@@ -236,16 +236,25 @@ class SandboxDeps(unittest.TestCase):
         self.assertNotIn("leaf sandbox", out)
         self.assertEqual(rc, 0)
 
-    def test_a_plan_advisory_leaf_alone_needs_no_sandbox_deps(self) -> None:
-        """#301 review round 7. The plan-advisory runner never calls
-        `_seed_sandbox_settings`/`_sandbox_argv` (the Check grants don't extend to
-        plan reviews), so no bounded sandbox is ever seeded for it — an instance
-        whose ONLY claude-family review leaf is a plan advisory must not fail
-        --strict over dependencies that run would never use."""
+    def test_a_claude_plan_advisory_leaf_requires_the_sandbox_deps(self) -> None:
+        """#301 review round 8. The plan-advisory runner seeds a MINIMAL fail-closed
+        sandbox for every confinable family — with NO [leaves.sandbox] exemption
+        involved — so a claude plan reviewer needs bwrap/socat even when no
+        exemption is configured (the seeded failIfUnavailable makes it REFUSE
+        without them)."""
         cfg = self._cfg('mode = "stub"\n',
-                        self._EXEMPTION +
                         '[[leaves.plan_advisory]]\nid = "pr"\nmode = "command"\n'
                         'family = "claude"\nargv = ["claude", "-p"]\n')
+        with self._deps(False):
+            rc, out = self._run(cfg)
+        self.assertIn("leaf sandbox", out)
+        self.assertEqual(rc, 1)                            # REQUIRED failure
+
+    def test_a_codex_plan_advisory_leaf_needs_no_claude_deps(self) -> None:
+        # codex's sandbox is its own (argv-configured); nothing is seeded for it.
+        cfg = self._cfg('mode = "stub"\n',
+                        '[[leaves.plan_advisory]]\nid = "pr"\nmode = "command"\n'
+                        'family = "codex"\nargv = ["codex", "exec"]\n')
         with self._deps(False):
             rc, out = self._run(cfg)
         self.assertNotIn("leaf sandbox", out)
