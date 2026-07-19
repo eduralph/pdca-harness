@@ -172,7 +172,31 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
                   for t in _declared_external_deps(build_notes.read_text(encoding="utf-8"))]
     items += [NeedsHumanItem(t, HUMAN)
               for t in _unregistered_dependency_items(d / "brief.md", cfg)]
+    # Plan-advisory findings (#301 + review): folded into §6 individually, exactly like
+    # the Check advisories — including the decorrelation note and any NOT-COMPLETED
+    # placeholder, which no other summary path reads. Each finding stays visible until
+    # the human dispositions it at sign-off: a bundle-wide "was the brief revised?" bit
+    # cannot say WHICH findings the revision addressed, so it must never suppress them
+    # (one cosmetic edit would have hidden every remaining objection from C6). All
+    # HUMAN-kind by construction (the plan prompt emits no [impl] markers), so
+    # auto-iterate correctly declines (#264).
+    for ptext in [p.read_text(encoding="utf-8")
+                  for p in sorted(d.glob("plan-advisory-*.md"))]:
+        items += _items_from_artifact(ptext)
     return items
+
+
+def _plan_advisory_benefit(d: Path) -> dict | None:
+    """The bundle's plan-advisory benefit record (#301), or None if absent/unreadable —
+    the same tolerant contract as every other bundle-file read (testbed #3)."""
+    p = d / "plan-advisory-benefit.json"
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def assemble_summary(d: Path, cfg: Config) -> None:
@@ -254,11 +278,22 @@ def assemble_summary(d: Path, cfg: Config) -> None:
             "- By / date:",
             "",
             "## 10. Act candidates (hints for the next Act review)",
+            *_plan_advisory_act_lines(d),
             "- (empty is the common case)",
             "",
         ]
     )
     (d / "SUMMARY.md").write_text(out, encoding="utf-8")
+
+
+def _plan_advisory_act_lines(d: Path) -> list[str]:
+    """§10 line for the plan-advisory benefit record (#301): benefit telemetry is process
+    signal — exactly what Act reviews to judge whether plan reviews pay off over cycles."""
+    benefit = _plan_advisory_benefit(d)
+    if not benefit:
+        return []
+    return [f"- Plan advisory: {benefit.get('findings', 0)} finding(s); brief revised: "
+            f"{'yes' if benefit.get('revised') else 'no'} (plan-advisory-*.md)"]
 
 
 def _gate_lines(gates: dict, *, prefix: str) -> str:

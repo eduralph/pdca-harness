@@ -584,14 +584,20 @@ def _waves(cfg: Config, ids: list[str]) -> int:
     (#wave-model). With no ids, schedules every in-flight briefed bundle. An unschedulable
     graph (cycle / unresolved dep) is reported, not run."""
     if ids:
-        # Same terminal filter as discovery (#302 review round 3): an explicitly
-        # requested resolved bundle with a stray placeholder brief must not present
-        # settled work as schedulable either.
-        bundles = [cfg.bundle(i) for i in ids
-                   if (cfg.bundle(i) / "brief.md").exists()
-                   and state.state(cfg.bundle(i)) not in (state.COMPLETE,
-                                                          state.DISCONTINUED,
-                                                          state.RESOLVED)]
+        # The explicit-id branch applies the SAME terminal filter as the no-id scan
+        # (#302 review rounds 3/9): `pdca flow <id>` skips a terminal bundle, so the
+        # preview must agree instead of reporting settled work as a runnable wave.
+        bundles = []
+        for i in ids:
+            d = cfg.bundle(i)
+            if not (d / "brief.md").exists():
+                continue
+            s = state.state(d)
+            if s in (state.COMPLETE, state.DISCONTINUED, state.RESOLVED):
+                print(f"waves: {d.name} — already terminal ({s}), excluded",
+                      file=sys.stderr)
+                continue
+            bundles.append(d)
     elif cfg.bundle_root.exists():
         # RESOLVED is terminal too (#302 review round 2, mirrored round 8): a resolved
         # bundle with a stray placeholder brief has brief.md on disk, so the file test

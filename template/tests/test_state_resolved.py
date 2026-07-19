@@ -70,6 +70,15 @@ class StateResolved(unittest.TestCase):
             rc = cli._waves(self.cfg, [])
         self.assertEqual(rc, 0)
         self.assertIn("no briefed bundles", out.getvalue())
+        # The explicit-id branch agrees with the no-id scan (#302 review round 9):
+        # naming the RESOLVED bundle outright must not resurrect it as a wave.
+        from contextlib import redirect_stderr
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = cli._waves(self.cfg, ["9"])
+        self.assertEqual(rc, 0)
+        self.assertIn("no briefed bundles", out.getvalue())
+        self.assertIn("already terminal", err.getvalue())
 
     def test_briefless_with_resolved_object_is_resolved(self) -> None:
         d = self._bundle("1", json.dumps(_RESOLVED))
