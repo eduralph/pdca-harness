@@ -19,7 +19,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, manual_test, merged,
-               publish, queue, registry, revalidate, revert, signoff, state, waves, worktree)
+               publish, queue, registry, revalidate, revert, signoff, sources, state, waves,
+               worktree)
 from .config import Config
 
 
@@ -407,47 +408,6 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-def _resolved_tracker_reopened(cfg: Config, iid: str) -> bool:
-    """True iff the RESOLVED bundle's tracker issue is verifiably OPEN again (#302
-    review round 4). Best-effort and conservative: only a GitHub tracker (a
-    ``[[plan.source]]`` with ``role = "tracker"``, else ``[tracker].system``), a
-    numeric id and a working ``gh`` can prove a reopen — anything unknowable keeps
-    the terminal no-op (never a crash, never a false reopen)."""
-    if not iid.isdigit():
-        return False
-    is_github, repo = cfg.tracker_system == "github", ""
-    for src in cfg.plan_sources:
-        if (isinstance(src, dict)
-                and (src.get("type") or "").strip().lower() == "github"
-                and (src.get("role") or "").strip().lower() == "tracker"):
-            is_github, repo = True, str(src.get("repo", "") or "")
-            break
-    if not is_github or shutil.which("gh") is None:
-        return False
-    args = ["gh", "issue", "view", iid, "--json", "state"]
-    if repo:
-        args += ["--repo", repo]
-    proc = subprocess.run(args, capture_output=True, text=True)
-    if proc.returncode != 0:
-        return False
-    try:
-        return json.loads(proc.stdout).get("state") == "OPEN"
-    except ValueError:
-        return False
-
-
-def _clear_resolved_marker(d: Path) -> None:
-    """Drop the ``resolved`` key from notes.json (tolerant read; the rest untouched)."""
-    notes = d / "notes.json"
-    try:
-        data = json.loads(notes.read_text(encoding="utf-8"))
-    except (ValueError, OSError):
-        return
-    if isinstance(data, dict) and "resolved" in data:
-        del data["resolved"]
-        notes.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-
-
 def _init_issue(cfg: Config, issue_id: str, from_brief: Path | None) -> int:
     # init-issue seeds a bundle from a brief you authored OUTSIDE the loop. With no
     # --from-brief it used to copy the blank brief.md.tpl, which left a content-less
@@ -548,8 +508,8 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
             # REOPENED the issue since it was written, and the seed never refreshes an
             # existing notes.json — so revalidate against the live tracker first, and
             # a reopened issue clears the marker and proceeds to a real flow.
-            if _resolved_tracker_reopened(cfg, iid):
-                _clear_resolved_marker(d)
+            if sources.tracker_issue_reopened(cfg, iid):
+                sources.clear_resolved_marker(d)
                 print(f"flow: issue_{iid} — the tracker issue is OPEN again; cleared "
                       "the resolved marker and planning it.", file=sys.stderr)
             else:

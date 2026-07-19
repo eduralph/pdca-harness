@@ -218,9 +218,10 @@ class PlanNeverReopensResolved(unittest.TestCase):
         os.environ["PDCA_NO_INHIBIT"] = "1"   # the mocked which/run must not fake an inhibitor
         gh_open = SimpleNamespace(returncode=0, stdout=json.dumps({"state": "OPEN"}),
                                   stderr="")
+        from pdca_harness import sources
         try:
-            with mock.patch.object(cli.subprocess, "run", return_value=gh_open), \
-                    mock.patch.object(cli.shutil, "which", return_value="/usr/bin/gh"), \
+            with mock.patch.object(sources.subprocess, "run", return_value=gh_open), \
+                    mock.patch.object(sources.shutil, "which", return_value="/usr/bin/gh"), \
                     redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
                 rc = cli.main(["flow", "26", "--no-publish"])
         finally:
@@ -228,9 +229,38 @@ class PlanNeverReopensResolved(unittest.TestCase):
             os.environ.pop("PDCA_NO_INHIBIT", None)
         self.assertEqual(rc, 0)
         self.assertIn("OPEN again", err.getvalue())
-        data = json.loads((d / "notes.json").read_text(encoding="utf-8"))
-        self.assertNotIn("resolved", data)                 # marker cleared…
-        self.assertTrue((d / "brief.md").exists())         # …and the flow really planned it
+        # #302 review round 5: the closure-era notes are set ASIDE wholesale — deleting
+        # only the key would leave ensure_notes/the tracker-role seed refusing to
+        # refresh, and the planner would brief on the pre-closure thread.
+        self.assertFalse((d / "notes.json").exists())
+        self.assertTrue((d / "notes.superseded-by-reopen.json").exists())
+        self.assertTrue((d / "brief.md").exists())         # the flow really planned it
+
+    def test_multi_id_flow_revalidates_reopened_trackers_too(self) -> None:
+        # #302 review round 5: `pdca flow 27 28` must apply the same live-state check —
+        # the terminal skip would otherwise exclude reopened issues from batch planning
+        # forever.
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        from types import SimpleNamespace
+        from pdca_harness import sources
+        self.cfg.tracker_system = "github"
+        # A missing templates dir makes the stub planner AUTHOR its fallback brief
+        # (a template copy would read as a placeholder → UNPLANNED, outside the point
+        # under test here, which is the revalidation re-entry).
+        self.cfg.templates_dir = self.tmp / "no-templates"
+        d = self._resolved("27")
+        gh_open = SimpleNamespace(returncode=0, stdout=json.dumps({"state": "OPEN"}),
+                                  stderr="")
+        with mock.patch.object(sources.subprocess, "run", return_value=gh_open), \
+                mock.patch.object(sources.shutil, "which", return_value="/usr/bin/gh"), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            results = flow.flow_ids(self.cfg, ["27"], plan_missing=True,
+                                    do_publish=False, do_act=False, today="2026-07-19")
+        self.assertFalse((d / "notes.json").exists())      # stale notes set aside
+        self.assertTrue((d / "brief.md").exists())         # re-entered THIS run's plan
+        self.assertIn("27", results)
+        self.assertNotEqual(results.get("27"), state.RESOLVED)
 
 
 if __name__ == "__main__":

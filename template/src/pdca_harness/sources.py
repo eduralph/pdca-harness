@@ -32,6 +32,7 @@ project that sets neither sees no change.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -94,6 +95,69 @@ def _is_tracker_source(spec: dict) -> bool:
     "tracker"``) — a github/gitlab/command source that supplies the canonical
     ``notes.json``, making the legacy ``notes_cmd`` redundant (#132)."""
     return (spec.get("role") or "").strip().lower() == "tracker"
+
+
+def tracker_github_repo(cfg: Config) -> tuple[bool, str]:
+    """``(the canonical tracker is GitHub, its --repo override)``.
+
+    A tracker-role plan.source is CANONICAL (#132) and SUPPRESSES the legacy
+    ``[tracker].system`` fallback WHATEVER its type (#300 review round 5): a gitlab
+    tracker-role source means the tracker is gitlab even if ``[tracker].system`` still
+    says github — falling back would point ``gh`` at the wrong repository's
+    same-numbered issues. Comparisons use the same normalization ``seed`` applies."""
+    for spec in cfg.plan_sources:
+        if isinstance(spec, dict) and _is_tracker_source(spec):
+            if (spec.get("type") or "").strip().lower() == "github":
+                return True, str(spec.get("repo", "") or "")
+            return False, ""
+    return (cfg.tracker_system or "").strip().lower() == "github", ""
+
+
+def tracker_issue_reopened(cfg: Config, issue_id: str) -> bool:
+    """True iff the tracker issue is verifiably OPEN again (#302 review rounds 4/5).
+
+    A ``resolved`` marker in notes.json is a CACHE of the closure — the tracker can
+    reopen the issue afterwards, and no seed refreshes an existing notes.json.
+    Conservative: only a GitHub canonical tracker, a numeric id and a working ``gh``
+    can prove a reopen; anything unknowable is False (never a crash)."""
+    if not issue_id.isdigit():
+        return False
+    is_github, repo = tracker_github_repo(cfg)
+    if not is_github or shutil.which("gh") is None:
+        return False
+    cmd = ["gh", "issue", "view", issue_id, "--json", "state"]
+    if repo:
+        cmd += ["--repo", repo]
+    rc, text = _run_capture(cmd, cfg.root)
+    if rc != 0:
+        return False
+    try:
+        return json.loads(text).get("state") == "OPEN"
+    except ValueError:
+        return False
+
+
+def clear_resolved_marker(d: Path) -> None:
+    """The tracker REOPENED a resolved item: retire the closure-era notes entirely.
+
+    Deleting only the ``resolved`` key would leave the stale notes.json in place, and
+    both ``ensure_notes`` and the tracker-role seed refuse to replace an existing
+    notes.json — the planner would then brief on the pre-closure thread, missing every
+    comment added at reopen (#302 review round 5). The whole file is set aside under a
+    unique name (kept inspectable, never deleted), so the next Plan seed re-fetches
+    the fresh thread and the bundle reads UNPLANNED again."""
+    notes = d / "notes.json"
+    if not notes.exists():
+        return
+    aside = d / "notes.superseded-by-reopen.json"
+    n = 2
+    while aside.exists():
+        aside = d / f"notes.superseded-by-reopen-{n}.json"
+        n += 1
+    try:
+        notes.rename(aside)
+    except OSError:
+        pass  # best-effort: an unmovable file keeps the terminal no-op, never a crash
 
 
 def _tracker_dest(d: Path, sources_dir: Path, spec: dict, default_name: str) -> Path:
