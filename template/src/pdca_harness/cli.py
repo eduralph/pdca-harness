@@ -535,7 +535,14 @@ def _waves(cfg: Config, ids: list[str]) -> int:
     (#wave-model). With no ids, schedules every in-flight briefed bundle. An unschedulable
     graph (cycle / unresolved dep) is reported, not run."""
     if ids:
-        bundles = [cfg.bundle(i) for i in ids if (cfg.bundle(i) / "brief.md").exists()]
+        # Same terminal filter as discovery (#302 review round 3): an explicitly
+        # requested resolved bundle with a stray placeholder brief must not present
+        # settled work as schedulable either.
+        bundles = [cfg.bundle(i) for i in ids
+                   if (cfg.bundle(i) / "brief.md").exists()
+                   and state.state(cfg.bundle(i)) not in (state.COMPLETE,
+                                                          state.DISCONTINUED,
+                                                          state.RESOLVED)]
     elif cfg.bundle_root.exists():
         # RESOLVED is terminal too (#302 review round 2): a resolved bundle with a stray
         # placeholder brief has brief.md on disk, so the file test alone would schedule

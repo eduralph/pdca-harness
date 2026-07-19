@@ -303,10 +303,17 @@ def run(cfg: Config, ids: list[str], *, apply: bool = False, repo: str = "",
     else:
         # The archived completed/ bundles (#171, the manual archive convention) are
         # exactly the locally-terminal cases class (c) exists to close (#300 review) —
-        # sweep them too, not just the active top level.
-        roots = (cfg.bundle_root, cfg.bundle_root / "completed")
-        bundles = sorted(d for root in roots if root.exists()
-                         for d in root.glob("issue_*") if d.is_dir())
+        # sweep them too, not just the active top level. Deduped by issue id with the
+        # ACTIVE directory winning (#300 review round 3, Config.find_bundle semantics):
+        # an issue reopened into a new active cycle must be reconciled against that
+        # cycle, never against its stale archived copy — which could otherwise close
+        # the reopened tracker issue while the active bundle is still in flight.
+        active = {d.name: d for d in cfg.bundle_root.glob("issue_*") if d.is_dir()} \
+            if cfg.bundle_root.exists() else {}
+        archived_root = cfg.bundle_root / "completed"
+        archived = {d.name: d for d in archived_root.glob("issue_*")
+                    if d.is_dir() and d.name not in active} if archived_root.exists() else {}
+        bundles = [d for _name, d in sorted({**archived, **active}.items())]
     if not bundles:
         print("cleanup: no bundles found")
         return 0

@@ -357,6 +357,26 @@ class GuardsAndScope(CleanupBase):
         self.assertEqual(rc, 0)
         self.assertIn("no briefed bundles to schedule", out.getvalue())
 
+    def test_active_bundle_shadows_its_stale_archived_copy(self) -> None:
+        # #300 review round 3: an issue reopened into a NEW active cycle must be
+        # reconciled against that cycle only — its stale archived COMPLETE copy (merged
+        # PR) could otherwise close the reopened tracker issue mid-flight.
+        arch = self.cfg.bundle_root / "completed" / "issue_93"
+        arch.mkdir(parents=True)
+        (arch / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        (arch / "patch.diff").write_text("diff --git a/x b/x\n", encoding="utf-8")
+        (arch / "check-gates.json").write_text("{}", encoding="utf-8")
+        shutil.copyfile(TEMPLATES / "SUMMARY.md.tpl", arch / "SUMMARY.md")
+        signoff.record(arch / "SUMMARY.md", action="accept", by="T", date="2026-07-01")
+        (arch / "publish.json").write_text(json.dumps({"pr_url": _PR}), encoding="utf-8")
+        active = self._staged("93", signoff_action=None)     # the reopened active cycle
+        self.assertEqual(state.state(active), state.AWAITING_SIGNOFF)
+        self.issue_states["93"] = _OPEN
+        self.pr_states[_PR] = "MERGED"
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._closes(), [])                 # NOT closed by the stale copy
+
     def test_archived_completed_bundles_are_reconciled_too(self) -> None:
         # #300 review: a bundle archived to results/completed/ (#171) is exactly the
         # locally-terminal case class (c) exists to close — the sweep must visit it.
