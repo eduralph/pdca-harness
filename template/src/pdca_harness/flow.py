@@ -25,7 +25,7 @@ import threading
 from pathlib import Path
 
 from . import (act, assemble, autoiterate, brief, driver, gates, integrate, lane, leaves,
-               merge, merged, preflight, publish, queue, signoff, state, waves)
+               merge, merged, preflight, publish, queue, signoff, sources, state, waves)
 from .config import Config
 
 
@@ -787,6 +787,19 @@ def flow_ids(
     Returns ``{issue_id: state}``.
     """
     today = today or datetime.date.today().isoformat()
+
+    # A cached RESOLVED marker may be stale (#302 review round 5): revalidate the
+    # explicitly listed ids against the live tracker, exactly like the single-id CLI
+    # path — a REOPENED issue clears its marker (and sets the closure-era notes aside)
+    # BEFORE the plan-missing set is computed, so the bundle re-enters this very run
+    # instead of being skipped as terminal forever.
+    for iid in ids:
+        b = cfg.bundle(iid)
+        if (b.exists() and state.state(b) == state.RESOLVED
+                and sources.tracker_issue_reopened(cfg, iid)):
+            sources.clear_resolved_marker(b)
+            print(f"flow: issue_{iid} — the tracker issue is OPEN again; cleared the "
+                  "resolved marker and planning it.", file=sys.stderr)
 
     # Optional Plan pre-pass (#65): brief the UNPLANNED ids in one shared session, before
     # the drive set is filtered, so the un-briefed ones become drivable. A csv enables it too.
