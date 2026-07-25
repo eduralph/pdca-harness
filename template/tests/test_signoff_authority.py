@@ -38,6 +38,9 @@ def _bundle(summary: str) -> Path:
     return d
 
 
+# A real SUMMARY always carries §6; `record` now requires it (see UnrecordableWithoutSectionSix).
+_SIX = "## 6. NEEDS-HUMAN — items the human must clear before sign-off\n- [x] cleared\n\n"
+
 _SIGNED_OFF_ELSEWHERE = (
     "# Result\n\n"
     "## 6. NEEDS-HUMAN — items the human must clear before sign-off\n"
@@ -108,10 +111,89 @@ class TheHeadingIsMatchedByPrefixNotContainment(unittest.TestCase):
         self.assertEqual(signoff.outcome_token(d / "SUMMARY.md"), "accepted")
         self.assertEqual(state.state(d), state.COMPLETE)
 
+    def test_a_lookalike_suffix_is_not_section_9(self):
+        """#330 review round 4: a bare prefix still admitted this. Containment → prefix →
+        prefix-plus-boundary; each fix admitted one narrower class of impostor."""
+        d = _bundle("# Result\n\n## 9. Check sign-off-not-authoritative\n"
+                    "- Outcome: accepted\n")
+        self.assertEqual(signoff.outcome_token(d / "SUMMARY.md"), "")
+        self.assertNotEqual(state.state(d), state.COMPLETE)
+
     def test_the_act_ledger_matches_the_same_way(self):
-        """`act._find` carried the identical containment test."""
-        d = _bundle("# Result\n\n## 19. Check sign-off\n- Outcome: merged-wider\n")
-        self.assertEqual(act._extract(d / "SUMMARY.md", d).outcome, "")
+        """`act._find` carried the identical test and now shares the predicate outright."""
+        for bad in ("## 19. Check sign-off", "## 9. Check sign-off-not-authoritative"):
+            d = _bundle(f"# Result\n\n{bad}\n- Outcome: merged-wider\n")
+            with self.subTest(heading=bad):
+                self.assertEqual(act._extract(d / "SUMMARY.md", d).outcome, "")
+
+    def test_heading_is_accepts_only_the_section_itself(self):
+        for text, want in (("9. Check sign-off", True),
+                           ("9. Check sign-off   ← human completes Check here", True),
+                           ("9. Check sign-off\n", True),
+                           ("9. Check sign-off-not-authoritative", False),
+                           ("19. Check sign-off", False),
+                           ("Notes about 9. Check sign-off", False)):
+            with self.subTest(text=text):
+                self.assertEqual(signoff.heading_is(text, signoff.SIGNOFF_HEADING), want)
+
+
+class UnrecordableWithoutSectionSix(unittest.TestCase):
+    """#330 review round 4, and it falsifies a claim I made earlier in this PR. §6's lenient
+    fallback "can only find MORE items" holds when the checkboxes survive somewhere — but
+    deleting the SECTION deletes its items, so the whole-document scan returns empty and C6
+    reads "the human cleared everything" from an artifact that merely lost the evidence."""
+
+    def test_a_summary_with_no_section_6_is_unrecordable(self):
+        d = _bundle("# Result\n\n## 9. Check sign-off\n- Outcome:\n- By / date:\n")
+        self.assertIn("6. NEEDS-HUMAN", signoff.unrecordable(d / "SUMMARY.md"))
+
+    def test_an_accept_cannot_be_recorded_into_it(self):
+        """Without this the bundle reaches COMPLETE, which releases publish."""
+        d = _bundle("# Result\n\n## 9. Check sign-off\n- Outcome:\n- By / date:\n")
+        with self.assertRaises(ValueError):
+            signoff.record(d / "SUMMARY.md", action="accept", by="eddie", date="2026-07-25")
+        self.assertNotEqual(state.state(d), state.COMPLETE)
+
+    def test_an_empty_but_present_section_6_is_fine(self):
+        """A clean bundle genuinely has no open items — that must still be signable."""
+        d = _bundle("# Result\n\n## 6. NEEDS-HUMAN — items the human must clear\n(none)\n\n"
+                    "## 9. Check sign-off\n- Outcome:\n- By / date:\n")
+        self.assertEqual(signoff.unrecordable(d / "SUMMARY.md"), "")
+
+
+class AnIterateNeverLosesItsReason(unittest.TestCase):
+    """#330 review round 4: the substitution counts for `By / date` and the iteration delta
+    were discarded, so a §9 missing those fields recorded 'successfully' while dropping the
+    human's stated reason — which `driver._carry_forward_into_brief` folds into the brief, so
+    the next Do would rebuild knowing it was rejected but not why."""
+
+    def test_an_iterate_whose_delta_field_is_missing_is_refused(self):
+        d = _bundle(f"# Result\n\n{_SIX}## 9. Check sign-off\n- Outcome:\n- By / date:\n")
+        with self.assertRaises(ValueError) as caught:
+            signoff.record(d / "SUMMARY.md", action="iterate-do", by="eddie",
+                           date="2026-07-25", delta="the fix addressed the symptom")
+        self.assertIn("Iteration delta", str(caught.exception))
+
+    def test_a_missing_by_date_field_is_refused(self):
+        d = _bundle(f"# Result\n\n{_SIX}## 9. Check sign-off\n- Outcome:\n")
+        with self.assertRaises(ValueError) as caught:
+            signoff.record(d / "SUMMARY.md", action="accept", by="eddie", date="2026-07-25")
+        self.assertIn("By / date", str(caught.exception))
+
+    def test_a_refusal_leaves_the_summary_untouched(self):
+        """The raises happen before the write, so no half-recorded §9 is left behind."""
+        body = f"# Result\n\n{_SIX}## 9. Check sign-off\n- Outcome:\n- By / date:\n"
+        d = _bundle(body)
+        with self.assertRaises(ValueError):
+            signoff.record(d / "SUMMARY.md", action="iterate-do", by="eddie",
+                           date="2026-07-25", delta="why it was rejected")
+        self.assertEqual((d / "SUMMARY.md").read_text(encoding="utf-8"), body)
+
+    def test_an_iterate_with_no_delta_does_not_need_the_field(self):
+        """Only a supplied rationale can be lost, so only that requires the field."""
+        d = _bundle(f"# Result\n\n{_SIX}## 9. Check sign-off\n- Outcome:\n- By / date:\n")
+        signoff.record(d / "SUMMARY.md", action="iterate-do", by="eddie", date="2026-07-25")
+        self.assertEqual(signoff.outcome_token(d / "SUMMARY.md"), "iterated-to-Do")
 
 
 class ASectionNineWithNoOutcomeFieldIsUnrecordable(unittest.TestCase):
@@ -129,14 +211,14 @@ class ASectionNineWithNoOutcomeFieldIsUnrecordable(unittest.TestCase):
             signoff.record(d / "SUMMARY.md", action="accept", by="eddie", date="2026-07-25")
 
     def test_a_well_formed_section_9_is_recordable(self):
-        d = _bundle("# Result\n\n## 9. Check sign-off\n- Outcome:\n- By / date:\n")
+        d = _bundle(f"# Result\n\n{_SIX}## 9. Check sign-off\n- Outcome:\n- By / date:\n")
         self.assertEqual(signoff.unrecordable(d / "SUMMARY.md"), "")
 
     def test_recording_the_same_outcome_twice_is_not_a_failure(self):
         """The batch sweep defers an iterate-do and the single-issue path then applies it, so
         the second write is byte-identical. Asserting on the text changing (rather than on the
         field matching) turned that legitimate replay into a raise."""
-        d = _bundle("# Result\n\n## 9. Check sign-off\n- Outcome:\n"
+        d = _bundle(f"# Result\n\n{_SIX}## 9. Check sign-off\n- Outcome:\n"
                     "- Iteration delta (if iterating):\n- By / date:\n")
         for _ in range(2):
             signoff.record(d / "SUMMARY.md", action="iterate-do", by="eddie",
@@ -219,7 +301,7 @@ class RecordRefusesAMalformedSummary(unittest.TestCase):
         self.assertEqual((d / "SUMMARY.md").read_text(encoding="utf-8"), original)
 
     def test_record_still_writes_a_well_formed_summary(self):
-        d = _bundle("# Result\n\n## 9. Check sign-off\n- Outcome:\n"
+        d = _bundle(f"# Result\n\n{_SIX}## 9. Check sign-off\n- Outcome:\n"
                     "- Iteration delta (if iterating):\n- By / date:\n")
         signoff.record(d / "SUMMARY.md", action="iterate-do", by="eddie", date="2026-07-25",
                        delta="the fix addressed the symptom")

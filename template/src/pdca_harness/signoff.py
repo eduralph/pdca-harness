@@ -36,6 +36,32 @@ _DELTA_RE = re.compile(r"^- Iteration delta \(if iterating\):[ \t]*(.*?)[ \t]*$"
 #: section is not a sign-off, #327), so a typo in one copy would reopen the fail-open.
 SIGNOFF_HEADING = "9. Check sign-off"
 
+#: The §6 heading. Its ABSENCE is load-bearing too — see :func:`unrecordable`.
+NEEDS_HUMAN_HEADING = "6. NEEDS-HUMAN"
+
+
+def heading_is(heading_text: str, canonical: str) -> bool:
+    """True iff a ``## `` heading's text names ``canonical`` — the section, not a lookalike.
+
+    Prefix **plus a boundary**, which is neither of the two things tried before it:
+
+    * containment matched ``## 19. Check sign-off`` and ``## Notes about 9. Check sign-off``;
+    * a bare prefix still matched ``## 9. Check sign-off-not-authoritative``.
+
+    Each let a leaf-written summary put ``- Outcome: accepted`` under a heading that is not
+    §9 and reach COMPLETE, which releases publish (#330 review). Equality is not an option
+    either: the shipped template writes ``## 9. Check sign-off   ← human completes Check
+    here``. So the canonical text must be followed by whitespace or nothing at all.
+
+    Shared with :func:`act._find`, which matched the same way and so could read a bundle's
+    outcome out of a lookalike section. One implementation, because every time this rule has
+    been fixed in one place and not the other it has come straight back.
+    """
+    if not heading_text.startswith(canonical):
+        return False
+    tail = heading_text[len(canonical):]
+    return tail == "" or tail[0].isspace()
+
 
 def outcome_token(summary_path: Path) -> str:
     """The §9 Outcome value, or "" if unset or the summary is absent. Scoped to §9.
@@ -107,15 +133,27 @@ def unrecordable(summary_path: Path) -> str:
     A §9 that exists but carries no ``- Outcome:`` line counts as unrecordable: ``set_field``
     would substitute nothing and return success, so ``pdca signoff --accept`` exited 0 while
     leaving the bundle at AWAITING_SIGNOFF — a silent no-op reported as a sign-off.
+
+    **A missing §6 counts too, and that is the subtle one.** :func:`open_needs_human` falls
+    back to scanning the whole document, which is safe only while the checkboxes survive
+    SOMEWHERE — deleting the heading finds more items, deleting the *section* deletes its
+    items with it. Then C6 sees an empty list and reads "the human cleared everything" from
+    an artifact that merely lost the evidence, so an accept records and publish is released
+    (#330 review). Section deletion is explicitly in the leaf-damage threat model
+    (``flow._isolate``), so zero surviving checkboxes cannot be treated as proof C6 is clear.
+    Reassembly rebuilds §6 from the review artifacts, which is where the real items live.
     """
     if not summary_path.exists():
         return "no SUMMARY.md"
-    section = _section(summary_path.read_text(encoding="utf-8"), SIGNOFF_HEADING,
-                       whole_on_missing=False)
+    text = summary_path.read_text(encoding="utf-8")
+    section = _section(text, SIGNOFF_HEADING, whole_on_missing=False)
     if not section:
         return f"no '## {SIGNOFF_HEADING}' section"
     if not _OUTCOME_RE.search(section):
         return f"'## {SIGNOFF_HEADING}' has no '- Outcome:' field to record into"
+    if not _section(text, NEEDS_HUMAN_HEADING, whole_on_missing=False):
+        return (f"no '## {NEEDS_HUMAN_HEADING}' section — C6 cannot be evaluated, and an "
+                "empty scan is not evidence the human cleared it")
     return ""
 
 
@@ -156,9 +194,25 @@ def record(summary_path: Path, *, action: str, by: str, date: str, delta: str = 
         raise ValueError(
             f"{summary_path}: '- Outcome:' was not substituted in '## {SIGNOFF_HEADING}' — "
             "refusing to report a sign-off that did not take. Re-run Check to reassemble it.")
-    updated, _ = set_field(updated, "By / date", f"{by} / {date}")
+    # These counts are checked too, not discarded. A §9 missing `- By / date:` loses the
+    # sign-off attribution; a §9 missing `- Iteration delta (if iterating):` loses the
+    # human's stated reason for the iterate, which `driver._carry_forward_into_brief` folds
+    # into the brief — so the next Do would rebuild knowing only that it was rejected, not
+    # why, and the human's requested change would be silently dropped (#330 review). Both
+    # raise BEFORE the write below, so a refusal never leaves a half-recorded §9.
+    updated, wrote_by = set_field(updated, "By / date", f"{by} / {date}")
+    if not wrote_by:
+        raise ValueError(
+            f"{summary_path}: '## {SIGNOFF_HEADING}' has no '- By / date:' field — refusing "
+            "to record a sign-off with no attribution. Re-run Check to reassemble it.")
     if delta:
-        updated, _ = set_field(updated, "Iteration delta (if iterating)", delta)
+        updated, wrote_delta = set_field(updated, "Iteration delta (if iterating)", delta)
+        if not wrote_delta:
+            raise ValueError(
+                f"{summary_path}: '## {SIGNOFF_HEADING}' has no "
+                "'- Iteration delta (if iterating):' field — refusing to record an iterate "
+                "whose reason would be dropped before the next Do reads it. Re-run Check to "
+                "reassemble it.")
     summary_path.write_text(text.replace(section, updated, 1), encoding="utf-8")
 
 
@@ -181,17 +235,13 @@ def _section(text: str, heading_substr: str, *, whole_on_missing: bool) -> str:
     A leaf with Write/Bash can leave any bundle file malformed (``flow._isolate``), so this
     is a live input, not a theoretical one.
 
-    The heading must START with ``heading_substr`` once ``## `` is stripped — not merely
-    contain it. Substring containment matched ``## 19. Check sign-off`` and ``## Notes about
-    9. Check sign-off``, which reopened the very fail-open the strict mode exists to close: a
-    leaf-written summary could put ``- Outcome: accepted`` under such a heading and reach
-    COMPLETE (#330 review). A prefix still tolerates the real heading's trailing annotation
-    (``## 9. Check sign-off   ← human completes Check here``).
+    Which headings count is :func:`heading_is` — a prefix plus a boundary, so a lookalike
+    cannot pose as the section.
     """
     lines = text.splitlines(keepends=True)
     start = None
     for i, line in enumerate(lines):
-        if line.startswith("## ") and line[3:].lstrip().startswith(heading_substr):
+        if line.startswith("## ") and heading_is(line[3:].lstrip(), heading_substr):
             start = i
             break
     if start is None:

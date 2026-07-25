@@ -23,7 +23,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import revalidate, state
+from . import revalidate, signoff, state
 from .config import Config
 
 # Cross-platform advisory file lock (#299 review): ``fcntl`` is Unix-only, and cli.py
@@ -756,17 +756,16 @@ def _sections(text: str) -> dict[str, str]:
 
 
 def _find(secs: dict[str, str], substr: str) -> str:
-    """The body of the section whose heading STARTS with ``substr``, or "".
+    """The body of the section whose heading names ``substr``, or "".
 
-    A prefix, not containment: `"9. Check sign-off" in k` also matched `## 19. Check
-    sign-off` and `## Notes about 9. Check sign-off`, so the ledger could read a bundle's
-    outcome out of an unrelated section. Same defect as `signoff._section` (#330 review) —
-    fixed in both, since leaving one is how these keep coming back. Keys are already
-    `## `-stripped by `_sections`, and a prefix still admits the real headings' trailing
-    annotations.
+    Delegates to ``signoff.heading_is`` rather than testing here: containment matched
+    ``## 19. Check sign-off``, and a bare prefix matched ``## 9. Check sign-off-not-
+    authoritative``, so the ledger could read a bundle's outcome out of a lookalike section.
+    Sharing the predicate is the point — this rule has come back twice from being fixed on
+    one side only (#330 review). Keys are already ``## ``-stripped by :func:`_sections`.
     """
     for k, v in secs.items():
-        if k.startswith(substr):
+        if signoff.heading_is(k, substr):
             return v
     return ""
 
