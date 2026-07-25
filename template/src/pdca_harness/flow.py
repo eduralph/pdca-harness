@@ -83,6 +83,52 @@ def _chunks(items: list, n: int):
 # Shared: the deterministic record/transition for one already-decided bundle, and
 # the single-issue "run the sign-off leaf then apply" convenience.
 # ----------------------------------------------------------------------------
+#: :func:`_apply_decision` outcome meaning "nothing was recorded, but the bundle was returned
+#: to a state a later beat can act on". Distinct from ``None`` (nothing to do — stop) and from
+#: ``"blocked"`` (C6 refused an accept — stop) precisely because the caller must NOT stop: the
+#: bundle is mid-repair, and breaking would strand it one beat short of a fresh SUMMARY.
+REASSEMBLE = "reassemble"
+
+
+def _quarantine_summary(d: Path, today: str) -> Path | None:
+    """Move a malformed ``SUMMARY.md`` aside so the bundle can reassemble; ``None`` on failure.
+
+    Renamed rather than deleted: it may carry §6 boxes the human ticked, and it is the
+    evidence about whichever leaf produced it. Date-stamped like ``revalidation-<date>.json``,
+    with a counter so a second incident on the same day cannot overwrite the first.
+    """
+    for n in range(1, 100):
+        suffix = "" if n == 1 else f"-{n}"
+        dest = d / f"SUMMARY.malformed-{today}{suffix}.md"
+        if dest.exists():
+            continue
+        try:
+            (d / "SUMMARY.md").rename(dest)
+        except OSError:
+            return None
+        return dest
+    return None
+
+
+def _repair_unsignable(d: Path, *, action: str, today: str, why: str) -> str | None:
+    """Move an unsignable ``SUMMARY.md`` aside and drop the stale decision; the caller's
+    return value.
+
+    Leaving the file in place would NOT re-drive: with SUMMARY.md present the bundle sits at
+    AWAITING_SIGNOFF, a HALTED state, so no beat reassembles it — the single-issue flow stops
+    and the batch sweep re-presents the same unusable summary every pass until the budget
+    runs out. Moving it aside drops the bundle to CHECKED, which the next beat rebuilds from
+    the check artifacts.
+    """
+    (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
+    kept = _quarantine_summary(d, today)
+    where = f"kept as {kept.name}" if kept else "could not be moved aside"
+    print(f"flow: {d.name} — decision '{action}' not recorded ({why}); unsignable "
+          f"SUMMARY.md {where}; bundle returned to {state.state(d)} to reassemble",
+          file=sys.stderr)
+    return REASSEMBLE if kept else None
+
+
 def _apply_decision(
     cfg: Config, d: Path, *, by: str, today: str, apply_now: bool
 ) -> str | None:
@@ -90,8 +136,9 @@ def _apply_decision(
 
     Reads the ``signoff-decision`` token a sign-off session (single or batch) left,
     records §9, and (if ``apply_now``) advances the transition. Returns the action
-    applied, ``None`` if no decision / unrecordable, or ``"blocked"`` if an accept was
-    refused because §6 NEEDS-HUMAN is still open. Pure deterministic code — no leaf.
+    applied, ``None`` if no decision / unrecordable, :data:`REASSEMBLE` if a malformed
+    SUMMARY was moved aside so a later beat can rebuild it, or ``"blocked"`` if an accept
+    was refused because §6 NEEDS-HUMAN is still open. Pure deterministic code — no leaf.
 
     ``apply_now`` advances the bundle immediately (single-issue ``flow``). The batch
     sweep passes ``apply_now=False`` so an ``iterate-do`` does NOT rebuild on the spot —
@@ -115,6 +162,16 @@ def _apply_decision(
               f"{state.state(d)}); skipping record, will re-drive", file=sys.stderr)
         (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
         return None
+    # BEFORE the C6 guard, deliberately. `open_needs_human` is the lenient side of
+    # `_section`, so on a summary with no §6 heading it scans the whole document and can
+    # return "blocked" for an accept — which would stop here and never reach the repair
+    # below, stranding the bundle exactly as an unrepaired malformed summary does (#330
+    # review). Whether the artifact can be written to at all is a property of the artifact,
+    # not of the decision, so it is settled first. C6 is not weakened: reassembly rebuilds §6
+    # from the review artifacts with every box unticked, so the guard fires on the next pass.
+    problem = signoff.unrecordable(d / "SUMMARY.md")
+    if problem:
+        return _repair_unsignable(d, action=action, today=today, why=problem)
     if action == "accept" and signoff.open_needs_human(d / "SUMMARY.md"):
         print(f"flow: {d.name} — cannot accept, §6 NEEDS-HUMAN still open (C6)", file=sys.stderr)
         return "blocked"
@@ -122,8 +179,16 @@ def _apply_decision(
     # folds it into the brief's carry-forward so the next iteration isn't blind.
     # §9's "Iteration delta" is a single line, so flatten a multi-line rationale.
     rationale = " ".join(leaves.signoff_rationale(d).split())
-    signoff.record(d / "SUMMARY.md", action=action, by=by or cfg.author or "unknown",
-                   date=today, delta=rationale)
+    try:
+        signoff.record(d / "SUMMARY.md", action=action, by=by or cfg.author or "unknown",
+                       date=today, delta=rationale)
+    except ValueError as exc:
+        # The `unrecordable` pre-check above catches the ordinary shapes; this stays as the
+        # backstop for the ones only the write can detect (a duplicated §9 body, where the
+        # substitution lands on the wrong copy). Contained HERE rather than left to
+        # `_isolate` because the single-issue flow has no `_isolate` around this call, and a
+        # traceback would abandon the run instead of reporting one bad bundle.
+        return _repair_unsignable(d, action=action, today=today, why=str(exc))
     (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
     # Apply now for single-issue flow; in the batch sweep apply an ``iterate-plan`` re-open
     # too — it only archives → UNPLANNED (no rebuild), so it can't interrupt the cheap-first
@@ -254,7 +319,14 @@ def flow(
         # (#264). The `for` bounds this, and so does the per-bundle auto budget.
         if _maybe_auto_iterate(cfg, d, by=by, today=today, apply_now=True):
             continue
-        if _signoff_and_apply(cfg, d, by=by, today=today) in (None, "blocked"):
+        applied = _signoff_and_apply(cfg, d, by=by, today=today)
+        if applied == REASSEMBLE:
+            # A malformed SUMMARY was moved aside; the bundle is back at CHECKED. Loop so
+            # this pass's `run_issue` rebuilds §1–8 and offers sign-off again, rather than
+            # stopping one beat short of a usable summary. Bounded by `max_iters` like every
+            # other retry here, and reassembly is deterministic code, so it cannot spin.
+            continue
+        if applied in (None, "blocked"):
             break
         if state.state(d) == state.COMPLETE:
             break

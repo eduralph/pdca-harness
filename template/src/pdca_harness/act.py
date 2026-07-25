@@ -23,7 +23,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import revalidate, state
+from . import revalidate, signoff, state
 from .config import Config
 
 # Cross-platform advisory file lock (#299 review): ``fcntl`` is Unix-only, and cli.py
@@ -723,7 +723,11 @@ def _extract(summary: Path, bundle: Path) -> ActEntry:
     s7 = _find(secs, "7. Proven")
     s10 = _find(secs, "10. Act candidates")
     date_m = _DATE_RE.search(s9)
-    out_m = re.search(r"^- Outcome:\s*(.+?)\s*$", s9, re.MULTILINE)
+    # [ \t] not \s: `\s` matches `\n`, so an EMPTY `- Outcome:` captured the following line
+    # and the ledger recorded "- Iteration delta (if iterating):" as the bundle's outcome.
+    # Same defect as signoff._OUTCOME_RE (#328) — fixed in both, or the next reader fixes one
+    # and leaves the other, which is how it survived this long.
+    out_m = re.search(r"^- Outcome:[ \t]*(.+?)[ \t]*$", s9, re.MULTILINE)
     return ActEntry(
         bundle=bundle,
         date=date_m.group(1) if date_m else "",
@@ -752,8 +756,16 @@ def _sections(text: str) -> dict[str, str]:
 
 
 def _find(secs: dict[str, str], substr: str) -> str:
+    """The body of the section whose heading names ``substr``, or "".
+
+    Delegates to ``signoff.heading_is`` rather than testing here: containment matched
+    ``## 19. Check sign-off``, and a bare prefix matched ``## 9. Check sign-off-not-
+    authoritative``, so the ledger could read a bundle's outcome out of a lookalike section.
+    Sharing the predicate is the point — this rule has come back twice from being fixed on
+    one side only (#330 review). Keys are already ``## ``-stripped by :func:`_sections`.
+    """
     for k, v in secs.items():
-        if substr in k:
+        if signoff.heading_is(k, substr):
             return v
     return ""
 

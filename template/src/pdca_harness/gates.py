@@ -17,8 +17,9 @@ label set (subset = AND). The bundle is classified from its brief: a primary axi
 exits 0, fails on any other exit, and may instead declare itself **unverifiable**
 when it genuinely cannot run its mechanical check (issue #46): exit
 :data:`UNVERIFIABLE_RC` (77, the automake SKIP convention) **or** print a line
-containing :data:`UNVERIFIABLE_MARKER` (``PDCA-UNVERIFIABLE: <reason>``; the marker
-wins over the exit code, so a gate may exit 0 and still defer). When
+containing :data:`UNVERIFIABLE_MARKER` (``PDCA-UNVERIFIABLE: <reason>``) **while exiting
+0 or 77** — the marker lets a gate that did NOT fail defer to the human, and is ignored on
+any other exit code, because a gate that failed has failed whatever it printed (#329). When
 ``[[gates.checks]]`` is empty the driver falls back to all-PASS stub rows, so the
 offline vertical slice still runs.
 
@@ -422,13 +423,26 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
 def _classify(rc: int, output: str) -> tuple[str, list[str]]:
     """Map a gate command's exit code + output to (result, evidence-lines).
 
-    ``unverifiable`` (issue #46) wins over the exit code: a gate may exit 0 and still
-    print the marker to defer to the human. The text after the marker is the reason;
-    otherwise the evidence is the command's last output line (as for pass/fail)."""
-    for line in output.splitlines():
-        if UNVERIFIABLE_MARKER in line:
-            reason = line.split(UNVERIFIABLE_MARKER, 1)[1].strip()
-            return "unverifiable", [reason or "gate declared itself unverifiable"]
+    ``unverifiable`` (issue #46) lets a gate that did NOT fail defer to the human: it may
+    exit 0 and still print the marker. The text after the marker is the reason; otherwise the
+    evidence is the command's last output line (as for pass/fail).
+
+    The marker is honoured only for an exit code that is not a failure — 0, or the dedicated
+    ``UNVERIFIABLE_RC``. A gate that exits non-zero FAILED, whatever its output happens to
+    contain, and saying otherwise masked real red (#329): the marker is a plain substring, so
+    a suite where one check deferred and a *different* test failed carried both the marker and
+    a non-zero exit, and the whole gate read ``unverifiable`` — which is not a gating failure,
+    so ``_finalize`` reported ``overall = "pass"``. Per bundle that still stops for a human
+    (``assemble._unverifiable_items`` → §6 → C6), but three consumers read ``overall`` with no
+    §6 in the path: the between-waves integration re-gate (``flow``) would not stop and later
+    waves would build on a red tip, ``revalidate`` would not count it as a PASS→FAIL
+    regression, and ``cli`` would exit 0. A gate with no possible verdict has its own channel;
+    it must use it rather than piggy-backing on a failure."""
+    if rc in (0, UNVERIFIABLE_RC):
+        for line in output.splitlines():
+            if UNVERIFIABLE_MARKER in line:
+                reason = line.split(UNVERIFIABLE_MARKER, 1)[1].strip()
+                return "unverifiable", [reason or "gate declared itself unverifiable"]
     last = output.strip().splitlines()[-1:] or [""]
     if rc == UNVERIFIABLE_RC:
         return "unverifiable", [last[0] or f"gate exited unverifiable (rc {UNVERIFIABLE_RC})"]

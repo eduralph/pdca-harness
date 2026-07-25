@@ -135,9 +135,10 @@ status: active
   (fitness-to-purpose). Judgment, always human-confirmed.
 - **Gate / gating** — a deterministic check that **blocks** accept (exits 0 = pass). Only
   gates block. C2/C4 + T1–T4.
-- **Unverifiable** — a gate result for a check that genuinely *cannot run* (exit 77 or a
-  `PDCA-UNVERIFIABLE:` line). Not a pass, not a fail: routed to §6 NEEDS-HUMAN so C6 makes
-  the human clear it (docs 04 §Gate result vocabulary, 06 §C5a).
+- **Unverifiable** — a gate result for a check that genuinely *cannot run* (exit 77, or a
+  `PDCA-UNVERIFIABLE:` line while exiting 0 or 77 — a non-zero exit is a fail whatever it
+  printed). Not a pass, not a fail: routed to §6 NEEDS-HUMAN so C6 makes the human clear it
+  (docs 04 §Gate result vocabulary, 06 §C5a).
 - **Advisory** — a non-blocking signal (the reviewer, and anything `gating = false`); it
   annotates, never gates.
 - **Judgment cell** — C5, T5, and Validation — the three cells no gate can decide; they

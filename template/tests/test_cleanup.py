@@ -169,11 +169,15 @@ class ClosedIssueSide(CleanupBase):
 
 
 class ApplyFailureHonesty(CleanupBase):
-    def test_discontinue_that_does_not_take_is_a_reported_failure(self) -> None:
-        # #300 review round 7: a customized SUMMARY.md without the canonical §9
-        # fields makes signoff.record substitute nothing and run_issue leave the
-        # bundle AWAITING_SIGNOFF — cleanup must report that, not exit 0 as though
-        # it were discontinued.
+    def test_discontinue_on_a_summary_with_no_section_9_is_a_reported_failure(self) -> None:
+        # #300 review round 7: a customized SUMMARY.md without §9 must not let
+        # `cleanup --apply` exit 0 over a bundle it did not reconcile.
+        #
+        # #327 moved WHERE this is caught. signoff.record now refuses a summary with no §9
+        # outright — a decision written where the (now strict) outcome read cannot see it
+        # would never take effect — so the failure is named at its cause instead of being
+        # inferred afterwards from the unchanged state. The properties this test exists for
+        # are unchanged: non-zero rc, the bundle untouched, and the reason on stderr.
         d = self._staged("61", signoff_action=None)
         (d / "SUMMARY.md").write_text("# custom summary — no canonical section 9\n",
                                       encoding="utf-8")
@@ -181,8 +185,30 @@ class ApplyFailureHonesty(CleanupBase):
         self.issue_states["61"] = _CLOSED
         rc, _out, err = self._run(apply=True)
         self.assertEqual(rc, 1)
-        self.assertIn("did not take", err)
+        self.assertIn("no '## 9. Check sign-off' section", err)
+        self.assertIn("action failed", err)
         self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)  # honestly reported
+
+    def test_discontinue_on_a_section_9_with_no_outcome_field_is_a_reported_failure(self) -> None:
+        """§9 is PRESENT here but carries no canonical `- Outcome:` line, so `set_field` used
+        to substitute nothing and `record` returned success over a bundle it had not signed
+        off — `cleanup` only noticed via its post-hoc state check, and `pdca signoff --accept`
+        did not notice at all, exiting 0 (#330 review round 3). `record` now refuses this the
+        same way as a missing §9, so the failure is named at its cause.
+
+        `cleanup._discontinue`'s post-hoc state check is left in place as defence in depth: it
+        no longer has a constructible trigger, which is the point of tightening `record`."""
+        d = self._staged("62", signoff_action=None)
+        (d / "SUMMARY.md").write_text(
+            "# custom summary\n\n## 9. Check sign-off\nfree prose, none of the fields\n",
+            encoding="utf-8")
+        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
+        self.issue_states["62"] = _CLOSED
+        rc, _out, err = self._run(apply=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("no '- Outcome:' field", err)
+        self.assertIn("action failed", err)
+        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
 
     def test_non_object_comment_probe_still_closes_with_the_comment(self) -> None:
         # #300 review round 9: a comment probe returning `null` (or null entries in
