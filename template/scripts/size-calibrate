@@ -13,18 +13,25 @@ features read from ``brief.md`` on the left, recorded outcomes on the right — 
 correlation of each feature against rounds-to-converge. What survives that correlation is what
 the follow-up detector is entitled to weight.
 
-**Outcome leakage is the trap this file exists to avoid.** A brief is not immutable: every
-iterate appends an ``## Iteration N — carry-forward`` section to it
-(``driver._carry_forward_into_brief``). Measuring the brief as it sits on disk therefore lets
-the outcome leak into the "a priori" side — a bundle's brief is bigger *because* it churned.
+**Outcome leakage is the trap this file exists to avoid.** A brief is not immutable: an iterate
+appends an ``## Iteration N — carry-forward`` section to it, recording the sign-off rationale and
+the failing gates (``driver._carry_forward_into_brief``, which no-ops when there is neither to
+carry). Measuring the brief as it sits on disk therefore lets the outcome leak into the "a priori"
+side — a bundle's brief is bigger *because* it churned.
 
-What makes it worse than ordinary noise is that the leak is one-sided. A converged bundle never
-iterated, so it has nothing appended; only the churned ones grow. On the corpus this was written
-against, 14 of 14 churned bundles carried appended text against 2 of 39 converged ones, so
-measuring the file on disk left the converged median untouched at 8.8 KB while pushing the
-churned median from 12.6 KB to 21.7 KB. A threshold set at that median would have come out ~70%
-too high, and the brief-size correlation against rounds reads 0.47 instead of 0.23 — the
-predictor mostly recovering the outcome it is supposed to predict.
+What makes it worse than ordinary noise is that the leak is one-sided. The text is written when
+an attempt is REJECTED, so it accumulates on the bundles that churned and almost nowhere else. On
+the corpus this was written against, all 14 churned bundles carried appended text, against 2 of
+the 39 that settled with no round charged to the brief now on disk. Both exceptions are re-plans,
+where the incoming brief was hand-authored with a carry-forward section of its own (``Why
+iteration-1 was re-planned: …``) under the same heading the driver uses — still outcome-derived
+text, so still excluded, and the count is 2 rather than 0 for that reason and not because a
+converged bundle grew.
+
+The consequence is that measuring the file on disk leaves the converged median untouched at
+8.8 KB while pushing the churned median from 12.6 KB to 21.7 KB: a threshold set there comes out
+~70% too high, and the brief-size correlation against rounds reads 0.47 instead of 0.23 — the
+predictor substantially recovering the outcome it is supposed to predict.
 
 Every brief feature here is therefore read from the text ABOVE the first carry-forward heading,
 including the ones parsed by the harness's own ``brief`` / ``waves`` helpers, which is what

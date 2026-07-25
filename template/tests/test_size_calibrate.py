@@ -4,14 +4,18 @@ Every test here guards a way the miner can be *quietly* wrong, which is the whol
 wrong number does not crash, it just sets a threshold nobody can defend. Grouped by failure
 class rather than by function, because that is what the assertions are really about.
 
-* **Outcome leakage.** The brief is mutated after Do — every iterate appends a carry-forward
-  section — so a predictor read from the file on disk partly recovers the outcome it claims to
-  predict. The subtle half is that the harness's own field parsers (``brief.field`` and
-  friends) read the path, not the text, so they leak even when the byte counts do not;
+* **Outcome leakage.** The brief is mutated after Do — a rejected attempt appends a
+  carry-forward section — so a predictor read from the file on disk partly recovers the outcome
+  it claims to predict. The subtle half is that the harness's own field parsers (``brief.field``
+  and friends) read the path, not the text, so they leak even when the byte counts do not;
   ``AprioriBrief`` is what closes that, and it refuses the routes that would read around it.
-* **Absent is not zero.** A missing patch, an undeclared ``Difficulty``, a field that is still
-  a ``<…>`` placeholder, a band with nothing built in it — each is encoded as 0 or "" and must
-  never be averaged, medianed, or printed as though it were an observed measurement.
+* **An absent OUTCOME is not a measurement.** A bundle with no patch records 0 bytes meaning
+  *absent*, and a difficulty band with nothing built in it has no patch size at all. Neither may
+  be ranked, medianed, or printed as though it had been observed. This is deliberately NOT the
+  same rule as an absent predictor: a brief that declares no ``Scope`` scores 0 words, and that
+  zero is a real, Plan-time-knowable fact about the brief which the correlations include on
+  purpose. The one predictor filtered instead of counted is ``difficulty_rank``, because it is
+  ORDINAL — its 0 would sort below "low" rather than reading as "declared nothing".
 * **Corpus membership.** A bundle that never reached Do has no outcome to correlate against.
   But Do is reached three ways — a patch, an iteration archive, or a ``close-disposition``
   marker — and an empty patch is a real Do output, not an absent one. Getting this wrong does
