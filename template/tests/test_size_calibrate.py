@@ -60,8 +60,13 @@ Draft only until Check sign-off.
 
 
 def _bundle(root: Path, name: str, *, brief: str | None = BRIEF.format(difficulty="high"),
-            patch: str | None = None, rounds: int = 0, close: str | None = None) -> Path:
-    """A bundle dir on disk with only the pieces a test needs."""
+            patch: str | None = None, rounds: int = 0, close: str | None = None,
+            settle: bool = False) -> Path:
+    """A bundle dir on disk with only the pieces a test needs.
+
+    ``settle`` carries it all the way to COMPLETE (the real files, not a forced flag), which
+    the render tests need because ``render`` correlates over settled rows only.
+    """
     d = root / name
     d.mkdir(parents=True)
     if brief is not None:
@@ -72,6 +77,10 @@ def _bundle(root: Path, name: str, *, brief: str | None = BRIEF.format(difficult
         (d / state.CLOSE_MARKER).write_text(close + "\n", encoding="utf-8")
     for n in range(1, rounds + 1):
         (d / f"iteration-v{n}").mkdir()
+    if settle:
+        (d / "check-gates.json").write_text('{"rows": []}', encoding="utf-8")
+        (d / "SUMMARY.md").write_text(
+            "# Result\n\n## 9. Check sign-off\n- Outcome: accepted\n", encoding="utf-8")
     return d
 
 
@@ -380,6 +389,53 @@ class AprioriBriefShim(unittest.TestCase):
         self.assertEqual(self.ap.name, "brief.md")
         self.assertTrue(self.ap.is_file())
         self.assertEqual(Path(self.ap.__fspath__()), self.bp)
+
+
+class DifficultySummary(unittest.TestCase):
+    """An absent patch is not a 0 KB patch — the one direction this table must never fail in,
+    since it would invent a small median for a band a detector gets calibrated against."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def _row(self, name, difficulty, *, patch, rounds=0, close=None):
+        d = _bundle(self.root, name, brief=BRIEF.format(difficulty=difficulty),
+                    patch=patch, rounds=rounds, close=close, settle=True)
+        row = sc.extract(d)
+        self.assertEqual(row.settled, 1)  # render() drops unsettled rows; the fixture must land
+        return row
+
+    def test_a_band_with_no_patches_reports_no_median(self):
+        """A close-only band: every patch_bytes is 0 meaning ABSENT, so there is nothing to
+        take a median of."""
+        rows = [self._row("issue_1", "low", patch=None, close="wont-fix")]
+        band, n, med_rounds, n_patched, med_kb = sc.difficulty_summary(rows)[0]
+        self.assertEqual((band, n, med_rounds, n_patched), ("low", 1, 0, 0))
+        self.assertIsNone(med_kb)
+
+    def test_a_mixed_band_medians_only_the_patched_bundles(self):
+        rows = [self._row("issue_2", "high", patch="x" * 2048),
+                self._row("issue_3", "high", patch=None, close="wont-fix")]
+        band, n, _, n_patched, med_kb = sc.difficulty_summary(rows)[0]
+        self.assertEqual((band, n, n_patched), ("high", 2, 1))
+        self.assertAlmostEqual(med_kb, 2.0)  # not 1.0 — the absent patch is not a zero
+
+    def test_the_rendered_table_prints_n_a_rather_than_zero(self):
+        rows = [self._row("issue_4", "low", patch=None, close="wont-fix")]
+        table = sc.render(rows, 0)
+        self.assertRegex(table, r"low\s+1\s+0\.0\s+0\s+n/a")
+
+    def test_a_close_bundle_has_no_patch_size_in_the_worst_table(self):
+        """A settled row without a patch is a close bundle — nothing else survives ``state``'s
+        patch-or-marker test — and it surfaces here whenever fewer than ten bundles burned a
+        round. '0.0 KB / 0 files' there would read as a measurement rather than an absence."""
+        rows = [self._row("issue_5", "high", patch="x" * 1024),
+                self._row("issue_6", "high", patch=None, close="wont-fix")]
+        table = sc.render(rows, 0)
+        self.assertRegex(table, r"issue_6\s+0\s+n/a\s+n/a")
+        self.assertRegex(table, r"issue_5\s+0\s+1\.0\s+0")  # a real patch still prints
 
 
 class Spearman(unittest.TestCase):

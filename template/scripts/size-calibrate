@@ -438,22 +438,30 @@ def _cells(cors: list[float | None]) -> str:
     return "".join(f"{c:>11.2f}" if c is not None else f"{'n/a':>11}" for c in cors)
 
 
-def difficulty_summary(rows: list[Row]) -> list[tuple[str, int, float, float]]:
-    """``(difficulty, n, median rounds, median patch KB)`` per declared difficulty band.
+def difficulty_summary(rows: list[Row]) -> list[tuple[str, int, float, int, float | None]]:
+    """``(difficulty, n, median rounds, n with a patch, median patch KB or None)`` per band.
 
     Reported separately from :data:`FEATURES` because ``Difficulty`` is the brief's own
     self-rating: if it already predicts churn, much of the detector is already written and the
     honest finding is "enforce the field you have", not "add a new signal".
+
+    The patch median is over the bundles that HAVE a patch, and is ``None`` — not 0.0 — when
+    none do. A close/no-fix bundle and a mid-replan one both record ``patch_bytes = 0`` meaning
+    *absent*; medianing those would report a 0.0 KB patch as though it had been observed, which
+    is the one direction this table must never fail in (it invents a small median for the band
+    a detector is most likely to be calibrated against). The patched count is returned
+    alongside ``n`` so a mixed band shows how much of it the median actually rests on.
     """
     out = []
     for band in ("low", "medium", "high", ""):
         group = [r for r in rows if r.difficulty == band]
         if not group:
             continue
-        patched = [r for r in group if r.has_patch] or group
+        patched = [r for r in group if r.has_patch]
         out.append((band or "(unset)", len(group),
-                    statistics.median(r.rounds for r in group),
-                    statistics.median(r.patch_bytes for r in patched) / 1024))
+                    statistics.median(r.rounds for r in group), len(patched),
+                    statistics.median(r.patch_bytes for r in patched) / 1024
+                    if patched else None))
     return out
 
 
@@ -539,16 +547,25 @@ def render(all_rows: list[Row], skipped: int) -> str:
         out.append(f"  {feat:<22} {calm:>10.1f} -> {churn:>10.1f}")
 
     out.append("\nDeclared Difficulty vs. what it cost:")
-    out.append(f"  {'difficulty':<12} {'n':>4} {'med rounds':>11} {'med patch KB':>13}")
-    for band, n, med_rounds, med_kb in difficulty_summary(rows):
-        out.append(f"  {band:<12} {n:>4} {med_rounds:>11.1f} {med_kb:>13.1f}")
+    out.append(f"  {'difficulty':<12} {'n':>4} {'med rounds':>11} {'patched':>8} "
+               f"{'med patch KB':>13}")
+    for band, n, med_rounds, n_patched, med_kb in difficulty_summary(rows):
+        kb = f"{med_kb:>13.1f}" if med_kb is not None else f"{'n/a':>13}"
+        out.append(f"  {band:<12} {n:>4} {med_rounds:>11.1f} {n_patched:>8} {kb}")
 
     worst = sorted(rows, key=lambda r: (-r.rounds, -r.patch_bytes))[:10]
     out.append("\nWorst-converging bundles:")
     out.append(f"  {'bundle':<18} {'rounds':>7} {'patch KB':>9} {'files':>6}  difficulty")
     for r in worst:
-        out.append(f"  {r.bundle:<18} {r.rounds:>7} {r.patch_bytes / 1024:>9.1f} "
-                   f"{r.patch_files:>6}  {r.difficulty or '(unset)'}")
+        # Same rule as the band table: no patch means no patch size, so neither column
+        # invents one. A settled row without a patch is a close bundle (nothing else survives
+        # `state`'s patch-or-marker test), which surfaces here whenever fewer than ten bundles
+        # burned a round — exactly the small corpus where a fabricated "0.0 KB / 0 files"
+        # reads as a measurement.
+        kb = f"{r.patch_bytes / 1024:>9.1f}" if r.has_patch else f"{'n/a':>9}"
+        files = f"{r.patch_files:>6}" if r.has_patch else f"{'n/a':>6}"
+        out.append(f"  {r.bundle:<18} {r.rounds:>7} {kb} "
+                   f"{files}  {r.difficulty or '(unset)'}")
     return "\n".join(out) + "\n"
 
 
