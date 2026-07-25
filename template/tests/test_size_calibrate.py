@@ -1,18 +1,27 @@
 """Slice-size calibration miner (issue #318) — scripts/size-calibrate.
 
-Covers the three things the miner can get quietly wrong, where "quietly" is the problem: a
-wrong number here does not crash, it just sets a threshold nobody can defend.
+Every test here guards a way the miner can be *quietly* wrong, which is the whole problem: a
+wrong number does not crash, it just sets a threshold nobody can defend. Grouped by failure
+class rather than by function, because that is what the assertions are really about.
 
-* **Difficulty is prose, not an enum.** Real briefs write ``high — the widest-surface slice: …``
-  and ``**hard** — net-new protocol surface``. An equality test scores nearly all of them as
-  undeclared; the engine never does that either (``leaves._when_matches`` substring-matches, and
-  the opus auto-route is configured ``substring = ["high", "hard"]``). This is a regression test:
-  the first run of the miner used equality and reported 27 of 85 bundles as unset.
+* **Outcome leakage.** The brief is mutated after Do — every iterate appends a carry-forward
+  section — so a predictor read from the file on disk partly recovers the outcome it claims to
+  predict. The subtle half is that the harness's own field parsers (``brief.field`` and
+  friends) read the path, not the text, so they leak even when the byte counts do not;
+  ``AprioriBrief`` is what closes that, and it refuses the routes that would read around it.
+* **Absent is not zero.** A missing patch, an undeclared ``Difficulty``, a field that is still
+  a ``<…>`` placeholder, a band with nothing built in it — each is encoded as 0 or "" and must
+  never be averaged, medianed, or printed as though it were an observed measurement.
+* **Corpus membership.** A bundle that never reached Do has no outcome to correlate against.
+  But Do is reached three ways — a patch, an iteration archive, or a ``close-disposition``
+  marker — and an empty patch is a real Do output, not an absent one. Getting this wrong does
+  not error; it silently selects which bundles the threshold gets fitted to.
+* **Counting declarations instead of things.** The same prerequisite named in two dependency
+  fields is one edge; a ``Difficulty`` of ``high — <rationale prose>`` is one declared band.
+  Both inflate a predictor if counted naively. The prose case is a regression test: the first
+  run of the miner equality-matched ``Difficulty`` and scored 27 of its 85 bundles as unset.
 * **Field values wrap.** ``brief.parse_fields`` reads the label's own line by contract, so
   measuring how big a field is needs a block reader that ends at the next field or heading.
-* **Corpus membership.** A bundle that never reached Do has no outcome to correlate against, but
-  one that reached Do and produced an EMPTY patch is a real non-convergence data point and must
-  be kept — that is exactly the shape of the worst bundle in the observed corpus.
 
 Run from the project root:
     PYTHONPATH=src python -m unittest discover -s tests
@@ -252,16 +261,18 @@ class Extract(unittest.TestCase):
         self.assertIsNone(sc.extract(_bundle(self.root, "issue_2")))
 
     def test_empty_patch_with_iterations_is_kept(self):
-        """The worst real bundle burned 3 rounds and produced a 0-byte patch. Dropping it
-        would delete the clearest evidence of the failure being measured."""
+        """An empty patch is a Do output — Do ran and changed nothing — not a missing one, and
+        a bundle that burned rounds to arrive there is the failure being measured, not noise.
+        Conflating the two would also corrupt ``has_patch``, which the patch correlations
+        subset on."""
         row = sc.extract(_bundle(self.root, "issue_3", patch="", rounds=3))
         self.assertIsNotNone(row)
         self.assertEqual((row.rounds, row.patch_bytes, row.patch_files), (3, 0, 0))
         self.assertEqual(row.has_patch, 1)  # an EMPTY patch, not an absent one
 
     def test_missing_patch_is_flagged_rather_than_read_as_empty(self):
-        """A mid-replan bundle has archives but no live patch; 0 bytes there means absent,
-        and averaging it against genuine zeroes would understate the association."""
+        """A mid-replan bundle has archives but no live patch; 0 bytes there means absent, and
+        ranking it against genuine zeroes would understate the association."""
         row = sc.extract(_bundle(self.root, "issue_7", patch=None, rounds=2))
         self.assertEqual((row.has_patch, row.patch_bytes), (0, 0))
 
@@ -285,12 +296,17 @@ class Extract(unittest.TestCase):
         self.assertEqual(dirty.brief_bytes, clean.brief_bytes)
         self.assertGreater(dirty.carry_forward_bytes, 500)
 
-    def test_settled_reflects_terminal_state(self):
-        """An AWAITING_SIGNOFF bundle may still iterate, so its zero archives are 'unfinished',
-        not 'converged' — the correlation must be able to exclude it."""
+    def test_an_unfinished_bundle_is_not_settled(self):
+        """A bundle short of a terminal state may still iterate, so its round count is
+        'unfinished', not 'converged'. Counting it would credit an in-flight cycle with an
+        outcome it has not earned and bias every correlation toward the calm end."""
         row = sc.extract(_bundle(self.root, "issue_10", patch="", rounds=1))
-        self.assertIn(row.settled, (0, 1))
-        self.assertEqual(row.settled, int(row.state in sc._SETTLED))
+        self.assertNotIn(row.state, sc._SETTLED)
+        self.assertEqual(row.settled, 0)
+
+    def test_an_accepted_bundle_is_settled(self):
+        row = sc.extract(_bundle(self.root, "issue_11", patch="", rounds=1, settle=True))
+        self.assertEqual((row.state, row.settled), (state.COMPLETE, 1))
 
     def test_undeclared_difficulty_ranks_zero(self):
         row = sc.extract(_bundle(self.root, "issue_5",
@@ -385,10 +401,25 @@ class AprioriBriefShim(unittest.TestCase):
         ap = sc.AprioriBrief(self.bp, "- **Slug:** demo\n")
         self.assertEqual(sc.brief.field(ap, "slug"), "demo")
 
-    def test_anything_else_delegates_to_the_real_path(self):
+    def test_metadata_delegates_to_the_real_path(self):
         self.assertEqual(self.ap.name, "brief.md")
         self.assertTrue(self.ap.is_file())
-        self.assertEqual(Path(self.ap.__fspath__()), self.bp)
+        self.assertEqual(self.ap.parent, self.bp.parent)
+
+    def test_a_route_that_would_read_around_the_guard_is_refused_loudly(self):
+        """Delegating these would hand back the FULL brief — the leak this class exists to
+        prevent, and silently. A raised error stops a run; a wrong predictor does not."""
+        for name in ("open", "read_bytes", "__fspath__"):
+            with self.subTest(name=name), self.assertRaises(AttributeError) as caught:
+                getattr(self.ap, name)
+            self.assertIn("carry-forward", str(caught.exception))
+
+    def test_os_fspath_fails_rather_than_yielding_the_real_file(self):
+        """The implicit protocol lookup skips __getattr__, so the guard here is the ABSENCE of
+        __fspath__: `open(ap)` must raise, not quietly reopen the unnarrowed file."""
+        import os
+        with self.assertRaises(TypeError):
+            os.fspath(self.ap)
 
 
 class DifficultySummary(unittest.TestCase):
