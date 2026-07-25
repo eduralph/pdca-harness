@@ -25,6 +25,11 @@ _PASS = {**_GATE, "cmd": "true"}
 _FAIL = {**_GATE, "cmd": "false"}
 _UNVERIFIABLE_RC = {**_GATE, "cmd": "echo 'no prod file to revert'; exit 77"}
 _UNVERIFIABLE_MARKER = {**_GATE, "cmd": "echo 'PDCA-UNVERIFIABLE: test-only change'; exit 0"}
+# A gate that genuinely FAILED while its output happens to carry the marker — a suite in which
+# one check deferred and a DIFFERENT test failed. The marker must not launder this (#329).
+_FAIL_WITH_MARKER = {**_GATE, "cmd": (
+    "echo 'PDCA-UNVERIFIABLE: PDCA_PROD_PACKAGE is unset'; "
+    "echo 'AssertionError: expected 3, got 7'; exit 1")}
 
 
 def _stub_config(root: Path) -> Config:
@@ -81,6 +86,32 @@ class UnverifiableGate(unittest.TestCase):
         result = gates.run_gates(self._gated_bundle("FAIL", _FAIL), self.cfg)
         self.assertEqual(self._c4_row(result)["result"], "fail")
         self.assertEqual(result["overall"], "fail")  # unchanged: a real fail still gates
+
+    def test_the_marker_does_not_launder_a_non_zero_exit(self) -> None:
+        """#329: the marker used to win over ANY exit code, so a hard failure whose output
+        merely CONTAINED the marker became `unverifiable` — and that is not a gating failure,
+        so `overall` read "pass". A gate with no possible verdict has its own channel (exit
+        77); it must not piggy-back on a failure."""
+        result = gates.run_gates(self._gated_bundle("FAILMARK", _FAIL_WITH_MARKER), self.cfg)
+        self.assertEqual(self._c4_row(result)["result"], "fail")
+        self.assertEqual(result["overall"], "fail")
+
+    def test_the_marker_is_still_honoured_alongside_exit_77(self) -> None:
+        """Exit 77 IS the unverifiable channel, so a marker there is a better reason string —
+        the fix narrows to non-failing exits, it does not require rc == 0."""
+        gate = {**_GATE, "cmd": "echo 'PDCA-UNVERIFIABLE: no prod path declared'; exit 77"}
+        result = gates.run_gates(self._gated_bundle("RCMARK", gate), self.cfg)
+        row = self._c4_row(result)
+        self.assertEqual(row["result"], "unverifiable")
+        self.assertIn("no prod path declared", row["path_line"])  # the marker's reason, not rc
+
+    def test_the_shipped_production_path_check_still_defers(self) -> None:
+        """The contract the fix relies on: `scripts/checks/test_exercises_production.py`
+        returns 0 on every marker-emitting path, so narrowing to non-failing exits leaves the
+        real deferral route working."""
+        gate = {**_GATE, "cmd": "echo 'PDCA-UNVERIFIABLE: PDCA_PROD_PACKAGE is unset'; exit 0"}
+        self.assertEqual(self._c4_row(gates.run_gates(
+            self._gated_bundle("SHIPPED", gate), self.cfg))["result"], "unverifiable")
 
     def test_pass_still_passes(self) -> None:
         result = gates.run_gates(self._gated_bundle("PASS", _PASS), self.cfg)

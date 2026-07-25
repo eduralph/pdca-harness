@@ -25,10 +25,16 @@ ACTION_TO_OUTCOME = {
     "discontinue": "discontinued",
 }
 
-_OUTCOME_RE = re.compile(r"^- Outcome:\s*(.*?)\s*$", re.MULTILINE)
-# Anchored with [ \t] (NOT \s) so an empty field stops at the line end instead of
-# running past the newline into the next line.
+# Both anchored with [ \t] (NOT \s) so an empty field stops at the line end instead of
+# running past the newline into the next line. `\s` matches `\n`, so `- Outcome:` with no
+# value captured the FOLLOWING line — `outcome_token` returned "- By / date:" for an
+# unsigned bundle, and a bare valid token on that line would have signed it off (#328).
+_OUTCOME_RE = re.compile(r"^- Outcome:[ \t]*(.*?)[ \t]*$", re.MULTILINE)
 _DELTA_RE = re.compile(r"^- Iteration delta \(if iterating\):[ \t]*(.*?)[ \t]*$", re.MULTILINE)
+
+#: The §9 heading. Spelled once: every use is load-bearing (an outcome read outside this
+#: section is not a sign-off, #327), so a typo in one copy would reopen the fail-open.
+SIGNOFF_HEADING = "9. Check sign-off"
 
 
 def outcome_token(summary_path: Path) -> str:
@@ -36,13 +42,15 @@ def outcome_token(summary_path: Path) -> str:
 
     An absent ``SUMMARY.md`` (a leaf deleted it, or it never assembled) is "no
     outcome", not a crash — :func:`state.state` and the batch sweep treat every
-    bundle file as possibly-absent (testbed issue #3).
+    bundle file as possibly-absent (testbed issue #3). A SUMMARY with no §9 section is the
+    same answer for the same reason: malformed is "not signed off", never "signed off".
     """
     if not summary_path.exists():
         return ""
     text = summary_path.read_text(encoding="utf-8")
-    # Restrict to the §9 section so a stray "Outcome:" elsewhere can't match.
-    section = _section(text, "9. Check sign-off")
+    # Restrict to §9 so a stray "Outcome:" elsewhere can't match — strictly, because falling
+    # back to the whole document is what let any such line grant a sign-off (#327).
+    section = _section(text, SIGNOFF_HEADING, whole_on_missing=False)
     m = _OUTCOME_RE.search(section)
     return (m.group(1).strip() if m else "")
 
@@ -59,7 +67,8 @@ def iteration_delta(summary_path: Path) -> str:
     driver folds into the brief's carry-forward so the next iteration isn't blind."""
     if not summary_path.exists():
         return ""
-    section = _section(summary_path.read_text(encoding="utf-8"), "9. Check sign-off")
+    section = _section(summary_path.read_text(encoding="utf-8"), SIGNOFF_HEADING,
+                       whole_on_missing=False)
     m = _DELTA_RE.search(section)
     return (m.group(1).strip() if m else "")
 
@@ -68,10 +77,16 @@ def open_needs_human(summary_path: Path) -> list[str]:
     """Unchecked ``- [ ]`` items under §6 NEEDS-HUMAN (must be empty before accept).
 
     An absent ``SUMMARY.md`` is "no open items", not a crash — every bundle file
-    is possibly-absent (testbed issue #3), same contract as :func:`outcome_token`."""
+    is possibly-absent (testbed issue #3), same contract as :func:`outcome_token`.
+
+    Deliberately the LENIENT side of :func:`_section`, unlike §9: with no §6 heading this
+    scans the whole document, which can only find more ``- [ ]`` items and so blocks accept
+    harder. Tightening it in sympathy with the §9 fix (#327) would turn a fail-safe into a
+    fail-open — a malformed summary would report zero open items."""
     if not summary_path.exists():
         return []
-    section = _section(summary_path.read_text(encoding="utf-8"), "6. NEEDS-HUMAN")
+    section = _section(summary_path.read_text(encoding="utf-8"), "6. NEEDS-HUMAN",
+                       whole_on_missing=True)
     return [
         line.strip()
         for line in section.splitlines()
@@ -83,6 +98,13 @@ def record(summary_path: Path, *, action: str, by: str, date: str, delta: str = 
     """Write the human's §9 decision into ``SUMMARY.md`` in place.
 
     ``action`` is one of ``accept`` / ``iterate-do`` / ``iterate-plan`` / ``discontinue``.
+
+    Raises ``ValueError`` when the summary has no §9 section. Two reasons, and the second is
+    the important one: the final ``text.replace(section, ...)`` would insert at position 0 if
+    handed an empty section, corrupting the file; and a decision written where
+    :func:`outcome_token` (now strict, #327) cannot see it would silently never take effect,
+    so the human's accept would appear to do nothing. ``flow._isolate`` contains the raise
+    per-bundle, which leaves that bundle unpublished — the safe direction.
     """
     outcome = ACTION_TO_OUTCOME[action]
     text = summary_path.read_text(encoding="utf-8")
@@ -93,7 +115,12 @@ def record(summary_path: Path, *, action: str, by: str, date: str, delta: str = 
         new, n = pat.subn(repl, body, count=1)
         return new if n else body
 
-    section = _section(text, "9. Check sign-off")
+    section = _section(text, SIGNOFF_HEADING, whole_on_missing=False)
+    if not section:
+        raise ValueError(
+            f"{summary_path}: no '## {SIGNOFF_HEADING}' section — refusing to record a "
+            "sign-off into a malformed SUMMARY.md (the decision would be unreadable, so the "
+            "bundle would never advance). Re-run Check to reassemble it.")
     updated = set_field(section, "Outcome", outcome)
     updated = set_field(updated, "By / date", f"{by} / {date}")
     if delta:
@@ -101,11 +128,24 @@ def record(summary_path: Path, *, action: str, by: str, date: str, delta: str = 
     summary_path.write_text(text.replace(section, updated, 1), encoding="utf-8")
 
 
-def _section(text: str, heading_substr: str) -> str:
+def _section(text: str, heading_substr: str, *, whole_on_missing: bool) -> str:
     """Return the body of the ``## ...`` section whose heading contains the substr.
 
-    Used to scope a field search to one section. Returns the whole text if no
-    matching heading is found (lenient — the caller's regex still has to match).
+    ``whole_on_missing`` says what an ABSENT heading means. It has no default because the
+    two callers need opposite answers — their failure directions are opposite:
+
+    * ``True`` — fall back to the whole text. Correct for §6 NEEDS-HUMAN: scanning
+      everything finds *more* ``- [ ]`` items, so a malformed summary blocks accept harder.
+      Fails safe.
+    * ``False`` — return ``""``. Required for §9, which is the AUTHORITY section. Falling
+      back there let **any** ``- Outcome:`` line in the file grant a sign-off, so a summary
+      whose §9 heading was lost or demoted to ``###`` read as COMPLETE — with §6 items still
+      unticked — and COMPLETE releases publish (#327). The C6 accept-guard only covers the
+      *write* path (:func:`record`); :mod:`state` trusts this read outright, so it is the
+      one place leniency cannot be afforded.
+
+    A leaf with Write/Bash can leave any bundle file malformed (``flow._isolate``), so this
+    is a live input, not a theoretical one.
     """
     lines = text.splitlines(keepends=True)
     start = None
@@ -114,7 +154,7 @@ def _section(text: str, heading_substr: str) -> str:
             start = i
             break
     if start is None:
-        return text
+        return text if whole_on_missing else ""
     end = len(lines)
     for j in range(start + 1, len(lines)):
         if lines[j].startswith("## "):

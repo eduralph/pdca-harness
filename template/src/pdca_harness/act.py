@@ -723,7 +723,11 @@ def _extract(summary: Path, bundle: Path) -> ActEntry:
     s7 = _find(secs, "7. Proven")
     s10 = _find(secs, "10. Act candidates")
     date_m = _DATE_RE.search(s9)
-    out_m = re.search(r"^- Outcome:\s*(.+?)\s*$", s9, re.MULTILINE)
+    # [ \t] not \s: `\s` matches `\n`, so an EMPTY `- Outcome:` captured the following line
+    # and the ledger recorded "- Iteration delta (if iterating):" as the bundle's outcome.
+    # Same defect as signoff._OUTCOME_RE (#328) — fixed in both, or the next reader fixes one
+    # and leaves the other, which is how it survived this long.
+    out_m = re.search(r"^- Outcome:[ \t]*(.+?)[ \t]*$", s9, re.MULTILINE)
     return ActEntry(
         bundle=bundle,
         date=date_m.group(1) if date_m else "",
