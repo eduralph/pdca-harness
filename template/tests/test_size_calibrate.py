@@ -405,18 +405,28 @@ class AprioriBriefShim(unittest.TestCase):
         ap = sc.AprioriBrief(self.bp, "- **Slug:** demo\n")
         self.assertEqual(sc.brief.field(ap, "slug"), "demo")
 
-    def test_metadata_delegates_to_the_real_path(self):
+    def test_the_allowlisted_metadata_delegates_to_the_real_path(self):
         self.assertEqual(self.ap.name, "brief.md")
+        self.assertEqual(self.ap.suffix, ".md")
         self.assertTrue(self.ap.is_file())
-        self.assertEqual(self.ap.parent, self.bp.parent)
+        self.assertTrue(self.ap.exists())
 
-    def test_a_route_that_would_read_around_the_guard_is_refused_loudly(self):
-        """Delegating these would hand back the FULL brief — the leak this class exists to
-        prevent, and silently. A raised error stops a run; a wrong predictor does not."""
-        for name in ("open", "read_bytes", "__fspath__"):
+    def test_everything_outside_the_allowlist_is_refused_loudly(self):
+        """Why an allowlist and not a blocklist: each of these hands back a real ``Path`` (or
+        the file itself), and one ``.read_text()`` later the caller has the FULL brief. There
+        are more path-returning methods than a blocklist could chase, so the default is refuse.
+        A raised error stops a run; a silently wrong predictor does not."""
+        for name in ("open", "read_bytes", "__fspath__",  # read the bytes directly
+                     "resolve", "absolute", "with_name", "parent", "expanduser"):  # hand back a Path
             with self.subTest(name=name), self.assertRaises(AttributeError) as caught:
                 getattr(self.ap, name)
             self.assertIn("carry-forward", str(caught.exception))
+
+    def test_the_refusal_names_the_way_out(self):
+        """A future helper hitting this needs to know what to do, not just that it failed."""
+        with self.assertRaises(AttributeError) as caught:
+            self.ap.resolve()
+        self.assertIn("read_text()", str(caught.exception))
 
     def test_os_fspath_fails_rather_than_yielding_the_real_file(self):
         """The implicit protocol lookup skips __getattr__, so the guard here is the ABSENCE of

@@ -168,12 +168,15 @@ def field_block(text: str, *labels: str) -> str:
     return "\n".join(out).strip()
 
 
-#: Attributes :class:`AprioriBrief` refuses rather than delegates. Each would re-read the file
-#: by a route the class cannot narrow, handing back the FULL brief — the very leak it exists to
-#: prevent, and silently, which is the failure mode this whole script is organised against. A
-#: helper that needs one of these needs a text-based accessor added here, so the refusal is
-#: loud: a raised AttributeError stops a run, a quietly wrong predictor does not.
-_GUARD_BYPASSES = frozenset({"open", "read_bytes", "__fspath__"})
+#: The ONLY attributes :class:`AprioriBrief` delegates to the real path — an allowlist, and it
+#: has to be. Blocking known escape routes cannot work: ``resolve()``, ``absolute()``,
+#: ``with_name()``, even ``parent``, each hand back a genuine ``Path`` whose ``read_text``
+#: returns the FULL brief, and ``Path`` has more path-returning methods than a denylist could
+#: chase. So the default is refuse, and the exceptions are the ones that provably cannot reach
+#: the file's bytes: strings about the name, and existence predicates. A helper needing more
+#: gets a loud AttributeError pointing here — which is the right trade, because the failure this
+#: guards against is a silently wrong predictor, not a crash.
+_DELEGATED = frozenset({"name", "stem", "suffix", "exists", "is_file"})
 
 
 class AprioriBrief:
@@ -195,9 +198,10 @@ class AprioriBrief:
 
     Re-parsing the fields here instead would mean a second implementation of the harness's field
     grammar, drifting silently the first time either side changed. So this narrows *what is
-    read* rather than reimplementing ``Path``: metadata (``name``, ``is_file``, ``parent``)
-    delegates to the real path, and the routes that would read around the narrowing are refused
-    outright — see :data:`_GUARD_BYPASSES`.
+    read* rather than reimplementing ``Path``: :func:`read_text` answers with the a-priori text,
+    a short allowlist of name-and-existence attributes delegates to the real path, and
+    everything else is refused — see :data:`_DELEGATED` for why that has to be an allowlist
+    rather than a list of blocked escape routes.
     """
 
     def __init__(self, path: Path, text: str) -> None:
@@ -214,13 +218,17 @@ class AprioriBrief:
         return self._text
 
     # No __fspath__: without it os.fspath() / open() raise TypeError at the call site instead
-    # of quietly yielding the real file. That is the point — see _GUARD_BYPASSES.
+    # of quietly yielding the real file. AttributeError (not a custom type) is deliberate for
+    # the rest — it is the signal "no such attribute", so incidental dunder probing by copy,
+    # pickle or a test framework degrades normally instead of exploding.
     def __getattr__(self, name: str):
-        if name in _GUARD_BYPASSES:
+        if name not in _DELEGATED:
             raise AttributeError(
-                f"AprioriBrief refuses {name!r}: it would read the whole brief.md, including "
-                "the post-Do carry-forward this class exists to withhold. Use read_text() for "
-                "the a-priori text, or add a text-based accessor for what you need.")
+                f"AprioriBrief does not delegate {name!r}. It offers read_text() — the a-priori "
+                f"text — plus {sorted(_DELEGATED)}. Anything else risks handing back a real "
+                "Path, whose read_text() returns the whole brief.md including the post-Do "
+                "carry-forward this class exists to withhold. Add a name here only if it "
+                "cannot reach the file's bytes.")
         return getattr(self._path, name)
 
 
