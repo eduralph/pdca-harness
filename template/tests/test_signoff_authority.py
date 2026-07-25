@@ -169,5 +169,65 @@ class RecordRefusesAMalformedSummary(unittest.TestCase):
                          "the fix addressed the symptom")
 
 
+class MalformedSummaryIsReportedNotRaisedAtTheBoundaries(unittest.TestCase):
+    """``record`` refusing is only safe if every caller expects it. The batch sweep has
+    ``flow._isolate``; the two DIRECT boundaries do not, and there a raise would surface as a
+    traceback and abandon the run instead of reporting one bad bundle. Mirrors the precedent
+    in ``flow._maybe_auto_iterate``, which already catches for exactly this reason."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "results").mkdir()
+
+    def _cfg(self):
+        from pdca_harness.config import Config, LeafConfig
+        return Config(
+            root=self.root, bundle_root=self.root / "results",
+            process_dir=self.root / "process", templates_dir=self.root / "templates",
+            default_branch="main", tracker_system="github", tracker_url="",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+
+    def _malformed(self, iid: str) -> Path:
+        d = self.root / "results" / f"issue_{iid}"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(_BRIEF, encoding="utf-8")
+        (d / "patch.diff").write_text("", encoding="utf-8")
+        (d / "check-gates.json").write_text('{"rows": []}', encoding="utf-8")
+        (d / "SUMMARY.md").write_text("# custom — no section 9\n", encoding="utf-8")
+        return d
+
+    def test_pdca_signoff_reports_and_exits_non_zero(self):
+        import argparse
+        from pdca_harness import cli
+        d = self._malformed("70")
+        args = argparse.Namespace(issue_id="70", accept=False, iterate_do=True,
+                                  iterate_plan=False, by="eddie", delta="", no_publish=True)
+        import contextlib, io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = cli._signoff(self._cfg(), args)
+        self.assertEqual(rc, 1)
+        self.assertIn("9. Check sign-off", err.getvalue())
+        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)  # untouched
+
+    def test_flow_apply_decision_reports_and_returns_none(self):
+        import contextlib, io
+        from pdca_harness import flow, leaves
+        d = self._malformed("71")
+        (d / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            got = flow._apply_decision(self._cfg(), d, by="eddie", today="2026-07-25",
+                                       apply_now=True)
+        self.assertIsNone(got)
+        self.assertIn("not recorded", err.getvalue())
+        # The stale decision is dropped, exactly as for an absent SUMMARY.md.
+        self.assertFalse((d / leaves.SIGNOFF_DECISION).exists())
+        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
+
+
 if __name__ == "__main__":
     unittest.main()

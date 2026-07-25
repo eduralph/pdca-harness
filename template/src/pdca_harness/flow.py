@@ -122,8 +122,20 @@ def _apply_decision(
     # folds it into the brief's carry-forward so the next iteration isn't blind.
     # §9's "Iteration delta" is a single line, so flatten a multi-line rationale.
     rationale = " ".join(leaves.signoff_rationale(d).split())
-    signoff.record(d / "SUMMARY.md", action=action, by=by or cfg.author or "unknown",
-                   date=today, delta=rationale)
+    try:
+        signoff.record(d / "SUMMARY.md", action=action, by=by or cfg.author or "unknown",
+                       date=today, delta=rationale)
+    except ValueError as exc:
+        # A SUMMARY present but missing §9 is unrecordable for the same reason an absent one
+        # is (#327): `record` refuses rather than writing a decision the strict outcome read
+        # could never see. Handled identically — drop the stale decision, let the next
+        # build-all pass re-drive. Contained HERE rather than left to `_isolate` because the
+        # single-issue flow has no `_isolate` around this call, and a traceback would abandon
+        # the run mid-bundle instead of reporting one bad bundle.
+        print(f"flow: {d.name} — decision '{action}' not recorded ({exc}); "
+              f"bundle left {state.state(d)}, will re-drive", file=sys.stderr)
+        (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
+        return None
     (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
     # Apply now for single-issue flow; in the batch sweep apply an ``iterate-plan`` re-open
     # too — it only archives → UNPLANNED (no rebuild), so it can't interrupt the cheap-first

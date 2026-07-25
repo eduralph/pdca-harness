@@ -1062,7 +1062,15 @@ def _signoff(cfg: Config, args: argparse.Namespace) -> int:
         action = "discontinue"
 
     date = datetime.date.today().isoformat()
-    signoff.record(summary, action=action, by=args.by or "unknown", date=date, delta=args.delta)
+    try:
+        signoff.record(summary, action=action, by=args.by or "unknown", date=date,
+                       delta=args.delta)
+    except ValueError as exc:
+        # A SUMMARY with no §9 is refused rather than written to (#327). Same answer as the
+        # absent-SUMMARY check above — report and exit non-zero — because this is a direct
+        # CLI boundary with nothing to contain a traceback.
+        print(f"cannot sign off — {exc}", file=sys.stderr)
+        return 1
 
     # Apply the transition: accept freezes; iterate clears and re-runs the body.
     final = driver.run_issue(d, cfg)

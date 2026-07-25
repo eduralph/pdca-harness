@@ -17,8 +17,9 @@ label set (subset = AND). The bundle is classified from its brief: a primary axi
 exits 0, fails on any other exit, and may instead declare itself **unverifiable**
 when it genuinely cannot run its mechanical check (issue #46): exit
 :data:`UNVERIFIABLE_RC` (77, the automake SKIP convention) **or** print a line
-containing :data:`UNVERIFIABLE_MARKER` (``PDCA-UNVERIFIABLE: <reason>``; the marker
-wins over the exit code, so a gate may exit 0 and still defer). When
+containing :data:`UNVERIFIABLE_MARKER` (``PDCA-UNVERIFIABLE: <reason>``) **while exiting
+0 or 77** — the marker lets a gate that did NOT fail defer to the human, and is ignored on
+any other exit code, because a gate that failed has failed whatever it printed (#329). When
 ``[[gates.checks]]`` is empty the driver falls back to all-PASS stub rows, so the
 offline vertical slice still runs.
 

@@ -1,7 +1,8 @@
 """Offline slice for the `unverifiable` gate-result class (issue #46, stdlib unittest).
 
 A gating gate that genuinely cannot RUN its mechanical check declares `unverifiable`
-(exit 77 or a `PDCA-UNVERIFIABLE:` marker line, marker wins) instead of a bogus pass or
+(exit 77, or a `PDCA-UNVERIFIABLE:` marker line while exiting 0 or 77 — a non-zero exit is a
+fail whatever it printed, #329) instead of a bogus pass or
 a hard fail. Proves: the gate runner classifies it, it does NOT fail `overall`, assemble
 routes it into SUMMARY §6 NEEDS-HUMAN, and the existing C6 accept-guard then blocks
 `--accept` until the human clears it. Deterministic real gate commands — no Claude /
