@@ -110,6 +110,25 @@ def _quarantine_summary(d: Path, today: str) -> Path | None:
     return None
 
 
+def _repair_unsignable(d: Path, *, action: str, today: str, why: str) -> str | None:
+    """Move an unsignable ``SUMMARY.md`` aside and drop the stale decision; the caller's
+    return value.
+
+    Leaving the file in place would NOT re-drive: with SUMMARY.md present the bundle sits at
+    AWAITING_SIGNOFF, a HALTED state, so no beat reassembles it — the single-issue flow stops
+    and the batch sweep re-presents the same unusable summary every pass until the budget
+    runs out. Moving it aside drops the bundle to CHECKED, which the next beat rebuilds from
+    the check artifacts.
+    """
+    (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
+    kept = _quarantine_summary(d, today)
+    where = f"kept as {kept.name}" if kept else "could not be moved aside"
+    print(f"flow: {d.name} — decision '{action}' not recorded ({why}); unsignable "
+          f"SUMMARY.md {where}; bundle returned to {state.state(d)} to reassemble",
+          file=sys.stderr)
+    return REASSEMBLE if kept else None
+
+
 def _apply_decision(
     cfg: Config, d: Path, *, by: str, today: str, apply_now: bool
 ) -> str | None:
@@ -143,6 +162,16 @@ def _apply_decision(
               f"{state.state(d)}); skipping record, will re-drive", file=sys.stderr)
         (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
         return None
+    # BEFORE the C6 guard, deliberately. `open_needs_human` is the lenient side of
+    # `_section`, so on a summary with no §6 heading it scans the whole document and can
+    # return "blocked" for an accept — which would stop here and never reach the repair
+    # below, stranding the bundle exactly as an unrepaired malformed summary does (#330
+    # review). Whether the artifact can be written to at all is a property of the artifact,
+    # not of the decision, so it is settled first. C6 is not weakened: reassembly rebuilds §6
+    # from the review artifacts with every box unticked, so the guard fires on the next pass.
+    problem = signoff.unrecordable(d / "SUMMARY.md")
+    if problem:
+        return _repair_unsignable(d, action=action, today=today, why=problem)
     if action == "accept" and signoff.open_needs_human(d / "SUMMARY.md"):
         print(f"flow: {d.name} — cannot accept, §6 NEEDS-HUMAN still open (C6)", file=sys.stderr)
         return "blocked"
@@ -154,26 +183,12 @@ def _apply_decision(
         signoff.record(d / "SUMMARY.md", action=action, by=by or cfg.author or "unknown",
                        date=today, delta=rationale)
     except ValueError as exc:
-        # A SUMMARY present but missing §9 is unrecordable for the same reason an absent one
-        # is (#327): `record` refuses rather than writing a decision the strict outcome read
-        # could never see. Contained HERE rather than left to `_isolate` because the
-        # single-issue flow has no `_isolate` around this call, and a traceback would abandon
-        # the run mid-bundle instead of reporting one bad bundle.
-        #
-        # Unlike the absent-SUMMARY branch above, leaving the file in place would NOT
-        # re-drive: with SUMMARY.md present the bundle sits at AWAITING_SIGNOFF, a HALTED
-        # state, so no beat reassembles it — the single-issue flow would stop and the batch
-        # sweep would re-present the same unusable summary every pass until the budget ran
-        # out. So move it aside: the bundle drops back to CHECKED and the next beat rebuilds
-        # §1–8 from the check artifacts. Renamed, not deleted — the human may have ticked §6
-        # boxes in it, and it is evidence about the leaf that wrote it.
-        (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
-        kept = _quarantine_summary(d, today)
-        where = f"kept as {kept.name}" if kept else "could not be moved aside"
-        print(f"flow: {d.name} — decision '{action}' not recorded ({exc}); malformed "
-              f"SUMMARY.md {where}; bundle returned to {state.state(d)} to reassemble",
-              file=sys.stderr)
-        return REASSEMBLE if kept else None
+        # The `unrecordable` pre-check above catches the ordinary shapes; this stays as the
+        # backstop for the ones only the write can detect (a duplicated §9 body, where the
+        # substitution lands on the wrong copy). Contained HERE rather than left to
+        # `_isolate` because the single-issue flow has no `_isolate` around this call, and a
+        # traceback would abandon the run instead of reporting one bad bundle.
+        return _repair_unsignable(d, action=action, today=today, why=str(exc))
     (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
     # Apply now for single-issue flow; in the batch sweep apply an ``iterate-plan`` re-open
     # too — it only archives → UNPLANNED (no rebuild), so it can't interrupt the cheap-first

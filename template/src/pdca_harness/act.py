@@ -756,8 +756,17 @@ def _sections(text: str) -> dict[str, str]:
 
 
 def _find(secs: dict[str, str], substr: str) -> str:
+    """The body of the section whose heading STARTS with ``substr``, or "".
+
+    A prefix, not containment: `"9. Check sign-off" in k` also matched `## 19. Check
+    sign-off` and `## Notes about 9. Check sign-off`, so the ledger could read a bundle's
+    outcome out of an unrelated section. Same defect as `signoff._section` (#330 review) —
+    fixed in both, since leaving one is how these keep coming back. Keys are already
+    `## `-stripped by `_sections`, and a prefix still admits the real headings' trailing
+    annotations.
+    """
     for k, v in secs.items():
-        if substr in k:
+        if k.startswith(substr):
             return v
     return ""
 

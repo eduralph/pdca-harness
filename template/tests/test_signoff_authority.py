@@ -85,6 +85,65 @@ class NoSectionNineIsNotSignedOff(unittest.TestCase):
         self.assertEqual(signoff.iteration_delta(d / "SUMMARY.md"), "")
 
 
+class TheHeadingIsMatchedByPrefixNotContainment(unittest.TestCase):
+    """#330 review: strict mode still delegated to a `substr in line` test, so `## 19. Check
+    sign-off` and `## Notes about 9. Check sign-off` both matched — reopening the exact
+    fail-open strict mode exists to close, by a different route."""
+
+    def test_a_numerically_different_heading_is_not_section_9(self):
+        d = _bundle("# Result\n\n## 19. Check sign-off\n- Outcome: accepted\n")
+        self.assertEqual(signoff.outcome_token(d / "SUMMARY.md"), "")
+        self.assertNotEqual(state.state(d), state.COMPLETE)
+
+    def test_a_heading_merely_mentioning_section_9_is_not_section_9(self):
+        d = _bundle("# Result\n\n## Notes about 9. Check sign-off\n- Outcome: accepted\n")
+        self.assertEqual(signoff.outcome_token(d / "SUMMARY.md"), "")
+        self.assertNotEqual(state.state(d), state.COMPLETE)
+
+    def test_the_real_heading_keeps_working_with_its_trailing_annotation(self):
+        """The shipped template writes `## 9. Check sign-off   ← human completes Check here`,
+        so the match has to be a prefix rather than equality."""
+        d = _bundle("# Result\n\n## 9. Check sign-off       ← human completes Check here\n"
+                    "- Outcome: accepted\n")
+        self.assertEqual(signoff.outcome_token(d / "SUMMARY.md"), "accepted")
+        self.assertEqual(state.state(d), state.COMPLETE)
+
+    def test_the_act_ledger_matches_the_same_way(self):
+        """`act._find` carried the identical containment test."""
+        d = _bundle("# Result\n\n## 19. Check sign-off\n- Outcome: merged-wider\n")
+        self.assertEqual(act._extract(d / "SUMMARY.md", d).outcome, "")
+
+
+class ASectionNineWithNoOutcomeFieldIsUnrecordable(unittest.TestCase):
+    """#330 review: the heading can be exact while the canonical field is absent. `set_field`
+    then substituted nothing and `record` returned success — so `pdca signoff --accept` exited
+    0 over a bundle it had not signed off."""
+
+    def test_unrecordable_names_the_missing_field(self):
+        d = _bundle("# Result\n\n## 9. Check sign-off\nfree prose, none of the fields\n")
+        self.assertIn("no '- Outcome:' field", signoff.unrecordable(d / "SUMMARY.md"))
+
+    def test_record_refuses_rather_than_silently_doing_nothing(self):
+        d = _bundle("# Result\n\n## 9. Check sign-off\nfree prose, none of the fields\n")
+        with self.assertRaises(ValueError):
+            signoff.record(d / "SUMMARY.md", action="accept", by="eddie", date="2026-07-25")
+
+    def test_a_well_formed_section_9_is_recordable(self):
+        d = _bundle("# Result\n\n## 9. Check sign-off\n- Outcome:\n- By / date:\n")
+        self.assertEqual(signoff.unrecordable(d / "SUMMARY.md"), "")
+
+    def test_recording_the_same_outcome_twice_is_not_a_failure(self):
+        """The batch sweep defers an iterate-do and the single-issue path then applies it, so
+        the second write is byte-identical. Asserting on the text changing (rather than on the
+        field matching) turned that legitimate replay into a raise."""
+        d = _bundle("# Result\n\n## 9. Check sign-off\n- Outcome:\n"
+                    "- Iteration delta (if iterating):\n- By / date:\n")
+        for _ in range(2):
+            signoff.record(d / "SUMMARY.md", action="iterate-do", by="eddie",
+                           date="2026-07-25", delta="same reason")
+        self.assertEqual(signoff.outcome_token(d / "SUMMARY.md"), "iterated-to-Do")
+
+
 class SectionSixStillFailsSafe(unittest.TestCase):
     """The other half of #327: §6 keeps the lenient fallback on purpose."""
 
@@ -259,6 +318,47 @@ class MalformedSummaryIsReportedNotRaisedAtTheBoundaries(unittest.TestCase):
         self.assertEqual((d / "SUMMARY.malformed-2026-07-25.md").read_text(encoding="utf-8"),
                          "the first one\n")
         self.assertTrue((d / "SUMMARY.malformed-2026-07-25-2.md").exists())
+
+    def test_repair_happens_before_the_c6_guard(self):
+        """#330 review: `open_needs_human` is the LENIENT side of `_section`, so a summary
+        with no §6 heading but any stray `- [ ]` made the C6 check return "blocked" for an
+        accept — stopping before the repair and stranding the bundle exactly as an unrepaired
+        malformed summary does. Repairability is a property of the artifact, so it is settled
+        first."""
+        import contextlib, io
+        from pdca_harness import flow, leaves
+        d = self.root / "results" / "issue_74"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(_BRIEF, encoding="utf-8")
+        (d / "patch.diff").write_text("", encoding="utf-8")
+        (d / "check-gates.json").write_text('{"rows": []}', encoding="utf-8")
+        # No §9 and no §6 heading, but an unchecked item the lenient scan will find.
+        (d / "SUMMARY.md").write_text("# mangled\n- [ ] something unrelated\n", encoding="utf-8")
+        (d / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = flow._apply_decision(self._cfg(), d, by="eddie", today="2026-07-25",
+                                       apply_now=True)
+        self.assertEqual(got, flow.REASSEMBLE)  # repaired, not merely reported "blocked"
+        self.assertEqual(state.state(d), state.CHECKED)
+
+    def test_c6_still_blocks_an_accept_on_a_well_formed_summary(self):
+        """The reordering must not weaken C6 where it applies."""
+        import contextlib, io
+        from pdca_harness import flow, leaves
+        d = self.root / "results" / "issue_75"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(_BRIEF, encoding="utf-8")
+        (d / "patch.diff").write_text("", encoding="utf-8")
+        (d / "check-gates.json").write_text('{"rows": []}', encoding="utf-8")
+        (d / "SUMMARY.md").write_text(
+            "# Result\n\n## 6. NEEDS-HUMAN\n- [ ] C5 — human must confirm\n\n"
+            "## 9. Check sign-off\n- Outcome:\n- By / date:\n", encoding="utf-8")
+        (d / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = flow._apply_decision(self._cfg(), d, by="eddie", today="2026-07-25",
+                                       apply_now=True)
+        self.assertEqual(got, "blocked")
+        self.assertTrue((d / "SUMMARY.md").exists())  # not quarantined — it is well-formed
 
     def test_reassemble_is_distinct_from_the_stop_signals(self):
         """The single-issue caller breaks on None/'blocked'; REASSEMBLE must not be either,

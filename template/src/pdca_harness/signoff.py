@@ -94,42 +94,76 @@ def open_needs_human(summary_path: Path) -> list[str]:
     ]
 
 
+def unrecordable(summary_path: Path) -> str:
+    """Why a sign-off cannot be written into this summary, or ``""`` when it can.
+
+    The single place that answers "is this artifact signable?". :func:`record` raises on it,
+    and ``flow`` consults it BEFORE the C6 accept-guard: ``open_needs_human`` is deliberately
+    lenient, so on a summary with no §6 heading it scans the whole document and can return
+    "blocked" for an accept — stopping before the repair path and stranding the bundle
+    exactly as an unrepaired malformed summary does (#330 review). Whether the artifact can
+    be written to is a property of the artifact, not of the decision, so it is settled first.
+
+    A §9 that exists but carries no ``- Outcome:`` line counts as unrecordable: ``set_field``
+    would substitute nothing and return success, so ``pdca signoff --accept`` exited 0 while
+    leaving the bundle at AWAITING_SIGNOFF — a silent no-op reported as a sign-off.
+    """
+    if not summary_path.exists():
+        return "no SUMMARY.md"
+    section = _section(summary_path.read_text(encoding="utf-8"), SIGNOFF_HEADING,
+                       whole_on_missing=False)
+    if not section:
+        return f"no '## {SIGNOFF_HEADING}' section"
+    if not _OUTCOME_RE.search(section):
+        return f"'## {SIGNOFF_HEADING}' has no '- Outcome:' field to record into"
+    return ""
+
+
 def record(summary_path: Path, *, action: str, by: str, date: str, delta: str = "") -> None:
     """Write the human's §9 decision into ``SUMMARY.md`` in place.
 
     ``action`` is one of ``accept`` / ``iterate-do`` / ``iterate-plan`` / ``discontinue``.
 
-    Raises ``ValueError`` when the summary has no §9 section. Two reasons, and the second is
-    the important one: the final ``text.replace(section, ...)`` would insert at position 0 if
-    handed an empty section, corrupting the file; and a decision written where
-    :func:`outcome_token` (now strict, #327) cannot see it would silently never take effect,
-    so the human's accept would appear to do nothing. ``flow._isolate`` contains the raise
-    per-bundle, which leaves that bundle unpublished — the safe direction.
+    Raises ``ValueError`` rather than half-writing: see :func:`unrecordable` for what counts.
+    The contract is that this function records or it raises — never "returns having changed
+    nothing", which is what let a `--accept` exit 0 over a bundle it did not sign off. Callers
+    all handle the raise (``cli._signoff`` reports and exits 1; ``flow._apply_decision``
+    quarantines the summary so the bundle reassembles).
     """
     outcome = ACTION_TO_OUTCOME[action]
+    problem = unrecordable(summary_path)
+    if problem:
+        raise ValueError(
+            f"{summary_path}: {problem} — refusing to record a sign-off into a malformed "
+            "SUMMARY.md (the decision would be unreadable, so the bundle would never "
+            "advance). Re-run Check to reassemble it.")
     text = summary_path.read_text(encoding="utf-8")
 
-    def set_field(body: str, label: str, value: str) -> str:
+    def set_field(body: str, label: str, value: str) -> tuple[str, int]:
+        """``(body, substitutions)`` — the count matters for ``Outcome``, see below."""
         pat = re.compile(rf"^(- {re.escape(label)}:).*?$", re.MULTILINE)
         repl = rf"\g<1> {value}" if value else r"\g<1>"
         new, n = pat.subn(repl, body, count=1)
-        return new if n else body
+        return (new, n) if n else (body, 0)
 
     section = _section(text, SIGNOFF_HEADING, whole_on_missing=False)
-    if not section:
+    updated, wrote_outcome = set_field(section, "Outcome", outcome)
+    # Asserted on the MATCH COUNT, not on the text changing: re-recording the same outcome
+    # (the batch sweep defers an iterate-do, then the single-issue path applies it) is a
+    # legitimate no-op whose text is identical, and treating that as a failure broke a real
+    # flow. What must never pass silently is the field not being there at all.
+    if not wrote_outcome:
         raise ValueError(
-            f"{summary_path}: no '## {SIGNOFF_HEADING}' section — refusing to record a "
-            "sign-off into a malformed SUMMARY.md (the decision would be unreadable, so the "
-            "bundle would never advance). Re-run Check to reassemble it.")
-    updated = set_field(section, "Outcome", outcome)
-    updated = set_field(updated, "By / date", f"{by} / {date}")
+            f"{summary_path}: '- Outcome:' was not substituted in '## {SIGNOFF_HEADING}' — "
+            "refusing to report a sign-off that did not take. Re-run Check to reassemble it.")
+    updated, _ = set_field(updated, "By / date", f"{by} / {date}")
     if delta:
-        updated = set_field(updated, "Iteration delta (if iterating)", delta)
+        updated, _ = set_field(updated, "Iteration delta (if iterating)", delta)
     summary_path.write_text(text.replace(section, updated, 1), encoding="utf-8")
 
 
 def _section(text: str, heading_substr: str, *, whole_on_missing: bool) -> str:
-    """Return the body of the ``## ...`` section whose heading contains the substr.
+    """Return the body of the ``## ...`` section whose heading starts with the substr.
 
     ``whole_on_missing`` says what an ABSENT heading means. It has no default because the
     two callers need opposite answers — their failure directions are opposite:
@@ -146,11 +180,18 @@ def _section(text: str, heading_substr: str, *, whole_on_missing: bool) -> str:
 
     A leaf with Write/Bash can leave any bundle file malformed (``flow._isolate``), so this
     is a live input, not a theoretical one.
+
+    The heading must START with ``heading_substr`` once ``## `` is stripped — not merely
+    contain it. Substring containment matched ``## 19. Check sign-off`` and ``## Notes about
+    9. Check sign-off``, which reopened the very fail-open the strict mode exists to close: a
+    leaf-written summary could put ``- Outcome: accepted`` under such a heading and reach
+    COMPLETE (#330 review). A prefix still tolerates the real heading's trailing annotation
+    (``## 9. Check sign-off   ← human completes Check here``).
     """
     lines = text.splitlines(keepends=True)
     start = None
     for i, line in enumerate(lines):
-        if line.startswith("## ") and heading_substr in line:
+        if line.startswith("## ") and line[3:].lstrip().startswith(heading_substr):
             start = i
             break
     if start is None:

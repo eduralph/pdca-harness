@@ -189,11 +189,15 @@ class ApplyFailureHonesty(CleanupBase):
         self.assertIn("action failed", err)
         self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)  # honestly reported
 
-    def test_discontinue_that_silently_does_not_take_is_still_caught(self) -> None:
-        """The post-hoc verification at ``cleanup._discontinue`` still earns its keep after
-        #327: §9 is PRESENT here, so ``signoff.record`` proceeds, but the canonical
-        ``- Outcome:`` field is absent so ``set_field`` substitutes nothing and the bundle
-        never leaves AWAITING_SIGNOFF. Nothing raises — only the state check catches it."""
+    def test_discontinue_on_a_section_9_with_no_outcome_field_is_a_reported_failure(self) -> None:
+        """§9 is PRESENT here but carries no canonical `- Outcome:` line, so `set_field` used
+        to substitute nothing and `record` returned success over a bundle it had not signed
+        off — `cleanup` only noticed via its post-hoc state check, and `pdca signoff --accept`
+        did not notice at all, exiting 0 (#330 review round 3). `record` now refuses this the
+        same way as a missing §9, so the failure is named at its cause.
+
+        `cleanup._discontinue`'s post-hoc state check is left in place as defence in depth: it
+        no longer has a constructible trigger, which is the point of tightening `record`."""
         d = self._staged("62", signoff_action=None)
         (d / "SUMMARY.md").write_text(
             "# custom summary\n\n## 9. Check sign-off\nfree prose, none of the fields\n",
@@ -202,7 +206,8 @@ class ApplyFailureHonesty(CleanupBase):
         self.issue_states["62"] = _CLOSED
         rc, _out, err = self._run(apply=True)
         self.assertEqual(rc, 1)
-        self.assertIn("did not take", err)
+        self.assertIn("no '- Outcome:' field", err)
+        self.assertIn("action failed", err)
         self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
 
     def test_non_object_comment_probe_still_closes_with_the_comment(self) -> None:
