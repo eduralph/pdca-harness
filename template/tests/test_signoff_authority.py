@@ -213,7 +213,12 @@ class MalformedSummaryIsReportedNotRaisedAtTheBoundaries(unittest.TestCase):
         self.assertIn("9. Check sign-off", err.getvalue())
         self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)  # untouched
 
-    def test_flow_apply_decision_reports_and_returns_none(self):
+    def test_flow_apply_decision_returns_the_bundle_to_a_reassemblable_state(self):
+        """Reporting is not enough: with SUMMARY.md still in place the bundle sits at
+        AWAITING_SIGNOFF, a HALTED state, so nothing reassembles it — the single-issue flow
+        would stop and the batch sweep would re-present the same unusable summary every pass
+        until the budget ran out. Moving it aside drops the bundle to CHECKED, which the
+        next beat rebuilds."""
         import contextlib, io
         from pdca_harness import flow, leaves
         d = self._malformed("71")
@@ -222,11 +227,44 @@ class MalformedSummaryIsReportedNotRaisedAtTheBoundaries(unittest.TestCase):
         with contextlib.redirect_stderr(err):
             got = flow._apply_decision(self._cfg(), d, by="eddie", today="2026-07-25",
                                        apply_now=True)
-        self.assertIsNone(got)
+        self.assertEqual(got, flow.REASSEMBLE)
         self.assertIn("not recorded", err.getvalue())
-        # The stale decision is dropped, exactly as for an absent SUMMARY.md.
-        self.assertFalse((d / leaves.SIGNOFF_DECISION).exists())
-        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
+        self.assertFalse((d / leaves.SIGNOFF_DECISION).exists())  # stale decision dropped
+        self.assertFalse((d / "SUMMARY.md").exists())
+        self.assertEqual(state.state(d), state.CHECKED)  # a beat can act on this
+
+    def test_the_malformed_summary_is_kept_not_deleted(self):
+        """It may carry §6 boxes the human ticked, and it is evidence about the leaf that
+        wrote it."""
+        import contextlib, io
+        from pdca_harness import flow, leaves
+        d = self._malformed("72")
+        (d / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
+        with contextlib.redirect_stderr(io.StringIO()):
+            flow._apply_decision(self._cfg(), d, by="eddie", today="2026-07-25",
+                                 apply_now=True)
+        kept = d / "SUMMARY.malformed-2026-07-25.md"
+        self.assertTrue(kept.exists())
+        self.assertEqual(kept.read_text(encoding="utf-8"), "# custom — no section 9\n")
+
+    def test_a_second_incident_the_same_day_does_not_overwrite_the_first(self):
+        import contextlib, io
+        from pdca_harness import flow, leaves
+        d = self._malformed("73")
+        (d / "SUMMARY.malformed-2026-07-25.md").write_text("the first one\n", encoding="utf-8")
+        (d / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
+        with contextlib.redirect_stderr(io.StringIO()):
+            flow._apply_decision(self._cfg(), d, by="eddie", today="2026-07-25",
+                                 apply_now=True)
+        self.assertEqual((d / "SUMMARY.malformed-2026-07-25.md").read_text(encoding="utf-8"),
+                         "the first one\n")
+        self.assertTrue((d / "SUMMARY.malformed-2026-07-25-2.md").exists())
+
+    def test_reassemble_is_distinct_from_the_stop_signals(self):
+        """The single-issue caller breaks on None/'blocked'; REASSEMBLE must not be either,
+        or the bundle is stranded one beat short of a fresh SUMMARY."""
+        from pdca_harness import flow
+        self.assertNotIn(flow.REASSEMBLE, (None, "blocked"))
 
 
 if __name__ == "__main__":

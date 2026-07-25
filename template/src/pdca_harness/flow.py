@@ -83,6 +83,33 @@ def _chunks(items: list, n: int):
 # Shared: the deterministic record/transition for one already-decided bundle, and
 # the single-issue "run the sign-off leaf then apply" convenience.
 # ----------------------------------------------------------------------------
+#: :func:`_apply_decision` outcome meaning "nothing was recorded, but the bundle was returned
+#: to a state a later beat can act on". Distinct from ``None`` (nothing to do — stop) and from
+#: ``"blocked"`` (C6 refused an accept — stop) precisely because the caller must NOT stop: the
+#: bundle is mid-repair, and breaking would strand it one beat short of a fresh SUMMARY.
+REASSEMBLE = "reassemble"
+
+
+def _quarantine_summary(d: Path, today: str) -> Path | None:
+    """Move a malformed ``SUMMARY.md`` aside so the bundle can reassemble; ``None`` on failure.
+
+    Renamed rather than deleted: it may carry §6 boxes the human ticked, and it is the
+    evidence about whichever leaf produced it. Date-stamped like ``revalidation-<date>.json``,
+    with a counter so a second incident on the same day cannot overwrite the first.
+    """
+    for n in range(1, 100):
+        suffix = "" if n == 1 else f"-{n}"
+        dest = d / f"SUMMARY.malformed-{today}{suffix}.md"
+        if dest.exists():
+            continue
+        try:
+            (d / "SUMMARY.md").rename(dest)
+        except OSError:
+            return None
+        return dest
+    return None
+
+
 def _apply_decision(
     cfg: Config, d: Path, *, by: str, today: str, apply_now: bool
 ) -> str | None:
@@ -90,8 +117,9 @@ def _apply_decision(
 
     Reads the ``signoff-decision`` token a sign-off session (single or batch) left,
     records §9, and (if ``apply_now``) advances the transition. Returns the action
-    applied, ``None`` if no decision / unrecordable, or ``"blocked"`` if an accept was
-    refused because §6 NEEDS-HUMAN is still open. Pure deterministic code — no leaf.
+    applied, ``None`` if no decision / unrecordable, :data:`REASSEMBLE` if a malformed
+    SUMMARY was moved aside so a later beat can rebuild it, or ``"blocked"`` if an accept
+    was refused because §6 NEEDS-HUMAN is still open. Pure deterministic code — no leaf.
 
     ``apply_now`` advances the bundle immediately (single-issue ``flow``). The batch
     sweep passes ``apply_now=False`` so an ``iterate-do`` does NOT rebuild on the spot —
@@ -128,14 +156,24 @@ def _apply_decision(
     except ValueError as exc:
         # A SUMMARY present but missing §9 is unrecordable for the same reason an absent one
         # is (#327): `record` refuses rather than writing a decision the strict outcome read
-        # could never see. Handled identically — drop the stale decision, let the next
-        # build-all pass re-drive. Contained HERE rather than left to `_isolate` because the
+        # could never see. Contained HERE rather than left to `_isolate` because the
         # single-issue flow has no `_isolate` around this call, and a traceback would abandon
         # the run mid-bundle instead of reporting one bad bundle.
-        print(f"flow: {d.name} — decision '{action}' not recorded ({exc}); "
-              f"bundle left {state.state(d)}, will re-drive", file=sys.stderr)
+        #
+        # Unlike the absent-SUMMARY branch above, leaving the file in place would NOT
+        # re-drive: with SUMMARY.md present the bundle sits at AWAITING_SIGNOFF, a HALTED
+        # state, so no beat reassembles it — the single-issue flow would stop and the batch
+        # sweep would re-present the same unusable summary every pass until the budget ran
+        # out. So move it aside: the bundle drops back to CHECKED and the next beat rebuilds
+        # §1–8 from the check artifacts. Renamed, not deleted — the human may have ticked §6
+        # boxes in it, and it is evidence about the leaf that wrote it.
         (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
-        return None
+        kept = _quarantine_summary(d, today)
+        where = f"kept as {kept.name}" if kept else "could not be moved aside"
+        print(f"flow: {d.name} — decision '{action}' not recorded ({exc}); malformed "
+              f"SUMMARY.md {where}; bundle returned to {state.state(d)} to reassemble",
+              file=sys.stderr)
+        return REASSEMBLE if kept else None
     (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
     # Apply now for single-issue flow; in the batch sweep apply an ``iterate-plan`` re-open
     # too — it only archives → UNPLANNED (no rebuild), so it can't interrupt the cheap-first
@@ -266,7 +304,14 @@ def flow(
         # (#264). The `for` bounds this, and so does the per-bundle auto budget.
         if _maybe_auto_iterate(cfg, d, by=by, today=today, apply_now=True):
             continue
-        if _signoff_and_apply(cfg, d, by=by, today=today) in (None, "blocked"):
+        applied = _signoff_and_apply(cfg, d, by=by, today=today)
+        if applied == REASSEMBLE:
+            # A malformed SUMMARY was moved aside; the bundle is back at CHECKED. Loop so
+            # this pass's `run_issue` rebuilds §1–8 and offers sign-off again, rather than
+            # stopping one beat short of a usable summary. Bounded by `max_iters` like every
+            # other retry here, and reassembly is deterministic code, so it cannot spin.
+            continue
+        if applied in (None, "blocked"):
             break
         if state.state(d) == state.COMPLETE:
             break
