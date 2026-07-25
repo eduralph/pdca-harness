@@ -1,18 +1,31 @@
 """Slice-size calibration miner (issue #318) — scripts/size-calibrate.
 
-Covers the three things the miner can get quietly wrong, where "quietly" is the problem: a
-wrong number here does not crash, it just sets a threshold nobody can defend.
+Every test here guards a way the miner can be *quietly* wrong, which is the whole problem: a
+wrong number does not crash, it just sets a threshold nobody can defend. Grouped by failure
+class rather than by function, because that is what the assertions are really about.
 
-* **Difficulty is prose, not an enum.** Real briefs write ``high — the widest-surface slice: …``
-  and ``**hard** — net-new protocol surface``. An equality test scores nearly all of them as
-  undeclared; the engine never does that either (``leaves._when_matches`` substring-matches, and
-  the opus auto-route is configured ``substring = ["high", "hard"]``). This is a regression test:
-  the first run of the miner used equality and reported 27 of 85 bundles as unset.
+* **Outcome leakage.** The brief is mutated after Do — a rejected attempt appends a
+  carry-forward section — so a predictor read from the file on disk partly recovers the outcome
+  it claims to predict. The subtle half is that the harness's own field parsers (``brief.field``
+  and friends) read the path, not the text, so they leak even when the byte counts do not;
+  ``AprioriBrief`` is what closes that, and it refuses the routes that would read around it.
+* **An absent OUTCOME is not a measurement.** A bundle with no patch records 0 bytes meaning
+  *absent*, and a difficulty band with nothing built in it has no patch size at all. Neither may
+  be ranked, medianed, or printed as though it had been observed. This is deliberately NOT the
+  same rule as an absent predictor: a brief that declares no ``Scope`` scores 0 words, and that
+  zero is a real, Plan-time-knowable fact about the brief which the correlations include on
+  purpose. The one predictor filtered instead of counted is ``difficulty_rank``, because it is
+  ORDINAL — its 0 would sort below "low" rather than reading as "declared nothing".
+* **Corpus membership.** A bundle that never reached Do has no outcome to correlate against.
+  But Do is reached three ways — a patch, an iteration archive, or a ``close-disposition``
+  marker — and an empty patch is a real Do output, not an absent one. Getting this wrong does
+  not error; it silently selects which bundles the threshold gets fitted to.
+* **Counting declarations instead of things.** The same prerequisite named in two dependency
+  fields is one edge; a ``Difficulty`` of ``high — <rationale prose>`` is one declared band.
+  Both inflate a predictor if counted naively. The prose case is a regression test: the first
+  run of the miner equality-matched ``Difficulty`` and scored 27 of its 85 bundles as unset.
 * **Field values wrap.** ``brief.parse_fields`` reads the label's own line by contract, so
   measuring how big a field is needs a block reader that ends at the next field or heading.
-* **Corpus membership.** A bundle that never reached Do has no outcome to correlate against, but
-  one that reached Do and produced an EMPTY patch is a real non-convergence data point and must
-  be kept — that is exactly the shape of the worst bundle in the observed corpus.
 
 Run from the project root:
     PYTHONPATH=src python -m unittest discover -s tests
@@ -252,16 +265,18 @@ class Extract(unittest.TestCase):
         self.assertIsNone(sc.extract(_bundle(self.root, "issue_2")))
 
     def test_empty_patch_with_iterations_is_kept(self):
-        """The worst real bundle burned 3 rounds and produced a 0-byte patch. Dropping it
-        would delete the clearest evidence of the failure being measured."""
+        """An empty patch is a Do output — Do ran and changed nothing — not a missing one, and
+        a bundle that burned rounds to arrive there is the failure being measured, not noise.
+        Conflating the two would also corrupt ``has_patch``, which the patch correlations
+        subset on."""
         row = sc.extract(_bundle(self.root, "issue_3", patch="", rounds=3))
         self.assertIsNotNone(row)
         self.assertEqual((row.rounds, row.patch_bytes, row.patch_files), (3, 0, 0))
         self.assertEqual(row.has_patch, 1)  # an EMPTY patch, not an absent one
 
     def test_missing_patch_is_flagged_rather_than_read_as_empty(self):
-        """A mid-replan bundle has archives but no live patch; 0 bytes there means absent,
-        and averaging it against genuine zeroes would understate the association."""
+        """A mid-replan bundle has archives but no live patch; 0 bytes there means absent, and
+        ranking it against genuine zeroes would understate the association."""
         row = sc.extract(_bundle(self.root, "issue_7", patch=None, rounds=2))
         self.assertEqual((row.has_patch, row.patch_bytes), (0, 0))
 
@@ -285,12 +300,17 @@ class Extract(unittest.TestCase):
         self.assertEqual(dirty.brief_bytes, clean.brief_bytes)
         self.assertGreater(dirty.carry_forward_bytes, 500)
 
-    def test_settled_reflects_terminal_state(self):
-        """An AWAITING_SIGNOFF bundle may still iterate, so its zero archives are 'unfinished',
-        not 'converged' — the correlation must be able to exclude it."""
+    def test_an_unfinished_bundle_is_not_settled(self):
+        """A bundle short of a terminal state may still iterate, so its round count is
+        'unfinished', not 'converged'. Counting it would credit an in-flight cycle with an
+        outcome it has not earned and bias every correlation toward the calm end."""
         row = sc.extract(_bundle(self.root, "issue_10", patch="", rounds=1))
-        self.assertIn(row.settled, (0, 1))
-        self.assertEqual(row.settled, int(row.state in sc._SETTLED))
+        self.assertNotIn(row.state, sc._SETTLED)
+        self.assertEqual(row.settled, 0)
+
+    def test_an_accepted_bundle_is_settled(self):
+        row = sc.extract(_bundle(self.root, "issue_11", patch="", rounds=1, settle=True))
+        self.assertEqual((row.state, row.settled), (state.COMPLETE, 1))
 
     def test_undeclared_difficulty_ranks_zero(self):
         row = sc.extract(_bundle(self.root, "issue_5",
@@ -385,10 +405,35 @@ class AprioriBriefShim(unittest.TestCase):
         ap = sc.AprioriBrief(self.bp, "- **Slug:** demo\n")
         self.assertEqual(sc.brief.field(ap, "slug"), "demo")
 
-    def test_anything_else_delegates_to_the_real_path(self):
+    def test_the_allowlisted_metadata_delegates_to_the_real_path(self):
         self.assertEqual(self.ap.name, "brief.md")
+        self.assertEqual(self.ap.suffix, ".md")
         self.assertTrue(self.ap.is_file())
-        self.assertEqual(Path(self.ap.__fspath__()), self.bp)
+        self.assertTrue(self.ap.exists())
+
+    def test_everything_outside_the_allowlist_is_refused_loudly(self):
+        """Why an allowlist and not a blocklist: each of these hands back a real ``Path`` (or
+        the file itself), and one ``.read_text()`` later the caller has the FULL brief. There
+        are more path-returning methods than a blocklist could chase, so the default is refuse.
+        A raised error stops a run; a silently wrong predictor does not."""
+        for name in ("open", "read_bytes", "__fspath__",  # read the bytes directly
+                     "resolve", "absolute", "with_name", "parent", "expanduser"):  # hand back a Path
+            with self.subTest(name=name), self.assertRaises(AttributeError) as caught:
+                getattr(self.ap, name)
+            self.assertIn("carry-forward", str(caught.exception))
+
+    def test_the_refusal_names_the_way_out(self):
+        """A future helper hitting this needs to know what to do, not just that it failed."""
+        with self.assertRaises(AttributeError) as caught:
+            self.ap.resolve()
+        self.assertIn("read_text()", str(caught.exception))
+
+    def test_os_fspath_fails_rather_than_yielding_the_real_file(self):
+        """The implicit protocol lookup skips __getattr__, so the guard here is the ABSENCE of
+        __fspath__: `open(ap)` must raise, not quietly reopen the unnarrowed file."""
+        import os
+        with self.assertRaises(TypeError):
+            os.fspath(self.ap)
 
 
 class DifficultySummary(unittest.TestCase):
