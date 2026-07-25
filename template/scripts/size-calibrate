@@ -19,8 +19,9 @@ iterate appends an ``## Iteration N — carry-forward`` section to it
 the outcome leak into the "a priori" side — a bundle's brief is bigger *because* it churned. On
 the corpus this was written against, that inflated the brief-size correlation from 0.45 to 0.64
 and would have justified a threshold roughly 50% too high. Every brief feature here is read from
-the text ABOVE the first carry-forward heading; :func:`carry_forward_bytes` reports what was
-excluded, so the leak stays visible instead of merely handled.
+the text ABOVE the first carry-forward heading — including the ones parsed by the harness's own
+``brief``/``waves`` helpers, which is what :class:`AprioriBrief` is for; :func:`carry_forward_bytes`
+reports what was excluded, so the leak stays visible instead of merely handled.
 
 **Read-only by construction:** it opens files, and never writes into the bundle tree. The only
 path it writes is an explicit ``--csv`` destination, which is refused if it resolves inside the
@@ -152,7 +153,46 @@ def field_block(text: str, *labels: str) -> str:
     return "\n".join(out).strip()
 
 
-def value_block(brief_path: Path, text: str, *labels: str) -> str:
+class AprioriBrief:
+    """A stand-in for ``brief.md`` whose text is only the pre-iterate portion.
+
+    Every ``brief`` / ``waves`` helper reads its brief through ``Path.read_text``, so handing
+    them one of these instead of the real path makes them parse the *a priori* text while
+    keeping their own (authoritative) field semantics. That matters: those helpers supply six
+    of the features below, and read straight from disk they defeat the guard the rest of this
+    file is built around. ``brief.parse_fields`` keeps the FIRST match for a label, so the leak
+    is one-directional but real — a field the brief never declared, appearing in carry-forward,
+    flips its predictor on *because the bundle churned*. Carry-forward folds in gate evidence
+    verbatim, and that evidence can be a multi-line value (``gates`` falls back to the raw
+    ``oracle`` command, which a config may write as a TOML multi-line string), so arbitrary
+    extra bullet lines genuinely can land in the brief.
+
+    Re-parsing the fields here instead would mean a second implementation of the harness's
+    field grammar, drifting silently the first time either side changed. Anything a helper
+    reaches for other than the text delegates to the real path, so this narrows *what is
+    read* rather than reimplementing ``Path``.
+    """
+
+    def __init__(self, path: Path, text: str) -> None:
+        self._path = path
+        self._text = text
+
+    def read_text(self, *_args, **_kwargs) -> str:
+        """The a-priori text, whatever encoding arguments the caller passed."""
+        return self._text
+
+    # Implicit protocol lookups (``open()``, ``os.fspath()``) go through the type and so skip
+    # __getattr__ — spelled out here so a helper that opens the path by other means still works
+    # rather than failing obscurely. It yields the REAL file, which is why read_text above is
+    # the narrowing that matters.
+    def __fspath__(self) -> str:
+        return str(self._path)
+
+    def __getattr__(self, name: str):
+        return getattr(self._path, name)
+
+
+def value_block(brief_path: Path | AprioriBrief, text: str, *labels: str) -> str:
     """The field's value block, or ``""`` when the field is absent OR still an unfilled
     ``<…>`` placeholder.
 
@@ -227,6 +267,11 @@ class Row:
     replans: int
     auto_iters: int
     has_patch: int
+    #: The close/no-fix fast path reached Do without building anything — ``close-disposition``
+    #: is its Do artifact. Recorded so a zero-round row that never built is distinguishable
+    #: from one that built and converged, which ``has_patch`` alone leaves ambiguous against a
+    #: mid-replan bundle.
+    is_close: int
     patch_bytes: int
     patch_files: int
     carry_forward_bytes: int
@@ -249,22 +294,30 @@ def extract(d: Path) -> Row | None:
     """One :class:`Row` for bundle dir ``d``, or ``None`` if it has nothing to measure.
 
     A bundle is skipped when it has no ``brief.md`` (nothing was ever planned, so there are no
-    a-priori features) or when it never reached Do (no ``patch.diff`` and no iteration archive,
-    so there is no outcome to correlate against). Both counts are reported by the caller rather
+    a-priori features) or when it never reached Do, so there is no outcome to correlate against.
+    Reaching Do means a ``patch.diff``, an iteration archive, **or** a ``close-disposition``
+    marker: the close fast path never builds a patch, and ``state`` treats the marker as the
+    stand-in for one, so requiring a patch would drop every first-pass close and bias the corpus
+    toward the bundles that needed implementing. Both counts are reported by the caller rather
     than silently dropped — a quiet skip would make the corpus look cleaner than it is.
+
+    Brief features are read through :class:`AprioriBrief`, never the path, so no predictor can
+    see post-Do text (module docstring).
     """
     bp = d / "brief.md"
     if not bp.is_file():
         return None
     patch = d / "patch.diff"
+    closed = d / state.CLOSE_MARKER
     rounds, replans = iteration_rounds(d)
-    if not patch.is_file() and rounds == 0:
+    if not patch.is_file() and not closed.is_file() and rounds == 0:
         return None
 
     text = apriori_text(bp)
-    success = value_block(bp, text, "success criterion")
-    scope = value_block(bp, text, "scope")
-    difficulty = normalize_difficulty(brief.field(bp, "difficulty"))
+    ap = AprioriBrief(bp, text)
+    success = value_block(ap, text, "success criterion")
+    scope = value_block(ap, text, "scope")
+    difficulty = normalize_difficulty(brief.field(ap, "difficulty"))
     bundle_state = state.state(d)
     return Row(
         bundle=d.name,
@@ -275,14 +328,20 @@ def extract(d: Path) -> Row | None:
         success_clauses=_clauses(success),
         scope_words=_words(scope),
         has_out_of_scope=int("out of scope" in scope.lower()),
-        test_files=len(brief.test_files(bp)),
-        ext_deps=len(brief.external_dependency_tokens(bp)),
-        declares_prod_reach=int(bool(brief.field(bp, "production reach"))),
+        test_files=len(brief.test_files(ap)),
+        ext_deps=len(brief.external_dependency_tokens(ap)),
+        declares_prod_reach=int(bool(brief.field(ap, "production reach"))),
         # `Planning artifact:` — the plan-pointer template, whose spec lives in a host ADR /
         # proposal. NOT the design-proposal template, which the harness does not tag.
-        is_plan_pointer=int(bool(brief.planning_artifact(bp))),
-        depends_on=len(waves.declared_deps(bp)),
-        conflicts_with=len(brief.conflicts_with(bp)),
+        is_plan_pointer=int(bool(brief.planning_artifact(ap))),
+        # UNIQUE ids, not declarations. `declared_deps` concatenates `Depends on`,
+        # `Depends on (merged)` and `Stacks on` because the wave model treats all three as the
+        # same "builds after that one" edge, and the templates keep the deprecated variants as
+        # equivalents — so a migrated brief naming one prerequisite in two of them declares two
+        # rows for one edge. Counting declarations would inflate the feature on exactly the
+        # briefs most likely to be old enough to matter. Same for a repeated `Conflicts with`.
+        depends_on=len(set(waves.declared_deps(ap))),
+        conflicts_with=len(set(brief.conflicts_with(ap))),
         rounds=rounds,
         replans=replans,
         auto_iters=autoiterate.count(d),
@@ -290,6 +349,7 @@ def extract(d: Path) -> Row | None:
         # means "absent", not "empty" — the flag keeps the two apart so patch correlations can
         # exclude it rather than average a real zero against a missing one.
         has_patch=int(patch.is_file()),
+        is_close=int(closed.is_file()),
         patch_bytes=patch.stat().st_size if patch.is_file() else 0,
         patch_files=len(waves.diff_files(patch)),
         carry_forward_bytes=carry_forward_bytes(bp),
@@ -432,6 +492,15 @@ def render(all_rows: list[Row], skipped: int) -> str:
     out.append(f"Carry-forward text excluded from every brief feature in {leaked} of "
                f"{len(rows)} briefs (it is written after Do, so measuring it would leak the "
                f"outcome into the predictor).")
+    closes = sum(1 for r in rows if r.is_close)
+    if closes:
+        # Included on purpose — a close is a real settled outcome and the detector would see
+        # those briefs too — but said out loud, because a close never built and so contributes
+        # a zero-round row that no amount of slice size could have made worse. A reader
+        # comparing the converged population to the churned one needs to be able to net it out.
+        out.append(f"{closes} of those took the close/no-fix fast path: settled at 0 rounds "
+                   "with no patch, counted as converged. They are in the rounds correlation "
+                   "(a real outcome) and out of the patch ones (nothing was built).")
     replanned = [r for r in rows if r.replans]
     if replanned:
         # Say this out loud rather than leaving it in a docstring: a reader who sees only the

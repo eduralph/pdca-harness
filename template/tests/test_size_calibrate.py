@@ -27,6 +27,8 @@ from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
 
+from pdca_harness import state
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "size-calibrate"
 
 # The script is deliberately extensionless (it is a CLI, not an importable module), so a plain
@@ -58,7 +60,7 @@ Draft only until Check sign-off.
 
 
 def _bundle(root: Path, name: str, *, brief: str | None = BRIEF.format(difficulty="high"),
-            patch: str | None = None, rounds: int = 0) -> Path:
+            patch: str | None = None, rounds: int = 0, close: str | None = None) -> Path:
     """A bundle dir on disk with only the pieces a test needs."""
     d = root / name
     d.mkdir(parents=True)
@@ -66,6 +68,8 @@ def _bundle(root: Path, name: str, *, brief: str | None = BRIEF.format(difficult
         (d / "brief.md").write_text(brief, encoding="utf-8")
     if patch is not None:
         (d / "patch.diff").write_text(patch, encoding="utf-8")
+    if close is not None:
+        (d / state.CLOSE_MARKER).write_text(close + "\n", encoding="utf-8")
     for n in range(1, rounds + 1):
         (d / f"iteration-v{n}").mkdir()
     return d
@@ -234,6 +238,8 @@ class Extract(unittest.TestCase):
         self.assertIsNone(sc.extract(_bundle(self.root, "issue_1", brief=None, patch="")))
 
     def test_bundle_that_never_reached_do_is_skipped(self):
+        """Do is reached by a patch, an iteration archive, or a close marker. This bundle has
+        none of the three, so it has no outcome to correlate against."""
         self.assertIsNone(sc.extract(_bundle(self.root, "issue_2")))
 
     def test_empty_patch_with_iterations_is_kept(self):
@@ -288,6 +294,92 @@ class Extract(unittest.TestCase):
                  "diff --git a/src/b.rs b/src/b.rs\n--- a/src/b.rs\n+++ b/src/b.rs\n")
         row = sc.extract(_bundle(self.root, "issue_6", patch=patch))
         self.assertEqual(row.patch_files, 2)
+
+    def test_a_first_pass_close_reached_do_and_is_kept(self):
+        """``close-disposition`` IS the close path's Do artifact — ``state`` reads it as past
+        Do. Requiring a patch would drop every first-pass close and bias the corpus toward the
+        bundles that needed implementing, dropping valid zero-round outcomes."""
+        row = sc.extract(_bundle(self.root, "issue_11", patch=None, close="wont-fix"))
+        self.assertIsNotNone(row)
+        self.assertEqual((row.rounds, row.has_patch, row.is_close), (0, 0, 1))
+
+    def test_a_patched_bundle_is_not_flagged_as_a_close(self):
+        self.assertEqual(sc.extract(_bundle(self.root, "issue_13", patch="")).is_close, 0)
+
+    def test_carry_forward_cannot_declare_a_field_the_brief_never_did(self):
+        """The leakage guard where it actually bites: the harness's own field parsers read the
+        file, so an absent field appearing in appended gate evidence would switch its predictor
+        ON *because the bundle churned*. Carry-forward folds gate evidence in verbatim and that
+        evidence can be a multi-line value, so stray bullets genuinely reach the brief."""
+        d = _bundle(self.root, "issue_14", patch="", rounds=1)
+        with (d / "brief.md").open("a", encoding="utf-8") as fh:
+            fh.write("\n## Iteration 1 — carry-forward (from the previous attempt)\n"
+                     "- Failing gate: contract build — check the shape below\n"
+                     "- **Production reach:** the payment path\n"
+                     "- **Depends on:** 42, 43\n"
+                     "- **Planning artifact:** docs/adr/0009.md\n"
+                     "- **Test file:** tests/test_leaked.py\n"
+                     "- **External dependencies:** `protoc`\n"
+                     "- **Conflicts with:** 99\n")
+        row = sc.extract(d)
+        self.assertEqual(
+            (row.declares_prod_reach, row.depends_on, row.is_plan_pointer,
+             row.ext_deps, row.conflicts_with),
+            (0, 0, 0, 0, 0))
+        self.assertEqual(row.test_files, 1)  # the brief's own, not the appended one
+
+    def test_fields_declared_above_the_carry_forward_are_still_read(self):
+        """The guard narrows what is read; it must not blind the parsers to the real brief."""
+        body = BRIEF.format(difficulty="high") + (
+            "- **Production reach:** the payment path\n"
+            "- **Depends on:** 42\n"
+            "- **Planning artifact:** docs/adr/0009.md\n")
+        d = _bundle(self.root, "issue_15", brief=body, patch="", rounds=1)
+        with (d / "brief.md").open("a", encoding="utf-8") as fh:
+            fh.write("\n## Iteration 1 — carry-forward (from the previous attempt)\n- x\n")
+        row = sc.extract(d)
+        self.assertEqual(
+            (row.declares_prod_reach, row.depends_on, row.is_plan_pointer), (1, 1, 1))
+
+    def test_one_prerequisite_named_in_two_dependency_fields_counts_once(self):
+        """``waves.declared_deps`` concatenates the three fields because the wave model treats
+        them as one edge, and the templates keep the deprecated variants as equivalents — so a
+        migrated brief declares the same edge twice. Counting declarations would inflate the
+        predictor on exactly those briefs."""
+        body = BRIEF.format(difficulty="high") + (
+            "- **Depends on:** #5\n"
+            "- **Depends on (merged):** issue_5\n"
+            "- **Stacks on:** 5, 6\n"
+            "- **Conflicts with:** 9, 9\n")
+        row = sc.extract(_bundle(self.root, "issue_16", brief=body, patch=""))
+        self.assertEqual(row.depends_on, 2)  # {5, 6} — one edge each, however often named
+        self.assertEqual(row.conflicts_with, 1)
+
+
+class AprioriBriefShim(unittest.TestCase):
+    """Why a shim rather than a second field parser: the harness's grammar stays the only one."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.bp = Path(self.tmp.name) / "brief.md"
+        self.bp.write_text("on disk", encoding="utf-8")
+        self.ap = sc.AprioriBrief(self.bp, "a priori only")
+
+    def test_read_text_yields_the_apriori_text_whatever_arguments_are_passed(self):
+        self.assertEqual(self.ap.read_text(), "a priori only")
+        self.assertEqual(self.ap.read_text(encoding="utf-8", errors="replace"),
+                         "a priori only")
+
+    def test_harness_parsers_see_the_apriori_text(self):
+        """sc.brief is the harness module the script itself hands these to."""
+        ap = sc.AprioriBrief(self.bp, "- **Slug:** demo\n")
+        self.assertEqual(sc.brief.field(ap, "slug"), "demo")
+
+    def test_anything_else_delegates_to_the_real_path(self):
+        self.assertEqual(self.ap.name, "brief.md")
+        self.assertTrue(self.ap.is_file())
+        self.assertEqual(Path(self.ap.__fspath__()), self.bp)
 
 
 class Spearman(unittest.TestCase):
