@@ -1,0 +1,623 @@
+#!/usr/bin/env python3
+"""Slice-size calibration miner (issue #318) — join each bundle's *a priori* brief features
+to its *observed* outcome, so a size threshold can be set from evidence instead of taste.
+
+The failure this measures: the larger the functional scope declared in an issue, the longer Do
+runs and the less Check converges — the reviewer keeps finding implementation defects,
+auto-iterate burns its rounds, and the bundle never stabilises. The cost is paid AFTER Do has
+already run. A detector that holds an oversized slice at Plan exit is the fix, but its cutoffs
+are only as good as the data behind them; guessing them would make the whole feature folklore.
+
+So this script decides nothing and changes nothing. It emits one row per bundle — structural
+features read from ``brief.md`` on the left, recorded outcomes on the right — plus a rank
+correlation of each feature against rounds-to-converge. What survives that correlation is what
+the follow-up detector is entitled to weight.
+
+**Outcome leakage is the trap this file exists to avoid.** A brief is not immutable: every
+iterate appends an ``## Iteration N — carry-forward`` section to it
+(``driver._carry_forward_into_brief``). Measuring the brief as it sits on disk therefore lets
+the outcome leak into the "a priori" side — a bundle's brief is bigger *because* it churned. On
+the corpus this was written against, that inflated the brief-size correlation from 0.45 to 0.64
+and would have justified a threshold roughly 50% too high. Every brief feature here is read from
+the text ABOVE the first carry-forward heading — including the ones parsed by the harness's own
+``brief``/``waves`` helpers, which is what :class:`AprioriBrief` is for; :func:`carry_forward_bytes`
+reports what was excluded, so the leak stays visible instead of merely handled.
+
+**Read-only by construction:** it opens files, and never writes into the bundle tree. The only
+path it writes is an explicit ``--csv`` destination, which is refused if it resolves inside the
+bundle root.
+
+Usage::
+
+    PYTHONPATH=src scripts/size-calibrate                 # human summary to stdout
+    PYTHONPATH=src scripts/size-calibrate --csv out.csv   # summary + the per-bundle table
+    PYTHONPATH=src scripts/size-calibrate --root ../other-instance
+
+Run it from an instance (anywhere under the directory holding ``pdca.toml``); ``--root`` points
+it at a different one. ``PYTHONPATH`` must include the harness ``src/``.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import re
+import statistics
+import sys
+from dataclasses import asdict, dataclass, fields as dataclass_fields
+from pathlib import Path
+
+try:
+    from pdca_harness import autoiterate, brief, state, waves
+    from pdca_harness.config import Config
+except ImportError as exc:  # pragma: no cover - environment error, not logic
+    sys.exit(f"size-calibrate: cannot import pdca_harness ({exc}).\n"
+             "Run with the harness on PYTHONPATH, e.g. "
+             "`PYTHONPATH=src scripts/size-calibrate`.")
+
+# Mirrors brief._FIELD_RE exactly — including the ``-\s*`` that admits the compact
+# ``-**Label:**`` form. Diverging would make a field that brief.field() reads as PRESENT come
+# back from field_block() as empty, i.e. silently score as zero-length rather than absent.
+_FIELD_START = re.compile(r"^\s*-\s*\*{0,2}([^:*]+?)\*{0,2}:\*{0,2}\s*(.*?)\s*$")
+# A markdown heading needs the space: a continuation line may legitimately open with an issue
+# reference like ``#318``, which a bare ``^#`` test would mistake for a section break.
+_HEADING = re.compile(r"^\s*#{1,6}\s")
+#: Where the driver's iterate carry-forward begins. Everything from here down is written AFTER
+#: Do ran, so it is outcome, not input — see the module docstring.
+_CARRY_FORWARD = re.compile(r"^##\s+Iteration\s+\d+\s+.*carry-forward", re.MULTILINE)
+_ITERATION_DIR = re.compile(r"^iteration-v(\d+)$")
+# Clause separators that suggest a field enumerates several independent things rather than
+# stating one. Deliberately crude — the correlation decides whether it carries signal.
+_CLAUSE_SEP = re.compile(r";|\band\b|\bplus\b|\bas well as\b", re.IGNORECASE)
+
+#: How a ``Difficulty`` value is read, in precedence order. The field is prose in practice —
+#: "high — the widest-surface m4 slice: …" — so an equality test scores nearly every real brief
+#: as unset. The engine never equality-matches it either: ``leaves._when_matches`` does a
+#: case-insensitive SUBSTRING test, and the opus auto-route is configured
+#: ``substring = ["high", "hard"]``. Mirroring that is what makes this column describe the
+#: routing the harness actually performs rather than a stricter one nobody wrote.
+#: Highest band wins on a value naming more than one, so a brief that hedges is not scored
+#: down — the same direction of caution the routing takes.
+_DIFFICULTY_BANDS = (("high", ("high", "hard")),
+                     ("medium", ("medium", "moderate")),
+                     ("low", ("low", "easy", "trivial")))
+
+#: Ordinal form of the bands above; an undeclared difficulty maps to 0, a sentinel that is
+#: filtered out rather than treated as "below low".
+_DIFFICULTY_RANK = {"low": 1, "medium": 2, "high": 3}
+
+#: States in which a bundle's outcome is final. ``AWAITING_SIGNOFF`` is deliberately excluded
+#: even though it is a halted state: the human may still choose iterate-to-Do, so counting its
+#: zero archives as "converged" would credit an unfinished cycle with an outcome it has not
+#: earned and bias every correlation toward the calm end.
+_SETTLED = frozenset({state.COMPLETE, state.DISCONTINUED, state.RESOLVED})
+
+
+def normalize_difficulty(raw: str) -> str:
+    """The declared difficulty band, or ``""`` when the brief names none.
+
+    See :data:`_DIFFICULTY_BANDS` for why this is a substring test rather than equality.
+    """
+    value = raw.lower()
+    for band, needles in _DIFFICULTY_BANDS:
+        if any(n in value for n in needles):
+            return band
+    return ""
+
+
+def apriori_text(brief_path: Path) -> str:
+    """The brief as it stood BEFORE any iterate — everything above the first carry-forward
+    heading. This is the only text a brief feature may be measured from (module docstring)."""
+    text = brief_path.read_text(encoding="utf-8", errors="replace")
+    m = _CARRY_FORWARD.search(text)
+    # rstrip: the append begins with its own newline, which would otherwise land on this side
+    # of the split and make brief_bytes depend on whether an iterate happened — a one-byte
+    # version of exactly the leakage this function exists to prevent.
+    return (text[:m.start()] if m else text).rstrip()
+
+
+def carry_forward_bytes(brief_path: Path) -> int:
+    """Bytes of appended carry-forward — the outcome-dependent text excluded from every brief
+    feature. Reported as its own column so the leakage is auditable rather than invisible."""
+    text = brief_path.read_text(encoding="utf-8", errors="replace")
+    m = _CARRY_FORWARD.search(text)
+    return len(text[m.start():].encode("utf-8")) if m else 0
+
+
+def field_block(text: str, *labels: str) -> str:
+    """The full VALUE of the first field matching ``labels`` — its own line plus any indented
+    continuation lines — or ``""``.
+
+    Two things this must not do. It must not return the label or its ``- **…:**`` markup, or
+    every word count silently measures boilerplate that is identical across briefs. And it must
+    not run on past the field: continuation membership is defined by INDENTATION, so the block
+    ends at the first unindented line. Without that, a field near the end of a brief swallows
+    whatever prose follows it.
+    """
+    wanted = {label.lower() for label in labels}
+    out: list[str] = []
+    capturing = False
+    for line in text.splitlines():
+        m = _FIELD_START.match(line)
+        if m:
+            if capturing:
+                break  # the next field starts — this block is done
+            if m.group(1).strip().lower() in wanted:
+                capturing = True
+                out.append(m.group(2))  # the value only, never the label
+            continue
+        if not capturing:
+            continue
+        if _HEADING.match(line) or (line.strip() and not line[:1].isspace()):
+            break  # a heading, or unindented prose: no longer this field's value
+        out.append(line.strip())
+    return "\n".join(out).strip()
+
+
+class AprioriBrief:
+    """A stand-in for ``brief.md`` whose text is only the pre-iterate portion.
+
+    Every ``brief`` / ``waves`` helper reads its brief through ``Path.read_text``, so handing
+    them one of these instead of the real path makes them parse the *a priori* text while
+    keeping their own (authoritative) field semantics. That matters: those helpers supply six
+    of the features below, and read straight from disk they defeat the guard the rest of this
+    file is built around. ``brief.parse_fields`` keeps the FIRST match for a label, so the leak
+    is one-directional but real — a field the brief never declared, appearing in carry-forward,
+    flips its predictor on *because the bundle churned*. Carry-forward folds in gate evidence
+    verbatim, and that evidence can be a multi-line value (``gates`` falls back to the raw
+    ``oracle`` command, which a config may write as a TOML multi-line string), so arbitrary
+    extra bullet lines genuinely can land in the brief.
+
+    Re-parsing the fields here instead would mean a second implementation of the harness's
+    field grammar, drifting silently the first time either side changed. Anything a helper
+    reaches for other than the text delegates to the real path, so this narrows *what is
+    read* rather than reimplementing ``Path``.
+    """
+
+    def __init__(self, path: Path, text: str) -> None:
+        self._path = path
+        self._text = text
+
+    def read_text(self, *_args, **_kwargs) -> str:
+        """The a-priori text, whatever encoding arguments the caller passed."""
+        return self._text
+
+    # Implicit protocol lookups (``open()``, ``os.fspath()``) go through the type and so skip
+    # __getattr__ — spelled out here so a helper that opens the path by other means still works
+    # rather than failing obscurely. It yields the REAL file, which is why read_text above is
+    # the narrowing that matters.
+    def __fspath__(self) -> str:
+        return str(self._path)
+
+    def __getattr__(self, name: str):
+        return getattr(self._path, name)
+
+
+def value_block(brief_path: Path | AprioriBrief, text: str, *labels: str) -> str:
+    """The field's value block, or ``""`` when the field is absent OR still an unfilled
+    ``<…>`` placeholder.
+
+    Presence is delegated to :func:`brief.field` so placeholder semantics match the rest of the
+    harness exactly — otherwise an untouched template would score as a long, richly-specified
+    field and drag every median toward the verbose end. :func:`field_block` stays pure (text in,
+    text out) so it can be tested without a bundle on disk.
+    """
+    if not any(brief.field(brief_path, label) for label in labels):
+        return ""
+    return field_block(text, *labels)
+
+
+def _words(text: str) -> int:
+    return len(text.split())
+
+
+def _clauses(block: str) -> int:
+    """Independent-looking clauses in a field value: separators + 1, or 0 when absent.
+
+    Counting bare separators would make a single-clause criterion (0 separators)
+    indistinguishable from a field that is not there at all."""
+    return _CLAUSE_SEP.subn("", block)[1] + 1 if block.strip() else 0
+
+
+def iteration_rounds(d: Path) -> tuple[int, int]:
+    """``(rounds attributable to the current brief, replan count)``.
+
+    An iterate-to-**Do** archives the attempt and keeps the brief; an iterate-to-**Plan**
+    archives the brief too (``driver._archive_iteration(include_brief=True)``) and the bundle is
+    re-planned from scratch. So an archive containing a ``brief.md`` marks a boundary: rounds
+    before it were spent on a DIFFERENT brief and must not be charged to the one on disk now.
+    Counting every archive would attribute a predecessor's churn to a brief that never caused it.
+    """
+    archives = []
+    for a in d.glob("iteration-v*"):
+        m = _ITERATION_DIR.match(a.name)
+        if m and a.is_dir():
+            archives.append((int(m.group(1)), a))
+    replans = [n for n, a in archives if (a / "brief.md").is_file()]
+    boundary = max(replans, default=0)
+    return sum(1 for n, _ in archives if n > boundary), len(replans)
+
+
+@dataclass(frozen=True)
+class Row:
+    """One bundle: structural features from the brief, then the recorded outcome.
+
+    Field ORDER is the CSV column order, and the split between the two halves is what the
+    correlation reads — see :data:`FEATURES` and :data:`OUTCOMES`.
+    """
+
+    bundle: str
+    # --- a priori: read from the pre-iterate brief, knowable before Do runs ----------
+    difficulty: str
+    #: ``difficulty`` as an ordinal, 0 when the brief declares none. The 0 is a sentinel, not
+    #: a rank below "low", so it is filtered out before correlating (see :func:`render`).
+    difficulty_rank: int
+    brief_bytes: int
+    success_words: int
+    success_clauses: int
+    scope_words: int
+    has_out_of_scope: int
+    test_files: int
+    ext_deps: int
+    declares_prod_reach: int
+    is_plan_pointer: int
+    depends_on: int
+    conflicts_with: int
+    # --- observed: what the cycle actually cost -------------------------------------
+    rounds: int
+    replans: int
+    auto_iters: int
+    has_patch: int
+    #: The close/no-fix fast path reached Do without building anything — ``close-disposition``
+    #: is its Do artifact. Recorded so a zero-round row that never built is distinguishable
+    #: from one that built and converged, which ``has_patch`` alone leaves ambiguous against a
+    #: mid-replan bundle.
+    is_close: int
+    patch_bytes: int
+    patch_files: int
+    carry_forward_bytes: int
+    state: str
+    settled: int
+
+
+#: Numeric a-priori columns, correlated against each outcome. ``difficulty`` is ordinal text
+#: and is scored separately (see :func:`difficulty_summary`).
+FEATURES = ("brief_bytes", "success_words", "success_clauses", "scope_words",
+            "has_out_of_scope", "test_files", "ext_deps", "declares_prod_reach",
+            "is_plan_pointer", "depends_on", "conflicts_with")
+
+#: Outcome columns. ``rounds`` is the headline — it is the thing that actually hurts — but
+#: patch size is reported too, since the two can disagree and that disagreement is a finding.
+OUTCOMES = ("rounds", "patch_bytes", "patch_files")
+
+
+def extract(d: Path) -> Row | None:
+    """One :class:`Row` for bundle dir ``d``, or ``None`` if it has nothing to measure.
+
+    A bundle is skipped when it has no ``brief.md`` (nothing was ever planned, so there are no
+    a-priori features) or when it never reached Do, so there is no outcome to correlate against.
+    Reaching Do means a ``patch.diff``, an iteration archive, **or** a ``close-disposition``
+    marker: the close fast path never builds a patch, and ``state`` treats the marker as the
+    stand-in for one, so requiring a patch would drop every first-pass close and bias the corpus
+    toward the bundles that needed implementing. Both counts are reported by the caller rather
+    than silently dropped — a quiet skip would make the corpus look cleaner than it is.
+
+    Brief features are read through :class:`AprioriBrief`, never the path, so no predictor can
+    see post-Do text (module docstring).
+    """
+    bp = d / "brief.md"
+    if not bp.is_file():
+        return None
+    patch = d / "patch.diff"
+    closed = d / state.CLOSE_MARKER
+    rounds, replans = iteration_rounds(d)
+    if not patch.is_file() and not closed.is_file() and rounds == 0:
+        return None
+
+    text = apriori_text(bp)
+    ap = AprioriBrief(bp, text)
+    success = value_block(ap, text, "success criterion")
+    scope = value_block(ap, text, "scope")
+    difficulty = normalize_difficulty(brief.field(ap, "difficulty"))
+    bundle_state = state.state(d)
+    return Row(
+        bundle=d.name,
+        difficulty=difficulty,
+        difficulty_rank=_DIFFICULTY_RANK.get(difficulty, 0),
+        brief_bytes=len(text.encode("utf-8")),
+        success_words=_words(success),
+        success_clauses=_clauses(success),
+        scope_words=_words(scope),
+        has_out_of_scope=int("out of scope" in scope.lower()),
+        test_files=len(brief.test_files(ap)),
+        ext_deps=len(brief.external_dependency_tokens(ap)),
+        declares_prod_reach=int(bool(brief.field(ap, "production reach"))),
+        # `Planning artifact:` — the plan-pointer template, whose spec lives in a host ADR /
+        # proposal. NOT the design-proposal template, which the harness does not tag.
+        is_plan_pointer=int(bool(brief.planning_artifact(ap))),
+        # UNIQUE ids, not declarations. `declared_deps` concatenates `Depends on`,
+        # `Depends on (merged)` and `Stacks on` because the wave model treats all three as the
+        # same "builds after that one" edge, and the templates keep the deprecated variants as
+        # equivalents — so a migrated brief naming one prerequisite in two of them declares two
+        # rows for one edge. Counting declarations would inflate the feature on exactly the
+        # briefs most likely to be old enough to matter. Same for a repeated `Conflicts with`.
+        depends_on=len(set(waves.declared_deps(ap))),
+        conflicts_with=len(set(brief.conflicts_with(ap))),
+        rounds=rounds,
+        replans=replans,
+        auto_iters=autoiterate.count(d),
+        # A bundle mid-replan has archives but no live patch. Its patch columns read 0, which
+        # means "absent", not "empty" — the flag keeps the two apart so patch correlations can
+        # exclude it rather than average a real zero against a missing one.
+        has_patch=int(patch.is_file()),
+        is_close=int(closed.is_file()),
+        patch_bytes=patch.stat().st_size if patch.is_file() else 0,
+        patch_files=len(waves.diff_files(patch)),
+        carry_forward_bytes=carry_forward_bytes(bp),
+        state=bundle_state,
+        settled=int(bundle_state in _SETTLED),
+    )
+
+
+def scan(cfg: Config) -> tuple[list[Row], int]:
+    """Every measurable bundle under ``cfg.bundle_root``, plus the count skipped.
+
+    Archived bundles under ``completed/`` are included: a frozen cycle is exactly the kind of
+    finished evidence this is trying to learn from.
+    """
+    roots = [cfg.bundle_root, cfg.bundle_root / "completed"]
+    dirs = sorted({d for r in roots if r.is_dir() for d in r.glob("issue_*") if d.is_dir()},
+                  key=lambda p: p.name)
+    rows = [r for r in (extract(d) for d in dirs) if r is not None]
+    return rows, len(dirs) - len(rows)
+
+
+# ----------------------------------------------------------------------------
+# Correlation. Stdlib only — the harness has no runtime dependencies and this script
+# must not be the thing that introduces one.
+# ----------------------------------------------------------------------------
+def _ranks(values: list[float]) -> list[float]:
+    """Fractional ranks, ties averaged — the tie handling Spearman requires.
+
+    Ties are the common case here (a column like ``has_out_of_scope`` is all 0s and 1s), so
+    naive ordinal ranking would systematically distort exactly the features most likely to
+    matter."""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    out = [0.0] * len(values)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        shared = (i + j) / 2 + 1  # 1-based average rank across the tied run
+        for k in range(i, j + 1):
+            out[order[k]] = shared
+        i = j + 1
+    return out
+
+
+def _pearson(xs: list[float], ys: list[float]) -> float | None:
+    """Pearson r, or ``None`` when it is undefined (fewer than 2 points, or no variance)."""
+    n = len(xs)
+    if n < 2:
+        return None
+    mx, my = statistics.fmean(xs), statistics.fmean(ys)
+    dx = [x - mx for x in xs]
+    dy = [y - my for y in ys]
+    denom = (sum(v * v for v in dx) ** 0.5) * (sum(v * v for v in dy) ** 0.5)
+    if denom == 0:
+        return None  # a constant column correlates with nothing
+    return sum(a * b for a, b in zip(dx, dy)) / denom
+
+
+def spearman(xs: list[float], ys: list[float]) -> float | None:
+    """Spearman's rho — Pearson over fractional ranks.
+
+    Rank correlation rather than Pearson on the raw values because these distributions are
+    heavily skewed (a handful of enormous patches, a long tail of small ones) and monotonic
+    association is all the detector needs: it thresholds, it does not extrapolate.
+    """
+    return _pearson(_ranks(xs), _ranks(ys))
+
+
+def _correlate(rows: list[Row], feature: str) -> list[float | None]:
+    """Spearman rho of ``feature`` against each of :data:`OUTCOMES`, in order.
+
+    Patch outcomes are scored only over bundles that HAVE a patch: a mid-replan bundle records
+    0 bytes meaning "absent", and averaging that against genuine zeroes would understate the
+    association."""
+    out: list[float | None] = []
+    for outcome in OUTCOMES:
+        subset = rows if outcome == "rounds" else [r for r in rows if r.has_patch]
+        xs = [float(getattr(r, feature)) for r in subset]
+        out.append(spearman(xs, [float(getattr(r, outcome)) for r in subset]))
+    return out
+
+
+def _cells(cors: list[float | None]) -> str:
+    """Correlation row body; an undefined rho prints ``n/a`` rather than a misleading 0.00."""
+    return "".join(f"{c:>11.2f}" if c is not None else f"{'n/a':>11}" for c in cors)
+
+
+def difficulty_summary(rows: list[Row]) -> list[tuple[str, int, float, int, float | None]]:
+    """``(difficulty, n, median rounds, n with a patch, median patch KB or None)`` per band.
+
+    Reported separately from :data:`FEATURES` because ``Difficulty`` is the brief's own
+    self-rating: if it already predicts churn, much of the detector is already written and the
+    honest finding is "enforce the field you have", not "add a new signal".
+
+    The patch median is over the bundles that HAVE a patch, and is ``None`` — not 0.0 — when
+    none do. A close/no-fix bundle and a mid-replan one both record ``patch_bytes = 0`` meaning
+    *absent*; medianing those would report a 0.0 KB patch as though it had been observed, which
+    is the one direction this table must never fail in (it invents a small median for the band
+    a detector is most likely to be calibrated against). The patched count is returned
+    alongside ``n`` so a mixed band shows how much of it the median actually rests on.
+    """
+    out = []
+    for band in ("low", "medium", "high", ""):
+        group = [r for r in rows if r.difficulty == band]
+        if not group:
+            continue
+        patched = [r for r in group if r.has_patch]
+        out.append((band or "(unset)", len(group),
+                    statistics.median(r.rounds for r in group), len(patched),
+                    statistics.median(r.patch_bytes for r in patched) / 1024
+                    if patched else None))
+    return out
+
+
+def churn_split(rows: list[Row], feature: str) -> tuple[float, float] | None:
+    """Median ``feature`` for converged (0 rounds) vs. churned (>=3 rounds) bundles.
+
+    The rank correlation answers "does this feature move with churn"; this answers "by how
+    much, in the units a human sets a threshold in". Both are needed — a real but tiny
+    separation is not a threshold you can act on.
+    """
+    calm = [getattr(r, feature) for r in rows if r.rounds == 0]
+    churn = [getattr(r, feature) for r in rows if r.rounds >= 3]
+    if not calm or not churn:
+        return None
+    return statistics.median(calm), statistics.median(churn)
+
+
+def render(all_rows: list[Row], skipped: int) -> str:
+    """The human summary — what correlates, how strongly, and with what separation."""
+    if not all_rows:
+        return "size-calibrate: no measurable bundles found.\n"
+    # Only settled bundles carry a final outcome; an unsettled one may still iterate, so its
+    # zero archives are "not finished yet", not "converged".
+    rows = [r for r in all_rows if r.settled]
+    unsettled = len(all_rows) - len(rows)
+    if not rows:
+        return (f"size-calibrate: {len(all_rows)} measurable bundles, none settled "
+                "(COMPLETE/DISCONTINUED/RESOLVED) — no final outcomes to correlate.\n")
+
+    out: list[str] = []
+    churned = sum(1 for r in rows if r.rounds >= 3)
+    leaked = sum(1 for r in rows if r.carry_forward_bytes)
+    out.append(f"Corpus: {len(rows)} settled bundles ({skipped} skipped: no brief, or never "
+               f"reached Do; {unsettled} excluded as still in flight). {churned} churned "
+               f"(>=3 rounds on the current brief).")
+    out.append(f"Carry-forward text excluded from every brief feature in {leaked} of "
+               f"{len(rows)} briefs (it is written after Do, so measuring it would leak the "
+               f"outcome into the predictor).")
+    closes = sum(1 for r in rows if r.is_close)
+    if closes:
+        # Included on purpose — a close is a real settled outcome and the detector would see
+        # those briefs too — but said out loud, because a close never built and so contributes
+        # a zero-round row that no amount of slice size could have made worse. A reader
+        # comparing the converged population to the churned one needs to be able to net it out.
+        out.append(f"{closes} of those took the close/no-fix fast path: settled at 0 rounds "
+                   "with no patch, counted as converged. They are in the rounds correlation "
+                   "(a real outcome) and out of the patch ones (nothing was built).")
+    replanned = [r for r in rows if r.replans]
+    if replanned:
+        # Say this out loud rather than leaving it in a docstring: a reader who sees only the
+        # churn count would not know that some of the corpus's worst churn has been charged to
+        # briefs that are no longer on disk, and would read the association as weaker than the
+        # underlying process really is.
+        out.append(
+            f"{len(replanned)} bundle(s) were re-planned ({sum(r.replans for r in replanned)} "
+            "replan(s) total). Rounds spent before a replan belong to a brief that was archived "
+            "and replaced, so they are NOT charged to the brief measured here — those bundles "
+            "can show few rounds despite a costly history. Mining the archived "
+            "iteration-v*/brief.md as its own data point would recover them; this run does not.")
+
+    out.append("\nRank correlation (Spearman rho) of each a-priori feature vs. outcome:")
+    out.append(f"  {'feature':<22} {'vs rounds':>10} {'vs patch B':>11} {'vs files':>9}")
+    scored = [(feat, _correlate(rows, feat)) for feat in FEATURES]
+    # Strongest association with rounds first — that is the outcome the detector exists to
+    # prevent, so it decides the reading order.
+    scored.sort(key=lambda s: abs(s[1][0]) if s[1][0] is not None else -1, reverse=True)
+    for feat, cors in scored:
+        out.append(f"  {feat:<22}{_cells(cors)}")
+    # Difficulty is scored over the DECLARING subset only: its 0 means "undeclared", so
+    # including those rows would rank an absent field below "low" and quietly flatter the
+    # feature that competes most directly with everything above.
+    declared = [r for r in rows if r.difficulty_rank]
+    out.append(f"  {'difficulty_rank*':<22}{_cells(_correlate(declared, 'difficulty_rank'))}")
+    out.append(f"  * declared only — {len(declared)} of {len(rows)} bundles set the field.")
+
+    out.append("\nMedian feature value, converged (0 rounds) vs. churned (>=3 rounds):")
+    for feat, _ in scored:
+        split = churn_split(rows, feat)
+        if split is None:
+            out.append(f"  {feat:<22} n/a (one of the two groups is empty)")
+            continue
+        calm, churn = split
+        out.append(f"  {feat:<22} {calm:>10.1f} -> {churn:>10.1f}")
+
+    out.append("\nDeclared Difficulty vs. what it cost:")
+    out.append(f"  {'difficulty':<12} {'n':>4} {'med rounds':>11} {'patched':>8} "
+               f"{'med patch KB':>13}")
+    for band, n, med_rounds, n_patched, med_kb in difficulty_summary(rows):
+        kb = f"{med_kb:>13.1f}" if med_kb is not None else f"{'n/a':>13}"
+        out.append(f"  {band:<12} {n:>4} {med_rounds:>11.1f} {n_patched:>8} {kb}")
+
+    worst = sorted(rows, key=lambda r: (-r.rounds, -r.patch_bytes))[:10]
+    out.append("\nWorst-converging bundles:")
+    out.append(f"  {'bundle':<18} {'rounds':>7} {'patch KB':>9} {'files':>6}  difficulty")
+    for r in worst:
+        # Same rule as the band table: no patch means no patch size, so neither column
+        # invents one. A settled row without a patch is a close bundle (nothing else survives
+        # `state`'s patch-or-marker test), which surfaces here whenever fewer than ten bundles
+        # burned a round — exactly the small corpus where a fabricated "0.0 KB / 0 files"
+        # reads as a measurement.
+        kb = f"{r.patch_bytes / 1024:>9.1f}" if r.has_patch else f"{'n/a':>9}"
+        files = f"{r.patch_files:>6}" if r.has_patch else f"{'n/a':>6}"
+        out.append(f"  {r.bundle:<18} {r.rounds:>7} {kb} "
+                   f"{files}  {r.difficulty or '(unset)'}")
+    return "\n".join(out) + "\n"
+
+
+def write_csv(rows: list[Row], dest: Path) -> None:
+    """The full per-bundle table — the artifact a threshold is actually argued from."""
+    cols = [f.name for f in dataclass_fields(Row)]
+    with dest.open("w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=cols)
+        w.writeheader()
+        for r in rows:
+            w.writerow(asdict(r))
+
+
+def _checked_csv_dest(dest: Path, bundle_root: Path) -> Path:
+    """``dest`` resolved, or exit — a destination inside the bundle tree is refused.
+
+    The read-only guarantee is the reason this script can be pointed at a live corpus without
+    ceremony. ``--csv results/issue_42/brief.md`` would quietly break it, so the one write path
+    is checked rather than trusted. ``resolve()`` also collapses ``..`` and follows symlinks, so
+    neither is a way around it.
+    """
+    resolved = dest.resolve()
+    root = bundle_root.resolve()
+    if resolved == root or root in resolved.parents:
+        sys.exit(f"size-calibrate: refusing to write inside the bundle tree ({root}) — "
+                 "this miner is read-only; choose a --csv path outside it.")
+    return resolved
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Mine the bundle corpus for what predicts a non-converging slice (#318).")
+    ap.add_argument("--root", type=Path, default=None,
+                    help="instance root (a dir holding pdca.toml); default: discovered from cwd")
+    ap.add_argument("--csv", type=Path, default=None,
+                    help="also write the full per-bundle table here (must be outside the "
+                         "bundle root)")
+    args = ap.parse_args(argv)
+
+    try:
+        cfg = Config.load(args.root)
+    except (OSError, ValueError) as exc:
+        sys.exit(f"size-calibrate: cannot load pdca.toml ({exc})")
+
+    dest = _checked_csv_dest(args.csv, cfg.bundle_root) if args.csv else None
+    rows, skipped = scan(cfg)
+    sys.stdout.write(render(rows, skipped))
+    if dest:
+        write_csv(rows, dest)
+        print(f"\nWrote {len(rows)} rows to {dest}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
