@@ -169,8 +169,6 @@ class SummarySpecFields(unittest.TestCase):
         self.assertIsInstance(signoff.open_needs_human(d / "SUMMARY.md"), list)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class NestedListRendering(unittest.TestCase):
@@ -196,6 +194,50 @@ class NestedListRendering(unittest.TestCase):
         from pdca_harness import assemble
         self.assertEqual(assemble._item("plain value"), "plain value")
         self.assertEqual(assemble._item("first\nsecond"), "first\n  second")
+
+
+class HierarchyIsPreserved(unittest.TestCase):
+    """Round two on #344: a field value keeps the shape the brief gave it."""
+
+    def _brief(self, body: str) -> Path:
+        f = Path(tempfile.mkdtemp()) / "brief.md"
+        f.write_text(body, encoding="utf-8")
+        return f
+
+    def test_relative_indentation_survives(self) -> None:
+        """`Scope → API → GET` must not flatten into three siblings. Stripping each line
+        independently loses every level, and `_item` then indents them equally — so §1
+        states a different specification from the one the brief authored."""
+        f = self._brief("- **Scope:**\n  - API:\n    - GET /things\n    - POST /things\n"
+                        "  - CLI\n- **Test file:** t.py\n")
+        self.assertEqual(brief.whole_field(f, "scope"),
+                         "- API:\n  - GET /things\n  - POST /things\n- CLI")
+
+    def test_the_rendered_item_keeps_those_levels(self) -> None:
+        from pdca_harness import assemble
+        f = self._brief("- **Scope:**\n  - API:\n    - GET /things\n  - CLI\n")
+        rendered = f"- Scope: {assemble._item(brief.whole_field(f, 'scope'))}"
+        self.assertIn("\n  - API:", rendered)
+        self.assertIn("\n    - GET /things", rendered, "a child became a sibling")
+        self.assertIn("\n  - CLI", rendered)
+
+    def test_an_ordered_list_is_recognised_too(self) -> None:
+        """`1. API` is a valid list marker; an unordered-only test absorbed the first
+        ordered child into the label while indenting the rest beneath it."""
+        from pdca_harness import assemble
+        f = self._brief("- **Scope:**\n  1. API\n  2. CLI\n")
+        rendered = f"- Scope: {assemble._item(brief.whole_field(f, 'scope'))}"
+        self.assertNotIn("- Scope: 1. API", rendered)
+        self.assertIn("\n  1. API", rendered)
+        self.assertIn("\n  2. CLI", rendered)
+
+    def test_wrapped_prose_is_unaffected(self) -> None:
+        """The common case must not regress: a continuation that is prose, not a list,
+        still reads as one wrapped value."""
+        from pdca_harness import assemble
+        f = self._brief("- **Success criterion:** first line\n  wrapped second\n")
+        self.assertEqual(assemble._item(brief.whole_field(f, "success criterion")),
+                         "first line\n  wrapped second")
 
 
 if __name__ == "__main__":

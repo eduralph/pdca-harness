@@ -68,8 +68,17 @@ def whole_field(brief_path: Path, *labels: str, default: str = "") -> str:
 
 
 def _block_for(text: str, label: str) -> str | None:
-    """The block belonging to ``label``, or None when the brief has no such field."""
-    out: list[str] = []
+    """The block belonging to ``label``, or None when the brief has no such field.
+
+    Continuation lines keep their indentation RELATIVE to each other. Stripping each line
+    independently would flatten a nested value — `Scope → API → GET` becomes three
+    siblings — and `_item` then indents them all equally, so SUMMARY §1 states a different
+    specification from the one the brief authored, in the artifact the human and the C6
+    guard read. The block is dedented by the common leading whitespace of its continuation
+    lines, which puts the shallowest at column 0 and preserves every level below it.
+    """
+    head: str | None = None
+    cont: list[str] = []
     base_indent: int | None = None
     for line in text.splitlines():
         m = _FIELD_RE.match(line)
@@ -77,19 +86,22 @@ def _block_for(text: str, label: str) -> str | None:
         if base_indent is None:
             if m and m.group(1).strip().lower() == label:
                 base_indent = indent
-                out.append(m.group(2))  # the value only, never the label
+                head = m.group(2)  # the value only, never the label
             continue
         if line.strip() and indent > base_indent:
-            out.append(line.strip())  # nested bullet or wrapped prose — still this field
+            cont.append(line)      # nested bullet or wrapped prose — still this field
             continue
         if m:
-            break  # a sibling field at the same or lower indent
+            break                  # a sibling field at the same or lower indent
         if _HEADING_RE.match(line) or (line.strip() and indent <= base_indent):
             break
-        out.append(line.strip())  # a blank line inside the block
+        cont.append(line)          # a blank line inside the block
     if base_indent is None:
         return None
-    return "\n".join(out).strip()
+    widths = [len(ln) - len(ln.lstrip()) for ln in cont if ln.strip()]
+    shift = min(widths) if widths else 0
+    body = [ln[shift:] if ln.strip() else "" for ln in cont]
+    return "\n".join([head or ""] + body).strip("\n").rstrip()
 
 
 def _is_placeholder(value: str) -> bool:
