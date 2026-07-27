@@ -336,6 +336,32 @@ argv = []
 # `codex` TUI (workspace-write, so edits don't each need approval — the human is present)
 # with the role prompt (agents/<name>.md) inlined via the `agent` key. Independent of the
 # builder/reviewer family above.
+# REMOTE CONTROL — answer an interactive leaf from another device (issue #337).
+#
+# The four leaves below (planner, sign-off, publisher, Act) hand the terminal to a REPL and
+# BLOCK there, so a rendered instance inherits a hard constraint that is easy to miss: the
+# human must be sitting at the terminal the flow runs in, for the whole batch. A `pdca flow`
+# over six bundles can park on one sign-off adjudication for hours because nobody is at that
+# machine.
+#
+# Claude Code's `--remote-control` removes it. Each interactive leaf is its own `claude`
+# subprocess with argv taken straight from this file, so enabling Remote Control in your OWN
+# shell does NOT reach them — which is exactly why this is worth writing down rather than
+# leaving to be discovered.
+#
+# To enable, APPEND the flag to the argv line below — do not add a second `argv = [...]`,
+# which would be a duplicate key the moment you uncomment it:
+#
+#   argv = ["claude", "--agent", "planner", "--permission-mode", "acceptEdits",
+#           "--remote-control"]
+#
+# The device must be enrolled first (`/login`). Left off by default because a flag that
+# makes a leaf refuse to start would block the flow on the one path that cannot be retried
+# unattended.
+#
+# CLAUDE-ONLY, and interactive-only. It applies to the `claude` interactive command, not
+# generically to every backend. The headless builder/reviewer must NOT carry it: it starts
+# an *interactive* session and they have no human to reach.
 [leaves.planner]
 mode = "{{ leaves_mode }}"
 family = "{{ interactive_family }}"

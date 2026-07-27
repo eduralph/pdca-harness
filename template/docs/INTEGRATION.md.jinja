@@ -144,3 +144,28 @@ standalone project.
 ## 11. Per-repo P-/D-/C-/A- extensions
 None today. Add repo-prefixed rules (e.g. `{{ project_slug }}-C7`) that *tighten
 or add to* a generic rule — never weaken one — as running cycles surface them.
+
+## Answering an interactive leaf from another device
+
+The four `interactive = true` leaves — planner, sign-off, publisher, Act — hand the terminal
+to a human+model REPL and block there. That means the human has to be at the terminal the
+flow runs in, for the whole batch: a `pdca flow` over several bundles can park on one
+sign-off adjudication for hours because nobody is at that machine.
+
+{% if interactive_family == "claude" -%}
+Claude Code's `--remote-control` flag removes the constraint. Append it to an interactive
+leaf's `argv` in `pdca.toml` and that leaf becomes answerable from another enrolled device;
+nothing else changes — `signoff-decision`, the §6 ticks and the C6 accept-guard all run the
+same code path, and only the human's location differs.
+
+Enabling Remote Control in your own shell does **not** reach the leaves: each is a separate
+`claude` subprocess whose argv comes from `pdca.toml`. That is the whole reason this needs
+documenting.
+
+The headless builder and reviewer must not carry the flag — it starts an *interactive*
+session, and they have no human to reach.
+{%- else -%}
+This instance runs its interactive leaves on `{{ interactive_family }}`. Claude Code offers
+`--remote-control` for exactly this; check whether your interactive family has an
+equivalent, and if so append the flag to the leaf's `argv` in `pdca.toml`.
+{%- endif %}
