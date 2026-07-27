@@ -171,3 +171,25 @@ class SummarySpecFields(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NestedListRendering(unittest.TestCase):
+    """A value that is a nested list must not be flattened into its label (PR #344 review).
+
+    `- **Scope:**` followed by indented `- **API:** …` bullets is the shape the module
+    docstring itself uses as the motivating example. Rendering it inline produces
+    `- Scope: - **API:** …` with the *remaining* bullets nested beneath — the first child
+    absorbed into the label, the rest one level deep: a different document.
+    """
+
+    def test_a_nested_list_value_keeps_its_hierarchy(self) -> None:
+        from pdca_harness import assemble
+        rendered = f"- Scope: {assemble._item('- **API:** a\\n- **CLI:** b')}"
+        self.assertNotIn("- Scope: - **API:**", rendered,
+                         "the first sub-bullet was flattened into the label")
+        self.assertEqual(rendered, "- Scope: \n  - **API:** a\n  - **CLI:** b")
+
+    def test_an_inline_value_is_unchanged(self) -> None:
+        from pdca_harness import assemble
+        self.assertEqual(assemble._item("plain value"), "plain value")
+        self.assertEqual(assemble._item("first\nsecond"), "first\n  second")

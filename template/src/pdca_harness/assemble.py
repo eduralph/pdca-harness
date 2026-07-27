@@ -112,7 +112,15 @@ def _item(value: str) -> str:
     Continuations are indented two spaces so a multi-line value stays ONE Markdown list
     item instead of terminating the list and dumping the remainder as body prose (#336).
     """
-    first, *rest = value.splitlines() or [""]
+    lines = value.splitlines() or [""]
+    # A value whose FIRST line is itself a list item is a nested list under an empty
+    # label — the documented Scope/API shape. Rendering it inline gives
+    # `- Scope: - **API:** …` with the remaining bullets nested beneath, which flattens the
+    # first child into the label and changes the brief's meaning in SUMMARY. Put the whole
+    # block on its own lines instead, so the hierarchy the brief authored survives.
+    if re.match(r"^\s*[-*+]\s", lines[0]):
+        return "\n" + "\n".join(f"  {line}" if line else "" for line in lines)
+    first, *rest = lines
     return "\n".join([first] + [f"  {line}" if line else "" for line in rest])
 
 
