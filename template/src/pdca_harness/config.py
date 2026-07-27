@@ -294,6 +294,10 @@ class Config:
     # bundle as close / no-fix, so the driver skips the builder + reviewer leaves and
     # routes it straight to sign-off. ``[driver].close_dispositions`` in pdca.toml; the
     # built-in default covers the common tracker vocabulary.
+    # Structural size-estimate weights + cutoffs ([driver.sizing], issue #320). A raw
+    # table so an instance can retune against its OWN corpus without patching the engine —
+    # the whole point of #324's calibration loop. Empty => sizing.DEFAULT_* apply.
+    sizing: dict = field(default_factory=dict)
     close_dispositions: list[str] = field(
         default_factory=lambda: list(DEFAULT_CLOSE_DISPOSITIONS))
     # Family-profile overrides ([families.<name>] in pdca.toml): per-vendor CLI
@@ -516,6 +520,7 @@ class Config:
         # for an instance's tracker vocabulary; absent ⇒ the built-in default.
         close_dispositions = list(
             driver_cfg.get("close_dispositions", DEFAULT_CLOSE_DISPOSITIONS))
+        sizing = dict(driver_cfg.get("sizing", {}))
 
         return cls(
             root=root,
@@ -572,6 +577,7 @@ class Config:
             sweep_worktrees=sweep_worktrees,
             doctor_min_free_gb=doctor_min_free_gb,
             close_dispositions=close_dispositions,
+            sizing=sizing,
             families={k.strip().lower(): dict(v)
                       for k, v in data.get("families", {}).items()},
             doctor_checks=list(data.get("doctor", {}).get("checks", [])),
