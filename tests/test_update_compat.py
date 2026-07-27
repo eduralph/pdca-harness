@@ -151,7 +151,8 @@ print(json.dumps({
          "scope": c.get("scope", ""), "at_publish": c.get("at_publish", None)}
         for c in cfg.gates_checks
     ],
-    "leaf_names": sorted(k for k in vars(cfg) if k.endswith("er") or k == "act"),
+    "leaves": {k: {"mode": getattr(v, "mode", None)}
+               for k, v in vars(cfg).items() if hasattr(v, "mode") and hasattr(v, "argv")},
     "raw": Path("pdca.toml").read_text(encoding="utf-8"),
 }))
 """
@@ -268,10 +269,16 @@ class UpdateCompat(unittest.TestCase):
         with no opt-in. Asserted on the merged TOML so it fails the moment such a default
         is introduced, not once someone notices the bill.
         """
-        raw = self.config()["raw"]
-        self.assertNotIn("[leaves.sizer]", raw,
-                         "update configured a sizer leaf without opt-in")
-        for line in raw.splitlines():
+        cfg = self.config()
+        # Asserted on the PARSED config, not on raw text. The template may legitimately
+        # SHIP a `[leaves.sizer]` table — #320 does, at `mode = "stub"` — and a raw-text
+        # test would fail on the mere presence of a section that costs nothing. What must
+        # never change on update is whether a model actually RUNS.
+        for name, leaf in cfg["leaves"].items():
+            with self.subTest(leaf=name):
+                self.assertNotEqual(leaf.get("mode"), "command",
+                                    f"update switched leaf '{name}' to a live model call")
+        for line in cfg["raw"].splitlines():
             stripped = line.strip()
             if stripped.startswith("size_guard") and not stripped.startswith("#"):
                 self.assertIn('"off"', stripped,
