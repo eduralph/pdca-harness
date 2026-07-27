@@ -98,7 +98,15 @@ def advance(d: Path, cfg: Config) -> None:
 
 
 def run_issue(d: Path, cfg: Config) -> str:
-    """Advance until the bundle reaches a halted state; return that state."""
+    """Advance until the bundle halts OR a pre-dispatch policy holds it; return its state.
+
+    Two exits, not one. The ordinary exit is a state in :data:`state.HALTED`. The other is
+    a :class:`plan_policy.PolicyHold` — an unregistered external dependency, say — which
+    leaves the bundle in-flight at PLANNED or BUILT: nothing about a hold changes the state
+    it is held in, so the caller gets a NON-halted state back and must not read it as
+    completion. :func:`held` answers that question for callers that care (``pdca run``
+    exits non-zero on it, so automation does not read a blocked run as a success).
+    """
     while state.state(d) not in state.HALTED:
         try:
             advance(d, cfg)
@@ -107,6 +115,15 @@ def run_issue(d: Path, cfg: Config) -> str:
             # or spin forever: nothing about a hold changes the state it is held in.
             break
     return state.state(d)
+
+
+def held(final: str) -> bool:
+    """True if ``final`` came back from :func:`run_issue` without the bundle finishing.
+
+    A non-halted state can ONLY mean a policy hold — the loop has no other early exit — so
+    this is the one predicate a caller needs to tell "stopped for a human" from "done".
+    """
+    return final not in state.HALTED
 
 
 # ----------------------------------------------------------------------------

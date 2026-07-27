@@ -481,6 +481,13 @@ def _run(cfg: Config, issue_id: str) -> int:
         return 1
     final = driver.run_issue(d, cfg)
     print(f"{final}\t{d}")
+    if driver.held(final):
+        # Non-zero, or automation reads a bundle blocked before Do as a completed run. The
+        # reasons were already printed by the driver; this is the exit code that carries
+        # them to a caller that never sees stderr.
+        print(f"run: {d.name} is held at {final} — resolve the item(s) above and re-run",
+              file=sys.stderr)
+        return 1
     if final == state.AWAITING_SIGNOFF:
         open_items = signoff.open_needs_human(d / "SUMMARY.md")
         if open_items:

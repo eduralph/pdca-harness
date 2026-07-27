@@ -48,6 +48,7 @@ an adversary either.
 
 from __future__ import annotations
 
+import sys
 from typing import NamedTuple
 
 from . import doctor, sizing
@@ -149,6 +150,13 @@ def dependency_reasons(d, cfg) -> list[HoldReason]:
     stop declaring dependencies.
     """
     mode = str(getattr(cfg, "dependency_guard", HOLD) or HOLD).strip().lower()
+    if mode not in (OFF, WARN, HOLD):
+        # A typo must fail SAFE. Falling through to the warn branch let
+        # `dependency_guard = "hld"` silently dispatch Do past an unregistered dependency,
+        # with nothing on screen to say the setting had not been understood.
+        print(f"plan-policy: [driver].dependency_guard = {mode!r} is not one of "
+              f"{OFF!r}/{WARN!r}/{HOLD!r} — treating it as {HOLD!r}", file=sys.stderr)
+        mode = HOLD
     if mode == OFF:
         return []
     # Only `hold` blocks. `warn` reports the same item and lets Do proceed — the code
