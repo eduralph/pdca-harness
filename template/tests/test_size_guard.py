@@ -127,10 +127,10 @@ class SizeGuard(unittest.TestCase):
         self.assertTrue((d / "patch.diff").exists(),
                         "the size advisory blocked Do — it must only warn")
 
-    def test_it_is_recomputed_not_cached(self) -> None:
-        """Registering a fix must take effect immediately. A persisted marker would pin
-        the verdict: once PLANNED, resuming does not re-run Plan, so the bundle would
-        warn forever."""
+    def test_the_verdict_is_recomputed_not_cached(self) -> None:
+        """Fixing the BUNDLE must take effect immediately. A persisted marker would pin the
+        verdict: once PLANNED, resuming does not re-run Plan, so the bundle would warn
+        forever."""
         d = self._bundle(_OVERSIZED)
         cfg = _cfg(self.tmp, "warn")
         self.assertTrue(plan_policy.evaluate(d, cfg))
@@ -156,6 +156,38 @@ class SizeGuard(unittest.TestCase):
         d = self._bundle(_OVERSIZED)
         cfg = _cfg(self.tmp, "warn")
         self.assertEqual(sizing.estimate(d / "brief.md", cfg).band, sizing.OVERSIZED)
+
+
+class ConfigIsASnapshot(unittest.TestCase):
+    """The recompute guarantee is about the BUNDLE, not the settings (PR #350 review).
+
+    `Config.load()` runs once per invocation, so `[driver].size_guard` and
+    `[driver.sizing]` are fixed for the whole run. Re-reading them per beat would let one
+    `pdca flow` score two bundles in the same batch against two different thresholds — a
+    batch has to be reproducible and explainable as one unit. The docstring used to claim
+    the policy "reads config from disk", which it does not; that claim is now scoped to
+    what actually is re-read.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_the_config_object_governs_the_whole_run(self) -> None:
+        d = self.tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(_OVERSIZED, encoding="utf-8")
+        off, warn = _cfg(self.tmp, "off"), _cfg(self.tmp, "warn")
+        self.assertEqual(plan_policy.evaluate(d, off), [])
+        self.assertTrue(plan_policy.evaluate(d, warn))
+
+    def test_the_docstring_no_longer_claims_a_config_reload(self) -> None:
+        """Locks the correction: the module must not re-acquire a claim the code does not
+        deliver, which is how this was found in the first place."""
+        self.assertNotIn("reads config from disk", plan_policy.__doc__ or "")
+        self.assertIn("CONFIG is a snapshot", plan_policy.__doc__ or "")
 
 
 if __name__ == "__main__":

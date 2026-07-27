@@ -19,12 +19,22 @@ bundle reaches Do, and the two it misses are not exotic:
 Every one of them converges on :func:`driver.advance`. Evaluating there covers all four by
 construction rather than by enumeration.
 
-## Why it is recomputed, never cached
+## Why the VERDICT is recomputed, never cached
 
 A persisted hold marker becomes stale authority: once a bundle is PLANNED, resuming does
-not re-run Plan, so registering the missing ``[[doctor.checks]]`` row or retuning
-``[driver.sizing]`` would never clear the marker and the bundle would hold forever. This
-runs each beat and reads config from disk, so the fix always takes effect immediately.
+not re-run Plan, so a marker written at Plan exit would outlive whatever caused it and the
+bundle would hold forever. The verdict is therefore derived fresh each beat from the
+bundle's own files — edit the brief, or register the missing ``[[doctor.checks]]`` row
+(``doctor.registered_ids`` deliberately reads ``pdca.toml`` from disk, PR #269 review), and
+the next beat proceeds.
+
+**The run's CONFIG is a snapshot, and that is deliberate.** ``Config.load()`` runs once per
+invocation, so ``[driver].size_guard`` and ``[driver.sizing]`` are fixed for the whole run:
+editing them mid-flight does not take effect until the next one. Re-reading them per beat
+would let a single ``pdca flow`` score two bundles in the same batch against two different
+thresholds, which is worse than the inconvenience it removes — a batch has to be
+reproducible and explainable as one unit. The recompute guarantee is about the bundle, not
+the settings.
 
 ## Why BUILT is checked too
 
