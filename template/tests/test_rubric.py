@@ -163,8 +163,6 @@ class RubricLoading(unittest.TestCase):
         self.assertNotIn("standing review rubric", leaves._build_prompt(self.d, cfg))
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ReviewFixes(unittest.TestCase):
@@ -303,3 +301,79 @@ class SecondReviewFixes(unittest.TestCase):
         self.assertTrue(prompt.startswith("You are the Do builder"),
                         "the task prompt should frame the work; the rubric constrains it")
         self.assertIn("LAST RULE", prompt)
+
+
+class ThirdReviewFixes(unittest.TestCase):
+    """Round three on #352."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.target = self.tmp / "target"
+        self.target.mkdir(parents=True)
+        self.d = self.tmp / "results" / "issue_1"
+        self.d.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _cfg(self, rel="A.md", section="Review rubric"):
+        cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=self.tmp / "templates",
+            default_branch="main", tracker_system="github", tracker_url="",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        cfg.rubric_file, cfg.rubric_section = rel, section
+        return cfg
+
+    def _load(self, cfg):
+        with mock.patch("pdca_harness.rubric._target_root", return_value=self.target):
+            return rubric.load(self.d, cfg)
+
+    def test_an_info_string_does_not_close_a_fence(self) -> None:
+        """A closer may carry only trailing whitespace: ```python inside an open backtick
+        fence is a nested example's info string, not a close."""
+        (self.target / "A.md").write_text(
+            "# P\n\n````md\n```python\n## Review rubric\n\nEXAMPLE ONLY\n````\n\n"
+            "## Review rubric\n\nTHE REAL RULES\n", encoding="utf-8")
+        text = self._load(self._cfg())
+        self.assertIn("THE REAL RULES", text)
+        self.assertNotIn("EXAMPLE ONLY", text)
+
+    def test_the_section_name_must_match_from_the_start(self) -> None:
+        """A substring test selects `## Historical review rubric` for a configured
+        `Review rubric`, handing every leaf an obsolete section while the real one is
+        never read."""
+        (self.target / "A.md").write_text(
+            "# P\n\n## Historical review rubric\n\nOBSOLETE\n\n"
+            "## Review rubric & protocol\n\nTHE REAL RULES\n", encoding="utf-8")
+        text = self._load(self._cfg())
+        self.assertIn("THE REAL RULES", text)
+        self.assertNotIn("OBSOLETE", text)
+
+    def test_a_prefix_of_the_heading_still_matches(self) -> None:
+        """The real-world shape: the configured name omits a trailing qualifier."""
+        (self.target / "A.md").write_text(
+            "# P\n\n## Review rubric & protocol\n\nRULES\n", encoding="utf-8")
+        self.assertIn("RULES", self._load(self._cfg()))
+
+    def test_a_stale_lane_is_not_used_when_setup_fell_back(self) -> None:
+        """`worktree.ensure()` can fail AFTER creating the lane and leave its owner stamp,
+        so `_do_build_command` runs in place while an ownership check would still prefer
+        the lane. The builder passes what ensure() actually returned — including None."""
+        lane = self.tmp / "lane"
+        lane.mkdir()
+        with mock.patch("pdca_harness.worktree.path", return_value=lane), \
+             mock.patch("pdca_harness.worktree.owner_of", return_value="issue_1"), \
+             mock.patch("pdca_harness.worktree._target",
+                        return_value=(self.target, "main")):
+            # The builder path: ensure() returned None, so the lane must be ignored.
+            self.assertEqual(
+                rubric._target_root(self.d, self._cfg(), None), self.target)
+            # …and a live worktree wins outright.
+            self.assertEqual(
+                rubric._target_root(self.d, self._cfg(), lane), lane)
+
+
+if __name__ == "__main__":
+    unittest.main()

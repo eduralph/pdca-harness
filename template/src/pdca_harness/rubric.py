@@ -40,6 +40,12 @@ from pathlib import Path
 
 SNAPSHOT = "rubric-snapshot.md"
 
+#: "The caller did not tell us" — distinct from "the caller told us there is no worktree".
+#: A plain `None` default cannot express that difference, and the difference is the whole
+#: point: a builder whose `ensure()` FAILED passes None, and must not then have the stale
+#: lane rediscovered on its behalf.
+_UNSET = object()
+
 
 def _section(text: str, heading: str) -> str:
     """The named Markdown section — from its heading to the next same-or-higher one.
@@ -53,12 +59,16 @@ def _section(text: str, heading: str) -> str:
     level = 0
     open_fence: tuple[str, int] | None = None
     for line in text.splitlines():
-        f = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        f = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
         if f:
-            marker = f.group(1)
+            marker, rest = f.group(1), f.group(2)
             if open_fence is None:
                 open_fence = (marker[0], len(marker))
-            elif marker[0] == open_fence[0] and len(marker) >= open_fence[1]:
+            elif (marker[0] == open_fence[0] and len(marker) >= open_fence[1]
+                  and not rest.strip()):
+                # A CLOSER may carry only trailing whitespace. ```python inside an open
+                # backtick fence is an info string on a nested example, not a close — and
+                # treating it as one exposes the example's headings to the scanner.
                 # A closing fence must MATCH its opener: a ``` block quoting a ~~~ line
                 # would otherwise close early, exposing a heading inside the example and
                 # handing every leaf the sample instead of the real rubric.
@@ -71,7 +81,7 @@ def _section(text: str, heading: str) -> str:
             if level:
                 if depth <= level:
                     break          # the next same-or-higher heading ends the section
-            elif wanted in title:
+            elif title == wanted or title.startswith(wanted):
                 level = depth
                 out.append(line)
                 continue
@@ -98,7 +108,24 @@ def _resolve(target: Path, rel: str) -> Path | None:
     return resolved
 
 
-def _target_root(d: Path, cfg) -> Path | None:
+def _owned_lane(d: Path, cfg) -> Path | None:
+    """This bundle's worktree, when a caller did not say which tree is live.
+
+    OWNERSHIP, not mere existence: an overflow gate can leave a lane preserved for a
+    different bundle, and `worktree.path()` hands it back simply because the directory is
+    there — which would snapshot that bundle's branch-specific rubric.
+    """
+    from . import worktree
+    try:
+        wt = worktree.path(d, cfg)
+        if wt and wt.is_dir() and worktree.owner_of(wt) == d.name:
+            return wt
+    except Exception:  # noqa: BLE001 — isolation is optional
+        pass
+    return None
+
+
+def _target_root(d: Path, cfg, worktree_root=_UNSET) -> Path | None:
     """Where to read the rubric from, most specific first.
 
     1. The bundle's ACTIVE worktree, when isolation is on. `_do_build_command` has already
@@ -110,15 +137,16 @@ def _target_root(d: Path, cfg) -> Path | None:
        supported non-Git target (Do runs in place) would otherwise silently lose its rubric.
     """
     from . import worktree
-    try:
-        wt = worktree.path(d, cfg)
-        # OWNERSHIP, not mere existence: an overflow gate can leave a lane preserved for a
-        # different bundle, and `path()` would hand it back simply because the directory is
-        # there — snapshotting another bundle's branch-specific rubric.
-        if wt and wt.is_dir() and worktree.owner_of(wt) == d.name:
-            return wt
-    except Exception:  # noqa: BLE001 — isolation is optional; fall through
-        pass
+    if worktree_root is not _UNSET:
+        # The caller knows which tree is live. A path wins outright — it came from a
+        # SUCCESSFUL `ensure()` and is what the builder is editing. An explicit None means
+        # setup FELL BACK to in-place, and the lane probe is skipped entirely: `ensure()`
+        # can fail AFTER creating the lane and leave its owner stamp behind, so an
+        # ownership check alone would hand back a tree nobody is editing.
+        if worktree_root is not None and Path(worktree_root).is_dir():
+            return Path(worktree_root)
+    elif (wt := _owned_lane(d, cfg)) is not None:
+        return wt
     try:
         resolved = worktree._target(d, cfg)
         if resolved:
@@ -138,7 +166,7 @@ def _target_root(d: Path, cfg) -> Path | None:
         return None
 
 
-def load(d: Path, cfg) -> str:
+def load(d: Path, cfg, worktree_root=_UNSET) -> str:
     """The rubric text for bundle ``d`` — snapshotting on first use. "" when unconfigured.
 
     Later callers get the snapshot even if the target has moved on, which is the whole
@@ -159,7 +187,7 @@ def load(d: Path, cfg) -> str:
         _record(snapshot, "")
         return ""
 
-    target = _target_root(d, cfg)
+    target = _target_root(d, cfg, worktree_root)
     if target is None:
         print(f"rubric: cannot resolve the target checkout for {d.name} — "
               "continuing without the rubric", file=sys.stderr)
@@ -209,14 +237,14 @@ def _record(snapshot: Path, text: str) -> None:
         pass  # the snapshot is a drift guard, never a hard requirement
 
 
-def for_builder(d: Path, cfg) -> str:
+def for_builder(d: Path, cfg, worktree_root=_UNSET) -> str:
     """The rubric block appended to the builder prompt, or "" when unconfigured.
 
     Carries an explicit self-review instruction: the point is not that the builder has
     *seen* the criteria but that it applies them before emitting, which is what removes
     the guaranteed round.
     """
-    text = load(d, cfg)
+    text = load(d, cfg, worktree_root)
     if not text:
         return ""
     return ("\n\n## The target repo's standing review rubric — you are judged against "

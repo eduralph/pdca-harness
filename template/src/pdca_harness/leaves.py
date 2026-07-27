@@ -852,7 +852,7 @@ def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None
         env = guard.shim_env(cfg, env)
     # Watch the bundle d so the heartbeat shows patch.diff / build-notes.md appearing.
     _invoke(
-        builder, workdir, _build_prompt(d, cfg),
+        builder, workdir, _build_prompt(d, cfg, worktree_root=wt),
         label=f"Do {d.name}",
         status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
         stream_json=True,  # Tier 3: show the builder's live tool-use
@@ -860,7 +860,8 @@ def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None
     )
 
 
-def _build_prompt(d: Path, cfg: Config | None = None) -> str:
+def _build_prompt(d: Path, cfg: Config | None = None, *,
+                  worktree_root: Path | None = None) -> str:
     # The target repo's standing rubric (#314), so the builder self-reviews against
     # the same criteria the reviewer will apply — the asymmetry that costs a
     # guaranteed round. "" when unconfigured, so the prompt is byte-identical.
@@ -868,7 +869,13 @@ def _build_prompt(d: Path, cfg: Config | None = None) -> str:
     # straight onto "You are the Do builder…" with no separator, merging the two
     # instructions. The task prompt also reads better first — the rubric is a standing
     # constraint on the work, not the framing for it.
-    rubric = rubric_mod.for_builder(d, cfg) if cfg is not None else ""
+    # `worktree_root` is what `worktree.ensure` ACTUALLY returned — None when setup failed
+    # and `_do_build_command` fell back to running in place. Passing it explicitly is the
+    # only way the rubric lookup can tell "this lane is mine and live" from "this lane is
+    # mine and stale": a failed ensure() leaves the directory and its owner stamp behind,
+    # so an ownership check alone would still prefer a tree the builder is not editing.
+    rubric = (rubric_mod.for_builder(d, cfg, worktree_root=worktree_root)
+              if cfg is not None else "")
     return (
         f"You are the Do builder. Read {d}/brief.md. If $PDCA_WORKTREE is set, make ALL "
         "target-source edits there — it is an isolated git worktree off the target's base "
