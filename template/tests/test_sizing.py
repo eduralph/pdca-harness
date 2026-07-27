@@ -164,8 +164,6 @@ class Combine(unittest.TestCase):
                 self.assertEqual(sizing.combine(base, model), base)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class SizerLeaf(unittest.TestCase):
@@ -227,3 +225,52 @@ class SizerLeaf(unittest.TestCase):
         """A leaf that failed to answer is not evidence a stronger one would succeed."""
         from pdca_harness import leaves
         self.assertFalse(leaves._sizer_escalates(None, {"on_band": ["watch"]}))
+
+
+class DoctorCoversTheSizer(unittest.TestCase):
+    """`pdca doctor --strict` must know about the sizer (#320 review).
+
+    `_command_leaves` enumerated the named leaves plus builder variants/escalations. A
+    sizer configured with its own binary — or a sizer escalation naming a stronger one —
+    was invisible, so `--strict` could pass while the Plan advisory later died on a CLI
+    that was never installed.
+    """
+
+    def _cfg(self, **kw):
+        from pdca_harness.config import Config, LeafConfig
+        cfg = Config(
+            root=Path("."), bundle_root=Path("results"), process_dir=Path("process"),
+            templates_dir=Path("templates"), default_branch="main",
+            tracker_system="github", tracker_url="", issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        for k, v in kw.items():
+            setattr(cfg, k, v)
+        return cfg
+
+    def test_a_command_sizer_is_enumerated(self) -> None:
+        from pdca_harness import doctor
+        from pdca_harness.config import LeafConfig
+        cfg = self._cfg(sizer=LeafConfig(mode="command", family="claude",
+                                         argv=["sizer-cli", "-p"]))
+        self.assertIn("sizer", doctor._command_leaves(cfg))
+
+    def test_a_stub_sizer_is_not_enumerated(self) -> None:
+        from pdca_harness import doctor
+        from pdca_harness.config import LeafConfig
+        self.assertNotIn("sizer", doctor._command_leaves(self._cfg(sizer=LeafConfig())))
+
+    def test_a_sizer_escalation_naming_another_binary_is_enumerated(self) -> None:
+        """The escalation is where a DIFFERENT CLI usually appears — a stronger model."""
+        from pdca_harness import doctor
+        from pdca_harness.config import LeafConfig
+        cfg = self._cfg(
+            sizer=LeafConfig(mode="command", family="claude", argv=["sizer-cli"]),
+            sizer_escalation=[{"on_band": ["watch"], "argv": ["stronger-cli", "-p"]}])
+        found = doctor._command_leaves(cfg)
+        self.assertTrue(any("stronger-cli" in (leaf.argv or [])
+                            for leaf in found.values()),
+                        f"the escalation binary was not preflighted: {list(found)}")
+
+
+if __name__ == "__main__":
+    unittest.main()
