@@ -166,8 +166,15 @@ def is_placeholder(brief_path: Path) -> bool:
     Plan beat re-plans it instead of the planner being silently skipped (issue #113). The
     Slug — the first, always-filled field of any real brief — is the cheap, reliable
     sentinel: an authored slug is kebab-case, never an angle-bracket placeholder.
+
+    Read through :func:`whole_field`, not :func:`field` (#336/#334): a brief that writes
+    its Slug on the line BENEATH the label — a shape `brief.md.tpl` itself teaches and four
+    briefs in one measured corpus use — reads as *placeholder* under the line-based
+    accessor. That misreading is load-bearing beyond re-planning: `state()` consults the
+    tracker's terminal `resolved` marker for a placeholder brief, so a live, authored,
+    reopened bundle carrying a stale marker would be classified RESOLVED and abandoned.
     """
-    slug = field(brief_path, "slug").strip()
+    slug = whole_field(brief_path, "slug").strip()
     return not slug or slug.startswith("<")
 
 

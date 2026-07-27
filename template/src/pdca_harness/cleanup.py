@@ -270,6 +270,17 @@ def _plan_bundle(cfg: Config, d: Path, *, issue_side: bool, repo: str,
         # test left it UNPLANNED-with-no-row, unreconcilable forever.
         bp = d / "brief.md"
         if not bp.exists() or brief.is_placeholder(bp):
+            # "Briefless" is not "notes-only". An iterate-to-Plan ARCHIVES brief.md, so a
+            # bundle mid-cycle with a full iteration history is briefless too (#334).
+            # Writing a `resolved` object there cannot transition it — `is_resolved` now
+            # refuses the marker on the cycle evidence — so `cleanup --apply` would report
+            # a successful mutation, change nothing, and propose the identical action on
+            # every subsequent run. Report the live cycle instead of trying to resolve it.
+            if st == state.UNPLANNED and state.has_cycle_evidence(d):
+                return _Row(d.name, st, "CLOSED",
+                            "tracker closed, but this bundle has an in-flight cycle "
+                            "(iteration history / Do+Check artifacts) — NOT marking "
+                            "resolved; finish or discontinue it deliberately")
             if st == state.UNPLANNED:
                 if (d / "notes.json").exists():
                     try:

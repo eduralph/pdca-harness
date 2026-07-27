@@ -28,23 +28,10 @@ def _say(msg: str) -> None:
 def _headless_note(leaf) -> str:
     return " (headless Claude — no live output, may take minutes)" if leaf.mode == "command" else ""
 
-# Everything Do and Check write, i.e. everything downstream of brief.md. Includes the
-# close marker (issue #60) so an iterate archives it too — reopening a close bundle to a
-# fix path then clears the marker and runs the real Do+Check band.
-DOWNSTREAM_OF_BRIEF = [
-    "patch.diff",
-    "build-notes.md",
-    state.CLOSE_MARKER,
-    "MANUAL-VERIFICATION.md",
-    "check-gates.json",
-    "check-gates.md",
-    "check-review.md",
-    "SUMMARY.md",
-    # The rubric snapshot (#314): a Do/Check-era artifact, so an iterate archives it and
-    # the rebuild takes a fresh one — a rubric that changed between attempts SHOULD apply
-    # to the next.
-    "rubric-snapshot.md",
-]
+# Moved to `state` (#334) so `is_resolved` can read it without a circular import.
+# Re-exported here because this is where the archive step and its callers expect it.
+DOWNSTREAM_OF_BRIEF = state.DOWNSTREAM_OF_BRIEF
+DOWNSTREAM_GLOBS = state.DOWNSTREAM_GLOBS
 
 
 def advance(d: Path, cfg: Config) -> None:
@@ -244,13 +231,18 @@ def _archive_iteration(d: Path, n: int, *, include_brief: bool) -> None:
     """
     arch = d / f"iteration-v{n}"
     names = list(DOWNSTREAM_OF_BRIEF)
-    names += [p.name for p in d.glob("check-advisory-*.md")]  # advisory artifacts (#64)
-    # Every leaf's captured error tail belongs to the attempt that produced it (#280 review):
-    # `build.error.log` (Do), `check-review.error.log` / `check-advisory-*.error.log` (Check).
-    # Each is cleared at the start of the NEXT run of its leaf, so a log left at the top level
-    # here is deleted rather than kept — destroying the only on-disk record of why the attempt
-    # failed, which is the whole point of capturing it. Archive them with their attempt.
-    names += [p.name for p in d.glob("*.error.log")]
+    # Pattern-matched cycle artifacts: the advisory files (#64) and every leaf's captured
+    # error tail — `build.error.log` (Do), `check-review.error.log` /
+    # `check-advisory-*.error.log` (Check). Each tail is cleared at the start of the NEXT
+    # run of its leaf, so one left at the top level here would be deleted rather than kept,
+    # destroying the only on-disk record of why the attempt failed (#280 review). Archive
+    # them with their attempt.
+    #
+    # The patterns come from `state.DOWNSTREAM_GLOBS`, the same constant `is_resolved`
+    # reads (#334), so "what an iterate archives" and "what proves a cycle ran" cannot
+    # drift apart.
+    for pattern in DOWNSTREAM_GLOBS:
+        names += [p.name for p in d.glob(pattern)]
     if include_brief:
         names.append("brief.md")
         # The plan-advisory artifacts + benefit record reviewed THAT brief (#301) —
