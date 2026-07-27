@@ -8,6 +8,19 @@ default_branch = "{{ default_branch }}"
 # per-run with --by.
 author = "{{ author_name }}"
 
+# The target repo's standing review rubric (issue #314) — a path RELATIVE TO THE TARGET
+# CHECKOUT, optionally narrowed to one Markdown section. Unset (the default) leaves every
+# model prompt byte-identical to today.
+#
+# The asymmetry it removes: the builder generates without ever seeing the criteria the
+# reviewer applies, so a convention violation ships and returns as a finding — a
+# guaranteed review round for something the builder could have fixed before emitting. One
+# artifact reaches all three leaves (builder, reviewer, adversary), snapshotted per attempt
+# so they cannot be judged against different versions of it.
+#
+# rubric_file = "AGENTS.md"
+# rubric_section = "Review rubric & protocol"
+
 [paths]
 bundle_root = "{{ bundle_root }}"
 process_dir = "{{ process_dir }}"

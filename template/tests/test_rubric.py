@@ -1,0 +1,167 @@
+"""The target repo's review rubric reaches all three model leaves (issue #314).
+
+The asymmetry this removes: the builder generates without ever seeing the criteria the
+reviewer applies, so convention violations ship and come back as findings — a guaranteed
+review round for something the builder could have fixed before emitting.
+
+Three consumers, not two: builder, Check reviewer, AND adversary. Feeding only two would
+just move the asymmetry from builder-vs-reviewer to reviewer-vs-adversary.
+"""
+
+from __future__ import annotations
+
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from pdca_harness import leaves, rubric
+from pdca_harness.config import Config, LeafConfig
+
+_RUBRIC = ("# Review rubric & protocol\n\n"
+           "- Never use `unwrap()` in library code.\n"
+           "- REJECTED as noise: naming bikesheds, import ordering.\n")
+
+
+class RubricLoading(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.target = self.tmp / "target"
+        (self.target / "docs").mkdir(parents=True)
+        self.d = self.tmp / "results" / "issue_1"
+        self.d.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _cfg(self, rubric_file: str = "", section: str = "") -> Config:
+        cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=self.tmp / "templates",
+            default_branch="main", tracker_system="github", tracker_url="",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
+        )
+        cfg.rubric_file = rubric_file
+        cfg.rubric_section = section
+        return cfg
+
+    def _with_target(self, cfg):
+        """Pin target resolution — the brief's repo target is publish's business, not this
+        module's, and resolving it for real would drag a git checkout into the test."""
+        return mock.patch.object(leaves.rubric_mod, "worktree", None), cfg
+
+    def _load(self, cfg) -> str:
+        with mock.patch("pdca_harness.worktree._target", return_value=(self.target, "main")):
+            return rubric.load(self.d, cfg)
+
+    # -- unset is byte-identical -------------------------------------------------------
+
+    def test_unset_yields_nothing(self) -> None:
+        self.assertEqual(self._load(self._cfg()), "")
+        self.assertEqual(rubric.for_builder(self.d, self._cfg()), "")
+        self.assertEqual(rubric.for_reviewer(self.d, self._cfg()), "")
+
+    # -- reading ------------------------------------------------------------------------
+
+    def test_whole_file(self) -> None:
+        (self.target / "RUBRIC.md").write_text(_RUBRIC, encoding="utf-8")
+        self.assertIn("unwrap()", self._load(self._cfg("RUBRIC.md")))
+
+    def test_one_section_of_a_larger_file(self) -> None:
+        """The common shape: the rubric is a heading inside the host's AGENTS.md, and
+        feeding the whole file would bury it in unrelated project context."""
+        (self.target / "AGENTS.md").write_text(
+            "# Project\n\nunrelated context\n\n" + _RUBRIC + "\n# Build\n\nmore prose\n",
+            encoding="utf-8")
+        text = self._load(self._cfg("AGENTS.md", "Review rubric"))
+        self.assertIn("unwrap()", text)
+        self.assertNotIn("unrelated context", text)
+        self.assertNotIn("more prose", text, "the section ran past its next sibling heading")
+
+    # -- fail-open ----------------------------------------------------------------------
+
+    def test_missing_file_degrades_to_nothing(self) -> None:
+        """A broken rubric path must never stop a build."""
+        self.assertEqual(self._load(self._cfg("nope.md")), "")
+
+    def test_missing_section_degrades_to_nothing(self) -> None:
+        (self.target / "AGENTS.md").write_text("# Project\n\nprose\n", encoding="utf-8")
+        self.assertEqual(self._load(self._cfg("AGENTS.md", "Review rubric")), "")
+
+    def test_paths_escaping_the_target_are_refused(self) -> None:
+        (self.tmp / "secret.md").write_text("not yours\n", encoding="utf-8")
+        for rel in ("../secret.md", "docs/../../secret.md", str(self.tmp / "secret.md")):
+            with self.subTest(rel=rel):
+                self.assertEqual(self._load(self._cfg(rel)), "",
+                                 f"{rel} resolved outside the target checkout")
+
+    # -- the snapshot -------------------------------------------------------------------
+
+    def test_first_read_snapshots_into_the_bundle(self) -> None:
+        (self.target / "RUBRIC.md").write_text(_RUBRIC, encoding="utf-8")
+        self._load(self._cfg("RUBRIC.md"))
+        self.assertTrue((self.d / rubric.SNAPSHOT).exists())
+
+    def test_later_readers_get_the_snapshot_not_the_moved_target(self) -> None:
+        """"One artifact, both sides, no drift" is not achieved by re-reading a live file.
+
+        The builder reads at Do and the reviewers at Check; the target can change in
+        between — including because of this very cycle — and each leaf would then be
+        judged against a different contract.
+        """
+        (self.target / "RUBRIC.md").write_text(_RUBRIC, encoding="utf-8")
+        first = self._load(self._cfg("RUBRIC.md"))
+        (self.target / "RUBRIC.md").write_text("# Review rubric\n\nTOTALLY DIFFERENT\n",
+                                               encoding="utf-8")
+        self.assertEqual(self._load(self._cfg("RUBRIC.md")), first,
+                         "a later leaf saw a different rubric than the builder did")
+
+    def test_snapshot_is_archived_with_its_attempt(self) -> None:
+        """An iterate must re-snapshot: a rubric that changed between attempts SHOULD
+        apply to the next one."""
+        from pdca_harness import driver
+        self.assertIn(rubric.SNAPSHOT, driver.DOWNSTREAM_OF_BRIEF)
+
+    # -- the three consumers ------------------------------------------------------------
+
+    def test_builder_block_demands_self_review(self) -> None:
+        """Seeing the criteria is not the point; applying them before emitting is."""
+        (self.target / "RUBRIC.md").write_text(_RUBRIC, encoding="utf-8")
+        with mock.patch("pdca_harness.worktree._target", return_value=(self.target, "main")):
+            block = rubric.for_builder(self.d, self._cfg("RUBRIC.md"))
+        self.assertIn("re-read your own diff", block)
+        self.assertIn("unwrap()", block)
+
+    def test_reviewer_block_names_the_rejected_classes(self) -> None:
+        (self.target / "RUBRIC.md").write_text(_RUBRIC, encoding="utf-8")
+        with mock.patch("pdca_harness.worktree._target", return_value=(self.target, "main")):
+            block = rubric.for_reviewer(self.d, self._cfg("RUBRIC.md"))
+        self.assertIn("do not raise them", block)
+        self.assertIn("REJECTED as noise", block)
+
+    def test_all_three_leaves_receive_the_same_bytes(self) -> None:
+        """One artifact, three consumers — the property the issue is named for."""
+        (self.target / "RUBRIC.md").write_text(_RUBRIC, encoding="utf-8")
+        cfg = self._cfg("RUBRIC.md")
+        with mock.patch("pdca_harness.worktree._target", return_value=(self.target, "main")):
+            builder = rubric.for_builder(self.d, cfg)
+            reviewer = rubric.for_reviewer(self.d, cfg)
+            adversary = leaves._advisory_prompt({}, "adversary", rubric.for_reviewer(self.d, cfg))
+        for name, block in (("builder", builder), ("reviewer", reviewer),
+                            ("adversary", adversary)):
+            with self.subTest(leaf=name):
+                self.assertIn("unwrap()", block, f"the {name} prompt carries no rubric")
+
+    def test_prompts_are_unchanged_when_unset(self) -> None:
+        """Byte-identical with no rubric configured — the property every instance that
+        never sets the key depends on."""
+        cfg = self._cfg()
+        self.assertEqual(leaves._advisory_prompt({}, "adversary", ""),
+                         leaves._advisory_prompt({}, "adversary"))
+        self.assertNotIn("standing review rubric", leaves._build_prompt(self.d, cfg))
+
+
+if __name__ == "__main__":
+    unittest.main()

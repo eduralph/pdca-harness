@@ -46,6 +46,7 @@ import time
 from pathlib import Path
 
 from . import act as act_mod
+from . import rubric as rubric_mod
 from . import assemble
 from . import brief
 from . import families
@@ -851,7 +852,7 @@ def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None
         env = guard.shim_env(cfg, env)
     # Watch the bundle d so the heartbeat shows patch.diff / build-notes.md appearing.
     _invoke(
-        builder, workdir, _build_prompt(d),
+        builder, workdir, _build_prompt(d, cfg),
         label=f"Do {d.name}",
         status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
         stream_json=True,  # Tier 3: show the builder's live tool-use
@@ -859,8 +860,12 @@ def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None
     )
 
 
-def _build_prompt(d: Path) -> str:
-    return (
+def _build_prompt(d: Path, cfg: Config | None = None) -> str:
+    # The target repo's standing rubric (#314), so the builder self-reviews against
+    # the same criteria the reviewer will apply — the asymmetry that costs a
+    # guaranteed round. "" when unconfigured, so the prompt is byte-identical.
+    rubric = rubric_mod.for_builder(d, cfg) if cfg is not None else ""
+    return rubric + (
         f"You are the Do builder. Read {d}/brief.md. If $PDCA_WORKTREE is set, make ALL "
         "target-source edits there — it is an isolated git worktree off the target's base "
         "(the host's primary checkout is NOT touched); cite path:line against it. Build to "
@@ -1359,7 +1364,7 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
         # A transient (no-output) reviewer failure is retried with backoff before it
         # degrades to a §6 placeholder; the failed attempts' stderr lands in error_log.
         err = _invoke_leaf_resilient(
-            cfg.reviewer, sandbox, _REVIEW_PROMPT,
+            cfg.reviewer, sandbox, _REVIEW_PROMPT + rubric_mod.for_reviewer(d, cfg),
             error_log=error_log,
             label=f"Check review {d.name}",
             status=lambda: progress.bundle_activity(sandbox, ("check-review.md",)),
@@ -1521,7 +1526,7 @@ def _advisory_applies(spec: dict, d: Path) -> bool:
     return _when_matches(spec.get("when"), d, default=True)
 
 
-def _advisory_prompt(spec: dict, leaf_id: str) -> str:
+def _advisory_prompt(spec: dict, leaf_id: str, rubric: str = "") -> str:
     role = spec.get("role") or "review the patch for correctness bugs and reuse / " \
         "simplification / efficiency cleanups"
     return (
@@ -1538,7 +1543,7 @@ def _advisory_prompt(spec: dict, leaf_id: str) -> str:
         "'- NEEDS-HUMAN — ' form for anything needing a human ARCHITECTURAL / scope / "
         "fitness-to-purpose decision; when in doubt, OMIT '[impl]'. You are ADVISORY — you "
         "never gate; the human decides at sign-off. If you find nothing, say so explicitly."
-    )
+    ) + rubric
 
 
 def _resolved_builder_family(d: Path) -> str:
@@ -1646,7 +1651,8 @@ def _run_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict, 
         out = sandbox / f"check-advisory-{leaf_id}.md"
         error_log = d / f"check-advisory-{leaf_id}.error.log"
         err = _invoke_leaf_resilient(
-            leaf, sandbox, _advisory_prompt(spec, leaf_id),
+            leaf, sandbox,
+            _advisory_prompt(spec, leaf_id, rubric_mod.for_reviewer(d, cfg)),
             error_log=error_log,
             label=f"Advisory {leaf_id} {d.name}",
             status=lambda: progress.bundle_activity(sandbox, (out.name,)),
