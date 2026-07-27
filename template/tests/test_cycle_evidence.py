@@ -152,3 +152,37 @@ class CycleEvidence(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CleanupAgreesWithTheGuard(unittest.TestCase):
+    """`cleanup` must share the notes-only test with `is_resolved` (PR #345 review).
+
+    Otherwise the two disagree about one bundle: cleanup sees "briefless + UNPLANNED +
+    tracker closed" and schedules `_mark_resolved`, while `is_resolved` refuses the marker
+    on the cycle evidence. `cleanup --apply` then reports a successful mutation that
+    changes nothing, and proposes the identical action on every subsequent run.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_an_evidenced_briefless_bundle_is_reported_not_resolved(self) -> None:
+        from pdca_harness import cleanup
+        d = self.tmp / "issue_9"
+        (d / "iteration-v1").mkdir(parents=True)      # brief archived mid-cycle
+        (d / "notes.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(state.state(d), state.UNPLANNED)
+        self.assertTrue(state.has_cycle_evidence(d))
+
+        from unittest import mock
+        with mock.patch.object(cleanup, "_issue_state",
+                               return_value={"state": "CLOSED"}):
+            row = cleanup._plan_bundle(None, d, issue_side=True, repo="o/r",
+                                       by="t", today="2026-01-01")
+        self.assertIsNotNone(row, "an evidenced briefless bundle produced no row at all")
+        self.assertIn("in-flight cycle", row.plan)
+        self.assertEqual(row.apply, [],
+                         "cleanup scheduled a mutation that is_resolved would refuse")
