@@ -28,10 +28,11 @@ DEFAULT_CLOSE_DISPOSITIONS = [
     # UPSTREAM = "not this repo's defect", EXTERNAL = "not a defect in scope at all".
     "upstream",
     "external",
-    # A parent whose work was decomposed into child bundles (#323). No patch lands here:
-    # the children carry the work, and the parent goes to sign-off for the human to record
-    # the decision.
-    "split",
+    # NB: "split" is deliberately NOT here. `close_class` SUBSTRING-matches every token, so
+    # a generic "split" would send `likely-fix — split parser failure`, `split-brain
+    # repro` and `not-split` down the close fast path, skipping builder and reviewer for
+    # ordinary fixes. An accepted split writes an explicit close MARKER, which
+    # `driver._close_class` honours outright — no hint token is needed for it (#323 review).
 ]
 
 

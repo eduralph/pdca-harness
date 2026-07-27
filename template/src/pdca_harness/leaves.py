@@ -857,6 +857,18 @@ def do_split(d: Path, cfg: Config) -> int:
     if not (d / "brief.md").exists():
         print(f"split: {d.name} has no brief.md to split", file=sys.stderr)
         return 1
+    # A frozen bundle is history. Writing a fresh proposal into a COMPLETE or DISCONTINUED
+    # record — and letting --accept overwrite its close marker and build notes — would
+    # rewrite an audit trail and spawn work nobody asked for.
+    st = state.state(d)
+    if st in (state.COMPLETE, state.DISCONTINUED, state.RESOLVED):
+        print(f"split: {d.name} is {st} — refusing to split a frozen bundle",
+              file=sys.stderr)
+        return 1
+    # Clear any previous proposal FIRST: `_invoke` ignores an interactive leaf's exit code,
+    # so a cancelled rerun would otherwise leave the old file in place and report success,
+    # and --accept would materialise a proposal for an earlier version of the brief.
+    (d / split.PROPOSAL).unlink(missing_ok=True)
     if cfg.splitter.mode == "command":
         _invoke(cfg.splitter, d, _split_prompt(d, cfg), cfg=cfg, label="splitter")
     else:

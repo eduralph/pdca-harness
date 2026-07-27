@@ -225,3 +225,101 @@ class SplitterLeaf(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewFixes(unittest.TestCase):
+    """Regressions from the codex review of #322/#323."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github", tracker_url="",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
+        )
+        self.parent = self.cfg.bundle("500")
+        self.parent.mkdir(parents=True)
+        (self.parent / "brief.md").write_text("- **Slug:** parent\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_a_fenced_end_marker_does_not_truncate_the_child(self) -> None:
+        """The earlier test asserted only the content BEFORE the fake terminator, so it
+        passed while every field after it was silently dropped."""
+        body = ("- **Slug:** tricky\n\n```md\n<!-- pdca:end child-1 -->\n```\n"
+                "- **Success criterion:** SURVIVES\n")
+        children = split.parse(_proposal(body))
+        self.assertEqual(len(children), 1)
+        self.assertIn("SURVIVES", children[0].body,
+                      "fields after a fenced end-marker were dropped")
+
+    def test_a_mismatched_end_label_is_refused_not_skipped(self) -> None:
+        text = ("<!-- pdca:split-proposal v1 -->\n"
+                "<!-- pdca:child child-1 -->\n- **Slug:** a\n<!-- pdca:end child-1 -->\n"
+                "<!-- pdca:child child-2 -->\n- **Slug:** b\n<!-- pdca:end child-9 -->\n")
+        with self.assertRaises(split.SplitError):
+            split.parse(text)
+
+    def test_cyclic_dependencies_are_refused_before_writing(self) -> None:
+        (self.parent / split.PROPOSAL).write_text(_proposal(
+            "- **Slug:** a\n- **Depends on:** child-2\n",
+            "- **Slug:** b\n- **Depends on:** child-1\n"), encoding="utf-8")
+        with self.assertRaises(split.SplitError):
+            split.accept(self.parent, ["601", "602"], self.cfg)
+        self.assertEqual(list(self.cfg.bundle_root.glob("issue_6*")), [])
+
+    def test_the_abandoned_attempt_is_archived(self) -> None:
+        """A split is decided at sign-off, so the parent still carries the rejected
+        attempt. Leaving patch.diff + SUMMARY.md live lets publish ship the very
+        implementation the split exists to abandon."""
+        (self.parent / "patch.diff").write_text("abandoned\n", encoding="utf-8")
+        (self.parent / "SUMMARY.md").write_text("stale\n", encoding="utf-8")
+        (self.parent / split.PROPOSAL).write_text(_proposal(_ONE, _TWO_INDEP),
+                                                  encoding="utf-8")
+        split.accept(self.parent, ["601", "602"], self.cfg)
+        self.assertFalse((self.parent / "patch.diff").exists(),
+                         "the abandoned patch is still live — publish could ship it")
+        self.assertTrue(list(self.parent.glob("iteration-v*/patch.diff")),
+                        "the attempt was destroyed rather than archived")
+
+    def test_a_second_acceptance_is_refused(self) -> None:
+        (self.parent / split.PROPOSAL).write_text(_proposal(_ONE, _TWO_INDEP),
+                                                  encoding="utf-8")
+        split.accept(self.parent, ["601", "602"], self.cfg)
+        with self.assertRaises(split.SplitError):
+            split.accept(self.parent, ["701", "702"], self.cfg)
+        self.assertFalse(self.cfg.bundle("701").exists())
+
+    def test_a_completed_id_is_refused(self) -> None:
+        (self.cfg.bundle_root / "completed" / "issue_601").mkdir(parents=True)
+        (self.parent / split.PROPOSAL).write_text(_proposal(_ONE, _TWO_INDEP),
+                                                  encoding="utf-8")
+        with self.assertRaises(split.SplitError):
+            split.accept(self.parent, ["601", "602"], self.cfg)
+
+    def test_a_frozen_bundle_is_not_splittable(self) -> None:
+        (self.parent / "patch.diff").write_text("x", encoding="utf-8")
+        (self.parent / "check-gates.json").write_text("[]", encoding="utf-8")
+        (self.parent / "SUMMARY.md").write_text(
+            "## 9. Sign-off\n\nOutcome: accepted\n", encoding="utf-8")
+        if state.state(self.parent) == state.COMPLETE:
+            self.assertEqual(leaves.do_split(self.parent, self.cfg), 1)
+
+    def test_split_is_not_a_close_disposition_token(self) -> None:
+        """`close_class` SUBSTRING-matches, so a generic "split" token would send
+        `likely-fix — split parser failure` down the close fast path."""
+        self.assertEqual(self.cfg.close_class("likely-fix — split parser failure"), "")
+        self.assertEqual(self.cfg.close_class("split-brain repro"), "")
+
+    def test_the_shipped_child_schema_can_publish(self) -> None:
+        """A filled Slug alone makes state() call the child PLANNED, so flow skips Plan
+        and sends it to Do — a child with no `Repo + branch target` builds fine and then
+        has nowhere to publish."""
+        tpl = (TEMPLATES / "split-proposal.md.tpl").read_text(encoding="utf-8")
+        for child in split.parse(tpl):
+            with self.subTest(child=child.label):
+                self.assertIn("Repo + branch target", child.body)
+                self.assertIn("External dependencies", child.body)

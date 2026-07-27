@@ -619,6 +619,14 @@ def _report_batch(results: dict[str, str]) -> int:
     return 0 if done == len(results) else 1
 
 
+def _prog() -> str:
+    """The command name this instance actually installs — rendered projects namespace it
+    (`pdca-gramps`), so hard-coding `pdca` prints guidance that is not executable there."""
+    name = Path(sys.argv[0] or "").name
+    # `-`, `-c`, `__main__.py` and the like are not command names an operator can retype.
+    return name if name and name.isidentifier() or name.startswith("pdca") else "pdca"
+
+
 def _split(cfg: Config, args) -> int:
     """`pdca split <id>` drafts a proposal; `--accept --ids …` materializes it.
 
@@ -631,7 +639,11 @@ def _split(cfg: Config, args) -> int:
     if not args.accept:
         return leaves.do_split(d, cfg)
 
-    ids = [t.strip() for t in args.ids.split(",") if t.strip()]
+    # Normalise `#601` -> `601`. The configured issue_id_example is `#123` and the brief
+    # parser strips the prefix from dependency lists, so `--ids '#601,#602'` is the natural
+    # thing to type — but it would create `issue_#601` while `compute_waves` looked for
+    # `issue_601`, and the printed follow-up command would be truncated by the shell at `#`.
+    ids = [t.strip().lstrip("#").strip() for t in args.ids.split(",") if t.strip("# ")]
     if not ids:
         print("split: --accept needs --ids <id>[,<id>…], one per child in proposal order",
               file=sys.stderr)
@@ -643,8 +655,8 @@ def _split(cfg: Config, args) -> int:
         return 1
     for child in created:
         print(child)
-    print(f"{d.name} marked split; run `{'pdca'} flow {' '.join(ids)}` to drive the children",
-          file=sys.stderr)
+    print(f"{d.name} marked split; run `{_prog()} flow {' '.join(ids)}` to drive the "
+          "children", file=sys.stderr)
     return 0
 
 
