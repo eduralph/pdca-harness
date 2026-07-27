@@ -161,6 +161,55 @@ def _mapped_argv(leaf: LeafConfig, profile: families.FamilyProfile,
     return extra
 
 
+# A single argv string is bounded by the OS, and an oversized interactive SEED overflows it
+# with "OSError: [Errno 7] Argument list too long" before the child ever execs. Linux caps a
+# single argument at MAX_ARG_STRLEN (~128 KiB) — not total ARG_MAX; Windows caps the WHOLE
+# command line at 32,767 characters, which is why this is per-platform rather than one
+# "portable" number. A flat POSIX budget would leave the crash intact on a platform the
+# template supports (scripts/install.ps1, and the os.name == "nt" branches in act/worktree).
+_SEED_ARG_BUDGET = 24 * 1024 if os.name == "nt" else 96 * 1024
+
+#: Prefix for a spilled seed. Dot-prefixed and matched by the rendered `.gitignore`, so the
+#: file never shows up as untracked in the instance's tree — keep the two in step (a test
+#: asserts it).
+_SEED_SPILL_PREFIX = ".pdca-prompt-"
+
+
+def _seed_positional(prompt: str, workdir: Path) -> tuple[str, Path | None]:
+    """The interactive REPL seed, spilling an oversized prompt to a file (issue #313).
+
+    Interactive leaves inherit the TTY to open a REPL, so the prompt cannot ride **stdin**
+    the way a headless leaf's does — it goes as ``claude "<seed>"``. The Act leaf is what
+    trips the limit first: its prompt embeds the whole cross-cycle ACT INDEX, which grows
+    with every frozen cycle (observed at 151,653 bytes on a mature instance), so `pdca flow`
+    began dying the moment it auto-ran Act. Any interactive leaf can hit it — a large
+    planner or sign-off batch does the same.
+
+    Over budget, the prompt is written to a scratch file **inside ``workdir``** — the REPL's
+    cwd, so it reads it with no out-of-tree permission prompt — and the seed becomes a short
+    pointer. Under budget the prompt is passed inline, byte-for-byte as before.
+
+    Measured in BYTES, not characters: the OS limit is on the encoded argument, and a prompt
+    of mostly non-ASCII would otherwise pass a character-count check and still fail to exec.
+
+    Returns ``(seed, spill|None)``; the caller unlinks ``spill`` once the session ends.
+    """
+    if len(prompt.encode("utf-8")) <= _SEED_ARG_BUDGET:
+        return prompt, None
+    fh = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=workdir,
+        prefix=_SEED_SPILL_PREFIX, suffix=".md", delete=False)
+    with fh:
+        fh.write(prompt)
+    spill = Path(fh.name)
+    seed = (
+        "Your full instructions were too large to pass on the command line, so they "
+        f"were written to `{spill.name}` in your current directory. Read that file in "
+        "full now — it IS your prompt (task and context) — then carry it out."
+    )
+    return seed, spill
+
+
 def _invoke(
     leaf: LeafConfig,
     workdir: Path,
@@ -197,7 +246,15 @@ def _invoke(
     prompt = prompt_prefix + prompt
     run_env = {**os.environ, **env} if env else None
     if leaf.interactive:
-        subprocess.run(argv + [prompt], cwd=workdir, env=run_env)
+        # The seed may be spilled to a file when it would blow the OS single-argument
+        # limit (#313). `finally` so a non-zero exit or a raising spawn still cleans up;
+        # a SIGKILLed session can still orphan one, which is why the name is gitignored.
+        seed, spill = _seed_positional(prompt, workdir)
+        try:
+            subprocess.run(argv + [seed], cwd=workdir, env=run_env)
+        finally:
+            if spill is not None:
+                spill.unlink(missing_ok=True)
         return
     # Headless: feed the prompt on stdin (a trailing positional would be swallowed
     # by a variadic --allowedTools) and tick a heartbeat, since `claude -p` prints
