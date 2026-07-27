@@ -20,6 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags: test_update_compat renders the previous RELEASE and
+          # updates onto HEAD, so it needs the vX.Y.Z tags. The default depth-1 checkout
+          # has none, and the test would skip itself into a permanent green (issue #342).
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -30,3 +35,6 @@ jobs:
 
       - name: Render the template (copier) + run the generated slice
         run: python -m unittest tests.test_render_and_run -v
+
+      - name: copier update from the previous release (instance compatibility)
+        run: python -m unittest tests.test_update_compat -v
