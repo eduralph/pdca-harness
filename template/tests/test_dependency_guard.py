@@ -252,6 +252,30 @@ class HoldReachesTheCaller(unittest.TestCase):
         from pdca_harness.config import Config
         self.assertEqual(cli._run(Config.load(self.tmp), "1"), 0)
 
+    def test_signoff_iterate_also_exits_non_zero_when_held(self) -> None:
+        """The second `run_issue` caller. An iterate archives the attempt, returns to
+        PLANNED and is then held before Do — nothing was rebuilt, so exiting 0 would tell
+        automation the sign-off decision had been carried out."""
+        from types import SimpleNamespace
+        from pdca_harness import cli, gates, assemble
+        from pdca_harness.config import Config
+        cfg = Config.load(self.tmp)
+        cfg.gates_checks = [{"id": "C4", "tier": "C4", "label": "v", "scope": "bundle",
+                             "gating": True, "cmd": "true"}]
+        (self.d / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
+        (self.d / "check-review.md").write_text("All advisory items PASS.\n",
+                                                encoding="utf-8")
+        gates.run_gates(self.d, cfg)
+        assemble.assemble_summary(self.d, cfg)
+        summary = self.d / "SUMMARY.md"
+        summary.write_text(summary.read_text().replace("- [ ]", "- [x]"), encoding="utf-8")
+
+        args = SimpleNamespace(issue_id="1", accept=False, iterate_do=True,
+                               iterate_plan=False, discontinue=False, by="t", delta="",
+                               no_publish=True)
+        self.assertEqual(cli._signoff(cfg, args), 1,
+                         "a held rebuild reported the sign-off as carried out")
+
 
 if __name__ == "__main__":
     unittest.main()

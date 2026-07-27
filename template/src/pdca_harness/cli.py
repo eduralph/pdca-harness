@@ -1131,6 +1131,14 @@ def _signoff(cfg: Config, args: argparse.Namespace) -> int:
     # Apply the transition: accept freezes; iterate clears and re-runs the body.
     final = driver.run_issue(d, cfg)
     print(f"{final}\t{d}")
+    if driver.held(final):
+        # Same contract as `pdca run` (#351 review): an iterate that archives the attempt,
+        # returns to PLANNED and is then held before Do has NOT rebuilt anything, and
+        # exiting 0 would tell automation the sign-off decision was carried out.
+        print(f"signoff: {d.name} is held at {final} — the transition was recorded but the "
+              "rebuild did not run; resolve the item(s) above and re-run",
+              file=sys.stderr)
+        return 1
 
     # Accept → publish by default, like `flow`'s closing step (#97): a standalone
     # `signoff --accept` otherwise left bundles COMPLETE-but-unpublished with no signal.
