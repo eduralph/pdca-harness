@@ -223,8 +223,6 @@ class SplitterLeaf(unittest.TestCase):
         self.assertEqual([c.label for c in children], ["child-1", "child-2"])
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ReviewFixes(unittest.TestCase):
@@ -323,3 +321,52 @@ class ReviewFixes(unittest.TestCase):
             with self.subTest(child=child.label):
                 self.assertIn("Repo + branch target", child.body)
                 self.assertIn("External dependencies", child.body)
+
+
+class FencedOrderingFields(unittest.TestCase):
+    """The last deferred finding from the #354 review: fenced examples are content.
+
+    A child body is a full draft brief and the format explicitly permits fenced code, so a
+    child illustrating `- **Depends on:** child-2` in an example must not have that example
+    treated as metadata. The reader and the rewriter share one fence-aware iterator — two
+    different views of the same document is how a reviewed proposal materialises into
+    something else.
+    """
+
+    def test_a_fenced_ordering_line_is_not_rewritten(self) -> None:
+        body = ("- **Slug:** s\n\n```md\n- **Depends on:** child-2\n```\n"
+                "- **Depends on:** child-2\n")
+        out = split.rewrite_ordering(body, {"child-2": "642"})
+        self.assertIn("```md\n- **Depends on:** child-2\n```", out,
+                      "the fenced example was rewritten")
+        self.assertIn("\n- **Depends on:** 642", out,
+                      "the real ordering field was not rewritten")
+
+    def test_a_fenced_ordering_line_is_not_read_as_a_reference(self) -> None:
+        """Otherwise a well-formed proposal fails the unknown-label or cycle check on its
+        own documentation."""
+        body = "- **Slug:** s\n\n```md\n- **Depends on:** child-9\n```\n"
+        self.assertEqual(split.Child("child-1", body).ordering("Depends on"), [])
+
+    def test_a_proposal_documenting_the_format_still_accepts(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        cfg = Config(
+            root=tmp, bundle_root=tmp / "results", process_dir=tmp / "process",
+            templates_dir=TEMPLATES, default_branch="main", tracker_system="github",
+            tracker_url="", issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        parent = cfg.bundle("500")
+        parent.mkdir(parents=True)
+        (parent / "brief.md").write_text("- **Slug:** p\n", encoding="utf-8")
+        (parent / split.PROPOSAL).write_text(_proposal(
+            "- **Slug:** a\n\n```md\n- **Depends on:** child-9\n```\n",
+            "- **Slug:** b\n- **Depends on:** child-1\n"), encoding="utf-8")
+        created = split.accept(parent, ["601", "602"], cfg)
+        self.assertEqual(len(created), 2)
+        self.assertIn("- **Depends on:** 601",
+                      (created[1] / "brief.md").read_text(encoding="utf-8"))
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    unittest.main()

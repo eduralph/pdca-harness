@@ -45,6 +45,31 @@ SUPPORTED_VERSION = 1
 ORDERING_FIELDS = ("Depends on", "Conflicts with")
 
 
+def _unfenced(text: str):
+    """`(line, in_fence)` for each line, so callers can skip fenced content.
+
+    One definition, used by BOTH the field reader and the label rewriter. They have to
+    agree: a fenced `- **Depends on:** child-2` that the rewriter changes but the reader
+    ignores — or vice versa — is two views of the same document, which is how a validated
+    proposal materialises into something different from what was reviewed.
+    """
+    open_fence: tuple[str, int] | None = None
+    for line in text.splitlines():
+        m = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if m:
+            marker, rest = m.group(1), m.group(2)
+            if open_fence is None:
+                open_fence = (marker[0], len(marker))
+                yield line, True
+                continue
+            if (marker[0] == open_fence[0] and len(marker) >= open_fence[1]
+                    and not rest.strip()):
+                open_fence = None
+            yield line, True
+            continue
+        yield line, open_fence is not None
+
+
 class SplitError(Exception):
     """A proposal that cannot be accepted as written. Always raised BEFORE any write."""
 
@@ -55,8 +80,15 @@ class Child:
     body: str
 
     def ordering(self, field: str) -> list[str]:
-        """The labels named by one ordering field — `[]` when absent or a placeholder."""
-        for line in self.body.splitlines():
+        """The labels named by one ordering field — `[]` when absent or a placeholder.
+
+        Fenced content is skipped: a child illustrating the format in a code block would
+        otherwise have its EXAMPLE validated as a real sibling reference, failing the
+        cycle or unknown-label check on a proposal that is perfectly well formed.
+        """
+        for line, fenced in _unfenced(self.body):
+            if fenced:
+                continue
             m = re.match(rf"^\s*-\s*\*{{0,2}}{re.escape(field)}\*{{0,2}}:\*{{0,2}}\s*(.*)$",
                          line, re.IGNORECASE)
             if m:
@@ -232,7 +264,10 @@ def rewrite_ordering(body: str, mapping: dict[str, str]) -> str:
     parallel, or building blind on the same base and conflicting at fold.
     """
     out: list[str] = []
-    for line in body.splitlines():
+    for line, fenced in _unfenced(body):
+        if fenced:
+            out.append(line)   # a fenced example is content, not metadata
+            continue
         for field in ORDERING_FIELDS:
             m = re.match(rf"^(\s*-\s*\*{{0,2}}{re.escape(field)}\*{{0,2}}:\*{{0,2}}\s*)(.*)$",
                          line, re.IGNORECASE)
