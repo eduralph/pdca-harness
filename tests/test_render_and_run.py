@@ -56,6 +56,15 @@ class RenderAndRun(unittest.TestCase):
             self.assertIn("Render Test", (out / "pdca.toml").read_text(encoding="utf-8"))
             self.assertFalse(list(out.rglob("*.jinja")), "unstripped .jinja files remain")
 
+            # …and the result is VALID TOML. Stripped suffixes prove nothing about syntax:
+            # a stray comment or a duplicated key renders happily and then breaks every
+            # `pdca` command at config load (#337).
+            import tomllib
+            try:
+                tomllib.loads((out / "pdca.toml").read_text(encoding="utf-8"))
+            except tomllib.TOMLDecodeError as exc:  # pragma: no cover - the failure path
+                self.fail(f"rendered pdca.toml is not valid TOML: {exc}")
+
             # The answers file must be written with a recorded version, or
             # `copier update` cannot work — the whole reason for using Copier.
             answers = out / ".copier-answers.yml"
