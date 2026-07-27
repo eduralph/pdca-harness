@@ -40,11 +40,15 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from . import sizing
+from . import doctor, sizing
 
 #: `[driver].size_guard` values. `hold` is NOT among them, deliberately — see
 #: :func:`size_reasons`.
-OFF, WARN = "off", "warn"
+OFF, WARN, HOLD = "off", "warn", "hold"
+
+#: Reason codes that STOP the beat. Deterministic verdicts only — a heuristic never earns
+#: a block (see :func:`size_reasons`).
+_BLOCKING = frozenset({"unregistered-dependency"})
 
 
 class HoldReason(NamedTuple):
@@ -84,6 +88,36 @@ def size_reasons(d, cfg) -> list[HoldReason]:
     return [HoldReason("oversized", detail)]
 
 
+def dependency_reasons(d, cfg) -> list[HoldReason]:
+    """Brief-declared external dependencies with no registered row (#333).
+
+    **This one blocks**, where the size advisory only warns, and the difference is not a
+    matter of taste: it is set membership, not a heuristic. There is no false-positive
+    class to trade against — a backticked token either names a registered row or it does
+    not — so the precision argument that keeps `size_guard` advisory does not apply.
+
+    It also does not add a new block, it moves an existing one earlier: the same condition
+    already refuses `signoff --accept` through the C6 guard. Catching it at Plan spends a
+    human minute; catching it at Check spends an `opus`/`max` builder, a codex reviewer at
+    `xhigh` and the adversary first — for a verdict that was knowable before Do ever
+    dispatched.
+
+    The escape hatch is unchanged: a dependency nothing can detect is written in prose or
+    annotated ``(no-check: …)`` and yields no token, so this can never become a reason to
+    stop declaring dependencies.
+    """
+    mode = str(getattr(cfg, "dependency_guard", HOLD) or HOLD).strip().lower()
+    if mode == OFF:
+        return []
+    return [HoldReason("unregistered-dependency", item)
+            for item in doctor.unregistered_dependencies(d / "brief.md", cfg)]
+
+
+def blocking(reasons) -> list[HoldReason]:
+    """The subset that should stop the beat. Advisory reasons are reported and passed."""
+    return [r for r in reasons if r.code in _BLOCKING]
+
+
 def evaluate(d, cfg) -> list[HoldReason]:
     """Every pre-dispatch reason to pause on this bundle. Empty ⇒ proceed.
 
@@ -92,4 +126,4 @@ def evaluate(d, cfg) -> list[HoldReason]:
     verdict is set membership rather than a heuristic, and therefore *can* justify a
     block) slots in beside it without another mechanism.
     """
-    return list(size_reasons(d, cfg))
+    return list(size_reasons(d, cfg)) + list(dependency_reasons(d, cfg))

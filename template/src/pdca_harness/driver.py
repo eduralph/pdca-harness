@@ -57,8 +57,19 @@ def advance(d: Path, cfg: Config) -> None:
     # about work that never enters Do. BUILT is covered as well as PLANNED: a partial
     # build lands there and never re-enters PLANNED, and Check is a real spend too.
     if not close and s in (state.PLANNED, state.BUILT):
-        for reason in plan_policy.evaluate(d, cfg):
+        reasons = plan_policy.evaluate(d, cfg)
+        for reason in reasons:
             _say(f"⚠ {d.name}: {reason.detail}")
+        # A BLOCKING reason stops the beat; advisories are reported and passed. Only a
+        # deterministic verdict earns a block — the unregistered dependency is set
+        # membership (#333), where the size band is a heuristic that peaks at 67%
+        # precision (#321). The bundle stays in-flight, so registering the row and
+        # re-running is all it takes: the policy is recomputed every beat.
+        blockers = plan_policy.blocking(reasons)
+        if blockers:
+            _say(f"→ {d.name}: held before {'Do' if s == state.PLANNED else 'Check'} — "
+                 f"{len(blockers)} blocking item(s) above; resolve, then re-run.")
+            return
     if s == state.PLANNED:
         if close:
             _say(f"→ {d.name}: close disposition '{close}' — skipping builder leaf (no patch to build)…")

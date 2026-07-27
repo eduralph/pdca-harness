@@ -59,7 +59,8 @@
   `[[doctor.checks]]` row in the render (a `cmd` that detects it + an install `hint`) and be
   named here as a **backticked token equal to that row's `id`** (`protoc` ↔ `id = "protoc"`).
   A declared, human-installable dependency with no matching row is a Plan-exit gap: the
-  driver reconciles this field against the registered rows at Check and routes any
+  driver reconciles this field against the registered rows at PLAN EXIT — before Do
+  dispatches — and again at Check as a backstop, routing any
   unregistered token into SUMMARY §6, where it blocks accept until it is registered. A
   dependency that legitimately has NO detecting command — a topology / environment shape (a
   ≥3-replica cluster, a partition-capable stack) — goes in plain prose (not backticked), or

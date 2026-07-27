@@ -24,10 +24,12 @@ from unittest import mock
 from pdca_harness import driver, plan_policy, sizing, state
 from pdca_harness.config import Config, LeafConfig
 
+# Deliberately declares NO external dependency: an unregistered one is #333's blocking
+# check, and mixing it in here would test that instead of the size advisory.
 _OVERSIZED = ("- **Slug:** wide\n"
               "- **Difficulty:** high\n"
               "- **Conflicts with:** 12\n"
-              "- **External dependencies:** `protoc`\n")
+              "- **Scope:** " + ("pad " * 4000) + "\n")
 _SMALL = "- **Slug:** narrow\n"
 
 
