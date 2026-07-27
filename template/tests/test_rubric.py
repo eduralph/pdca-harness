@@ -217,3 +217,89 @@ class ReviewFixes(unittest.TestCase):
         (self.target / "RUBRIC.md").write_text("# R\n\nappeared later\n", encoding="utf-8")
         self.assertEqual(self._load(self._cfg()), "",
                          "a later leaf picked up a rubric the builder never saw")
+
+
+class SecondReviewFixes(unittest.TestCase):
+    """Regressions from the second codex pass on #352."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.target = self.tmp / "target"
+        self.target.mkdir(parents=True)
+        self.d = self.tmp / "results" / "issue_1"
+        self.d.mkdir(parents=True)
+        (self.d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _cfg(self, rel="", section=""):
+        cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=self.tmp / "templates",
+            default_branch="main", tracker_system="github", tracker_url="",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        cfg.rubric_file, cfg.rubric_section = rel, section
+        return cfg
+
+    def _load(self, cfg):
+        with mock.patch("pdca_harness.rubric._target_root", return_value=self.target):
+            return rubric.load(self.d, cfg)
+
+    def test_a_backtick_fence_is_not_closed_by_a_tilde_line(self) -> None:
+        """A ``` example quoting a ~~~ line would close the fence early, exposing the
+        example's heading and returning the sample instead of the real rubric."""
+        (self.target / "A.md").write_text(
+            "# P\n\n```md\n~~~\n## Review rubric\n\nEXAMPLE ONLY\n```\n\n"
+            "## Review rubric\n\nTHE REAL RULES\n", encoding="utf-8")
+        text = self._load(self._cfg("A.md", "Review rubric"))
+        self.assertIn("THE REAL RULES", text)
+        self.assertNotIn("EXAMPLE ONLY", text)
+
+    def test_an_indented_heading_is_still_a_heading(self) -> None:
+        """One to three spaces is valid ATX Markdown; a stricter anchor degraded the
+        section to no rubric at all."""
+        (self.target / "A.md").write_text(
+            "# P\n\n  ## Review rubric\n\n- INDENTED RULE\n", encoding="utf-8")
+        self.assertIn("INDENTED RULE", self._load(self._cfg("A.md", "Review rubric")))
+
+    def test_the_unconfigured_outcome_is_pinned_too(self) -> None:
+        """Unset at Do, set before Check: the reviewer would otherwise apply a rubric the
+        builder never received. Config changes take effect on the NEXT attempt."""
+        self.assertEqual(self._load(self._cfg()), "")
+        self.assertTrue((self.d / rubric.SNAPSHOT).exists())
+        (self.target / "R.md").write_text("# R\n\nturned on later\n", encoding="utf-8")
+        self.assertEqual(self._load(self._cfg("R.md")), "",
+                         "a mid-cycle config change reached a later leaf")
+
+    def test_a_brief_with_no_target_reads_no_rubric(self) -> None:
+        """`_checkout_path(cfg, "")` resolves to cfg.root.parent, so an empty repo spec
+        would read a rubric out of an unrelated sibling directory."""
+        from pdca_harness import rubric as r
+        with mock.patch("pdca_harness.worktree.path", return_value=None), \
+             mock.patch("pdca_harness.worktree._target", return_value=None), \
+             mock.patch("pdca_harness.publish._resolve_target", return_value=("", "", "")):
+            self.assertIsNone(r._target_root(self.d, self._cfg("R.md")))
+
+    def test_a_lane_owned_by_another_bundle_is_not_used(self) -> None:
+        """An overflow gate can leave a lane preserved for a different bundle; `path()`
+        returns it because the directory exists."""
+        from pdca_harness import rubric as r
+        lane = self.tmp / "lane"
+        lane.mkdir()
+        with mock.patch("pdca_harness.worktree.path", return_value=lane), \
+             mock.patch("pdca_harness.worktree.owner_of", return_value="issue_999"), \
+             mock.patch("pdca_harness.worktree._target", return_value=(self.target, "main")):
+            self.assertEqual(r._target_root(self.d, self._cfg("R.md")), self.target)
+
+    def test_the_builder_prompt_and_rubric_do_not_run_together(self) -> None:
+        """`for_builder()` has no trailing whitespace, so prefixing it glued its last rule
+        onto `You are the Do builder…` — merging two instructions into one line."""
+        (self.target / "R.md").write_text("# R\n\n- LAST RULE\n", encoding="utf-8")
+        with mock.patch("pdca_harness.rubric._target_root", return_value=self.target):
+            prompt = leaves._build_prompt(self.d, self._cfg("R.md"))
+        self.assertNotIn("LAST RULEYou are", prompt)
+        self.assertTrue(prompt.startswith("You are the Do builder"),
+                        "the task prompt should frame the work; the rubric constrains it")
+        self.assertIn("LAST RULE", prompt)

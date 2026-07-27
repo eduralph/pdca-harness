@@ -864,8 +864,12 @@ def _build_prompt(d: Path, cfg: Config | None = None) -> str:
     # The target repo's standing rubric (#314), so the builder self-reviews against
     # the same criteria the reviewer will apply — the asymmetry that costs a
     # guaranteed round. "" when unconfigured, so the prompt is byte-identical.
+    # APPENDED, not prepended (#314 review): prefixing glued the rubric's last rule
+    # straight onto "You are the Do builder…" with no separator, merging the two
+    # instructions. The task prompt also reads better first — the rubric is a standing
+    # constraint on the work, not the framing for it.
     rubric = rubric_mod.for_builder(d, cfg) if cfg is not None else ""
-    return rubric + (
+    return (
         f"You are the Do builder. Read {d}/brief.md. If $PDCA_WORKTREE is set, make ALL "
         "target-source edits there — it is an isolated git worktree off the target's base "
         "(the host's primary checkout is NOT touched); cite path:line against it. Build to "
@@ -901,7 +905,7 @@ def _build_prompt(d: Path, cfg: Config | None = None) -> str:
         "runs the target's own hooks (formatter/linters), which no PDCA gate models, so a patch the target's "
         "commit hook would reject is not done even if every gate is green. Do NOT push, "
         "open, or mark any PR ready."
-    )
+    ) + rubric
 
 
 def _stub_build(d: Path, cfg: Config) -> None:

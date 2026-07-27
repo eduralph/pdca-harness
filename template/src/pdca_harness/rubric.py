@@ -51,14 +51,21 @@ def _section(text: str, heading: str) -> str:
     wanted = heading.strip().lower()
     out: list[str] = []
     level = 0
-    fenced = False
+    open_fence: tuple[str, int] | None = None
     for line in text.splitlines():
-        if re.match(r"^\s*(```|~~~)", line):
-            # A fenced Markdown EXAMPLE containing a matching heading would otherwise be
-            # treated as the real section, handing every leaf the sample instead of the
-            # rubric — and running on to the next real heading.
-            fenced = not fenced
-        m = None if fenced else re.match(r"^(#{1,6})\s+(.*?)\s*$", line)
+        f = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if f:
+            marker = f.group(1)
+            if open_fence is None:
+                open_fence = (marker[0], len(marker))
+            elif marker[0] == open_fence[0] and len(marker) >= open_fence[1]:
+                # A closing fence must MATCH its opener: a ``` block quoting a ~~~ line
+                # would otherwise close early, exposing a heading inside the example and
+                # handing every leaf the sample instead of the real rubric.
+                open_fence = None
+        # ATX headings may be indented up to three spaces and still be structural Markdown;
+        # a stricter anchor silently degraded such a section to "no rubric".
+        m = None if open_fence else re.match(r"^ {0,3}(#{1,6})\s+(.*?)\s*$", line)
         if m:
             depth, title = len(m.group(1)), m.group(2).strip().lower()
             if level:
@@ -105,7 +112,10 @@ def _target_root(d: Path, cfg) -> Path | None:
     from . import worktree
     try:
         wt = worktree.path(d, cfg)
-        if wt and wt.is_dir():
+        # OWNERSHIP, not mere existence: an overflow gate can leave a lane preserved for a
+        # different bundle, and `path()` would hand it back simply because the directory is
+        # there — snapshotting another bundle's branch-specific rubric.
+        if wt and wt.is_dir() and worktree.owner_of(wt) == d.name:
             return wt
     except Exception:  # noqa: BLE001 — isolation is optional; fall through
         pass
@@ -118,6 +128,10 @@ def _target_root(d: Path, cfg) -> Path | None:
     try:
         from . import publish
         repo_spec, _base, _slug = publish._resolve_target(d)
+        if not str(repo_spec).strip():
+            # `_checkout_path(cfg, "")` resolves to cfg.root.parent, so a brief with no
+            # usable target would read a rubric out of an unrelated sibling directory.
+            return None
         mapped = publish._checkout_path(cfg, repo_spec)
         return mapped if mapped.is_dir() else None
     except Exception:  # noqa: BLE001 — no target is a warning, never a crash
@@ -139,6 +153,10 @@ def load(d: Path, cfg) -> str:
 
     rel = str(getattr(cfg, "rubric_file", "") or "").strip()
     if not rel:
+        # Pinned like every other fail-open path: if the key is unset at Do and set before
+        # Check, the reviewer would otherwise apply a rubric the builder never received.
+        # Configuration changes take effect on the NEXT attempt, not mid-cycle.
+        _record(snapshot, "")
         return ""
 
     target = _target_root(d, cfg)
