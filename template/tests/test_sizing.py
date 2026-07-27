@@ -361,8 +361,24 @@ class ThirdReviewFixes(unittest.TestCase):
                                     "proposed_seams": None,
                                     "confidence": "certain"})        # not low/medium/high
         self.assertEqual(out.band, sizing.OVERSIZED)
-        self.assertNotIn("outcome(s)", "; ".join(out.reasons),
+        joined = "; ".join(out.reasons)
+        self.assertNotIn("outcome(s)", joined,
                          "a malformed field was quoted back into the reasons")
+        self.assertNotIn("confidence", joined,
+                         "an unrecognised confidence was presented as if it were an answer")
+
+    def test_only_a_recognised_confidence_is_quoted(self) -> None:
+        """`null` rendered as "(confidence none)" and "certain" as "(confidence certain)" —
+        both read to a human as an answer on the scale the model was asked for, when it
+        gave none."""
+        base = sizing.SizeEstimate(0, sizing.OK, [], churn_band=sizing.OK,
+                                   patch_band=sizing.OK)
+        for value in ("certain", None, "", {"level": "high"}):
+            with self.subTest(confidence=value):
+                out = sizing.combine(base, {"band": "oversized", "confidence": value})
+                self.assertNotIn("confidence", "; ".join(out.reasons))
+        out = sizing.combine(base, {"band": "oversized", "confidence": "high"})
+        self.assertIn("confidence high", "; ".join(out.reasons))
 
     def test_an_unusable_band_still_changes_nothing(self) -> None:
         """The guarantee that DOES hold, asserted beside the tolerance above so the two

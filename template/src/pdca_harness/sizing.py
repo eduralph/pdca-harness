@@ -292,8 +292,12 @@ def combine(structural: SizeEstimate, model: dict | None) -> SizeEstimate:
     detail = f"sizer says {band}"
     if isinstance(outcomes, list) and outcomes:
         detail += f" — {len(outcomes)} independently shippable outcome(s)"
+    # Only a RECOGNISED confidence is quoted. `null` rendered as "(confidence none)" and
+    # "certain" as "(confidence certain)" — both read to a human as an answer the model
+    # gave on the scale it was asked for, when in fact it gave none. Dropping them is what
+    # the tolerant contract above already promises.
     confidence = str(model.get("confidence", "")).strip().lower()
-    if confidence:
+    if confidence in ("low", "medium", "high"):
         detail += f" (confidence {confidence})"
     reasons.append(detail)
     return SizeEstimate(structural.score, combined, reasons,
