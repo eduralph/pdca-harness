@@ -625,10 +625,55 @@ def _fork_owner(repo: Path, remote: str = "origin") -> str:
     return m.group(1) if m else ""
 
 
+def publish_gates(cfg: Config) -> list[dict]:
+    """The T4 rows publish is responsible for running (issue #339).
+
+    The tier alone used to select them, so registering ANY T4-tier check for Check
+    silently made publish re-run it before every push. In one instance that check was a
+    batched 3x model review of the whole ``patch.diff``: ~6 minutes, re-paid on every
+    publish attempt and every retry — and the push and ``gh pr create`` sit downstream of
+    it, so retries happen.
+
+    Duplicated cost is the smaller half. **Publish re-samples a nondeterministic reviewer
+    after the human has signed off**: a bundle green at Check can be refused at publish
+    over a finding that did not exist when §9 was recorded. Observed in both directions on
+    one bundle — two findings each seen by only 1 of 3 passes, and a re-run of the
+    identical command minutes later reporting none. That is not re-checking a decision
+    against a fixed oracle; it is drawing a fresh sample from a distribution, after the
+    decision, with the branch push gated on the result.
+
+    What the slot is actually for (this module's own docstring): checks whose subject is
+    the contribution artifacts publish just drafted — ``commit-msg.txt`` /
+    ``pr-description.md`` — which do not exist at Check time, so Check cannot have
+    validated them.
+
+    **The default is keyed on `scope`, not a flat True.** A bundle-scoped T4 row is about
+    the bundle's own artifacts, so it defaults to running here — which keeps the shipped
+    ``T4-contribution`` row gating publish, unchanged, including for an instance taking a
+    ``copier update``. A repo-scoped row cannot be about artifacts publish just drafted, so
+    it defaults off; a flat ``True`` would preserve the original defect for exactly those
+    rows, and worse, publish's environment carries only ``$PDCA_BUNDLE`` (no
+    ``$PDCA_WORKTREE``, which the Check runner exports), so a repo-scoped row depending on
+    it passes Check and then falsely blocks the push.
+
+    An explicit ``at_publish`` always wins, in both directions.
+
+    Not modelled here, and worth knowing: a check cannot yet be publish-ONLY. ``_applies``
+    knows only ``scope``/``target``, so a row whose subject is ``pr-description.md`` still
+    runs at Check — where ``pdca contribcheck`` is deliberately default-open (no
+    ``pr-description.md`` yet => pass), which is what lets one registration serve both
+    phases. A real ``phase`` property would express it directly; that is the larger change
+    #339 records for later.
+    """
+    return [c for c in cfg.gates_checks
+            if c.get("tier") == "T4"
+            and c.get("at_publish", c.get("scope", "repo") == "bundle")]
+
+
 def _t4_passes(cfg: Config, d: Path) -> bool:
     """Run every configured T4-tier gate over the bundle. No T4 gate → nothing to
     enforce (True). Keeps publish decoupled from any one project's checker."""
-    t4 = [c for c in cfg.gates_checks if c.get("tier") == "T4"]
+    t4 = publish_gates(cfg)
     if not t4:
         return True
     env = {**os.environ, "PDCA_BUNDLE": str(d)}

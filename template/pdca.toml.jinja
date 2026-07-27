@@ -744,6 +744,15 @@ checks = [
   # pass); `pdca publish` hard-gates T4 after drafting them (relaxed to a flag under
   # --no-issue). Gating is right here — this audits THIS cycle's own contribution artifacts,
   # not pre-existing code, so the usual "T4 advisory" caveat (below) does not apply.
+  # `at_publish` (issue #339) — whether `pdca publish` re-runs this row before pushing.
+  # Defaults from `scope`: a BUNDLE-scoped T4 row is about the bundle's own contribution
+  # artifacts, so it runs at publish (the row below); a REPO-scoped one cannot be, so it
+  # does not. Set it explicitly to override in either direction.
+  #
+  # Register a whole-diff model review at T4 and you want `at_publish = false`: Check has
+  # already paid for it, and re-running a NONDETERMINISTIC reviewer after the human signed
+  # off means a bundle green at Check can be refused at publish over a finding that did not
+  # exist when §9 was recorded.
   { id = "T4-contribution", tier = "T4", label = "PR body has a user-impact opener + tracker id in both artifacts", cmd = "{{ cli_name }} contribcheck", gating = true, scope = "bundle" },
 ]
 {% endif %}

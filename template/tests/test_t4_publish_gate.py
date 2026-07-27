@@ -56,7 +56,7 @@ class T4PublishGate(unittest.TestCase):
         """Before this fix the empty `cmd` ran, `subprocess.run("")` exited 0, and the gate
         passed without executing anything."""
         marker = self.tmp / "ran"
-        cfg = _cfg(self.tmp, [{"id": "T4-d", "tier": "T4", "subcmd": "contribcheck"}],
+        cfg = _cfg(self.tmp, [{"id": "T4-d", "tier": "T4", "scope": "bundle", "subcmd": "contribcheck"}],
                    runner=f"sh -c 'touch {marker}' #")
         self.assertTrue(publish._t4_passes(cfg, self.bundle))
         self.assertTrue(marker.exists(),
@@ -64,13 +64,13 @@ class T4PublishGate(unittest.TestCase):
 
     def test_delegated_row_with_no_runner_fails_loudly(self) -> None:
         """A misconfiguration must block the push, not sail through as a pass."""
-        cfg = _cfg(self.tmp, [{"id": "T4-d", "tier": "T4", "subcmd": "contribcheck"}])
+        cfg = _cfg(self.tmp, [{"id": "T4-d", "tier": "T4", "scope": "bundle", "subcmd": "contribcheck"}])
         self.assertFalse(publish._t4_passes(cfg, self.bundle))
 
     def test_plain_cmd_rows_are_unaffected(self) -> None:
-        cfg = _cfg(self.tmp, [{"id": "T4-p", "tier": "T4", "cmd": "true"}])
+        cfg = _cfg(self.tmp, [{"id": "T4-p", "tier": "T4", "scope": "bundle", "cmd": "true"}])
         self.assertTrue(publish._t4_passes(cfg, self.bundle))
-        cfg = _cfg(self.tmp, [{"id": "T4-p", "tier": "T4", "cmd": "false"}])
+        cfg = _cfg(self.tmp, [{"id": "T4-p", "tier": "T4", "scope": "bundle", "cmd": "false"}])
         self.assertFalse(publish._t4_passes(cfg, self.bundle))
 
     def test_no_t4_rows_is_still_vacuously_true(self) -> None:
@@ -81,7 +81,7 @@ class T4PublishGate(unittest.TestCase):
 
     def test_the_gate_is_announced_before_it_runs(self) -> None:
         """The whole point: something reaches the terminal before the silence starts."""
-        cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4",
+        cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4", "scope": "bundle",
                                "label": "contribution lint", "cmd": "true"}])
         with mock.patch.object(progress, "run_with_heartbeat",
                                wraps=progress.run_with_heartbeat) as spy:
@@ -96,7 +96,7 @@ class T4PublishGate(unittest.TestCase):
         newest write is whatever Check left hours earlier — every tick would render
         "no writes 180m", a stall warning on the run proving it is not stalled.
         """
-        cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4", "cmd": "true"}])
+        cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4", "scope": "bundle", "cmd": "true"}])
         with mock.patch.object(progress, "run_with_heartbeat",
                                wraps=progress.run_with_heartbeat) as spy:
             publish._t4_passes(cfg, self.bundle)
@@ -107,7 +107,7 @@ class T4PublishGate(unittest.TestCase):
         """`run_with_heartbeat` merges the child's stderr into stdout, so the report now
         carries BOTH streams — strictly more than the old `stdout or stderr`, which
         discarded stderr whenever stdout was non-empty."""
-        cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4",
+        cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4", "scope": "bundle",
                                "cmd": "echo to-stdout; echo to-stderr 1>&2; exit 1"}])
         with mock.patch("sys.stderr") as err:
             self.assertFalse(publish._t4_passes(cfg, self.bundle))
@@ -117,12 +117,12 @@ class T4PublishGate(unittest.TestCase):
                       "stderr was dropped — the old `stdout or stderr` behaviour")
 
     def test_bundle_is_exported_to_the_gate(self) -> None:
-        cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4",
+        cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4", "scope": "bundle",
                                "cmd": 'test "$PDCA_BUNDLE" = "' + str(self.bundle) + '"'}])
         self.assertTrue(publish._t4_passes(cfg, self.bundle))
 
     def test_unlaunchable_gate_blocks_instead_of_crashing(self) -> None:
-        cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4", "cmd": "false"}])
+        cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4", "scope": "bundle", "cmd": "false"}])
         with mock.patch.object(progress, "run_with_heartbeat",
                                side_effect=OSError("boom")):
             self.assertFalse(publish._t4_passes(cfg, self.bundle))
