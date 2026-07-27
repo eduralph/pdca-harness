@@ -778,7 +778,12 @@ SIZING_FILE = "sizing.json"
 
 def _sizer_prompt(d: Path) -> str:
     return (
-        "You are the SIZER. Read only " + str(d / "brief.md") + " and answer ONE question: "
+        "You are the SIZER. Read " + str(d / "brief.md")
+        + (f" AND the planning artifact it points at ({_pointer}) — for a pointer brief "
+           "THAT document is the plan, and sizing the pointer alone would score a "
+           "three-migration project as one small slice"
+           if (_pointer := brief.planning_artifact(d / "brief.md")) else "")
+        + ". Answer ONE question: "
         "how many INDEPENDENTLY SHIPPABLE outcomes does this brief describe? An outcome is "
         "independently shippable if it could be its own PR — its own defect, its own success "
         "criterion, its own test — without waiting on the others.\n\n"

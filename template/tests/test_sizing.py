@@ -272,5 +272,61 @@ class DoctorCoversTheSizer(unittest.TestCase):
                         f"the escalation binary was not preflighted: {list(found)}")
 
 
+class SecondReviewFixes(unittest.TestCase):
+    """Round two on #349."""
+
+    def _brief(self, body: str, *, raw: bytes | None = None) -> Path:
+        f = Path(tempfile.mkdtemp()) / "brief.md"
+        if raw is not None:
+            f.write_bytes(raw)
+        else:
+            f.write_text(body, encoding="utf-8")
+        return f
+
+    def test_invalid_utf8_abstains_instead_of_raising(self) -> None:
+        """`_apriori_bytes` reads with errors="replace" and survives, but the field helpers
+        decode strictly — so one stray byte aborted the Plan beat, which is exactly what
+        "a detector that crashes Plan is worse than one that abstains" forbids."""
+        f = self._brief("", raw=b"- **Slug:** s\n- **Difficulty:** high\n\xff\xfe\n")
+        est = sizing.estimate(f, _CFG)
+        self.assertEqual(est.band, sizing.OK)
+        self.assertEqual(est.score, 0)
+
+    def test_only_the_drivers_carry_forward_heading_truncates(self) -> None:
+        """A loose "starts with Iteration" test discarded everything under a legitimate
+        `## Iteration strategy` heading, scoring a large slice as small."""
+        big = "x" * 14000
+        legit = self._brief(f"- **Slug:** s\n- **Difficulty:** high\n\n"
+                            f"## Iteration strategy\n\n{big}\n")
+        real = self._brief(f"- **Slug:** s\n- **Difficulty:** high\n\n"
+                           f"## Iteration 1 — carry-forward\n\n{big}\n")
+        self.assertGreater(sizing.estimate(legit, _CFG).score,
+                           sizing.estimate(real, _CFG).score,
+                           "a legitimate Iteration heading was treated as carry-forward")
+
+    def test_difficulty_is_word_matched_not_substring_matched(self) -> None:
+        """Bare substring fired on "hardening": `medium — certificate hardening is
+        localized` scored as high."""
+        cases = {"medium — certificate hardening is localized": 0,
+                 "low — hard-won but small": 0,
+                 "high — widest surface": 3,
+                 "hard problem": 3}
+        for value, expected in cases.items():
+            with self.subTest(difficulty=value):
+                f = self._brief(f"- **Slug:** s\n- **Difficulty:** {value}\n")
+                self.assertEqual(sizing.estimate(f, _CFG).score, expected)
+
+    def test_a_pointer_brief_tells_the_sizer_to_read_the_artifact(self) -> None:
+        """For a pointer brief THAT document is the plan; sizing the pointer alone scores a
+        three-migration project as one small slice."""
+        from pdca_harness import leaves
+        d = Path(tempfile.mkdtemp())
+        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        self.assertNotIn("planning artifact", leaves._sizer_prompt(d).lower())
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Planning artifact:** docs/migration.md\n", encoding="utf-8")
+        self.assertIn("docs/migration.md", leaves._sizer_prompt(d))
+
+
 if __name__ == "__main__":
     unittest.main()
