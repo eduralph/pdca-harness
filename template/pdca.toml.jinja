@@ -310,6 +310,34 @@ argv = []
 # decorrelation is the default and the ideal — a DIFFERENT family from the builder
 # (INTEGRATION §4). `--agent reviewer` (same family as the builder) is the
 # documented FALLBACK only; it weakens the independence Check relies on.
+# The cheap-model SIZE judgment (issue #320) — advisory, optional, off by default.
+#
+# Answers the one question the structural estimator provably cannot: how many
+# INDEPENDENTLY SHIPPABLE outcomes does this brief describe? Structure (sizing.py,
+# calibrated against a real 86-bundle corpus) predicts patch size well and churn weakly;
+# neither tells you whether a slice DECOMPOSES, and that is what justifies a split.
+#
+# `mode = "stub"` ships deliberately: taking a `copier update` must never switch on a model
+# call — and a per-Plan cost — an instance did not ask for. Switch to "command" to enable.
+# Its verdict can only ever RAISE the driver's band, never lower it (sizing.combine).
+[leaves.sizer]
+mode = "stub"
+family = "claude"
+interactive = false
+agent = "sizer"
+# argv = ["claude", "-p", "--agent", "sizer", "--allowedTools", "Read", "--model", "haiku"]
+
+# Escalation on the sizer's OWN first-pass verdict — runtime state, not a brief field,
+# which is why this is an escalation rather than a variant. A `watch` or low-confidence
+# answer is exactly when a stronger model earns its cost; nothing in the brief predicts it.
+# At most one escalation runs: this is a corroborating signal, not a search.
+#
+# [[leaves.sizer_escalation]]
+# on_band = ["watch"]
+# on_confidence = ["low"]
+# effort = "medium"
+# argv = ["claude", "-p", "--agent", "sizer", "--allowedTools", "Read", "--model", "sonnet"]
+
 [leaves.reviewer]
 mode = "{{ leaves_mode }}"
 family = "{{ reviewer_family }}"

@@ -86,6 +86,9 @@ class Config:
     rubric_file: str = ""
     rubric_section: str = ""
     planner: LeafConfig = field(default_factory=LeafConfig)
+    #: The cheap-model size judgment (#320). Absent from pdca.toml => stub => never runs,
+    #: so an instance taking a `copier update` gains no model call it did not ask for.
+    sizer: LeafConfig = field(default_factory=LeafConfig)
     signoff: LeafConfig = field(default_factory=LeafConfig)
     publisher: LeafConfig = field(default_factory=LeafConfig)
     act: LeafConfig = field(default_factory=LeafConfig)
@@ -199,6 +202,11 @@ class Config:
     # an underpowered executor (e.g. min_iteration=2 → stronger, =3 → frontier). Empty ⇒
     # every attempt uses the default [leaves.builder].
     builder_escalation: list[dict] = field(default_factory=list)
+    # Sizer escalation ([[leaves.sizer_escalation]], #320). Triggers on the leaf's OWN
+    # first-pass verdict — runtime state, not a brief field — which is why it is an
+    # escalation rather than a variant: a `watch` or low-confidence answer is exactly when
+    # a stronger model is worth paying for, and no brief field predicts that.
+    sizer_escalation: list[dict] = field(default_factory=list)
     # Difficulty-routed builder variants (issue #134): an OPEN list of per-bundle Do
     # backends ([[leaves.builder_variant]] in pdca.toml), each {family, mode, argv, when}
     # where when = {field, substring} matches a brief field (e.g. difficulty=high), like a
@@ -300,6 +308,10 @@ class Config:
     # bundle as close / no-fix, so the driver skips the builder + reviewer leaves and
     # routes it straight to sign-off. ``[driver].close_dispositions`` in pdca.toml; the
     # built-in default covers the common tracker vocabulary.
+    # Structural size-estimate weights + cutoffs ([driver.sizing], issue #320). A raw
+    # table so an instance can retune against its OWN corpus without patching the engine —
+    # the whole point of #324's calibration loop. Empty => sizing.DEFAULT_* apply.
+    sizing: dict = field(default_factory=dict)
     close_dispositions: list[str] = field(
         default_factory=lambda: list(DEFAULT_CLOSE_DISPOSITIONS))
     # Family-profile overrides ([families.<name>] in pdca.toml): per-vendor CLI
@@ -459,6 +471,10 @@ class Config:
             {**spec, "mode": mode_override or spec.get("mode", "")}
             for spec in leaves.get("builder_escalation", [])
         ]
+        sizer_escalation = [
+            dict(spec) for spec in leaves.get("sizer_escalation", [])
+            if isinstance(spec, dict)
+        ]
 
         # Difficulty-routed builder variants (issue #134) — per-bundle backends keyed on a
         # brief field via `when`. PDCA_LEAVES_MODE forces their mode too; "" inherits the
@@ -522,6 +538,7 @@ class Config:
         # for an instance's tracker vocabulary; absent ⇒ the built-in default.
         close_dispositions = list(
             driver_cfg.get("close_dispositions", DEFAULT_CLOSE_DISPOSITIONS))
+        sizing = dict(driver_cfg.get("sizing", {}))
 
         return cls(
             root=root,
@@ -564,6 +581,8 @@ class Config:
             plan_advisory_leaves=plan_advisory_leaves,
             plan_advisory_selection=plan_advisory_selection,
             builder_escalation=builder_escalation,
+            sizer=leaf("sizer"),
+            sizer_escalation=sizer_escalation,
             builder_variants=builder_variants,
             gates_runner=gates_runner,
             lanes=lanes,
@@ -580,6 +599,7 @@ class Config:
             sweep_worktrees=sweep_worktrees,
             doctor_min_free_gb=doctor_min_free_gb,
             close_dispositions=close_dispositions,
+            sizing=sizing,
             families={k.strip().lower(): dict(v)
                       for k, v in data.get("families", {}).items()},
             doctor_checks=list(data.get("doctor", {}).get("checks", [])),
