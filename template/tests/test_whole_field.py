@@ -184,12 +184,19 @@ class NestedListRendering(unittest.TestCase):
 
     def test_a_nested_list_value_keeps_its_hierarchy(self) -> None:
         from pdca_harness import assemble
-        rendered = f"- Scope: {assemble._item('- **API:** a\\n- **CLI:** b')}"
+        value = "- **API:** a\n- **CLI:** b"
+        rendered = f"- Scope: {assemble._item(value)}"
         self.assertNotIn("- Scope: - **API:**", rendered,
                          "the first sub-bullet was flattened into the label")
-        self.assertEqual(rendered, "- Scope: \n  - **API:** a\n  - **CLI:** b")
+        lines = rendered.splitlines()
+        self.assertEqual(lines[0].rstrip(), "- Scope:")
+        self.assertEqual(lines[1:], ["  - **API:** a", "  - **CLI:** b"])
 
     def test_an_inline_value_is_unchanged(self) -> None:
         from pdca_harness import assemble
         self.assertEqual(assemble._item("plain value"), "plain value")
         self.assertEqual(assemble._item("first\nsecond"), "first\n  second")
+
+
+if __name__ == "__main__":
+    unittest.main()
