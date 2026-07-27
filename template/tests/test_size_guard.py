@@ -3,7 +3,7 @@
 Two properties, and the second is the one that took three review rounds to get right.
 
 **Advisory, not blocking.** Calibrated over 86 settled bundles, the best structural rule
-reaches 50% recall at 67% precision — one wrong hold for every two right. #321's own DoD
+reaches 50% recall at 62% precision — nearly one wrong hold per right one. #321's own DoD
 says to ship `warn` and leave `hold` unimplemented rather than train people to override a
 gate, and that is what this does.
 
