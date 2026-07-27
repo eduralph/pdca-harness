@@ -58,7 +58,19 @@ def _section(text: str, heading: str) -> str:
     out: list[str] = []
     level = 0
     open_fence: tuple[str, int] | None = None
+    in_comment = False
     for line in text.splitlines():
+        # HTML comments first: a commented-out rubric draft is a realistic thing to find in
+        # an AGENTS.md, and its headings are not structural Markdown. Selecting them would
+        # hand every leaf rules the author had explicitly switched off.
+        if not open_fence:
+            if in_comment:
+                if "-->" in line:
+                    in_comment = False
+                continue
+            if "<!--" in line and "-->" not in line:
+                in_comment = True
+                continue
         f = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
         if f:
             marker, rest = f.group(1), f.group(2)
@@ -213,8 +225,10 @@ def load(d: Path, cfg, worktree_root=_UNSET) -> str:
     if section:
         text = _section(text, section)
         if not text:
-            print(f"rubric: no section matching {section!r} in {path} — continuing "
-                  "without it", file=sys.stderr)
+            print(f"rubric: no ATX heading matching {section!r} in {path} — continuing "
+                  "without it. Section selection reads `## Heading` only; a Setext "
+                  "heading (underlined with --- or ===) is not recognised.",
+                  file=sys.stderr)
             _record(snapshot, "")
             return ""
     text = text.strip()

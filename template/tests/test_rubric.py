@@ -375,5 +375,39 @@ class ThirdReviewFixes(unittest.TestCase):
                 rubric._target_root(self.d, self._cfg(), lane), lane)
 
 
+class FourthReviewFixes(unittest.TestCase):
+    """Round four on #352 — both findings in `_section`, as in rounds two and three."""
+
+    def test_a_commented_out_section_is_not_selected(self) -> None:
+        """A commented-out draft is a realistic thing to find in an AGENTS.md, and its
+        heading is not structural Markdown. Selecting it hands every leaf rules the author
+        had explicitly switched off."""
+        text = ("# P\n\n<!--\n## Review rubric\n\nCOMMENTED DRAFT\n-->\n\n"
+                "## Review rubric\n\nTHE REAL RULES\n")
+        got = rubric._section(text, "Review rubric")
+        self.assertIn("THE REAL RULES", got)
+        self.assertNotIn("COMMENTED DRAFT", got)
+
+    def test_a_single_line_comment_does_not_open_a_block(self) -> None:
+        text = "# P\n\n<!-- ## Review rubric -->\n\n## Review rubric\n\nREAL\n"
+        self.assertIn("REAL", rubric._section(text, "Review rubric"))
+
+    def test_a_comment_marker_inside_a_fence_is_inert(self) -> None:
+        """Fence state is checked first, so a `<!--` quoted in an example cannot swallow
+        the rest of the file."""
+        text = "# P\n\n```md\n<!--\n```\n\n## Review rubric\n\nREAL\n"
+        self.assertIn("REAL", rubric._section(text, "Review rubric"))
+
+    def test_setext_headings_are_deliberately_unsupported(self) -> None:
+        """ATX only, by decision rather than oversight — see `_section`'s docstring.
+
+        The safe direction: an unrecognised section yields NO rubric and a warning naming
+        Setext, rather than a partial or wrong one. A rubric the author did not intend is
+        worse than none.
+        """
+        text = "# P\n\nReview rubric\n-------------\n\nSETEXT RULES\n"
+        self.assertEqual(rubric._section(text, "Review rubric"), "")
+
+
 if __name__ == "__main__":
     unittest.main()
