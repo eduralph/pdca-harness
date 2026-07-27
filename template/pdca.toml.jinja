@@ -28,6 +28,12 @@ templates_dir = "templates"
 # ergonomics actually bite (then prefer this over N separate workspaces).
 [driver]
 lanes = 1
+# Pre-dispatch size advisory (#321): "off" (default) | "warn". With "warn" the driver
+# prints an oversize note before Do and before Check, naming which signal fired, and
+# proceeds. There is deliberately NO blocking mode: calibrated over 86 real bundles the
+# structural signal peaks at 67% precision — one wrong hold for every two right — and a
+# gate at that rate is one people learn to override.
+size_guard = "off"
 # Sign-off pass budget for one `pdca flow` run (issue #260): how many build-all → sign-off
 # passes a wave gets (and how many iterations a single issue gets) before the driver stops
 # driving it. A hard bundle can legitimately need many sign-off iterations; when the budget
@@ -307,11 +313,14 @@ argv = []
 # call — and a per-Plan cost — an instance did not ask for. Switch to "command" to enable.
 # Its verdict can only ever RAISE the driver's band, never lower it (sizing.combine).
 [leaves.sizer]
+# Switch `mode` to "command" to enable — the argv below is ACTIVE so that one edit is
+# enough. `--allowedTools Read Write`: the leaf reads brief.md and must WRITE sizing.json,
+# and a Read-only grant would let it run and produce nothing.
 mode = "stub"
 family = "claude"
 interactive = false
 agent = "sizer"
-# argv = ["claude", "-p", "--agent", "sizer", "--allowedTools", "Read", "--model", "haiku"]
+argv = ["claude", "-p", "--agent", "sizer", "--allowedTools", "Read", "Write", "--model", "haiku"]
 
 # Escalation on the sizer's OWN first-pass verdict — runtime state, not a brief field,
 # which is why this is an escalation rather than a variant. A `watch` or low-confidence
@@ -322,7 +331,7 @@ agent = "sizer"
 # on_band = ["watch"]
 # on_confidence = ["low"]
 # effort = "medium"
-# argv = ["claude", "-p", "--agent", "sizer", "--allowedTools", "Read", "--model", "sonnet"]
+# argv = ["claude", "-p", "--agent", "sizer", "--allowedTools", "Read", "Write", "--model", "sonnet"]
 
 [leaves.reviewer]
 mode = "{{ leaves_mode }}"

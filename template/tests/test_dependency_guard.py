@@ -109,7 +109,8 @@ class DependencyGuard(unittest.TestCase):
     def test_do_is_not_dispatched_while_it_holds(self) -> None:
         """The whole point: the cycle is not burned discovering this at Check."""
         d = self._bundle()
-        driver.advance(d, _cfg(self.tmp))
+        with self.assertRaises(plan_policy.PolicyHold):
+            driver.advance(d, _cfg(self.tmp))
         self.assertFalse((d / "patch.diff").exists(), "Do ran despite a blocking hold")
         self.assertEqual(state.state(d), state.PLANNED, "the bundle stays in-flight")
 
@@ -118,7 +119,8 @@ class DependencyGuard(unittest.TestCase):
         every beat and `registered_ids` reads pdca.toml as it stands NOW, so a row added
         mid-cycle counts (PR #269 review)."""
         d = self._bundle()
-        driver.advance(d, _cfg(self.tmp))
+        with self.assertRaises(plan_policy.PolicyHold):
+            driver.advance(d, _cfg(self.tmp))
         self.assertFalse((d / "patch.diff").exists())
         self._register()
         driver.advance(d, _cfg(self.tmp, [_ROW]))
@@ -144,3 +146,53 @@ class DependencyGuard(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HoldDoesNotSpin(unittest.TestCase):
+    """`run_issue`, not `advance` — the gap that let an infinite loop through review.
+
+    Every earlier test drove `driver.advance` directly, so none of them exercised the loop
+    that actually consumes a hold: `while state not in HALTED: advance(...)`. A hold leaves
+    the bundle PLANNED or BUILT — neither halted — so a quiet return spins forever printing
+    the same warning until the process is killed.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "results").mkdir(parents=True)
+        (self.tmp / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n',
+                                            encoding="utf-8")
+        self.d = self.tmp / "results" / "issue_1"
+        self.d.mkdir(parents=True)
+        (self.d / "brief.md").write_text(_DECLARED, encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_run_issue_returns_instead_of_looping(self) -> None:
+        import signal
+
+        def _die(_sig, _frm):  # pragma: no cover - only on regression
+            raise AssertionError("run_issue did not terminate on a policy hold")
+
+        old = signal.signal(signal.SIGALRM, _die)
+        signal.alarm(10)
+        try:
+            self.assertEqual(driver.run_issue(self.d, _cfg(self.tmp)), state.PLANNED)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
+
+    def test_the_hold_is_raised_so_a_caller_cannot_ignore_it(self) -> None:
+        with self.assertRaises(plan_policy.PolicyHold):
+            driver.advance(self.d, _cfg(self.tmp))
+
+    def test_warn_mode_reports_but_does_not_block(self) -> None:
+        """The documented `warn` option must actually differ from `hold` — sharing a
+        reason code made `blocking()` stop the beat for both."""
+        cfg = _cfg(self.tmp, guard="warn")
+        reasons = plan_policy.evaluate(self.d, cfg)
+        self.assertTrue(reasons, "warn must still report the item")
+        self.assertEqual(plan_policy.blocking(reasons), [])
+        driver.advance(self.d, cfg)
+        self.assertTrue((self.d / "patch.diff").exists(), "warn blocked Do")

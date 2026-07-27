@@ -618,7 +618,16 @@ def _size(cfg: Config, issue_ids: list[str]) -> int:
     fired (#320).
     """
     if issue_ids:
-        bundles = [cfg.bundle(i) for i in issue_ids]
+        bundles = []
+        for i in issue_ids:
+            d = cfg.bundle(i)
+            # An explicit id that names nothing must be REPORTED, not sized: the estimator
+            # fail-opens to `ok` by design (a detector that crashes Plan is worse than one
+            # that abstains), so a typo would otherwise print a confident `ok` and exit 0.
+            if not (d / "brief.md").is_file():
+                print(f"size: {d.name} has no brief.md — nothing to size", file=sys.stderr)
+                return 1
+            bundles.append(d)
     else:
         bundles = sorted(b for b in cfg.bundle_root.glob("issue_*")
                          if b.is_dir() and (b / "brief.md").exists()) \
@@ -650,9 +659,10 @@ def _status(cfg: Config, issue_id: str | None) -> int:
         flag = ""
         # Oversize marker (#320/#321): visible in the queue without running anything,
         # since the estimate is a pure read of the brief.
-        if (d / "brief.md").exists() and \
-                sizing.estimate(d / "brief.md", cfg).band == sizing.OVERSIZED:
-            flag = "  [oversized]"
+        # Computed first, APPENDED below — the sign-off annotation used to overwrite it,
+        # hiding the marker precisely at the queue's human touch point.
+        oversized = ((d / "brief.md").exists()
+                     and sizing.estimate(d / "brief.md", cfg).band == sizing.OVERSIZED)
         if s == state.AWAITING_SIGNOFF:
             n = len(signoff.open_needs_human(d / "SUMMARY.md"))
             flag = "  [cheap: confirm]" if n == 0 else f"  [{n} NEEDS-HUMAN]"
@@ -661,6 +671,8 @@ def _status(cfg: Config, issue_id: str | None) -> int:
         blocked = _blocked_by(cfg, d) if s != state.COMPLETE else []
         if blocked:
             flag += f"  [blocked-by: {', '.join(blocked)}]"
+        if oversized:
+            flag += "  [oversized]"
         print(f"{s:18}{d.name}{flag}")
     return 0
 

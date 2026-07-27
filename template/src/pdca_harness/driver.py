@@ -69,7 +69,7 @@ def advance(d: Path, cfg: Config) -> None:
         if blockers:
             _say(f"→ {d.name}: held before {'Do' if s == state.PLANNED else 'Check'} — "
                  f"{len(blockers)} blocking item(s) above; resolve, then re-run.")
-            return
+            raise plan_policy.PolicyHold(blockers)
     if s == state.PLANNED:
         if close:
             _say(f"→ {d.name}: close disposition '{close}' — skipping builder leaf (no patch to build)…")
@@ -109,7 +109,12 @@ def advance(d: Path, cfg: Config) -> None:
 def run_issue(d: Path, cfg: Config) -> str:
     """Advance until the bundle reaches a halted state; return that state."""
     while state.state(d) not in state.HALTED:
-        advance(d, cfg)
+        try:
+            advance(d, cfg)
+        except plan_policy.PolicyHold:
+            # The bundle stays in-flight in a NON-halted state, so the loop must exit here
+            # or spin forever: nothing about a hold changes the state it is held in.
+            break
     return state.state(d)
 
 
