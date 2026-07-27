@@ -142,6 +142,18 @@ def field_block(text: str, *labels: str) -> str:
     """The full VALUE of the first field matching ``labels`` — its own line plus any indented
     continuation lines — or ``""``.
 
+    **Deliberately NOT unified with `brief.whole_field` yet (#336).** That function is this
+    one with a fix: a line indented MORE than the field's own bullet is a continuation even
+    when it matches the field pattern, so a nested ``  - **API:** …`` sub-bullet no longer
+    ends the block. This copy still ends it there, which under-counts a field written with
+    nested bullets.
+
+    Not changed here because the published calibration correlations (#319) were computed
+    with THIS behaviour, and re-deriving them needs a real bundle corpus — which lives in a
+    rendered instance, not in this repo (there is no ``results/`` here). Switching the
+    parser silently would move every number #320 and #321 are calibrated against. **#320
+    owns the unification**: it can re-run the corpus and report how the figures shift.
+
     Two things this must not do. It must not return the label or its ``- **…:**`` markup, or
     every word count silently measures boilerplate that is identical across briefs. And it must
     not run on past the field: continuation membership is defined by INDENTATION, so the block
