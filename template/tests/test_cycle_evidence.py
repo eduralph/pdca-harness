@@ -150,8 +150,6 @@ class CycleEvidence(unittest.TestCase):
                             f"{name} was archived — its accumulation is now broken")
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class CleanupAgreesWithTheGuard(unittest.TestCase):
@@ -186,3 +184,6 @@ class CleanupAgreesWithTheGuard(unittest.TestCase):
         self.assertIn("in-flight cycle", row.plan)
         self.assertEqual(row.apply, [],
                          "cleanup scheduled a mutation that is_resolved would refuse")
+
+if __name__ == "__main__":
+    unittest.main()
