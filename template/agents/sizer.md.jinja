@@ -20,8 +20,13 @@ outcomes should be. Size is not the question; **decomposability** is.
 
 ## Propose seams — never cut them
 
-**Do does not split. Do reports. Splitting is the human's call at sign-off.** Name where a
-seam would fall and why; do not create bundles, branches, or tracker items.
+**You do not split. You report.** Name where a seam would fall and why; do not create
+bundles, branches, or tracker items, and do not edit `brief.md`.
+
+The human decides, and they decide **at Plan** — an `oversized` verdict surfaces before Do
+dispatches, which is the whole point of asking you now rather than after a build. (The
+older phrasing said "at sign-off"; that predates the Plan-time advisory and would have you
+imply the slice should be built first.)
 
 ## Output — `sizing.json`, and nothing else
 
@@ -40,5 +45,7 @@ seam would fall and why; do not create bundles, branches, or tracker items.
 
 Your verdict can only ever **raise** the driver's band, never lower it: a brief that
 structure scored calm and you find decomposable is exactly the case you exist for, but
-structure's evidence is never discarded on your say-so. Answer `low` confidence honestly —
-it is a trigger for a stronger pass, not a failure.
+structure's evidence is never discarded on your say-so. Answer `low` confidence honestly. Where the instance has configured
+`[[leaves.sizer_escalation]]` it triggers a stronger pass; where it has not, it is still
+the right answer — an honest `low` tells the human how much to lean on your verdict, and
+guessing `high` to look decisive is the one failure mode here.

@@ -35,6 +35,48 @@ HALTED = {UNPLANNED, AWAITING_SIGNOFF, COMPLETE, DISCONTINUED, RESOLVED}
 # symmetric stand-in for patch.diff — so the state machine reads it as "past Do".
 CLOSE_MARKER = "close-disposition"
 
+# Everything Do and Check write, i.e. everything downstream of brief.md. Includes the
+# close marker (issue #60) so an iterate archives it too — reopening a close bundle to a
+# fix path then clears the marker and runs the real Do+Check band.
+#
+# Lives here rather than in `driver` (#334) because `is_resolved` must read it and
+# `driver` already imports this module — the other direction would be a cycle. `driver`
+# re-exports the name, so `driver.DOWNSTREAM_OF_BRIEF` still resolves.
+DOWNSTREAM_OF_BRIEF = [
+    "patch.diff",
+    "build-notes.md",
+    CLOSE_MARKER,
+    "MANUAL-VERIFICATION.md",
+    "check-gates.json",
+    "check-gates.md",
+    "check-review.md",
+    "SUMMARY.md",
+    # The rubric snapshot (#314): a Do/Check-era artifact, so an iterate archives it and
+    # the rebuild takes a fresh one — a rubric that changed between attempts SHOULD apply
+    # to the next.
+    "rubric-snapshot.md",
+]
+
+# Cycle artifacts matched by pattern rather than name. ONE definition, read by both
+# `_archive_iteration` (what an iterate moves) and `is_resolved` (what counts as evidence
+# a cycle ran), so those two answers cannot drift apart.
+DOWNSTREAM_GLOBS = ("check-advisory-*.md", "*.error.log")
+
+# Cycle evidence that must NOT be archived — the one set where "what the archive moves"
+# and "what proves a cycle ran" deliberately differ, so it is deliberately NOT read by
+# `_archive_iteration`.
+#
+# Both files accumulate ACROSS rebuilds by design, and archiving either breaks the
+# feature that depends on the accumulation:
+#   auto-iterate.json   — the round budget; archive it and the count resets every
+#                         iterate, so auto-iterate never terminates.
+#   loop-telemetry.json — `leaves._record_loop_attempt`: "The file persists across
+#                         iterations (it is not archived), so it accumulates."
+# Yet a bundle cannot hold either without having run a cycle, so both are unambiguous
+# evidence. Adding them to DOWNSTREAM_OF_BRIEF instead would fix the misclassification
+# below and break termination, which is the worse bug.
+CYCLE_EVIDENCE_ONLY = ("auto-iterate.json", "loop-telemetry.json")
+
 # §9 outcome token → bundle state. state owns the state names, so the mapping
 # lives here; signoff knows only the tokens (no import cycle).
 _OUTCOME_TO_STATE = {
@@ -62,7 +104,41 @@ def is_resolved(d: Path) -> bool:
         data = json.loads(notes.read_text(encoding="utf-8"))
     except (ValueError, OSError):
         return False
-    return isinstance(data, dict) and isinstance(data.get("resolved"), dict)
+    if not (isinstance(data, dict) and isinstance(data.get("resolved"), dict)):
+        return False
+    # RESOLVED is terminal: the bundle leaves the resume set and `do_plan` returns early
+    # rather than briefing it (#302). So a marker arriving while a cycle is IN FLIGHT —
+    # a stale scrape, a tracker item closed as a duplicate, a human closing the ticket
+    # while the fix is being built — must not settle it. The docstring's "callers scope
+    # this to BRIEFLESS bundles" is not a guard the caller can honour: an iterate-to-Plan
+    # ARCHIVES brief.md, so a bundle mid-cycle with a full iteration history is briefless
+    # too. Decide it here, from evidence on disk (#334).
+    return not has_cycle_evidence(d)
+
+
+def has_cycle_evidence(d: Path) -> bool:
+    """True if anything in the bundle proves a cycle actually ran (issue #334).
+
+    Only a genuinely notes-only bundle can be RESOLVED. Every other artifact class means
+    work happened that a terminal marker would silently abandon — and the failure is
+    silent in the direction that costs most: the bundle drops out of the resume set and
+    Plan skips it, so a cycle with real iteration history ends with nothing reported.
+    """
+    bp = d / "brief.md"
+    if bp.exists() and not brief.is_placeholder(bp):
+        # An AUTHORED brief only. An unfilled template copy is "never authored" — the same
+        # standing as no brief at all — so the tracker's resolution still wins there
+        # (#302 review), which `test_placeholder_brief_does_not_unresolve_a_resolved_tracker`
+        # locks. Read via `whole_field`, so a Slug written beneath its label is recognised
+        # as authored rather than mistaken for a template (#336).
+        return True
+    if any((d / name).exists() for name in DOWNSTREAM_OF_BRIEF):
+        return True
+    if any((d / name).exists() for name in CYCLE_EVIDENCE_ONLY):
+        return True
+    if any(next(d.glob(pattern), None) for pattern in DOWNSTREAM_GLOBS):
+        return True
+    return next(d.glob("iteration-v*"), None) is not None
 
 
 def state(d: Path) -> str:

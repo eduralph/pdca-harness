@@ -51,13 +51,14 @@ Collapsing them would trade one error set for another and hide which signal fire
 
 ## Nothing here gates
 
-Best measured precision is 62% (score ≥ 7 against ≥3 rounds) and 55% (patch ≥ 100 KB).
+Best measured precision is 62% (score ≥ 7 against ≥3 rounds) and 57% (patch ≥ 100 KB).
 Roughly one wrong hold for every right one, which is the failure mode #321 exists to
 avoid — a gate people learn to override. Both bands are advisory; the human decides.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -86,6 +87,24 @@ DEFAULT_BRIEF_KB = 12
 #: the churn rate first rises above the corpus base rate of 19%.
 DEFAULT_WATCH = 4
 DEFAULT_OVERSIZED = 7
+
+#: The heading `driver._carry_forward_into_brief` writes, matched EXACTLY as
+#: `scripts/size-calibrate` matches it — the two must agree on where the a-priori text
+#: ends or the estimator and the calibration measure different things. A loose
+#: "starts with Iteration" test also truncates a brief at a legitimate
+#: `## Iteration strategy` heading, discarding the scope below it and scoring the slice
+#: as small.
+_CARRY_FORWARD_RE = re.compile(r"^##\s+Iteration\s+\d+\s+.*carry-forward",
+                               re.IGNORECASE | re.MULTILINE)
+
+#: Difficulty bands, WORD-matched. Substring alone mirrors `leaves._when_matches`, but
+#: bare `"hard"` also fires on "hardening" / "hard-coded" — so
+#: `Difficulty: medium — certificate hardening is localized` scored as high. Bands are
+#: tested highest-first so a value naming more than one is not scored down, the same
+#: direction of caution the routing takes.
+_DIFFICULTY_BANDS = (("high", (r"high", r"hard")),
+                     ("medium", (r"medium", r"moderate")),
+                     ("low", (r"low", r"easy", r"trivial")))
 
 OK, WATCH, OVERSIZED = "ok", "watch", "oversized"
 _ORDER = {OK: 0, WATCH: 1, OVERSIZED: 2}
@@ -153,13 +172,18 @@ def estimate(brief_path: Path, cfg) -> SizeEstimate:
         conflicts = len(brief.conflicts_with(brief_path))
         ext_deps = len(brief.external_dependency_tokens(brief_path))
         plan_pointer = bool(brief.planning_artifact(brief_path))
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is NOT an OSError. `_apriori_bytes` reads with
+        # errors="replace" and survives, but the field helpers below use a strict decode —
+        # so a brief with one stray byte aborted the Plan beat, which is precisely what
+        # "a detector that crashes Plan is worse than one that abstains" forbids.
         return SizeEstimate(0, OK, ["brief unreadable — not sized"])
 
-    # Substring, not equality, exactly as `leaves._when_matches` routes on it: the field is
-    # prose in practice ("high — the widest-surface slice: …"), so an equality test scores
-    # nearly every real brief as unset.
-    is_high = "high" in difficulty or "hard" in difficulty
+    # Word-matched, not equality and not bare substring. The field is prose in practice
+    # ("high — the widest-surface slice: …") so equality scores nearly every real brief as
+    # unset — but a bare substring fires on "hardening", and the highest band must win so a
+    # hedged value is not scored down.
+    is_high = _band(difficulty) == "high"
     over_size = apriori >= brief_kb * 1024
 
     score = 0
@@ -199,17 +223,34 @@ def estimate(brief_path: Path, cfg) -> SizeEstimate:
                         churn_band=churn_band, patch_band=patch_band)
 
 
+def _band(value: str) -> str:
+    """The declared difficulty band, or "" when the brief names none.
+
+    The LEADING token wins. Briefs write `- **Difficulty:** low — hard-won but small`:
+    the band is what the field declares, and everything after the dash is justification
+    prose that must not override it. Scanning the whole value highest-band-first reads
+    "hard-won" as high and inverts the author's own answer.
+
+    Only when the leading token names no band is the rest scanned, highest-first — so a
+    value that hedges across bands is still not scored down.
+    """
+    head = re.split(r"[\s\u2014\u2013:;,()\[\]-]+", value.strip(), maxsplit=1)
+    lead = head[0].lower() if head else ""
+    for band, needles in _DIFFICULTY_BANDS:
+        if lead in needles:
+            return band
+    for band, needles in _DIFFICULTY_BANDS:
+        if any(re.search(rf"\b{n}\b", value) for n in needles):
+            return band
+    return ""
+
+
 def _apriori_bytes(brief_path: Path) -> int:
     """Brief bytes ABOVE the first carry-forward heading — see the module docstring on
     why measuring the file as-is leaks the outcome into the predictor."""
     text = brief_path.read_text(encoding="utf-8", errors="replace")
-    lowered = text.lower()
-    idx = -1
-    for marker in ("\n## iteration", "\n# iteration"):
-        found = lowered.find(marker)
-        if found != -1 and (idx == -1 or found < idx):
-            idx = found
-    return len((text if idx == -1 else text[:idx]).rstrip().encode("utf-8"))
+    m = _CARRY_FORWARD_RE.search(text)
+    return len((text if m is None else text[:m.start()]).rstrip().encode("utf-8"))
 
 
 def combine(structural: SizeEstimate, model: dict | None) -> SizeEstimate:

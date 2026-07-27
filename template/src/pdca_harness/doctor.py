@@ -240,7 +240,10 @@ def _command_leaves(cfg: Config) -> dict[str, LeafConfig]:
     pass while the real Do attempt later dies on that missing CLI. Advisory leaves
     have no builder inheritance (their stored default mode is ``stub``)."""
     named = {"builder": cfg.builder, "reviewer": cfg.reviewer, "planner": cfg.planner,
-             "signoff": cfg.signoff, "publisher": cfg.publisher, "act": cfg.act}
+             "signoff": cfg.signoff, "publisher": cfg.publisher, "act": cfg.act,
+             # The sizer (#320) is a real command leaf the Plan beat spawns; omitting it
+             # let `--strict` pass while the advisory later died on a missing CLI.
+             "sizer": getattr(cfg, "sizer", LeafConfig())}
     out = {role: leaf for role, leaf in named.items()
            if leaf.mode == "command" and leaf.argv}
     # (kind, specs, base) — base is the leaf an omitted field inherits from (None ⇒
@@ -250,7 +253,12 @@ def _command_leaves(cfg: Config) -> dict[str, LeafConfig]:
     for kind, specs, base in (("advisory", cfg.advisory_leaves, None),
                               ("plan-advisory", getattr(cfg, "plan_advisory_leaves", []), None),
                               ("variant", cfg.builder_variants, cfg.builder),
-                              ("escalation", cfg.builder_escalation, cfg.builder)):
+                              ("escalation", cfg.builder_escalation, cfg.builder),
+                              # Sizer escalations inherit from [leaves.sizer] the same way
+                              # builder escalations inherit from [leaves.builder], so a
+                              # spec naming a different binary must be resolved too.
+                              ("sizer-escalation", getattr(cfg, "sizer_escalation", []),
+                               getattr(cfg, "sizer", None))):
         for i, spec in enumerate(specs):
             mode = spec.get("mode") or (base.mode if base else "stub")
             argv = list(spec.get("argv") or (base.argv if base else []))
