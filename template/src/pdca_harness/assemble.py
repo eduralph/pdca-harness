@@ -8,6 +8,7 @@ mirrors ``templates/SUMMARY.md.tpl`` — keep the two in step if you edit either
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 from pathlib import Path
@@ -93,6 +94,26 @@ def leaf_status(artifact_text: str) -> str:
     artifact (a leaf that actually produced findings) — issue #278."""
     m = _LEAF_STATUS_RE.search(artifact_text)
     return m.group(1) if m else ""
+
+
+def _one_line(value: str) -> str:
+    """A brief value flattened to one line, for a context that cannot hold a newline.
+
+    Only the SUMMARY title uses this: it is a Markdown `#` heading, so the two-space
+    continuation indent :func:`_item` applies would render as literal text rather than a
+    wrapped list item (#336).
+    """
+    return " ".join(value.split())
+
+
+def _item(value: str) -> str:
+    """A brief value rendered as the tail of a SUMMARY `- Label: …` bullet.
+
+    Continuations are indented two spaces so a multi-line value stays ONE Markdown list
+    item instead of terminating the list and dumping the remainder as body prose (#336).
+    """
+    first, *rest = value.splitlines() or [""]
+    return "\n".join([first] + [f"  {line}" if line else "" for line in rest])
 
 
 def _classify_finding(text: str, *, standing: bool = False) -> NeedsHumanItem:
@@ -231,18 +252,23 @@ def assemble_summary(d: Path, cfg: Config) -> None:
     )
 
     issue = d.name.replace("issue_", "")
+    # §1-8 render the brief's spec fields for a human (and the C6 accept-guard) to judge
+    # against, so they must carry the WHOLE value — `parse_fields` is line-based and cut
+    # every wrapped field at its first line (#336). `fields` stays for everything that
+    # genuinely wants one line.
+    spec = functools.partial(brief.whole_field, d / "brief.md")
     out = "\n".join(
         [
-            f"# Result — issue {issue} / {fields.get('slug', fields.get('defect', '')[:40])}",
+            f"# Result — issue {issue} / {_one_line(spec('slug') or fields.get('defect', '')[:40])}",
             "",
             "## 1. Spec (from brief.md)              ← Check verifies against THIS",
-            f"- Defect / goal: {fields.get('defect', fields.get('goal', ''))}",
-            f"- Success criterion: {fields.get('success criterion', '')}",
-            f"- Repo + branch target: {fields.get('repo + branch target', fields.get('branch target', ''))}",
-            f"- Scope (one logical fix) / out of scope: {fields.get('scope', '')}",
+            f"- Defect / goal: {_item(spec('defect', 'goal'))}",
+            f"- Success criterion: {_item(spec('success criterion'))}",
+            f"- Repo + branch target: {_item(spec('repo + branch target', 'branch target'))}",
+            f"- Scope (one logical fix) / out of scope: {_item(spec('scope'))}",
             "",
             "## 2. Disposition claimed               ← sign-off confirms or overrides",
-            f"- Outcome: {fields.get('disposition hint', 'Fixed')}",
+            f"- Outcome: {_item(spec('disposition hint', default='Fixed'))}",
             "- Confidence: medium",
             "- Recommendation: (set by Do)",
             "",

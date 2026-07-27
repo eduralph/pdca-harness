@@ -31,6 +31,67 @@ def parse_fields(brief_path: Path) -> dict[str, str]:
     return fields
 
 
+_HEADING_RE = re.compile(r"^\s*#{1,6}\s")
+
+
+def whole_field(brief_path: Path, *labels: str, default: str = "") -> str:
+    """The COMPLETE value of the first field matching ``labels`` — its inline remainder
+    plus every continuation line — or ``default`` when the field is absent (issue #336).
+
+    :func:`field` is line-based, so a value wrapped onto following lines is cut at its
+    first line. `brief.md.tpl` itself writes the Success criterion placeholder across two
+    lines, planners copy that shape, and the renderer then dropped all but the first —
+    which is why 93% of criteria reached sign-off truncated.
+
+    **Where the block ends**, in priority order, because the order is the whole difficulty:
+
+    1. A line indented MORE than the field's own bullet is a continuation — *even when it
+       looks like a field*. A nested sub-bullet list is ordinary Markdown, and
+       ``  - **API:** …`` under a ``- **Scope:**`` matches the field pattern exactly.
+       Testing the pattern first (as the calibration script's ``field_block`` does) ends
+       the block at the first nested bullet and renders the field EMPTY — worse than the
+       truncation this function exists to remove.
+    2. Otherwise a field-shaped line at the same or lower indent starts the next field.
+    3. Otherwise a heading, or unindented prose, ends the value — continuation membership
+       is indentation, so a field near the end of a brief cannot swallow what follows it.
+
+    Returns the value **raw**: no :func:`_is_placeholder` filtering, so an unfilled field
+    still renders exactly as it does today rather than silently vanishing. Callers that
+    need the absent-is-safe semantics keep using :func:`field`.
+    """
+    text = brief_path.read_text(encoding="utf-8")
+    for label in labels:  # label PRIORITY, as field() resolves it — not file order
+        found = _block_for(text, label.lower())
+        if found is not None:
+            return found
+    return default
+
+
+def _block_for(text: str, label: str) -> str | None:
+    """The block belonging to ``label``, or None when the brief has no such field."""
+    out: list[str] = []
+    base_indent: int | None = None
+    for line in text.splitlines():
+        m = _FIELD_RE.match(line)
+        indent = len(line) - len(line.lstrip())
+        if base_indent is None:
+            if m and m.group(1).strip().lower() == label:
+                base_indent = indent
+                out.append(m.group(2))  # the value only, never the label
+            continue
+        if line.strip() and indent > base_indent:
+            out.append(line.strip())  # nested bullet or wrapped prose — still this field
+            continue
+        if m:
+            break  # a sibling field at the same or lower indent
+        if _HEADING_RE.match(line) or (line.strip() and indent <= base_indent):
+            break
+        out.append(line.strip())  # a blank line inside the block
+    if base_indent is None:
+        return None
+    return "\n".join(out).strip()
+
+
 def _is_placeholder(value: str) -> bool:
     """True if a value is still the template's unfilled ``<…>`` placeholder, so a
     consumer treats it as absent. Without this, a substring gate matches the placeholder
