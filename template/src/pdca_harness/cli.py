@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, manual_test, merged,
                publish, queue, registry, revalidate, revert, signoff, sizing, sources, state,
-               sweep, waves, worktree)
+               split, sweep, waves, worktree)
 from .config import Config
 
 
@@ -183,6 +183,14 @@ def main(argv: list[str] | None = None) -> int:
     p_size = sub.add_parser("size",
                             help="print the a-priori slice-size estimate for one bundle or the queue (#320)")
     p_size.add_argument("issue_ids", nargs="*", help="ids to size; none => every briefed bundle")
+
+    p_split = sub.add_parser("split",
+                             help="propose a split for an oversized slice, then materialize it (#322/#323)")
+    p_split.add_argument("issue_id")
+    p_split.add_argument("--accept", action="store_true",
+                         help="materialize the proposal's children (needs --ids)")
+    p_split.add_argument("--ids", default="",
+                         help="comma-separated tracker ids, one per child, IN PROPOSAL ORDER")
 
     p_status = sub.add_parser("status", help="list bundle states (cheap-first queue)")
     p_status.add_argument("issue_id", nargs="?")
@@ -435,6 +443,8 @@ def main(argv: list[str] | None = None) -> int:
         return doctor.run(cfg, strict=args.strict)
     if args.cmd == "size":
         return _size(cfg, args.issue_ids)
+    if args.cmd == "split":
+        return _split(cfg, args)
     if args.cmd == "sweep":
         # Explicit mode so the manual command works even under sweep_worktrees = "off".
         lines = sweep.sweep(cfg, mode="remove" if args.remove else "clean",
@@ -607,6 +617,35 @@ def _report_batch(results: dict[str, str]) -> int:
     tail = f" ({resolved} resolved in the tracker)" if resolved else ""
     print(f"flow: {done}/{len(results)} complete{tail}")
     return 0 if done == len(results) else 1
+
+
+def _split(cfg: Config, args) -> int:
+    """`pdca split <id>` drafts a proposal; `--accept --ids …` materializes it.
+
+    Two verbs in one because they are two halves of one decision and the second is
+    meaningless without the first: the human reads the proposal, then accepts it with the
+    tracker ids they filed. Every PR needs its own issue, and child slices are no
+    exception — which is why the ids come from the human rather than being invented here.
+    """
+    d = cfg.bundle(args.issue_id)
+    if not args.accept:
+        return leaves.do_split(d, cfg)
+
+    ids = [t.strip() for t in args.ids.split(",") if t.strip()]
+    if not ids:
+        print("split: --accept needs --ids <id>[,<id>…], one per child in proposal order",
+              file=sys.stderr)
+        return 1
+    try:
+        created = split.accept(d, ids, cfg)
+    except split.SplitError as exc:
+        print(f"split: {exc}", file=sys.stderr)
+        return 1
+    for child in created:
+        print(child)
+    print(f"{d.name} marked split; run `{'pdca'} flow {' '.join(ids)}` to drive the children",
+          file=sys.stderr)
+    return 0
 
 
 def _size(cfg: Config, issue_ids: list[str]) -> int:

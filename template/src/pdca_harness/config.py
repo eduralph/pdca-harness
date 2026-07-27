@@ -28,6 +28,10 @@ DEFAULT_CLOSE_DISPOSITIONS = [
     # UPSTREAM = "not this repo's defect", EXTERNAL = "not a defect in scope at all".
     "upstream",
     "external",
+    # A parent whose work was decomposed into child bundles (#323). No patch lands here:
+    # the children carry the work, and the parent goes to sign-off for the human to record
+    # the decision.
+    "split",
 ]
 
 
@@ -83,6 +87,9 @@ class Config:
     #: The cheap-model size judgment (#320). Absent from pdca.toml => stub => never runs,
     #: so an instance taking a `copier update` gains no model call it did not ask for.
     sizer: LeafConfig = field(default_factory=LeafConfig)
+    #: The splitter (#322) — interactive, like the other human-in-the-loop leaves. Absent
+    #: from pdca.toml => stub => `pdca split` still works offline.
+    splitter: LeafConfig = field(default_factory=LeafConfig)
     signoff: LeafConfig = field(default_factory=LeafConfig)
     publisher: LeafConfig = field(default_factory=LeafConfig)
     act: LeafConfig = field(default_factory=LeafConfig)
@@ -589,6 +596,7 @@ class Config:
             plan_advisory_selection=plan_advisory_selection,
             builder_escalation=builder_escalation,
             sizer=leaf("sizer"),
+            splitter=leaf("splitter"),
             sizer_escalation=sizer_escalation,
             builder_variants=builder_variants,
             gates_runner=gates_runner,

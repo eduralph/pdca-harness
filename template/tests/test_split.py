@@ -1,0 +1,227 @@
+"""The splitter leaf and `pdca split --accept` (issues #322 / #323).
+
+Decomposing an oversized slice by hand is error-prone in exactly the place that matters:
+the inter-child `Depends on:` / `Conflicts with:` fields, which are what make the wave
+scheduler do the right thing. Fat-finger those and the children either serialise when they
+could have run in parallel, or build blind on the same base and conflict at fold.
+
+The doctrine the leaf inherits verbatim: **Do does not split — Do reports. Splitting is the
+human's call at sign-off.**
+"""
+
+from __future__ import annotations
+
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+
+from pdca_harness import driver, leaves, split, state, waves
+from pdca_harness.config import Config, LeafConfig
+
+TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
+
+
+def _proposal(*children: str, version: int = 1) -> str:
+    body = f"<!-- pdca:split-proposal v{version} -->\n# Split proposal\n\n"
+    for i, child in enumerate(children, 1):
+        body += (f"<!-- pdca:child child-{i} -->\n{child}\n"
+                 f"<!-- pdca:end child-{i} -->\n\n")
+    return body
+
+
+_ONE = "- **Slug:** first\n- **Defect / goal:** a\n"
+_TWO_DEP = "- **Slug:** second\n- **Defect / goal:** b\n- **Depends on:** child-1\n"
+_TWO_INDEP = "- **Slug:** second\n- **Defect / goal:** b\n"
+
+
+class Parsing(unittest.TestCase):
+    def test_children_are_returned_in_document_order(self) -> None:
+        """Order is load-bearing: `--accept` maps children to ids POSITIONALLY, so a
+        parser that reordered them would silently mis-assign every id."""
+        children = split.parse(_proposal(_ONE, _TWO_DEP))
+        self.assertEqual([c.label for c in children], ["child-1", "child-2"])
+
+    def test_a_child_body_may_contain_headings_and_fenced_code(self) -> None:
+        """The reason the delimiters are HTML comments: a child body is a full draft brief,
+        so anything that could appear INSIDE a child cannot mark its edge."""
+        tricky = ("- **Slug:** tricky\n\n## Notes\n\n```md\n- **Slug:** not-a-child\n"
+                  "<!-- pdca:end child-1 -->\n```\n")
+        children = split.parse(_proposal(tricky))
+        self.assertEqual(len(children), 1)
+        self.assertIn("not-a-child", children[0].body)
+
+    def test_an_unmarked_or_future_format_is_refused(self) -> None:
+        for text, why in ((_proposal(_ONE).replace("<!-- pdca:split-proposal v1 -->", ""),
+                           "no version marker"),
+                          (_proposal(_ONE, version=99), "unsupported version"),
+                          ("<!-- pdca:split-proposal v1 -->\nno children\n", "no children")):
+            with self.subTest(case=why):
+                with self.assertRaises(split.SplitError):
+                    split.parse(text)
+
+    def test_ordering_fields_are_read_but_placeholders_are_not(self) -> None:
+        children = split.parse(_proposal(_ONE, _TWO_DEP))
+        self.assertEqual(children[1].ordering("Depends on"), ["child-1"])
+        placeholder = split.parse(_proposal("- **Slug:** s\n- **Depends on:** <id>\n"))
+        self.assertEqual(placeholder[0].ordering("Depends on"), [])
+
+
+class Accepting(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github", tracker_url="",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
+        )
+        self.parent = self.cfg.bundle("500")
+        self.parent.mkdir(parents=True)
+        (self.parent / "brief.md").write_text("- **Slug:** parent\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, text: str) -> None:
+        (self.parent / split.PROPOSAL).write_text(text, encoding="utf-8")
+
+    # -- the rewrite that makes the scheduler work -------------------------------------
+
+    def test_labels_are_rewritten_to_real_ids_in_ordering_fields(self) -> None:
+        """Asserted on the resulting FIELD VALUE, not merely that files were written —
+        this is the step that makes `compute_waves` work on the output."""
+        self._write(_proposal(_ONE, _TWO_DEP))
+        created = split.accept(self.parent, ["601", "602"], self.cfg)
+        body = (created[1] / "brief.md").read_text(encoding="utf-8")
+        self.assertIn("- **Depends on:** 601", body)
+        self.assertNotIn("child-1", body)
+
+    def test_prose_mentioning_a_label_is_left_alone(self) -> None:
+        """A blanket substitution would corrupt a child that explains its seam in prose."""
+        self._write(_proposal("- **Slug:** s\n- **Defect / goal:** unlike child-2, this…\n",
+                              _TWO_INDEP))
+        created = split.accept(self.parent, ["601", "602"], self.cfg)
+        self.assertIn("unlike child-2", (created[0] / "brief.md").read_text(encoding="utf-8"))
+
+    # -- validation happens before any write -------------------------------------------
+
+    def test_id_count_mismatch_is_refused_not_guessed(self) -> None:
+        self._write(_proposal(_ONE, _TWO_DEP))
+        with self.assertRaises(split.SplitError):
+            split.accept(self.parent, ["601"], self.cfg)
+        self.assertEqual(list(self.cfg.bundle_root.glob("issue_6*")), [],
+                         "a child was created despite the refusal")
+
+    def test_duplicate_ids_are_refused(self) -> None:
+        self._write(_proposal(_ONE, _TWO_DEP))
+        with self.assertRaises(split.SplitError):
+            split.accept(self.parent, ["601", "601"], self.cfg)
+
+    def test_colliding_with_an_existing_bundle_is_refused(self) -> None:
+        self.cfg.bundle("601").mkdir(parents=True)
+        self._write(_proposal(_ONE, _TWO_DEP))
+        with self.assertRaises(split.SplitError):
+            split.accept(self.parent, ["601", "602"], self.cfg)
+        self.assertFalse((self.cfg.bundle("602")).exists(),
+                         "a sibling was created before the collision was detected")
+
+    def test_an_unresolvable_label_is_refused(self) -> None:
+        self._write(_proposal(_ONE, "- **Slug:** s\n- **Depends on:** child-9\n"))
+        with self.assertRaises(split.SplitError):
+            split.accept(self.parent, ["601", "602"], self.cfg)
+
+    def test_nothing_is_left_behind_on_failure(self) -> None:
+        """A part-written accept is worse than either outcome: the human can neither re-run
+        (the ids exist) nor proceed (the batch is incomplete)."""
+        self._write(_proposal(_ONE, "- **Slug:** s\n- **Depends on:** child-9\n"))
+        with self.assertRaises(split.SplitError):
+            split.accept(self.parent, ["601", "602"], self.cfg)
+        self.assertEqual(list(self.cfg.bundle_root.glob("issue_6*")), [])
+        self.assertFalse((self.parent / ".split-staging").exists(), "staging left behind")
+
+    # -- the parent ---------------------------------------------------------------------
+
+    def test_the_parent_is_marked_split_and_takes_the_close_path(self) -> None:
+        self._write(_proposal(_ONE, _TWO_INDEP))
+        split.accept(self.parent, ["601", "602"], self.cfg)
+        self.assertEqual((self.parent / state.CLOSE_MARKER).read_text().strip(), "split")
+        self.assertEqual(driver._close_class(self.parent, self.cfg), "split")
+
+    def test_an_ITERATED_parent_still_takes_the_close_path(self) -> None:
+        """The realistic split parent: it failed an attempt BEFORE anyone concluded it was
+        too large. `_close_class` excludes any bundle with an `iteration-v*` archive from
+        the hint path, so a brief-hint rewrite alone would silently run a normal build."""
+        (self.parent / "iteration-v1").mkdir()
+        self._write(_proposal(_ONE, _TWO_INDEP))
+        split.accept(self.parent, ["601", "602"], self.cfg)
+        self.assertEqual(driver._close_class(self.parent, self.cfg), "split",
+                         "an iterated split parent fell through to a real build")
+
+    def test_reopening_a_split_parent_still_works(self) -> None:
+        """The marker is in DOWNSTREAM_OF_BRIEF, so an iterate archives it and the next
+        pass runs a real build — the close stays a decision, not a trap."""
+        self.assertIn(state.CLOSE_MARKER, driver.DOWNSTREAM_OF_BRIEF)
+
+    # -- the promise the whole feature rests on ------------------------------------------
+
+    def test_round_trip_stub_proposal_to_scheduled_waves(self) -> None:
+        """Offline, end to end: stub splitter → --accept → the wave plan.
+
+        This is the proof that the parallel/stacked promise actually holds. Two dependent
+        children must schedule as TWO waves; two independent ones as ONE. If the label→id
+        rewrite were wrong, `compute_waves` would see dangling references and this is where
+        it shows.
+        """
+        leaves.do_split(self.parent, self.cfg)          # stub writes a 2-child proposal
+        created = split.accept(self.parent, ["601", "602"], self.cfg)
+        self.assertEqual(len(waves.compute_waves(self.cfg, created)), 2,
+                         "a declared dependency did not stack the children")
+
+        other = self.cfg.bundle("700")
+        other.mkdir(parents=True)
+        (other / "brief.md").write_text(_proposal(_ONE, _TWO_INDEP), encoding="utf-8")
+        (other / split.PROPOSAL).write_text(_proposal(_ONE, _TWO_INDEP), encoding="utf-8")
+        indep = split.accept(other, ["801", "802"], self.cfg)
+        self.assertEqual(len(waves.compute_waves(self.cfg, indep)), 1,
+                         "independent children were serialised instead of parallelised")
+
+
+class SplitterLeaf(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github", tracker_url="",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
+        )
+        self.d = self.cfg.bundle("500")
+        self.d.mkdir(parents=True)
+        (self.d / "brief.md").write_text("- **Slug:** parent\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_the_leaf_writes_exactly_one_file(self) -> None:
+        """Asserted on the directory listing, not just the file's presence: "propose seams,
+        never cut them" means no bundles, no branches, no edits to brief.md."""
+        before = {p.name for p in self.d.iterdir()}
+        self.assertEqual(leaves.do_split(self.d, self.cfg), 0)
+        self.assertEqual({p.name for p in self.d.iterdir()} - before, {split.PROPOSAL})
+
+    def test_a_bundle_with_no_brief_is_refused(self) -> None:
+        (self.d / "brief.md").unlink()
+        self.assertEqual(leaves.do_split(self.d, self.cfg), 1)
+
+    def test_the_shipped_template_parses(self) -> None:
+        """The template teaches the format, so it must BE the format — a template whose own
+        delimiters did not parse would be discovered only by a real split."""
+        children = split.parse((TEMPLATES / "split-proposal.md.tpl").read_text("utf-8"))
+        self.assertEqual([c.label for c in children], ["child-1", "child-2"])
+
+
+if __name__ == "__main__":
+    unittest.main()

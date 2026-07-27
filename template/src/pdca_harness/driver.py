@@ -127,6 +127,22 @@ def _close_class(d: Path, cfg: Config) -> str:
     hint, not a gate: reopening to a fix path (iterate-do/-plan) archives the close marker
     and leaves an iteration behind, so the next pass returns "" and runs the real build.
     """
+    # An EXISTING close marker wins outright (#323). The first-attempt guard below applies
+    # to the brief's *hint*, which is advisory — but the marker is written by the driver
+    # (or by `pdca split --accept`) and is a decision already taken. Without this, a split
+    # parent could never take the close path: the realistic one has an `iteration-v*`
+    # archive, because it failed an attempt before anyone concluded it was too large.
+    #
+    # Reopening still works: an iterate archives the marker (it is in DOWNSTREAM_OF_BRIEF),
+    # so the next pass falls through to the hint path and runs a real build.
+    marker = d / state.CLOSE_MARKER
+    if marker.exists():
+        try:
+            recorded = marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            recorded = ""
+        if recorded:
+            return recorded
     bp = d / "brief.md"
     if not bp.exists() or list(d.glob("iteration-v*")):
         return ""

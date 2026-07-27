@@ -46,6 +46,7 @@ import time
 from pathlib import Path
 
 from . import act as act_mod
+from . import sizing, split
 from . import assemble
 from . import brief
 from . import families
@@ -803,6 +804,74 @@ def _stub_sizer(d: Path) -> dict | None:
                "confidence": "low", "stub": True}
     (d / SIZING_FILE).write_text(json.dumps(verdict, indent=2) + "\n", encoding="utf-8")
     return verdict
+
+
+def _split_prompt(d: Path, cfg: Config) -> str:
+    tpl = cfg.templates_dir / "split-proposal.md.tpl"
+    est = sizing.estimate(d / "brief.md", cfg)
+    return (
+        f"You are the SPLITTER. Read {d / 'brief.md'}. This slice has been judged too "
+        "large to build as one cycle. The driver sized it "
+        f"{est.band}: {'; '.join(est.reasons) or 'no structural signal'}.\n\n"
+        f"Fill {tpl} and write the result to {d / split.PROPOSAL} — exactly one file, "
+        "nothing else. Do NOT create bundles, branches or tracker items, and do NOT edit "
+        "brief.md: Do does not split, Do reports. Splitting is the human's call at "
+        "sign-off.\n\n"
+        "Each child must be independently shippable — its own defect, success criterion, "
+        "test and PR. Prefer fewer, larger children: each costs a full cycle, so a split "
+        "into six that could have been two is its own kind of oversizing.\n\n"
+        "The `Depends on:` / `Conflicts with:` fields BETWEEN children are the point. Get "
+        "them right and the scheduler needs no new code — independent children run in one "
+        "parallel wave, dependent ones stack. Keep the `<!-- pdca:child … -->` delimiters "
+        "exactly as the template writes them: a child body is a full draft brief and may "
+        "contain arbitrary headings and fenced code, so nothing that could appear inside a "
+        "child can mark its edge."
+    )
+
+
+def do_split(d: Path, cfg: Config) -> int:
+    """Run the splitter leaf over a briefed bundle (#322). Returns a process code."""
+    if not (d / "brief.md").exists():
+        print(f"split: {d.name} has no brief.md to split", file=sys.stderr)
+        return 1
+    if cfg.splitter.mode == "command":
+        _invoke(cfg.splitter, d, _split_prompt(d, cfg), cfg=cfg, label="splitter")
+    else:
+        _stub_split(d)
+    if not (d / split.PROPOSAL).exists():
+        print(f"split: the splitter produced no {split.PROPOSAL} in {d}", file=sys.stderr)
+        return 1
+    print(f"{d / split.PROPOSAL}")
+    return 0
+
+
+def _stub_split(d: Path) -> None:
+    """Offline placeholder: a two-child proposal, the second DEPENDING on the first.
+
+    Deliberately not two independent children: a stub whose output produced a single wave
+    would let the round-trip test pass without ever exercising the label→id rewrite, which
+    is the part of `--accept` most worth proving.
+    """
+    (d / split.PROPOSAL).write_text(
+        "<!-- pdca:split-proposal v1 -->\n"
+        f"# Split proposal — {d.name}\n\n## Wave sketch\n\n"
+        "child-2 stacks on child-1 (stub).\n\n"
+        "<!-- pdca:child child-1 -->\n"
+        "- **Slug:** stub-child-one\n"
+        "- **Defect / goal:** the first independently shippable outcome\n"
+        "- **Success criterion:** it ships alone\n"
+        "- **Test file:** tests/test_one.py\n"
+        "- **Difficulty:** low\n"
+        "<!-- pdca:end child-1 -->\n\n"
+        "<!-- pdca:child child-2 -->\n"
+        "- **Slug:** stub-child-two\n"
+        "- **Defect / goal:** the second, which builds on the first\n"
+        "- **Success criterion:** it ships after child-1\n"
+        "- **Test file:** tests/test_two.py\n"
+        "- **Difficulty:** low\n"
+        "- **Depends on:** child-1\n"
+        "<!-- pdca:end child-2 -->\n",
+        encoding="utf-8")
 
 
 def select_builder(d: Path, cfg: Config, n: int) -> LeafConfig:

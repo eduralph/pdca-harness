@@ -306,6 +306,28 @@ argv = []
 # `mode = "stub"` ships deliberately: taking a `copier update` must never switch on a model
 # call — and a per-Plan cost — an instance did not ask for. Switch to "command" to enable.
 # Its verdict can only ever RAISE the driver's band, never lower it (sizing.combine).
+# The SPLITTER (issue #322) — interactive, invoked by `pdca split <id>`.
+#
+# Reads brief.md plus the driver's size estimate and writes exactly ONE file,
+# split-proposal.md: N child slices, each a full draft brief, each carrying `Depends on:` /
+# `Conflicts with:` naming its SIBLINGS by proposal-local label. Those ordering fields are
+# the point — get them right and `compute_waves` needs no new code: independent children
+# run in one parallel wave, dependent ones stack.
+#
+# It proposes seams and never cuts them: no bundles, no branches, no tracker calls.
+# `pdca split <id> --accept --ids 640,641` is the deterministic half that materializes them.
+[leaves.splitter]
+mode = "{{ leaves_mode }}"
+family = "{{ interactive_family }}"
+interactive = true
+agent = "splitter"
+{% if interactive_family == "claude" -%}
+argv = ["claude", "--agent", "splitter", "--permission-mode", "acceptEdits"]
+{% elif interactive_family == "codex" -%}
+argv = ["codex", "--sandbox", "workspace-write"]
+{% else -%}
+argv = []
+{% endif %}
 [leaves.sizer]
 mode = "stub"
 family = "claude"
