@@ -235,7 +235,10 @@ def _band(value: str) -> str:
     value that hedges across bands is still not scored down.
     """
     head = re.split(r"[\s\u2014\u2013:;,()\[\]-]+", value.strip(), maxsplit=1)
-    lead = head[0].lower() if head else ""
+    # Strip Markdown around the token: briefs write `low`, **low**, _low_ as readily as a
+    # bare word, and an unstripped leading token falls through to the prose scan — where
+    # `\`low\` — hard-won but small` is read as HIGH, inverting the author's own answer.
+    lead = head[0].strip("`*_'\"").lower() if head else ""
     for band, needles in _DIFFICULTY_BANDS:
         if lead in needles:
             return band
@@ -263,8 +266,17 @@ def combine(structural: SizeEstimate, model: dict | None) -> SizeEstimate:
     least fails predictably, and "combined so the model can only escalate" is the property
     #320 is named for — asserted directly in the tests.
 
-    A missing, malformed, or unknown-band verdict leaves the structural estimate exactly
-    as it was: the leaf is optional and offline runs must be unaffected.
+    **What is guaranteed:** a missing verdict, a non-dict verdict, or one whose ``band`` is
+    absent or not one of ok/watch/oversized leaves the structural estimate exactly as it
+    was. The leaf is optional and offline runs must be unaffected.
+
+    **What is deliberately NOT required:** the rest of the schema. A verdict with a valid
+    band but a sloppy ``independent_outcomes`` (a string rather than a list) or an
+    unrecognised ``confidence`` still escalates, and the malformed fields are simply not
+    quoted in the reasons. The band IS the answer this leaf was asked for; the other fields
+    explain it. Discarding a real escalation because its explanation was untidy throws away
+    the one signal worth paying a model for — and escalate-only means a wrong escalation
+    costs a warning, never a block.
     """
     if not isinstance(model, dict):
         return structural
@@ -280,8 +292,12 @@ def combine(structural: SizeEstimate, model: dict | None) -> SizeEstimate:
     detail = f"sizer says {band}"
     if isinstance(outcomes, list) and outcomes:
         detail += f" — {len(outcomes)} independently shippable outcome(s)"
+    # Only a RECOGNISED confidence is quoted. `null` rendered as "(confidence none)" and
+    # "certain" as "(confidence certain)" — both read to a human as an answer the model
+    # gave on the scale it was asked for, when in fact it gave none. Dropping them is what
+    # the tolerant contract above already promises.
     confidence = str(model.get("confidence", "")).strip().lower()
-    if confidence:
+    if confidence in ("low", "medium", "high"):
         detail += f" (confidence {confidence})"
     reasons.append(detail)
     return SizeEstimate(structural.score, combined, reasons,

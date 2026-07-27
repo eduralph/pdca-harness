@@ -328,5 +328,67 @@ class SecondReviewFixes(unittest.TestCase):
         self.assertIn("docs/migration.md", leaves._sizer_prompt(d))
 
 
+class ThirdReviewFixes(unittest.TestCase):
+    """Round three on #349."""
+
+    def _brief(self, body: str) -> Path:
+        f = Path(tempfile.mkdtemp()) / "brief.md"
+        f.write_text(body, encoding="utf-8")
+        return f
+
+    def test_markdown_around_the_difficulty_token_is_stripped(self) -> None:
+        """Briefs write `low`, **low**, _low_ as readily as a bare word. An unstripped
+        token falls through to the prose scan, where "`low` — hard-won but small" reads as
+        HIGH — inverting the author's own answer."""
+        for value, expected in {"`low` — hard-won but small": 0,
+                                "**low** — hard-won": 0,
+                                "_medium_ — certificate hardening": 0,
+                                "`high` — widest surface": 3,
+                                "**hard** problem": 3}.items():
+            with self.subTest(difficulty=value):
+                f = self._brief(f"- **Slug:** s\n- **Difficulty:** {value}\n")
+                self.assertEqual(sizing.estimate(f, _CFG).score, expected)
+
+    def test_a_valid_band_escalates_even_with_an_untidy_schema(self) -> None:
+        """Deliberate, and the contract now says so: the band IS the answer this leaf was
+        asked for, and the other fields explain it. Discarding a real escalation because
+        its explanation was untidy throws away the one signal worth paying a model for —
+        and escalate-only means a wrong escalation costs a warning, never a block."""
+        base = sizing.SizeEstimate(0, sizing.OK, [], churn_band=sizing.OK,
+                                   patch_band=sizing.OK)
+        out = sizing.combine(base, {"band": "oversized",
+                                    "independent_outcomes": "a,b",   # a string, not a list
+                                    "proposed_seams": None,
+                                    "confidence": "certain"})        # not low/medium/high
+        self.assertEqual(out.band, sizing.OVERSIZED)
+        joined = "; ".join(out.reasons)
+        self.assertNotIn("outcome(s)", joined,
+                         "a malformed field was quoted back into the reasons")
+        self.assertNotIn("confidence", joined,
+                         "an unrecognised confidence was presented as if it were an answer")
+
+    def test_only_a_recognised_confidence_is_quoted(self) -> None:
+        """`null` rendered as "(confidence none)" and "certain" as "(confidence certain)" —
+        both read to a human as an answer on the scale the model was asked for, when it
+        gave none."""
+        base = sizing.SizeEstimate(0, sizing.OK, [], churn_band=sizing.OK,
+                                   patch_band=sizing.OK)
+        for value in ("certain", None, "", {"level": "high"}):
+            with self.subTest(confidence=value):
+                out = sizing.combine(base, {"band": "oversized", "confidence": value})
+                self.assertNotIn("confidence", "; ".join(out.reasons))
+        out = sizing.combine(base, {"band": "oversized", "confidence": "high"})
+        self.assertIn("confidence high", "; ".join(out.reasons))
+
+    def test_an_unusable_band_still_changes_nothing(self) -> None:
+        """The guarantee that DOES hold, asserted beside the tolerance above so the two
+        cannot be confused."""
+        base = sizing.SizeEstimate(4, sizing.WATCH, ["structural"],
+                                   churn_band=sizing.WATCH, patch_band=sizing.OK)
+        for model in (None, {}, {"band": ""}, {"band": "enormous"}, "nope", []):
+            with self.subTest(model=model):
+                self.assertEqual(sizing.combine(base, model), base)
+
+
 if __name__ == "__main__":
     unittest.main()
