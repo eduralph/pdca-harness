@@ -31,7 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import brief, leaves, state
+from . import brief, gates, leaves, progress, state
 from .config import Config
 
 COMMIT_MSG = "commit-msg.txt"
@@ -633,10 +633,37 @@ def _t4_passes(cfg: Config, d: Path) -> bool:
         return True
     env = {**os.environ, "PDCA_BUNDLE": str(d)}
     for chk in t4:
-        r = subprocess.run(chk.get("cmd", ""), shell=True, cwd=cfg.root, env=env,
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            print((r.stdout or r.stderr).strip(), file=sys.stderr)
+        # Resolve `subcmd` through the SAME helper Check uses (#338). Reading the raw
+        # `cmd` ran the empty string for a delegated row — and `subprocess.run("")` exits
+        # 0, so a gate an instance believed it had registered passed vacuously at publish
+        # while working correctly at Check.
+        cmd, cmd_error = gates._delegated_cmd(chk, cfg.gates_runner)
+        label = f"{chk.get('id', '')}: {chk.get('label', '')}".strip(": ")
+        if cmd_error:
+            print(f"publish: T4 gate '{label}' is misconfigured — {cmd_error}",
+                  file=sys.stderr)
+            return False
+        # Heartbeat, not a bare captured run (#338): a T4 gate can be minutes of complete
+        # silence — 6m25s measured for three parallel model review passes over a 300 KB
+        # patch.diff — and on a bundle whose contribution texts already exist this is the
+        # FIRST thing publish does, so the terminal goes quiet immediately and an operator
+        # reasonably kills a working run.
+        #
+        # Deliberately NO `status=progress.bundle_activity`: that probe reports the newest
+        # write in the bundle, which suits a Do leaf or an artifact-producing Check gate. A
+        # T4 gate reads patch.diff and writes its report once, at the end, so the newest
+        # write is whatever Check left hours earlier and every tick would render
+        # "no writes 180m" — a stall warning on the very run proving it is not stalled.
+        try:
+            rc, output, _ = progress.run_with_heartbeat(
+                cmd, cwd=cfg.root, shell=True, env=env, capture=True,
+                label=f"T4 {label}" if label else "T4 gate",
+            )
+        except Exception as exc:  # command not found, etc. — a failing gate, surfaced
+            print(f"publish: T4 gate '{label}' could not run — {exc}", file=sys.stderr)
+            return False
+        if rc != 0:
+            print(output.strip(), file=sys.stderr)
             return False
     return True
 
