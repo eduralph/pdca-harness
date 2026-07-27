@@ -79,6 +79,12 @@ class Config:
     issue_id_example: str
     builder: LeafConfig
     reviewer: LeafConfig
+    # The target repo's standing review rubric ([project] in pdca.toml, #314). A path
+    # RELATIVE TO THE TARGET CHECKOUT, optionally narrowed to one Markdown section — the
+    # common shape is an "AGENTS.md" heading rather than a whole dedicated file. Unset =>
+    # every prompt is byte-identical to today.
+    rubric_file: str = ""
+    rubric_section: str = ""
     planner: LeafConfig = field(default_factory=LeafConfig)
     signoff: LeafConfig = field(default_factory=LeafConfig)
     publisher: LeafConfig = field(default_factory=LeafConfig)
@@ -523,6 +529,8 @@ class Config:
             process_dir=root / paths.get("process_dir", "process"),
             templates_dir=root / paths.get("templates_dir", "templates"),
             default_branch=data.get("project", {}).get("default_branch", "main"),
+            rubric_file=data.get("project", {}).get("rubric_file", ""),
+            rubric_section=data.get("project", {}).get("rubric_section", ""),
             tracker_system=tracker.get("system", ""),
             tracker_url=tracker.get("url", ""),
             issue_id_example=tracker.get("issue_id_example", ""),

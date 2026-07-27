@@ -40,6 +40,10 @@ DOWNSTREAM_OF_BRIEF = [
     "check-gates.md",
     "check-review.md",
     "SUMMARY.md",
+    # The rubric snapshot (#314): a Do/Check-era artifact, so an iterate archives it and
+    # the rebuild takes a fresh one — a rubric that changed between attempts SHOULD apply
+    # to the next.
+    "rubric-snapshot.md",
 ]
 
 
