@@ -83,14 +83,14 @@ class SizeGuard(unittest.TestCase):
     def test_hold_is_accepted_but_says_it_is_not_blocking(self) -> None:
         """Silently downgrading `hold` would let an instance believe it is protected.
 
-        `hold` is unimplemented on evidence, not oversight: 67% precision means one wrong
-        block for every two right, which is how a gate gets trained out of usefulness.
+        `hold` is unimplemented on evidence, not oversight: 62% precision means nearly one
+        wrong block per right one, which is how a gate gets trained out of usefulness.
         """
         d = self._bundle(_OVERSIZED)
         reasons = plan_policy.evaluate(d, _cfg(self.tmp, "hold"))
         self.assertEqual(len(reasons), 1)
         self.assertIn("treated as 'warn'", reasons[0].detail)
-        self.assertIn("67%", reasons[0].detail, "the evidence should travel with the note")
+        self.assertIn("62%", reasons[0].detail, "the evidence should travel with the note")
 
     # -- where it is evaluated --------------------------------------------------------
 

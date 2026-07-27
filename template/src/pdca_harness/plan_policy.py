@@ -59,7 +59,7 @@ def size_reasons(d, cfg) -> list[HoldReason]:
 
     **There is no `hold` mode, and that is an evidence-based decision.** Calibrated over
     86 settled bundles of a real instance, the best structural rule reaches 50% recall at
-    67% precision against ≥3 rounds — one wrong hold for every two right ones. A blocking
+    62% precision against ≥3 rounds — nearly one wrong hold for every right one. A blocking
     gate at that precision costs a manual override every third flag, which is precisely how
     a guard is trained out of usefulness. #321's own definition of done anticipates this:
 
@@ -80,7 +80,7 @@ def size_reasons(d, cfg) -> list[HoldReason]:
     detail = f"oversized — consider `pdca split` first ({'; '.join(est.reasons)})"
     if mode not in (OFF, WARN):
         detail += (f" [size_guard={mode!r} is treated as 'warn': a blocking mode is "
-                   "unimplemented — the signal peaks at 67% precision, see #321]")
+                   "unimplemented — the signal peaks at 62% precision, see #321]")
     return [HoldReason("oversized", detail)]
 
 
