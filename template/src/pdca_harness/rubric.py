@@ -51,8 +51,14 @@ def _section(text: str, heading: str) -> str:
     wanted = heading.strip().lower()
     out: list[str] = []
     level = 0
+    fenced = False
     for line in text.splitlines():
-        m = re.match(r"^(#{1,6})\s+(.*?)\s*$", line)
+        if re.match(r"^\s*(```|~~~)", line):
+            # A fenced Markdown EXAMPLE containing a matching heading would otherwise be
+            # treated as the real section, handing every leaf the sample instead of the
+            # rubric — and running on to the next real heading.
+            fenced = not fenced
+        m = None if fenced else re.match(r"^(#{1,6})\s+(.*?)\s*$", line)
         if m:
             depth, title = len(m.group(1)), m.group(2).strip().lower()
             if level:
@@ -85,6 +91,39 @@ def _resolve(target: Path, rel: str) -> Path | None:
     return resolved
 
 
+def _target_root(d: Path, cfg) -> Path | None:
+    """Where to read the rubric from, most specific first.
+
+    1. The bundle's ACTIVE worktree, when isolation is on. `_do_build_command` has already
+       created it pinned to the brief's target base, so the primary checkout may be on
+       another branch, stale, or carrying a dirty AGENTS.md — and for a stacked bundle the
+       worktree includes a prerequisite branch the rubric may depend on.
+    2. The resolved target checkout.
+    3. The mapped checkout directly. `worktree._target` requires a `.git` entry, so a
+       supported non-Git target (Do runs in place) would otherwise silently lose its rubric.
+    """
+    from . import worktree
+    try:
+        wt = worktree.path(d, cfg)
+        if wt and wt.is_dir():
+            return wt
+    except Exception:  # noqa: BLE001 — isolation is optional; fall through
+        pass
+    try:
+        resolved = worktree._target(d, cfg)
+        if resolved:
+            return resolved[0]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from . import publish
+        repo_spec, _base, _slug = publish._resolve_target(d)
+        mapped = publish._checkout_path(cfg, repo_spec)
+        return mapped if mapped.is_dir() else None
+    except Exception:  # noqa: BLE001 — no target is a warning, never a crash
+        return None
+
+
 def load(d: Path, cfg) -> str:
     """The rubric text for bundle ``d`` — snapshotting on first use. "" when unconfigured.
 
@@ -95,28 +134,33 @@ def load(d: Path, cfg) -> str:
     if snapshot.exists():
         try:
             return snapshot.read_text(encoding="utf-8").strip()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             return ""
 
     rel = str(getattr(cfg, "rubric_file", "") or "").strip()
     if not rel:
         return ""
 
-    from . import worktree
-    resolved_target = worktree._target(d, cfg)
-    if not resolved_target:
+    target = _target_root(d, cfg)
+    if target is None:
         print(f"rubric: cannot resolve the target checkout for {d.name} — "
               "continuing without the rubric", file=sys.stderr)
+        _record(snapshot, "")
         return ""
-    path = _resolve(resolved_target[0], rel)
+    path = _resolve(target, rel)
     if path is None or not path.is_file():
         print(f"rubric: [project].rubric_file = {rel!r} does not resolve to a file inside "
               f"the target checkout — continuing without it", file=sys.stderr)
+        _record(snapshot, "")
         return ""
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError is NOT an OSError: a rubric file that is not valid UTF-8 would
+        # otherwise propagate out of the Do beat, turning the documented fail-open into a
+        # hard abort.
         print(f"rubric: {path} unreadable ({exc}) — continuing without it", file=sys.stderr)
+        _record(snapshot, "")
         return ""
 
     section = str(getattr(cfg, "rubric_section", "") or "").strip()
@@ -125,14 +169,26 @@ def load(d: Path, cfg) -> str:
         if not text:
             print(f"rubric: no section matching {section!r} in {path} — continuing "
                   "without it", file=sys.stderr)
+            _record(snapshot, "")
             return ""
     text = text.strip()
-    if text:
-        try:
-            snapshot.write_text(text + "\n", encoding="utf-8")
-        except OSError:
-            pass  # the snapshot is an optimisation + drift guard, never a hard requirement
+    _record(snapshot, text)
     return text
+
+
+def _record(snapshot: Path, text: str) -> None:
+    """Snapshot the outcome — INCLUDING an empty one.
+
+    Recording only successes leaves the drift window open in the other direction: if the
+    builder found no rubric and the target then gains one before Check (an in-place build
+    creates it, an operator restores it), the reviewer retries the live lookup and is
+    handed rules the builder never saw. An empty snapshot pins "no rubric for this
+    attempt" for every later leaf.
+    """
+    try:
+        snapshot.write_text(text + "\n" if text else "", encoding="utf-8")
+    except OSError:
+        pass  # the snapshot is a drift guard, never a hard requirement
 
 
 def for_builder(d: Path, cfg) -> str:

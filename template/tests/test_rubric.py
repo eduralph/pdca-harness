@@ -165,3 +165,55 @@ class RubricLoading(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewFixes(unittest.TestCase):
+    """Regressions from the codex review of #352."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.target = self.tmp / "target"
+        self.target.mkdir(parents=True)
+        self.d = self.tmp / "results" / "issue_1"
+        self.d.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _cfg(self, rel="RUBRIC.md", section=""):
+        cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=self.tmp / "templates",
+            default_branch="main", tracker_system="github", tracker_url="",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        cfg.rubric_file, cfg.rubric_section = rel, section
+        return cfg
+
+    def _load(self, cfg):
+        with mock.patch("pdca_harness.rubric._target_root", return_value=self.target):
+            return rubric.load(self.d, cfg)
+
+    def test_non_utf8_rubric_fails_open(self) -> None:
+        """UnicodeDecodeError is not an OSError — it would have aborted the Do beat."""
+        (self.target / "RUBRIC.md").write_bytes(b"\xff\xfe not utf-8 \x00")
+        self.assertEqual(self._load(self._cfg()), "")
+
+    def test_a_fenced_example_heading_is_not_mistaken_for_the_section(self) -> None:
+        (self.target / "AGENTS.md").write_text(
+            "# Project\n\n```md\n## Review rubric\n\nEXAMPLE ONLY\n```\n\n"
+            "## Review rubric\n\nTHE REAL RULES\n", encoding="utf-8")
+        text = self._load(self._cfg("AGENTS.md", "Review rubric"))
+        self.assertIn("THE REAL RULES", text)
+        self.assertNotIn("EXAMPLE ONLY", text)
+
+    def test_an_absent_rubric_is_snapshotted_too(self) -> None:
+        """Otherwise the drift window stays open the other way: the builder finds nothing,
+        the target then GAINS the file, and the reviewer is handed rules the builder never
+        saw."""
+        self.assertEqual(self._load(self._cfg()), "")
+        self.assertTrue((self.d / rubric.SNAPSHOT).exists(),
+                        "the empty outcome was not pinned for later leaves")
+        (self.target / "RUBRIC.md").write_text("# R\n\nappeared later\n", encoding="utf-8")
+        self.assertEqual(self._load(self._cfg()), "",
+                         "a later leaf picked up a rubric the builder never saw")
