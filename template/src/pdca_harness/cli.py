@@ -20,8 +20,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, manual_test, merged,
-               publish, queue, registry, revalidate, revert, signoff, sources, state, sweep,
-               waves, worktree)
+               publish, queue, registry, revalidate, revert, signoff, sizing, sources, state,
+               sweep, waves, worktree)
 from .config import Config
 
 
@@ -179,6 +179,10 @@ def main(argv: list[str] | None = None) -> int:
     p_flow.add_argument("--max-passes", type=int, help="sign-off pass budget before the driver stops driving a bundle (#260; overrides [driver].max_passes / PDCA_MAX_PASSES)")
     p_flow.add_argument("--auto-iterate", action="store_true", help="rebuild without stopping when every Check finding is implementation-level; a judgment finding still halts (#264; overrides [driver].auto_iterate / PDCA_AUTO_ITERATE)")
     p_flow.add_argument("--no-inhibit", action="store_true", help="don't hold a suspend inhibitor for the run (also PDCA_NO_INHIBIT=1) — for CI/containers where it's unavailable or unwanted (#244)")
+
+    p_size = sub.add_parser("size",
+                            help="print the a-priori slice-size estimate for one bundle or the queue (#320)")
+    p_size.add_argument("issue_ids", nargs="*", help="ids to size; none => every briefed bundle")
 
     p_status = sub.add_parser("status", help="list bundle states (cheap-first queue)")
     p_status.add_argument("issue_id", nargs="?")
@@ -429,6 +433,8 @@ def main(argv: list[str] | None = None) -> int:
         return cleanup.run(cfg, args.issue_ids, apply=args.apply, repo=args.repo, by=args.by)
     if args.cmd == "doctor":
         return doctor.run(cfg, strict=args.strict)
+    if args.cmd == "size":
+        return _size(cfg, args.issue_ids)
     if args.cmd == "sweep":
         # Explicit mode so the manual command works even under sweep_worktrees = "off".
         lines = sweep.sweep(cfg, mode="remove" if args.remove else "clean",
@@ -603,6 +609,32 @@ def _report_batch(results: dict[str, str]) -> int:
     return 0 if done == len(results) else 1
 
 
+def _size(cfg: Config, issue_ids: list[str]) -> int:
+    """Read-only: the structural size estimate and WHY, for one bundle or the queue.
+
+    Read-only on purpose — it decides nothing and writes nothing, so it can be run against
+    a live queue at any time. The reasons matter more than the band: "3 conflicts declared"
+    and "predicts a large patch" call for different responses, and a bare band hides which
+    fired (#320).
+    """
+    if issue_ids:
+        bundles = [cfg.bundle(i) for i in issue_ids]
+    else:
+        bundles = sorted(b for b in cfg.bundle_root.glob("issue_*")
+                         if b.is_dir() and (b / "brief.md").exists()) \
+            if cfg.bundle_root.exists() else []
+    if not bundles:
+        print("(no briefed bundles to size)")
+        return 0
+    for d in bundles:
+        est = sizing.estimate(d / "brief.md", cfg)
+        print(f"{est.band}\t{d.name}\tscore={est.score} "
+              f"churn={est.churn_band} patch={est.patch_band}")
+        for reason in est.reasons:
+            print(f"    - {reason}")
+    return 0
+
+
 def _status(cfg: Config, issue_id: str | None) -> int:
     if issue_id:
         d = cfg.bundle(issue_id)
@@ -616,6 +648,11 @@ def _status(cfg: Config, issue_id: str | None) -> int:
     rows.sort(key=lambda r: (_STATE_ORDER.index(r[0]) if r[0] in _STATE_ORDER else 99, r[1].name))
     for s, d in rows:
         flag = ""
+        # Oversize marker (#320/#321): visible in the queue without running anything,
+        # since the estimate is a pure read of the brief.
+        if (d / "brief.md").exists() and \
+                sizing.estimate(d / "brief.md", cfg).band == sizing.OVERSIZED:
+            flag = "  [oversized]"
         if s == state.AWAITING_SIGNOFF:
             n = len(signoff.open_needs_human(d / "SUMMARY.md"))
             flag = "  [cheap: confirm]" if n == 0 else f"  [{n} NEEDS-HUMAN]"

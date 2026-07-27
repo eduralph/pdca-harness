@@ -16,7 +16,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import assemble, brief, gates, leaves, signoff, state
+from . import assemble, brief, gates, leaves, plan_policy, signoff, state
 from .config import Config
 
 
@@ -47,6 +47,18 @@ def advance(d: Path, cfg: Config) -> None:
     """Run the one beat the bundle's current state calls for."""
     s = state.state(d)
     close = _close_class(d, cfg)
+    # Pre-dispatch policy (#321). Evaluated here because every path into Do converges on
+    # this function — single flow, the zero-id sweep, explicit ids, and `pdca run` — and
+    # recomputed each beat so a fix (registering a doctor row, retuning [driver.sizing])
+    # takes effect immediately instead of being pinned by a stale marker.
+    #
+    # AFTER `_close_class`: a close-disposition bundle skips builder and reviewer
+    # entirely, so advising a split on a duplicate/wontfix/split parent would be noise
+    # about work that never enters Do. BUILT is covered as well as PLANNED: a partial
+    # build lands there and never re-enters PLANNED, and Check is a real spend too.
+    if not close and s in (state.PLANNED, state.BUILT):
+        for reason in plan_policy.evaluate(d, cfg):
+            _say(f"⚠ {d.name}: {reason.detail}")
     if s == state.PLANNED:
         if close:
             _say(f"→ {d.name}: close disposition '{close}' — skipping builder leaf (no patch to build)…")

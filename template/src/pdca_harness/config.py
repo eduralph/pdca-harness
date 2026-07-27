@@ -306,6 +306,11 @@ class Config:
     # table so an instance can retune against its OWN corpus without patching the engine —
     # the whole point of #324's calibration loop. Empty => sizing.DEFAULT_* apply.
     sizing: dict = field(default_factory=dict)
+    # Pre-dispatch size advisory ([driver].size_guard, #321): "off" (default) | "warn".
+    # Default OFF, not "warn": a rendered default that emits output and consults a leaf
+    # would change behaviour for every instance taking a `copier update` — the property
+    # #342's update test asserts. An instance opts in.
+    size_guard: str = "off"
     close_dispositions: list[str] = field(
         default_factory=lambda: list(DEFAULT_CLOSE_DISPOSITIONS))
     # Family-profile overrides ([families.<name>] in pdca.toml): per-vendor CLI
@@ -533,6 +538,7 @@ class Config:
         close_dispositions = list(
             driver_cfg.get("close_dispositions", DEFAULT_CLOSE_DISPOSITIONS))
         sizing = dict(driver_cfg.get("sizing", {}))
+        size_guard = str(driver_cfg.get("size_guard", "off"))
 
         return cls(
             root=root,
@@ -592,6 +598,7 @@ class Config:
             doctor_min_free_gb=doctor_min_free_gb,
             close_dispositions=close_dispositions,
             sizing=sizing,
+            size_guard=size_guard,
             families={k.strip().lower(): dict(v)
                       for k, v in data.get("families", {}).items()},
             doctor_checks=list(data.get("doctor", {}).get("checks", [])),
