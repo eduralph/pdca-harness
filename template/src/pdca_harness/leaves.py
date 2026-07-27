@@ -787,14 +787,37 @@ def run_sizer(d: Path, cfg: Config) -> dict | None:
         return None
     if cfg.sizer.mode != "command":
         return _stub_sizer(d)
-    _invoke(cfg.sizer, d, _sizer_prompt(d), cfg=cfg, label="sizer")
-    verdict = _read_sizing(d)
+    verdict = _sizer_pass(cfg.sizer, d, cfg, "sizer")
     for spec in cfg.sizer_escalation:
         if _sizer_escalates(verdict, spec):
-            _invoke(_leaf_from_spec(spec, cfg.sizer), d, _sizer_prompt(d),
-                    cfg=cfg, label="sizer (escalated)")
-            return _read_sizing(d)
+            escalated = _sizer_pass(_leaf_from_spec(spec, cfg.sizer), d, cfg,
+                                    "sizer (escalated)")
+            # An escalation that produced nothing must not discard the first pass: the
+            # cheap verdict is still the best evidence available.
+            return escalated if escalated is not None else verdict
     return verdict
+
+
+def _sizer_pass(leaf: LeafConfig, d: Path, cfg: Config, label: str) -> dict | None:
+    """One sizer invocation. Never raises, never reuses a previous verdict.
+
+    ADVISORY means advisory: a non-zero exit, a rate limit or a missing executable must
+    leave the structural estimate usable rather than abort the beat that consulted it —
+    an optional corroborating signal has no business taking the cycle down with it.
+
+    The artifact is unlinked FIRST so a pass that exits cleanly without writing cannot be
+    read as having produced the previous run's answer — most likely when an existing
+    bundle is switched from stub to command mode, where a stale `ok` would silently stand
+    in for a verdict the model never gave.
+    """
+    (d / SIZING_FILE).unlink(missing_ok=True)
+    try:
+        _invoke(leaf, d, _sizer_prompt(d), cfg=cfg, label=label)
+    except Exception as exc:  # noqa: BLE001 — an advisory leaf never aborts the beat
+        print(f"leaves: {label} did not run ({exc}) — continuing on the structural "
+              "estimate alone", file=sys.stderr)
+        return None
+    return _read_sizing(d)
 
 
 def _stub_sizer(d: Path) -> dict | None:

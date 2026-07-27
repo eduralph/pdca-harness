@@ -51,6 +51,21 @@ OFF, WARN, HOLD = "off", "warn", "hold"
 _BLOCKING = frozenset({"unregistered-dependency"})
 
 
+class PolicyHold(Exception):
+    """A blocking pre-dispatch reason. Raised by the driver, caught by its callers.
+
+    An EXCEPTION rather than a quiet return, because a quiet return is a hang: `run_issue`
+    loops `while state not in HALTED: advance(...)`, and a hold leaves the bundle in
+    PLANNED or BUILT — neither halted — so `advance` returning without progress spins
+    forever printing the same warning. Signalling out of band is the only shape that
+    cannot be accidentally ignored by a caller's loop.
+    """
+
+    def __init__(self, reasons: list["HoldReason"]):
+        self.reasons = reasons
+        super().__init__("; ".join(r.detail for r in reasons))
+
+
 class HoldReason(NamedTuple):
     """One reason the driver should pause before spending on this bundle."""
 
@@ -78,10 +93,27 @@ def size_reasons(d, cfg) -> list[HoldReason]:
         return []
 
     est = sizing.estimate(d / "brief.md", cfg)
+    # Fold in the configured sizer's verdict (#320's 1b). Without this the model half is
+    # unreachable: `estimate` alone never sees the one question structure cannot answer —
+    # how many independently shippable outcomes the brief describes — and every configured
+    # `[leaves.sizer]` escalation is dead config. `combine` escalates only, so a stub, a
+    # missing verdict or a malformed one leaves the structural estimate byte-identical.
+    from . import leaves
+    est = sizing.combine(est, leaves.run_sizer(d, cfg))
     if est.band != sizing.OVERSIZED:
         return []
 
-    detail = f"oversized — consider `pdca split` first ({'; '.join(est.reasons)})"
+    # The remediation follows the READOUT that fired, not the combined band. A brief that
+    # is high-difficulty and large scores `patch_band=oversized` with `churn_band=watch`,
+    # and the sizing contract is explicit that a large COHERENT patch is not a slice that
+    # needs splitting — recommending a split there is advice the estimator's own model
+    # contradicts.
+    if est.churn_band == sizing.OVERSIZED or est.patch_band != sizing.OVERSIZED:
+        remedy = "consider `pdca split` first"
+    else:
+        remedy = ("expect a large patch — worth a look before Do, but a large COHERENT "
+                  "change is not a split candidate")
+    detail = f"oversized — {remedy} ({'; '.join(est.reasons)})"
     if mode not in (OFF, WARN):
         detail += (f" [size_guard={mode!r} is treated as 'warn': a blocking mode is "
                    "unimplemented — the signal peaks at 67% precision, see #321]")
@@ -109,7 +141,11 @@ def dependency_reasons(d, cfg) -> list[HoldReason]:
     mode = str(getattr(cfg, "dependency_guard", HOLD) or HOLD).strip().lower()
     if mode == OFF:
         return []
-    return [HoldReason("unregistered-dependency", item)
+    # Only `hold` blocks. `warn` reports the same item and lets Do proceed — the code
+    # carries the mode, because `blocking()` decides on the code alone and a shared code
+    # would make the documented warn option silently behave as hold.
+    code = "unregistered-dependency" if mode == HOLD else "unregistered-dependency-warn"
+    return [HoldReason(code, item)
             for item in doctor.unregistered_dependencies(d / "brief.md", cfg)]
 
 
