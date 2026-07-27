@@ -80,6 +80,9 @@ class Config:
     builder: LeafConfig
     reviewer: LeafConfig
     planner: LeafConfig = field(default_factory=LeafConfig)
+    #: The cheap-model size judgment (#320). Absent from pdca.toml => stub => never runs,
+    #: so an instance taking a `copier update` gains no model call it did not ask for.
+    sizer: LeafConfig = field(default_factory=LeafConfig)
     signoff: LeafConfig = field(default_factory=LeafConfig)
     publisher: LeafConfig = field(default_factory=LeafConfig)
     act: LeafConfig = field(default_factory=LeafConfig)
@@ -193,6 +196,11 @@ class Config:
     # an underpowered executor (e.g. min_iteration=2 → stronger, =3 → frontier). Empty ⇒
     # every attempt uses the default [leaves.builder].
     builder_escalation: list[dict] = field(default_factory=list)
+    # Sizer escalation ([[leaves.sizer_escalation]], #320). Triggers on the leaf's OWN
+    # first-pass verdict — runtime state, not a brief field — which is why it is an
+    # escalation rather than a variant: a `watch` or low-confidence answer is exactly when
+    # a stronger model is worth paying for, and no brief field predicts that.
+    sizer_escalation: list[dict] = field(default_factory=list)
     # Difficulty-routed builder variants (issue #134): an OPEN list of per-bundle Do
     # backends ([[leaves.builder_variant]] in pdca.toml), each {family, mode, argv, when}
     # where when = {field, substring} matches a brief field (e.g. difficulty=high), like a
@@ -457,6 +465,10 @@ class Config:
             {**spec, "mode": mode_override or spec.get("mode", "")}
             for spec in leaves.get("builder_escalation", [])
         ]
+        sizer_escalation = [
+            dict(spec) for spec in leaves.get("sizer_escalation", [])
+            if isinstance(spec, dict)
+        ]
 
         # Difficulty-routed builder variants (issue #134) — per-bundle backends keyed on a
         # brief field via `when`. PDCA_LEAVES_MODE forces their mode too; "" inherits the
@@ -561,6 +573,8 @@ class Config:
             plan_advisory_leaves=plan_advisory_leaves,
             plan_advisory_selection=plan_advisory_selection,
             builder_escalation=builder_escalation,
+            sizer=leaf("sizer"),
+            sizer_escalation=sizer_escalation,
             builder_variants=builder_variants,
             gates_runner=gates_runner,
             lanes=lanes,

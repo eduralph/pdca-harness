@@ -715,6 +715,96 @@ def _explicit_model_variant(d: Path, cfg: Config) -> dict | None:
     return None
 
 
+SIZING_FILE = "sizing.json"
+
+
+def _sizer_prompt(d: Path) -> str:
+    return (
+        "You are the SIZER. Read only " + str(d / "brief.md") + " and answer ONE question: "
+        "how many INDEPENDENTLY SHIPPABLE outcomes does this brief describe? An outcome is "
+        "independently shippable if it could be its own PR — its own defect, its own success "
+        "criterion, its own test — without waiting on the others.\n\n"
+        "This is the judgment structural features cannot make. Do NOT re-estimate size from "
+        "word counts or file counts; the driver already has those. Size is not the question; "
+        "DECOMPOSABILITY is.\n\n"
+        "Write exactly one file, " + str(d / SIZING_FILE) + ", and nothing else:\n"
+        '{"band": "ok|watch|oversized", "independent_outcomes": ["…"], '
+        '"proposed_seams": ["…"], "confidence": "low|medium|high"}\n\n'
+        "band: `ok` = one outcome. `watch` = arguably two, or one with a large uncertain "
+        "surface. `oversized` = two or more that could each ship alone.\n"
+        "Propose seams; do NOT cut them — splitting is the human's call at sign-off."
+    )
+
+
+def _read_sizing(d: Path) -> dict | None:
+    """The sizer's verdict, or None if absent/unreadable/not an object.
+
+    Tolerant like every other bundle-file read: a malformed verdict must leave the
+    structural estimate exactly as it was, never crash the beat that consulted it.
+    """
+    p = d / SIZING_FILE
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _sizer_escalates(verdict: dict | None, spec: dict) -> bool:
+    """Whether ``spec`` fires against the first-pass verdict.
+
+    Matches on the leaf's own output — band and/or confidence — because that is the only
+    place the signal exists. An absent verdict never escalates: a leaf that failed to
+    answer is not evidence that a stronger one would.
+    """
+    if not verdict:
+        return False
+    bands = [str(b).lower() for b in spec.get("on_band", [])]
+    confs = [str(c).lower() for c in spec.get("on_confidence", [])]
+    band = str(verdict.get("band", "")).lower()
+    conf = str(verdict.get("confidence", "")).lower()
+    # OR across the declared conditions, and a spec declaring NEITHER never fires — an
+    # empty spec must not escalate every bundle, which is the failure a truthiness test
+    # would produce.
+    return (bool(bands) and band in bands) or (bool(confs) and conf in confs)
+
+
+def run_sizer(d: Path, cfg: Config) -> dict | None:
+    """Run the cheap-model size judgment over a brief, returning its verdict (#320).
+
+    Optional by construction: with no ``[leaves.sizer]`` in ``pdca.toml`` the leaf is a
+    stub and this writes nothing a model produced, so an instance taking a `copier update`
+    gains no model call it never asked for.
+
+    Escalation is over the leaf's OWN first pass — a `watch` or low-confidence answer is
+    exactly when a stronger model earns its cost, and no brief field predicts that. At most
+    one escalation runs: this is a corroborating signal, not a search.
+    """
+    if not (d / "brief.md").exists():
+        return None
+    if cfg.sizer.mode != "command":
+        return _stub_sizer(d)
+    _invoke(cfg.sizer, d, _sizer_prompt(d), cfg=cfg, label="sizer")
+    verdict = _read_sizing(d)
+    for spec in cfg.sizer_escalation:
+        if _sizer_escalates(verdict, spec):
+            _invoke(_leaf_from_spec(spec, cfg.sizer), d, _sizer_prompt(d),
+                    cfg=cfg, label="sizer (escalated)")
+            return _read_sizing(d)
+    return verdict
+
+
+def _stub_sizer(d: Path) -> dict | None:
+    """Offline placeholder: a deterministic `ok` verdict so the suite stays green with no
+    model, and so `combine()` is exercised on the stub path exactly as on the real one."""
+    verdict = {"band": "ok", "independent_outcomes": [], "proposed_seams": [],
+               "confidence": "low", "stub": True}
+    (d / SIZING_FILE).write_text(json.dumps(verdict, indent=2) + "\n", encoding="utf-8")
+    return verdict
+
+
 def select_builder(d: Path, cfg: Config, n: int) -> LeafConfig:
     """Pick the Do builder backend for bundle ``d`` on attempt ``n`` (issues #134/#135/#167).
 

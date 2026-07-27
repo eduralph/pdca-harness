@@ -166,3 +166,64 @@ class Combine(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SizerLeaf(unittest.TestCase):
+    """The model half (1b): the leaf, its escalation, and its optionality."""
+
+    def setUp(self) -> None:
+        from pdca_harness.config import Config, LeafConfig
+        self.tmp = Path(tempfile.mkdtemp())
+        self.d = self.tmp / "results" / "issue_1"
+        self.d.mkdir(parents=True)
+        (self.d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=self.tmp / "templates",
+            default_branch="main", tracker_system="github", tracker_url="",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
+        )
+
+    def test_stub_mode_writes_a_deterministic_verdict(self) -> None:
+        """Offline runs must exercise the same combine() path as a real leaf."""
+        from pdca_harness import leaves
+        verdict = leaves.run_sizer(self.d, self.cfg)
+        self.assertEqual(verdict["band"], sizing.OK)
+        self.assertTrue((self.d / leaves.SIZING_FILE).exists())
+
+    def test_no_brief_means_no_verdict(self) -> None:
+        from pdca_harness import leaves
+        (self.d / "brief.md").unlink()
+        self.assertIsNone(leaves.run_sizer(self.d, self.cfg))
+
+    def test_malformed_verdict_reads_as_absent(self) -> None:
+        from pdca_harness import leaves
+        (self.d / leaves.SIZING_FILE).write_text("{not json", encoding="utf-8")
+        self.assertIsNone(leaves._read_sizing(self.d))
+        # …and therefore leaves the structural estimate untouched.
+        base = sizing.SizeEstimate(3, sizing.WATCH, [])
+        self.assertEqual(sizing.combine(base, leaves._read_sizing(self.d)), base)
+
+    def test_escalation_fires_on_band_or_confidence(self) -> None:
+        from pdca_harness import leaves
+        cases = [
+            ({"band": "watch", "confidence": "high"}, {"on_band": ["watch"]}, True),
+            ({"band": "ok", "confidence": "low"}, {"on_confidence": ["low"]}, True),
+            ({"band": "ok", "confidence": "high"}, {"on_band": ["watch"]}, False),
+            ({"band": "watch"}, {"on_band": ["watch"], "on_confidence": ["low"]}, True),
+        ]
+        for verdict, spec, expected in cases:
+            with self.subTest(verdict=verdict, spec=spec):
+                self.assertEqual(leaves._sizer_escalates(verdict, spec), expected)
+
+    def test_an_empty_escalation_spec_never_fires(self) -> None:
+        """A spec declaring neither condition must not escalate every bundle — the failure
+        a plain truthiness test would produce."""
+        from pdca_harness import leaves
+        self.assertFalse(leaves._sizer_escalates({"band": "oversized"}, {}))
+
+    def test_absent_verdict_never_escalates(self) -> None:
+        """A leaf that failed to answer is not evidence a stronger one would succeed."""
+        from pdca_harness import leaves
+        self.assertFalse(leaves._sizer_escalates(None, {"on_band": ["watch"]}))
