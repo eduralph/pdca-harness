@@ -75,8 +75,12 @@ def build_two_ref_source(tmp: Path, prior: str) -> Path:
     _git(src, "init", "-q")
 
     # Commit 1 — the genuine prior release tree, extracted from this repo's history.
-    subprocess.run(f"git -C {REPO} archive {prior} | tar -x -C {src}",
-                   shell=True, check=True, capture_output=True)
+    # No shell: a checkout path containing whitespace or a metacharacter — e.g.
+    # /home/user/My Projects/pdca-harness — would otherwise split or be reinterpreted, and
+    # this suite would fail before rendering anything.
+    archive = subprocess.run(["git", "-C", str(REPO), "archive", prior],
+                             check=True, capture_output=True)
+    subprocess.run(["tar", "-x", "-C", str(src)], input=archive.stdout, check=True)
     _commit(src, "prior release")
     _git(src, "tag", "v_old")
 
@@ -151,8 +155,16 @@ print(json.dumps({
          "scope": c.get("scope", ""), "at_publish": c.get("at_publish", None)}
         for c in cfg.gates_checks
     ],
+    # Named leaves AND the list-backed ones. `[[leaves.advisory]]`,
+    # `[[leaves.plan_advisory]]`, and the builder variants/escalations are lists of dicts,
+    # not objects with .mode — so an update that enabled one of those would have slipped
+    # past an attribute-only probe while the instance quietly gained model calls.
     "leaves": {k: {"mode": getattr(v, "mode", None)}
                for k, v in vars(cfg).items() if hasattr(v, "mode") and hasattr(v, "argv")},
+    "leaf_specs": {k: [dict(spec) for spec in v]
+                   for k, v in vars(cfg).items()
+                   if isinstance(v, list) and v and all(isinstance(x, dict) for x in v)
+                   and any("mode" in x or "argv" in x for x in v)},
     "raw": Path("pdca.toml").read_text(encoding="utf-8"),
 }))
 """
@@ -206,6 +218,14 @@ def render_prior_edit_and_update(tmp: Path, prior: str) -> tuple[dict | None, st
 
     run_update(str(out), vcs_ref="v_new", defaults=True, unsafe=True,
                quiet=True, overwrite=True)
+    # Positive postcondition: without it every assertion below still holds on the v_old
+    # render, so a no-op update — a resolution change, a future Copier behaviour — would
+    # leave this suite permanently green while exercising nothing.
+    answers = (out / ".copier-answers.yml").read_text(encoding="utf-8")
+    if "_commit: v_new" not in answers:
+        raise AssertionError(
+            "copier update did not advance the instance to v_new; the answers file still "
+            f"records:\n{answers}")
     return load_updated_config(out)
 
 
@@ -278,6 +298,11 @@ class UpdateCompat(unittest.TestCase):
             with self.subTest(leaf=name):
                 self.assertNotEqual(leaf.get("mode"), "command",
                                     f"update switched leaf '{name}' to a live model call")
+        for name, specs in cfg["leaf_specs"].items():
+            for i, spec in enumerate(specs):
+                with self.subTest(leaf=f"{name}[{i}]"):
+                    self.assertNotEqual(spec.get("mode"), "command",
+                                        f"update enabled {name}[{i}] as a live model call")
         for line in cfg["raw"].splitlines():
             stripped = line.strip()
             if stripped.startswith("size_guard") and not stripped.startswith("#"):
