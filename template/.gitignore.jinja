@@ -16,6 +16,14 @@ settings.local.json
 results/issue_selftest/
 *.log
 
+# Oversized interactive-leaf seeds spilled to a scratch file (leaves._seed_positional,
+# issue #313). Every interactive leaf runs with the PROJECT ROOT as its cwd, so the spill
+# lands here rather than in a bundle — and the Act seed, the one that actually overflows,
+# is ~150 KB. Normally unlinked when the session ends; a killed session orphans one, which
+# is the other reason this line exists. Keep the pattern in step with
+# `leaves._SEED_SPILL_PREFIX` (a test asserts they match).
+.pdca-prompt-*.md
+
 # Act frontier lock/temp sidecars (issue #299) — runtime-only serialization helpers;
 # the marker itself ({{ process_dir }}/.act-reviewed) stays tracked.
 .act-reviewed.lock

@@ -144,8 +144,6 @@ class DependencyGuard(unittest.TestCase):
                          doctor.unregistered_dependencies(d / "brief.md", cfg))
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class HoldDoesNotSpin(unittest.TestCase):
@@ -196,3 +194,88 @@ class HoldDoesNotSpin(unittest.TestCase):
         self.assertEqual(plan_policy.blocking(reasons), [])
         driver.advance(self.d, cfg)
         self.assertTrue((self.d / "patch.diff").exists(), "warn blocked Do")
+
+
+class HoldReachesTheCaller(unittest.TestCase):
+    """Round two on #351: a hold has to be visible to whatever invoked the driver."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "results").mkdir(parents=True)
+        (self.tmp / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n',
+                                            encoding="utf-8")
+        self.d = self.tmp / "results" / "issue_1"
+        self.d.mkdir(parents=True)
+        (self.d / "brief.md").write_text(_DECLARED, encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_a_typo_in_the_guard_fails_safe(self) -> None:
+        """`dependency_guard = "hld"` fell through to the warn branch and dispatched Do
+        past an unregistered dependency, with nothing on screen to say the setting had not
+        been understood. An unrecognised value now warns and holds."""
+        cfg = _cfg(self.tmp, guard="hld")
+        self.assertTrue(plan_policy.blocking(plan_policy.evaluate(self.d, cfg)))
+
+    def test_every_recognised_value_still_behaves(self) -> None:
+        for guard, blocks in (("hold", True), ("warn", False), ("off", None)):
+            with self.subTest(guard=guard):
+                reasons = plan_policy.evaluate(self.d, _cfg(self.tmp, guard=guard))
+                if blocks is None:
+                    self.assertEqual(reasons, [])
+                else:
+                    self.assertEqual(bool(plan_policy.blocking(reasons)), blocks)
+
+    def test_held_distinguishes_a_hold_from_completion(self) -> None:
+        """A non-halted return can only mean a policy hold — the loop has no other early
+        exit — so this is the predicate a caller needs."""
+        self.assertTrue(driver.held(state.PLANNED))
+        self.assertTrue(driver.held(state.BUILT))
+        self.assertFalse(driver.held(state.COMPLETE))
+        self.assertFalse(driver.held(state.AWAITING_SIGNOFF))
+
+    def test_pdca_run_exits_non_zero_when_held(self) -> None:
+        """Otherwise automation reads a bundle blocked before Do as a completed run —
+        `run_issue` returns PLANNED and the command returned 0."""
+        from pdca_harness import cli
+        from pdca_harness.config import Config
+        self.assertEqual(cli._run(Config.load(self.tmp), "1"), 1)
+
+    def test_pdca_run_still_exits_zero_when_it_finishes(self) -> None:
+        (self.tmp / "pdca.toml").write_text(
+            '[paths]\nbundle_root = "results"\n\n'
+            '[[doctor.checks]]\nid = "protoc"\n'
+            'cmd = "protoc --version"\nhint = "apt install protobuf-compiler"\n',
+            encoding="utf-8")
+        from pdca_harness import cli
+        from pdca_harness.config import Config
+        self.assertEqual(cli._run(Config.load(self.tmp), "1"), 0)
+
+    def test_signoff_iterate_also_exits_non_zero_when_held(self) -> None:
+        """The second `run_issue` caller. An iterate archives the attempt, returns to
+        PLANNED and is then held before Do — nothing was rebuilt, so exiting 0 would tell
+        automation the sign-off decision had been carried out."""
+        from types import SimpleNamespace
+        from pdca_harness import cli, gates, assemble
+        from pdca_harness.config import Config
+        cfg = Config.load(self.tmp)
+        cfg.gates_checks = [{"id": "C4", "tier": "C4", "label": "v", "scope": "bundle",
+                             "gating": True, "cmd": "true"}]
+        (self.d / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
+        (self.d / "check-review.md").write_text("All advisory items PASS.\n",
+                                                encoding="utf-8")
+        gates.run_gates(self.d, cfg)
+        assemble.assemble_summary(self.d, cfg)
+        summary = self.d / "SUMMARY.md"
+        summary.write_text(summary.read_text().replace("- [ ]", "- [x]"), encoding="utf-8")
+
+        args = SimpleNamespace(issue_id="1", accept=False, iterate_do=True,
+                               iterate_plan=False, discontinue=False, by="t", delta="",
+                               no_publish=True)
+        self.assertEqual(cli._signoff(cfg, args), 1,
+                         "a held rebuild reported the sign-off as carried out")
+
+
+if __name__ == "__main__":
+    unittest.main()

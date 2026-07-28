@@ -368,5 +368,66 @@ class FencedOrderingFields(unittest.TestCase):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TheSplitterReadsTheSizer(unittest.TestCase):
+    """The splitter is the consumer that needs the sizer's answer most (#351 review).
+
+    `_split_prompt` passed only the STRUCTURAL band and reasons — "difficulty=high;
+    3 conflicts declared" — and dropped `proposed_seams` and `independent_outcomes`
+    entirely. So an instance paid one model to find the seams and then paid a second to
+    rediscover them, with the first answer sitting unread in the same bundle.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.d = self.tmp / "results" / "issue_1"
+        self.d.mkdir(parents=True)
+        (self.d / "brief.md").write_text("- **Slug:** s\n- **Difficulty:** high\n",
+                                         encoding="utf-8")
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github", tracker_url="",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _verdict(self, **kw) -> None:
+        import json
+        (self.d / "sizing.json").write_text(json.dumps({
+            "band": "oversized",
+            "independent_outcomes": ["parser rewrite", "renderer rewrite"],
+            "proposed_seams": ["split at the parser/renderer boundary"], **kw}),
+            encoding="utf-8")
+
+    def test_the_seams_and_outcomes_reach_the_prompt(self) -> None:
+        self._verdict()
+        prompt = leaves._split_prompt(self.d, self.cfg)
+        self.assertIn("split at the parser/renderer boundary", prompt)
+        self.assertIn("renderer rewrite", prompt)
+
+    def test_the_prior_is_framed_as_a_starting_point(self) -> None:
+        """A verdict presented as settled invites ratification. The splitter sees the
+        brief and can disagree — and a reasoned disagreement is worth more than assent."""
+        self._verdict()
+        prompt = leaves._split_prompt(self.d, self.cfg)
+        self.assertIn("STARTING POINT", prompt)
+        self.assertIn("disagree", prompt)
+
+    def test_no_verdict_leaves_the_prompt_unchanged(self) -> None:
+        """The sizer is optional; a splitter run without one must read as it always did."""
+        self.assertNotIn("sizer has already", leaves._split_prompt(self.d, self.cfg))
+
+    def test_the_splitter_never_invokes_the_paid_leaf(self) -> None:
+        """READ, not re-run: paying a second model to rediscover the first one's answer is
+        the waste this fixes."""
+        from unittest import mock
+        self._verdict()
+        with mock.patch.object(leaves, "run_sizer") as sizer:
+            leaves._split_prompt(self.d, self.cfg)
+        sizer.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

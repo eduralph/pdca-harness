@@ -325,8 +325,6 @@ class SandboxConfig(unittest.TestCase):
         self.assertIs(cfg.leaf_network_access, False)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ShippedPdcaTomlExamples(unittest.TestCase):
@@ -369,3 +367,6 @@ class ShippedPdcaTomlExamples(unittest.TestCase):
         sandbox = parsed["leaves"]["sandbox"]
         self.assertIn("unsandboxed_commands", sandbox)   # both keys, under ONE table
         self.assertIs(sandbox["network_access"], True)   # …and an UNQUOTED boolean
+
+if __name__ == "__main__":
+    unittest.main()

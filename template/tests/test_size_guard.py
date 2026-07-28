@@ -3,7 +3,7 @@
 Two properties, and the second is the one that took three review rounds to get right.
 
 **Advisory, not blocking.** Calibrated over 86 settled bundles, the best structural rule
-reaches 50% recall at 67% precision — one wrong hold for every two right. #321's own DoD
+reaches 50% recall at 62% precision — nearly one wrong hold per right one. #321's own DoD
 says to ship `warn` and leave `hold` unimplemented rather than train people to override a
 gate, and that is what this does.
 
@@ -15,6 +15,9 @@ PLANNED at all.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import shutil
 import tempfile
 import unittest
@@ -85,14 +88,14 @@ class SizeGuard(unittest.TestCase):
     def test_hold_is_accepted_but_says_it_is_not_blocking(self) -> None:
         """Silently downgrading `hold` would let an instance believe it is protected.
 
-        `hold` is unimplemented on evidence, not oversight: 67% precision means one wrong
-        block for every two right, which is how a gate gets trained out of usefulness.
+        `hold` is unimplemented on evidence, not oversight: 62% precision means nearly one
+        wrong block per right one, which is how a gate gets trained out of usefulness.
         """
         d = self._bundle(_OVERSIZED)
         reasons = plan_policy.evaluate(d, _cfg(self.tmp, "hold"))
         self.assertEqual(len(reasons), 1)
         self.assertIn("treated as 'warn'", reasons[0].detail)
-        self.assertIn("67%", reasons[0].detail, "the evidence should travel with the note")
+        self.assertIn("62%", reasons[0].detail, "the evidence should travel with the note")
 
     # -- where it is evaluated --------------------------------------------------------
 
@@ -129,10 +132,10 @@ class SizeGuard(unittest.TestCase):
         self.assertTrue((d / "patch.diff").exists(),
                         "the size advisory blocked Do — it must only warn")
 
-    def test_it_is_recomputed_not_cached(self) -> None:
-        """Registering a fix must take effect immediately. A persisted marker would pin
-        the verdict: once PLANNED, resuming does not re-run Plan, so the bundle would
-        warn forever."""
+    def test_the_verdict_is_recomputed_not_cached(self) -> None:
+        """Fixing the BUNDLE must take effect immediately. A persisted marker would pin the
+        verdict: once PLANNED, resuming does not re-run Plan, so the bundle would warn
+        forever."""
         d = self._bundle(_OVERSIZED)
         cfg = _cfg(self.tmp, "warn")
         self.assertTrue(plan_policy.evaluate(d, cfg))
@@ -158,6 +161,161 @@ class SizeGuard(unittest.TestCase):
         d = self._bundle(_OVERSIZED)
         cfg = _cfg(self.tmp, "warn")
         self.assertEqual(sizing.estimate(d / "brief.md", cfg).band, sizing.OVERSIZED)
+
+
+class ConfigIsASnapshot(unittest.TestCase):
+    """The recompute guarantee is about the BUNDLE, not the settings (PR #350 review).
+
+    `Config.load()` runs once per invocation, so `[driver].size_guard` and
+    `[driver.sizing]` are fixed for the whole run. Re-reading them per beat would let one
+    `pdca flow` score two bundles in the same batch against two different thresholds — a
+    batch has to be reproducible and explainable as one unit. The docstring used to claim
+    the policy "reads config from disk", which it does not; that claim is now scoped to
+    what actually is re-read.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_the_config_object_governs_the_whole_run(self) -> None:
+        d = self.tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(_OVERSIZED, encoding="utf-8")
+        off, warn = _cfg(self.tmp, "off"), _cfg(self.tmp, "warn")
+        self.assertEqual(plan_policy.evaluate(d, off), [])
+        self.assertTrue(plan_policy.evaluate(d, warn))
+
+    def test_the_docstring_no_longer_claims_a_config_reload(self) -> None:
+        """Locks the correction: the module must not re-acquire a claim the code does not
+        deliver, which is how this was found in the first place."""
+        self.assertNotIn("reads config from disk", plan_policy.__doc__ or "")
+        self.assertIn("CONFIG is a snapshot", plan_policy.__doc__ or "")
+
+
+class ThirdReviewFixes(unittest.TestCase):
+    """Round three on #351."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.d = self.tmp / "results" / "issue_1"
+        self.d.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_the_model_verdict_survives_an_unchanged_band(self) -> None:
+        """A structurally `oversized` brief plus a sizer saying `oversized` used to drop
+        the model's evidence entirely, because combine returned early when the band did
+        not move — losing the one signal that can see decomposability."""
+        base = sizing.SizeEstimate(9, sizing.OVERSIZED, ["structural"],
+                                   churn_band=sizing.WATCH, patch_band=sizing.OVERSIZED)
+        out = sizing.combine(base, {"band": "oversized",
+                                    "independent_outcomes": ["a", "b"]})
+        self.assertEqual(out.model_band, sizing.OVERSIZED)
+        self.assertIn("2 independently shippable outcome(s)", "; ".join(out.reasons))
+
+    def test_a_model_split_verdict_overrides_the_coherent_patch_advice(self) -> None:
+        """patch=oversized with churn=watch normally reads "large but coherent". If the
+        SIZER says the slice decomposes, advising against a split contradicts it."""
+        from unittest import mock
+        (self.d / "brief.md").write_text(_OVERSIZED, encoding="utf-8")
+        cfg = _cfg(self.tmp, "warn")
+        with mock.patch("pdca_harness.leaves.run_sizer",
+                        return_value={"band": "oversized",
+                                      "independent_outcomes": ["a", "b"]}):
+            reasons = plan_policy.evaluate(self.d, cfg)
+        self.assertTrue(reasons)
+        self.assertIn("pdca split", reasons[0].detail)
+        self.assertNotIn("COHERENT", reasons[0].detail)
+
+    def test_a_blocking_check_runs_before_the_paid_advisory(self) -> None:
+        """No sense buying a model advisory for a bundle about to be held on set
+        membership — the human pays again on the retry after registering the row."""
+        from unittest import mock
+        (self.tmp / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n',
+                                            encoding="utf-8")
+        (self.d / "brief.md").write_text(
+            _OVERSIZED + "- **External dependencies:** `protoc`\n", encoding="utf-8")
+        cfg = _cfg(self.tmp, "warn")
+        cfg.dependency_guard = "hold"
+        with mock.patch("pdca_harness.leaves.run_sizer") as sizer:
+            reasons = plan_policy.evaluate(self.d, cfg)
+        sizer.assert_not_called()
+        self.assertEqual([r.code for r in reasons], ["unregistered-dependency"])
+
+
+class TheVerdictHasAConsumer(unittest.TestCase):
+    """The paid verdict was written and then read by nothing (#351 review).
+
+    `sizing.json` was consulted only by its own cache: `pdca size` recomputed the
+    STRUCTURAL estimate, SUMMARY never saw it, and the operator's only glimpse was a
+    stderr line at the moment Plan exited. An instance paid a model to answer "how many
+    independently shippable outcomes?" and the answer went nowhere.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.d = self.tmp / "results" / "issue_9"
+        self.d.mkdir(parents=True)
+        (self.tmp / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n',
+                                            encoding="utf-8")
+        (self.d / "brief.md").write_text(
+            "- **Slug:** s\n- **Difficulty:** high\n- **Conflicts with:** 1\n",
+            encoding="utf-8")
+        (self.d / "sizing.json").write_text(json.dumps({
+            "band": "oversized",
+            "independent_outcomes": ["parser", "renderer"],
+            "proposed_seams": ["split at the parser/renderer boundary"],
+            "confidence": "high"}), encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_pdca_size_shows_the_stored_verdict_and_its_seams(self) -> None:
+        from pdca_harness import cli
+        from pdca_harness.config import Config
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(cli._size(Config.load(self.tmp), []), 0)
+        out = buf.getvalue()
+        self.assertIn("sizer=oversized", out)
+        self.assertIn("2 independently shippable outcome(s)", out)
+        self.assertIn("seam: split at the parser/renderer boundary", out,
+                      "the seams the sizer proposed were not shown")
+
+    def test_pdca_size_never_invokes_the_paid_leaf(self) -> None:
+        """It is documented read-only and must stay safe to run against a live queue."""
+        from unittest import mock
+        from pdca_harness import cli, leaves
+        from pdca_harness.config import Config
+        with mock.patch.object(leaves, "run_sizer") as sizer, \
+                contextlib.redirect_stdout(io.StringIO()):
+            cli._size(Config.load(self.tmp), [])
+        sizer.assert_not_called()
+
+    def test_the_paid_leaf_is_not_invoked_before_check(self) -> None:
+        """At BUILT the patch already exists, the advisory does not block, and nothing
+        persists it — so a second call buys a log line about work already paid for. A
+        verdict Plan already produced is read for free."""
+        from unittest import mock
+        from pdca_harness import leaves
+        cfg = _cfg(self.tmp, "warn")
+        with mock.patch.object(leaves, "run_sizer") as sizer:
+            reasons = plan_policy.evaluate(self.d, cfg, may_invoke=False)
+        sizer.assert_not_called()
+        self.assertTrue(any("sizer says oversized" in r.detail for r in reasons),
+                        "the stored verdict was not folded into the BUILT advisory")
+
+    def test_the_paid_leaf_is_invoked_before_do(self) -> None:
+        from unittest import mock
+        from pdca_harness import leaves
+        cfg = _cfg(self.tmp, "warn")
+        with mock.patch.object(leaves, "run_sizer", return_value=None) as sizer:
+            plan_policy.evaluate(self.d, cfg, may_invoke=True)
+        sizer.assert_called_once()
 
 
 if __name__ == "__main__":

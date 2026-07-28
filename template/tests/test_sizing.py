@@ -164,8 +164,6 @@ class Combine(unittest.TestCase):
                 self.assertEqual(sizing.combine(base, model), base)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class SizerLeaf(unittest.TestCase):
@@ -227,3 +225,335 @@ class SizerLeaf(unittest.TestCase):
         """A leaf that failed to answer is not evidence a stronger one would succeed."""
         from pdca_harness import leaves
         self.assertFalse(leaves._sizer_escalates(None, {"on_band": ["watch"]}))
+
+
+class DoctorCoversTheSizer(unittest.TestCase):
+    """`pdca doctor --strict` must know about the sizer (#320 review).
+
+    `_command_leaves` enumerated the named leaves plus builder variants/escalations. A
+    sizer configured with its own binary — or a sizer escalation naming a stronger one —
+    was invisible, so `--strict` could pass while the Plan advisory later died on a CLI
+    that was never installed.
+    """
+
+    def _cfg(self, **kw):
+        from pdca_harness.config import Config, LeafConfig
+        cfg = Config(
+            root=Path("."), bundle_root=Path("results"), process_dir=Path("process"),
+            templates_dir=Path("templates"), default_branch="main",
+            tracker_system="github", tracker_url="", issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        for k, v in kw.items():
+            setattr(cfg, k, v)
+        return cfg
+
+    def test_a_command_sizer_is_enumerated(self) -> None:
+        from pdca_harness import doctor
+        from pdca_harness.config import LeafConfig
+        cfg = self._cfg(sizer=LeafConfig(mode="command", family="claude",
+                                         argv=["sizer-cli", "-p"]))
+        self.assertIn("sizer", doctor._command_leaves(cfg))
+
+    def test_a_stub_sizer_is_not_enumerated(self) -> None:
+        from pdca_harness import doctor
+        from pdca_harness.config import LeafConfig
+        self.assertNotIn("sizer", doctor._command_leaves(self._cfg(sizer=LeafConfig())))
+
+    def test_a_sizer_escalation_naming_another_binary_is_enumerated(self) -> None:
+        """The escalation is where a DIFFERENT CLI usually appears — a stronger model."""
+        from pdca_harness import doctor
+        from pdca_harness.config import LeafConfig
+        cfg = self._cfg(
+            sizer=LeafConfig(mode="command", family="claude", argv=["sizer-cli"]),
+            sizer_escalation=[{"on_band": ["watch"], "argv": ["stronger-cli", "-p"]}])
+        found = doctor._command_leaves(cfg)
+        self.assertTrue(any("stronger-cli" in (leaf.argv or [])
+                            for leaf in found.values()),
+                        f"the escalation binary was not preflighted: {list(found)}")
+
+
+class SecondReviewFixes(unittest.TestCase):
+    """Round two on #349."""
+
+    def _brief(self, body: str, *, raw: bytes | None = None) -> Path:
+        f = Path(tempfile.mkdtemp()) / "brief.md"
+        if raw is not None:
+            f.write_bytes(raw)
+        else:
+            f.write_text(body, encoding="utf-8")
+        return f
+
+    def test_invalid_utf8_abstains_instead_of_raising(self) -> None:
+        """`_apriori_bytes` reads with errors="replace" and survives, but the field helpers
+        decode strictly — so one stray byte aborted the Plan beat, which is exactly what
+        "a detector that crashes Plan is worse than one that abstains" forbids."""
+        f = self._brief("", raw=b"- **Slug:** s\n- **Difficulty:** high\n\xff\xfe\n")
+        est = sizing.estimate(f, _CFG)
+        self.assertEqual(est.band, sizing.OK)
+        self.assertEqual(est.score, 0)
+
+    def test_only_the_drivers_carry_forward_heading_truncates(self) -> None:
+        """A loose "starts with Iteration" test discarded everything under a legitimate
+        `## Iteration strategy` heading, scoring a large slice as small."""
+        big = "x" * 14000
+        legit = self._brief(f"- **Slug:** s\n- **Difficulty:** high\n\n"
+                            f"## Iteration strategy\n\n{big}\n")
+        real = self._brief(f"- **Slug:** s\n- **Difficulty:** high\n\n"
+                           f"## Iteration 1 — carry-forward\n\n{big}\n")
+        self.assertGreater(sizing.estimate(legit, _CFG).score,
+                           sizing.estimate(real, _CFG).score,
+                           "a legitimate Iteration heading was treated as carry-forward")
+
+    def test_difficulty_is_word_matched_not_substring_matched(self) -> None:
+        """Bare substring fired on "hardening": `medium — certificate hardening is
+        localized` scored as high."""
+        cases = {"medium — certificate hardening is localized": 0,
+                 "low — hard-won but small": 0,
+                 "high — widest surface": 3,
+                 "hard problem": 3}
+        for value, expected in cases.items():
+            with self.subTest(difficulty=value):
+                f = self._brief(f"- **Slug:** s\n- **Difficulty:** {value}\n")
+                self.assertEqual(sizing.estimate(f, _CFG).score, expected)
+
+    def test_a_pointer_brief_tells_the_sizer_to_read_the_artifact(self) -> None:
+        """For a pointer brief THAT document is the plan; sizing the pointer alone scores a
+        three-migration project as one small slice."""
+        from pdca_harness import leaves
+        d = Path(tempfile.mkdtemp())
+        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        self.assertNotIn("planning artifact", leaves._sizer_prompt(d).lower())
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Planning artifact:** docs/migration.md\n", encoding="utf-8")
+        self.assertIn("docs/migration.md", leaves._sizer_prompt(d))
+
+
+class ThirdReviewFixes(unittest.TestCase):
+    """Round three on #349."""
+
+    def _brief(self, body: str) -> Path:
+        f = Path(tempfile.mkdtemp()) / "brief.md"
+        f.write_text(body, encoding="utf-8")
+        return f
+
+    def test_markdown_around_the_difficulty_token_is_stripped(self) -> None:
+        """Briefs write `low`, **low**, _low_ as readily as a bare word. An unstripped
+        token falls through to the prose scan, where "`low` — hard-won but small" reads as
+        HIGH — inverting the author's own answer."""
+        for value, expected in {"`low` — hard-won but small": 0,
+                                "**low** — hard-won": 0,
+                                "_medium_ — certificate hardening": 0,
+                                "`high` — widest surface": 3,
+                                "**hard** problem": 3}.items():
+            with self.subTest(difficulty=value):
+                f = self._brief(f"- **Slug:** s\n- **Difficulty:** {value}\n")
+                self.assertEqual(sizing.estimate(f, _CFG).score, expected)
+
+    def test_a_valid_band_escalates_even_with_an_untidy_schema(self) -> None:
+        """Deliberate, and the contract now says so: the band IS the answer this leaf was
+        asked for, and the other fields explain it. Discarding a real escalation because
+        its explanation was untidy throws away the one signal worth paying a model for —
+        and escalate-only means a wrong escalation costs a warning, never a block."""
+        base = sizing.SizeEstimate(0, sizing.OK, [], churn_band=sizing.OK,
+                                   patch_band=sizing.OK)
+        out = sizing.combine(base, {"band": "oversized",
+                                    "independent_outcomes": "a,b",   # a string, not a list
+                                    "proposed_seams": None,
+                                    "confidence": "certain"})        # not low/medium/high
+        self.assertEqual(out.band, sizing.OVERSIZED)
+        joined = "; ".join(out.reasons)
+        self.assertNotIn("outcome(s)", joined,
+                         "a malformed field was quoted back into the reasons")
+        self.assertNotIn("confidence", joined,
+                         "an unrecognised confidence was presented as if it were an answer")
+
+    def test_only_a_recognised_confidence_is_quoted(self) -> None:
+        """`null` rendered as "(confidence none)" and "certain" as "(confidence certain)" —
+        both read to a human as an answer on the scale the model was asked for, when it
+        gave none."""
+        base = sizing.SizeEstimate(0, sizing.OK, [], churn_band=sizing.OK,
+                                   patch_band=sizing.OK)
+        for value in ("certain", None, "", {"level": "high"}):
+            with self.subTest(confidence=value):
+                out = sizing.combine(base, {"band": "oversized", "confidence": value})
+                self.assertNotIn("confidence", "; ".join(out.reasons))
+        out = sizing.combine(base, {"band": "oversized", "confidence": "high"})
+        self.assertIn("confidence high", "; ".join(out.reasons))
+
+    def test_an_unusable_band_still_changes_nothing(self) -> None:
+        """The guarantee that DOES hold, asserted beside the tolerance above so the two
+        cannot be confused."""
+        base = sizing.SizeEstimate(4, sizing.WATCH, ["structural"],
+                                   churn_band=sizing.WATCH, patch_band=sizing.OK)
+        for model in (None, {}, {"band": ""}, {"band": "enormous"}, "nope", []):
+            with self.subTest(model=model):
+                self.assertEqual(sizing.combine(base, model), base)
+
+    def test_a_failed_escalation_restores_the_first_verdict_to_disk(self) -> None:
+        """The escalation pass unlinks the artifact before running, so returning the first
+        verdict only in memory left the bundle without the sizing record it had earned."""
+        from unittest import mock
+        from pdca_harness import leaves
+        from pdca_harness.config import Config, LeafConfig
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        cfg = Config(root=tmp, bundle_root=tmp / "results", process_dir=tmp / "process",
+                     templates_dir=tmp / "templates", default_branch="main",
+                     tracker_system="github", tracker_url="", issue_id_example="#1",
+                     builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        cfg.sizer = LeafConfig(mode="command", family="generic", argv=["true"])
+        cfg.sizer_escalation = [{"on_band": ["watch"], "argv": ["also-true"]}]
+
+        calls = {"n": 0}
+
+        def _fake(leaf, workdir, prompt, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                (Path(workdir) / leaves.SIZING_FILE).write_text(
+                    '{"band": "watch", "confidence": "low"}', encoding="utf-8")
+            else:
+                raise OSError("escalation binary missing")
+
+        with mock.patch.object(leaves, "_invoke", side_effect=_fake):
+            verdict = leaves.run_sizer(d, cfg)
+        self.assertEqual(verdict["band"], "watch")
+        self.assertTrue((d / leaves.SIZING_FILE).exists(),
+                        "the first verdict's artifact was destroyed by a failed escalation")
+
+    def _sizer_cfg(self, tmp: Path):
+        from pdca_harness.config import Config, LeafConfig
+        cfg = Config(root=tmp, bundle_root=tmp / "results", process_dir=tmp / "process",
+                     templates_dir=tmp / "templates", default_branch="main",
+                     tracker_system="github", tracker_url="", issue_id_example="#1",
+                     builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        cfg.sizer = LeafConfig(mode="command", family="generic", argv=["true"])
+        return cfg
+
+    def test_one_paid_verdict_per_brief_not_per_beat(self) -> None:
+        """The policy is evaluated before Do AND before Check, so a naive re-invoke doubles
+        the cost of every cycle — four calls with an escalation — and lets the second
+        nondeterministic answer overwrite the first."""
+        from unittest import mock
+        from pdca_harness import leaves
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        cfg = self._sizer_cfg(tmp)
+        calls = {"n": 0}
+
+        def _fake(leaf, workdir, prompt, **kw):
+            calls["n"] += 1
+            (Path(workdir) / leaves.SIZING_FILE).write_text(
+                '{"band": "watch", "confidence": "high"}', encoding="utf-8")
+
+        with mock.patch.object(leaves, "_invoke", side_effect=_fake):
+            leaves.run_sizer(d, cfg)          # PLANNED
+            leaves.run_sizer(d, cfg)          # BUILT
+            self.assertEqual(calls["n"], 1, "the sizer was paid for twice on one brief")
+            # An iterate rewrites the brief, which must earn a fresh pass.
+            (d / "brief.md").write_text("- **Slug:** s\n- **Difficulty:** high\n",
+                                        encoding="utf-8")
+            leaves.run_sizer(d, cfg)
+            self.assertEqual(calls["n"], 2, "a rewritten brief reused a stale verdict")
+
+    def test_a_verdict_from_another_brief_is_never_reused(self) -> None:
+        """The digest subsumes the stale-artifact problem the unconditional unlink guarded:
+        a verdict left by a different brief simply does not match."""
+        from unittest import mock
+        from pdca_harness import leaves
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        (d / leaves.SIZING_FILE).write_text(
+            '{"band": "oversized", "brief_sha": "deadbeefdeadbeef"}', encoding="utf-8")
+        cfg = self._sizer_cfg(tmp)
+        with mock.patch.object(leaves, "_invoke") as inv:
+            leaves.run_sizer(d, cfg)
+        inv.assert_called_once()
+
+    def test_a_pointer_briefs_artifact_is_part_of_the_cache_key(self) -> None:
+        """For a pointer brief the artifact IS the plan, so hashing brief.md alone reused
+        an `ok` verdict after the artifact grew from one outcome to three — suppressing
+        exactly the advisory the pointer case exists to produce."""
+        from unittest import mock
+        from pdca_harness import leaves
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "plan.md").write_text("one outcome\n", encoding="utf-8")
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Planning artifact:** plan.md\n", encoding="utf-8")
+        cfg = self._sizer_cfg(tmp)
+        calls = {"n": 0}
+
+        def _fake(leaf, workdir, prompt, **kw):
+            calls["n"] += 1
+            (Path(workdir) / leaves.SIZING_FILE).write_text('{"band": "ok"}',
+                                                            encoding="utf-8")
+
+        with mock.patch.object(leaves, "_invoke", side_effect=_fake):
+            leaves.run_sizer(d, cfg)
+            leaves.run_sizer(d, cfg)
+            self.assertEqual(calls["n"], 1, "an unchanged pointer brief re-paid")
+            (d / "plan.md").write_text("one\ntwo\nthree outcomes\n", encoding="utf-8")
+            leaves.run_sizer(d, cfg)
+            self.assertEqual(calls["n"], 2, "the artifact changed but the verdict was reused")
+
+    def test_an_unfetchable_artifact_is_not_cached(self) -> None:
+        """A URL cannot be fingerprinted. Paying for a re-run is the safe direction when
+        the alternative is trusting a verdict whose input may have moved."""
+        from unittest import mock
+        from pdca_harness import leaves
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Planning artifact:** https://example/plan\n",
+            encoding="utf-8")
+        cfg = self._sizer_cfg(tmp)
+        calls = {"n": 0}
+
+        def _fake(leaf, workdir, prompt, **kw):
+            calls["n"] += 1
+            (Path(workdir) / leaves.SIZING_FILE).write_text('{"band": "ok"}',
+                                                            encoding="utf-8")
+
+        with mock.patch.object(leaves, "_invoke", side_effect=_fake):
+            leaves.run_sizer(d, cfg)
+            leaves.run_sizer(d, cfg)
+        self.assertEqual(calls["n"], 2, "an unfingerprintable input was cached anyway")
+
+    def test_changing_the_sizer_config_invalidates_the_verdict(self) -> None:
+        """Adding an escalation that fires on low confidence must earn a fresh pass —
+        otherwise the cached answer from the weaker model is returned and the escalation
+        the operator just configured never runs."""
+        from unittest import mock
+        from pdca_harness import leaves
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        cfg = self._sizer_cfg(tmp)
+        calls = {"n": 0}
+
+        def _fake(leaf, workdir, prompt, **kw):
+            calls["n"] += 1
+            (Path(workdir) / leaves.SIZING_FILE).write_text(
+                '{"band": "watch", "confidence": "low"}', encoding="utf-8")
+
+        with mock.patch.object(leaves, "_invoke", side_effect=_fake):
+            leaves.run_sizer(d, cfg)
+            leaves.run_sizer(d, cfg)
+            self.assertEqual(calls["n"], 1)
+            cfg.sizer_escalation = [{"on_confidence": ["low"], "argv": ["stronger"]}]
+            leaves.run_sizer(d, cfg)
+            self.assertGreater(calls["n"], 1,
+                               "a newly configured escalation reused the weak verdict")
+
+
+if __name__ == "__main__":
+    unittest.main()

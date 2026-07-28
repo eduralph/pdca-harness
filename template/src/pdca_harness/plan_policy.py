@@ -19,12 +19,22 @@ bundle reaches Do, and the two it misses are not exotic:
 Every one of them converges on :func:`driver.advance`. Evaluating there covers all four by
 construction rather than by enumeration.
 
-## Why it is recomputed, never cached
+## Why the VERDICT is recomputed, never cached
 
 A persisted hold marker becomes stale authority: once a bundle is PLANNED, resuming does
-not re-run Plan, so registering the missing ``[[doctor.checks]]`` row or retuning
-``[driver.sizing]`` would never clear the marker and the bundle would hold forever. This
-runs each beat and reads config from disk, so the fix always takes effect immediately.
+not re-run Plan, so a marker written at Plan exit would outlive whatever caused it and the
+bundle would hold forever. The verdict is therefore derived fresh each beat from the
+bundle's own files — edit the brief, or register the missing ``[[doctor.checks]]`` row
+(``doctor.registered_ids`` deliberately reads ``pdca.toml`` from disk, PR #269 review), and
+the next beat proceeds.
+
+**The run's CONFIG is a snapshot, and that is deliberate.** ``Config.load()`` runs once per
+invocation, so ``[driver].size_guard`` and ``[driver.sizing]`` are fixed for the whole run:
+editing them mid-flight does not take effect until the next one. Re-reading them per beat
+would let a single ``pdca flow`` score two bundles in the same batch against two different
+thresholds, which is worse than the inconvenience it removes — a batch has to be
+reproducible and explainable as one unit. The recompute guarantee is about the bundle, not
+the settings.
 
 ## Why BUILT is checked too
 
@@ -38,6 +48,7 @@ an adversary either.
 
 from __future__ import annotations
 
+import sys
 from typing import NamedTuple
 
 from . import doctor, sizing
@@ -73,12 +84,12 @@ class HoldReason(NamedTuple):
     detail: str    # one line for the human
 
 
-def size_reasons(d, cfg) -> list[HoldReason]:
+def size_reasons(d, cfg, *, may_invoke: bool = True) -> list[HoldReason]:
     """Size advisories for a bundle, per ``[driver].size_guard``.
 
     **There is no `hold` mode, and that is an evidence-based decision.** Calibrated over
     86 settled bundles of a real instance, the best structural rule reaches 50% recall at
-    67% precision against ≥3 rounds — one wrong hold for every two right ones. A blocking
+    62% precision against ≥3 rounds — nearly one wrong hold for every right one. A blocking
     gate at that precision costs a manual override every third flag, which is precisely how
     a guard is trained out of usefulness. #321's own definition of done anticipates this:
 
@@ -98,8 +109,15 @@ def size_reasons(d, cfg) -> list[HoldReason]:
     # how many independently shippable outcomes the brief describes — and every configured
     # `[leaves.sizer]` escalation is dead config. `combine` escalates only, so a stub, a
     # missing verdict or a malformed one leaves the structural estimate byte-identical.
+    # `may_invoke` is False before CHECK. The paid leaf answers "how many independently
+    # shippable outcomes?" — advice that can prevent a build, and therefore worth buying
+    # only while one can still be prevented. At BUILT the patch already exists, the
+    # advisory does not block, and nothing persists it, so a second call would buy a log
+    # line about work already paid for. A verdict the Plan beat already produced is read
+    # for free.
     from . import leaves
-    est = sizing.combine(est, leaves.run_sizer(d, cfg))
+    est = sizing.combine(est, leaves.run_sizer(d, cfg) if may_invoke
+                         else leaves._read_sizing(d))
     if est.band != sizing.OVERSIZED:
         return []
 
@@ -108,7 +126,13 @@ def size_reasons(d, cfg) -> list[HoldReason]:
     # and the sizing contract is explicit that a large COHERENT patch is not a slice that
     # needs splitting — recommending a split there is advice the estimator's own model
     # contradicts.
-    if est.churn_band == sizing.OVERSIZED or est.patch_band != sizing.OVERSIZED:
+    # The MODEL's verdict counts here even when it did not raise the band: "two
+    # independently shippable outcomes" is the evidence that justifies a split, and
+    # telling the human "large but coherent" over the top of it contradicts the one
+    # signal that can actually see decomposability.
+    if (est.churn_band == sizing.OVERSIZED
+            or est.model_band == sizing.OVERSIZED
+            or est.patch_band != sizing.OVERSIZED):
         remedy = "consider `pdca split` first"
     else:
         remedy = ("expect a large patch — worth a look before Do, but a large COHERENT "
@@ -116,7 +140,7 @@ def size_reasons(d, cfg) -> list[HoldReason]:
     detail = f"oversized — {remedy} ({'; '.join(est.reasons)})"
     if mode not in (OFF, WARN):
         detail += (f" [size_guard={mode!r} is treated as 'warn': a blocking mode is "
-                   "unimplemented — the signal peaks at 67% precision, see #321]")
+                   "unimplemented — the signal peaks at 62% precision, see #321]")
     return [HoldReason("oversized", detail)]
 
 
@@ -139,6 +163,13 @@ def dependency_reasons(d, cfg) -> list[HoldReason]:
     stop declaring dependencies.
     """
     mode = str(getattr(cfg, "dependency_guard", HOLD) or HOLD).strip().lower()
+    if mode not in (OFF, WARN, HOLD):
+        # A typo must fail SAFE. Falling through to the warn branch let
+        # `dependency_guard = "hld"` silently dispatch Do past an unregistered dependency,
+        # with nothing on screen to say the setting had not been understood.
+        print(f"plan-policy: [driver].dependency_guard = {mode!r} is not one of "
+              f"{OFF!r}/{WARN!r}/{HOLD!r} — treating it as {HOLD!r}", file=sys.stderr)
+        mode = HOLD
     if mode == OFF:
         return []
     # Only `hold` blocks. `warn` reports the same item and lets Do proceed — the code
@@ -154,7 +185,7 @@ def blocking(reasons) -> list[HoldReason]:
     return [r for r in reasons if r.code in _BLOCKING]
 
 
-def evaluate(d, cfg) -> list[HoldReason]:
+def evaluate(d, cfg, *, may_invoke: bool = True) -> list[HoldReason]:
     """Every pre-dispatch reason to pause on this bundle. Empty ⇒ proceed.
 
     Advisory by construction today: the driver prints these and continues. The return
@@ -162,4 +193,10 @@ def evaluate(d, cfg) -> list[HoldReason]:
     verdict is set membership rather than a heuristic, and therefore *can* justify a
     block) slots in beside it without another mechanism.
     """
-    return list(size_reasons(d, cfg)) + list(dependency_reasons(d, cfg))
+    # Deterministic checks FIRST. The size advisory may invoke a paid model leaf, and
+    # there is no sense buying an advisory for a bundle that is about to be held on set
+    # membership — the human would pay for it again on the retry after registering the row.
+    deps = list(dependency_reasons(d, cfg))
+    if blocking(deps):
+        return deps
+    return list(size_reasons(d, cfg, may_invoke=may_invoke)) + deps

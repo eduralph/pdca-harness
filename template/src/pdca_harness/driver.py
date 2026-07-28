@@ -28,19 +28,10 @@ def _say(msg: str) -> None:
 def _headless_note(leaf) -> str:
     return " (headless Claude — no live output, may take minutes)" if leaf.mode == "command" else ""
 
-# Everything Do and Check write, i.e. everything downstream of brief.md. Includes the
-# close marker (issue #60) so an iterate archives it too — reopening a close bundle to a
-# fix path then clears the marker and runs the real Do+Check band.
-DOWNSTREAM_OF_BRIEF = [
-    "patch.diff",
-    "build-notes.md",
-    state.CLOSE_MARKER,
-    "MANUAL-VERIFICATION.md",
-    "check-gates.json",
-    "check-gates.md",
-    "check-review.md",
-    "SUMMARY.md",
-]
+# Moved to `state` (#334) so `is_resolved` can read it without a circular import.
+# Re-exported here because this is where the archive step and its callers expect it.
+DOWNSTREAM_OF_BRIEF = state.DOWNSTREAM_OF_BRIEF
+DOWNSTREAM_GLOBS = state.DOWNSTREAM_GLOBS
 
 
 def advance(d: Path, cfg: Config) -> None:
@@ -57,12 +48,16 @@ def advance(d: Path, cfg: Config) -> None:
     # about work that never enters Do. BUILT is covered as well as PLANNED: a partial
     # build lands there and never re-enters PLANNED, and Check is a real spend too.
     if not close and s in (state.PLANNED, state.BUILT):
-        reasons = plan_policy.evaluate(d, cfg)
+        # The paid sizer runs only before Do. The blocking dependency check and the free
+        # structural estimate still run at BUILT — a resumed or partially-built bundle
+        # must not buy a reviewer at xhigh plus an adversary to discover something two
+        # files already answer.
+        reasons = plan_policy.evaluate(d, cfg, may_invoke=(s == state.PLANNED))
         for reason in reasons:
             _say(f"⚠ {d.name}: {reason.detail}")
         # A BLOCKING reason stops the beat; advisories are reported and passed. Only a
         # deterministic verdict earns a block — the unregistered dependency is set
-        # membership (#333), where the size band is a heuristic that peaks at 67%
+        # membership (#333), where the size band is a heuristic that peaks at 62%
         # precision (#321). The bundle stays in-flight, so registering the row and
         # re-running is all it takes: the policy is recomputed every beat.
         blockers = plan_policy.blocking(reasons)
@@ -107,7 +102,15 @@ def advance(d: Path, cfg: Config) -> None:
 
 
 def run_issue(d: Path, cfg: Config) -> str:
-    """Advance until the bundle reaches a halted state; return that state."""
+    """Advance until the bundle halts OR a pre-dispatch policy holds it; return its state.
+
+    Two exits, not one. The ordinary exit is a state in :data:`state.HALTED`. The other is
+    a :class:`plan_policy.PolicyHold` — an unregistered external dependency, say — which
+    leaves the bundle in-flight at PLANNED or BUILT: nothing about a hold changes the state
+    it is held in, so the caller gets a NON-halted state back and must not read it as
+    completion. :func:`held` answers that question for callers that care (``pdca run``
+    exits non-zero on it, so automation does not read a blocked run as a success).
+    """
     while state.state(d) not in state.HALTED:
         try:
             advance(d, cfg)
@@ -116,6 +119,15 @@ def run_issue(d: Path, cfg: Config) -> str:
             # or spin forever: nothing about a hold changes the state it is held in.
             break
     return state.state(d)
+
+
+def held(final: str) -> bool:
+    """True if ``final`` came back from :func:`run_issue` without the bundle finishing.
+
+    A non-halted state can ONLY mean a policy hold — the loop has no other early exit — so
+    this is the one predicate a caller needs to tell "stopped for a human" from "done".
+    """
+    return final not in state.HALTED
 
 
 # ----------------------------------------------------------------------------
@@ -284,13 +296,18 @@ def _archive_iteration(d: Path, n: int, *, include_brief: bool) -> None:
     """
     arch = d / f"iteration-v{n}"
     names = list(DOWNSTREAM_OF_BRIEF)
-    names += [p.name for p in d.glob("check-advisory-*.md")]  # advisory artifacts (#64)
-    # Every leaf's captured error tail belongs to the attempt that produced it (#280 review):
-    # `build.error.log` (Do), `check-review.error.log` / `check-advisory-*.error.log` (Check).
-    # Each is cleared at the start of the NEXT run of its leaf, so a log left at the top level
-    # here is deleted rather than kept — destroying the only on-disk record of why the attempt
-    # failed, which is the whole point of capturing it. Archive them with their attempt.
-    names += [p.name for p in d.glob("*.error.log")]
+    # Pattern-matched cycle artifacts: the advisory files (#64) and every leaf's captured
+    # error tail — `build.error.log` (Do), `check-review.error.log` /
+    # `check-advisory-*.error.log` (Check). Each tail is cleared at the start of the NEXT
+    # run of its leaf, so one left at the top level here would be deleted rather than kept,
+    # destroying the only on-disk record of why the attempt failed (#280 review). Archive
+    # them with their attempt.
+    #
+    # The patterns come from `state.DOWNSTREAM_GLOBS`, the same constant `is_resolved`
+    # reads (#334), so "what an iterate archives" and "what proves a cycle ran" cannot
+    # drift apart.
+    for pattern in DOWNSTREAM_GLOBS:
+        names += [p.name for p in d.glob(pattern)]
     if include_brief:
         names.append("brief.md")
         # The plan-advisory artifacts + benefit record reviewed THAT brief (#301) —

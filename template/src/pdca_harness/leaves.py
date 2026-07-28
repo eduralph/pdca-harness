@@ -46,6 +46,7 @@ import time
 from pathlib import Path
 
 from . import act as act_mod
+from . import rubric as rubric_mod
 from . import sizing, split
 from . import assemble
 from . import brief
@@ -162,6 +163,55 @@ def _mapped_argv(leaf: LeafConfig, profile: families.FamilyProfile,
     return extra
 
 
+# A single argv string is bounded by the OS, and an oversized interactive SEED overflows it
+# with "OSError: [Errno 7] Argument list too long" before the child ever execs. Linux caps a
+# single argument at MAX_ARG_STRLEN (~128 KiB) — not total ARG_MAX; Windows caps the WHOLE
+# command line at 32,767 characters, which is why this is per-platform rather than one
+# "portable" number. A flat POSIX budget would leave the crash intact on a platform the
+# template supports (scripts/install.ps1, and the os.name == "nt" branches in act/worktree).
+_SEED_ARG_BUDGET = 24 * 1024 if os.name == "nt" else 96 * 1024
+
+#: Prefix for a spilled seed. Dot-prefixed and matched by the rendered `.gitignore`, so the
+#: file never shows up as untracked in the instance's tree — keep the two in step (a test
+#: asserts it).
+_SEED_SPILL_PREFIX = ".pdca-prompt-"
+
+
+def _seed_positional(prompt: str, workdir: Path) -> tuple[str, Path | None]:
+    """The interactive REPL seed, spilling an oversized prompt to a file (issue #313).
+
+    Interactive leaves inherit the TTY to open a REPL, so the prompt cannot ride **stdin**
+    the way a headless leaf's does — it goes as ``claude "<seed>"``. The Act leaf is what
+    trips the limit first: its prompt embeds the whole cross-cycle ACT INDEX, which grows
+    with every frozen cycle (observed at 151,653 bytes on a mature instance), so `pdca flow`
+    began dying the moment it auto-ran Act. Any interactive leaf can hit it — a large
+    planner or sign-off batch does the same.
+
+    Over budget, the prompt is written to a scratch file **inside ``workdir``** — the REPL's
+    cwd, so it reads it with no out-of-tree permission prompt — and the seed becomes a short
+    pointer. Under budget the prompt is passed inline, byte-for-byte as before.
+
+    Measured in BYTES, not characters: the OS limit is on the encoded argument, and a prompt
+    of mostly non-ASCII would otherwise pass a character-count check and still fail to exec.
+
+    Returns ``(seed, spill|None)``; the caller unlinks ``spill`` once the session ends.
+    """
+    if len(prompt.encode("utf-8")) <= _SEED_ARG_BUDGET:
+        return prompt, None
+    fh = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=workdir,
+        prefix=_SEED_SPILL_PREFIX, suffix=".md", delete=False)
+    with fh:
+        fh.write(prompt)
+    spill = Path(fh.name)
+    seed = (
+        "Your full instructions were too large to pass on the command line, so they "
+        f"were written to `{spill.name}` in your current directory. Read that file in "
+        "full now — it IS your prompt (task and context) — then carry it out."
+    )
+    return seed, spill
+
+
 def _invoke(
     leaf: LeafConfig,
     workdir: Path,
@@ -198,7 +248,15 @@ def _invoke(
     prompt = prompt_prefix + prompt
     run_env = {**os.environ, **env} if env else None
     if leaf.interactive:
-        subprocess.run(argv + [prompt], cwd=workdir, env=run_env)
+        # The seed may be spilled to a file when it would blow the OS single-argument
+        # limit (#313). `finally` so a non-zero exit or a raising spawn still cleans up;
+        # a SIGKILLed session can still orphan one, which is why the name is gitignored.
+        seed, spill = _seed_positional(prompt, workdir)
+        try:
+            subprocess.run(argv + [seed], cwd=workdir, env=run_env)
+        finally:
+            if spill is not None:
+                spill.unlink(missing_ok=True)
         return
     # Headless: feed the prompt on stdin (a trailing positional would be swallowed
     # by a variadic --allowedTools) and tick a heartbeat, since `claude -p` prints
@@ -721,7 +779,12 @@ SIZING_FILE = "sizing.json"
 
 def _sizer_prompt(d: Path) -> str:
     return (
-        "You are the SIZER. Read only " + str(d / "brief.md") + " and answer ONE question: "
+        "You are the SIZER. Read " + str(d / "brief.md")
+        + (f" AND the planning artifact it points at ({_pointer}) — for a pointer brief "
+           "THAT document is the plan, and sizing the pointer alone would score a "
+           "three-migration project as one small slice"
+           if (_pointer := brief.planning_artifact(d / "brief.md")) else "")
+        + ". Answer ONE question: "
         "how many INDEPENDENTLY SHIPPABLE outcomes does this brief describe? An outcome is "
         "independently shippable if it could be its own PR — its own defect, its own success "
         "criterion, its own test — without waiting on the others.\n\n"
@@ -783,19 +846,93 @@ def run_sizer(d: Path, cfg: Config) -> dict | None:
     exactly when a stronger model earns its cost, and no brief field predicts that. At most
     one escalation runs: this is a corroborating signal, not a search.
     """
-    if not (d / "brief.md").exists():
+    bp = d / "brief.md"
+    if not bp.exists():
         return None
     if cfg.sizer.mode != "command":
         return _stub_sizer(d)
+
+    # One paid verdict per BRIEF, not per beat. The policy is evaluated before Do and
+    # again before Check (#321), so a naive re-invoke doubles the cost of every cycle —
+    # four calls with an escalation — and lets the second nondeterministic answer overwrite
+    # the first. The verdict is a function of the brief, so it is stamped with the brief's
+    # digest and reused while that digest holds; an iterate that rewrites the brief changes
+    # it and earns a fresh pass. This also subsumes the stale-artifact problem the
+    # unconditional unlink was guarding: a verdict from a DIFFERENT brief never matches.
+    digest = _sizer_key(d, cfg, bp)
+    existing = _read_sizing(d)
+    if digest and existing is not None and existing.get("brief_sha") == digest:
+        return existing
+
     verdict = _sizer_pass(cfg.sizer, d, cfg, "sizer")
     for spec in cfg.sizer_escalation:
         if _sizer_escalates(verdict, spec):
             escalated = _sizer_pass(_leaf_from_spec(spec, cfg.sizer), d, cfg,
                                     "sizer (escalated)")
+            if escalated is not None:
+                return _stamp(d, escalated, digest)
             # An escalation that produced nothing must not discard the first pass: the
-            # cheap verdict is still the best evidence available.
-            return escalated if escalated is not None else verdict
-    return verdict
+            # cheap verdict is still the best evidence available. Restore it to DISK too —
+            # the escalation pass unlinks the artifact before running, so returning it only
+            # in memory would leave the bundle without the sizing record it did earn.
+            return _stamp(d, verdict, digest)
+    return _stamp(d, verdict, digest)
+
+
+def _sizer_key(d: Path, cfg: Config, bp: Path) -> str:
+    """The cache key for a sizing verdict, or "" when the inputs cannot be fingerprinted.
+
+    A POINTER brief is the reason this is not just the brief's digest: for those, the
+    planning artifact IS the plan and the sizer is told to read it, so hashing `brief.md`
+    alone would reuse an `ok` verdict after the artifact grew from one outcome to three —
+    suppressing exactly the advisory the pointer case exists to produce.
+
+    An artifact that cannot be read — a URL, or a path outside the tree — yields "" and the
+    verdict is NOT cached. Paying for a re-run is the safe direction when the alternative
+    is silently trusting a verdict whose input may have changed underneath it.
+    """
+    h = hashlib.sha256(bp.read_bytes())
+    # The CONFIGURATION is an input too. Adding a `[[leaves.sizer_escalation]]` that fires
+    # on low confidence, or pointing the leaf at a stronger model, must earn a fresh
+    # verdict — otherwise the cached answer from the weaker pass is returned and the
+    # escalation the operator just configured never runs.
+    h.update(repr([
+        (cfg.sizer.mode, cfg.sizer.family, tuple(cfg.sizer.argv), cfg.sizer.agent,
+         cfg.sizer.model, cfg.sizer.effort),
+        tuple(sorted((k, repr(v)) for spec in cfg.sizer_escalation
+                     for k, v in spec.items())),
+    ]).encode("utf-8"))
+    artifact = brief.planning_artifact(bp)
+    if not artifact:
+        return h.hexdigest()[:16]
+    for root in (d, rubric_mod._target_root(d, cfg)):
+        if root is None:
+            continue
+        try:
+            candidate = (Path(root) / artifact).resolve()
+            if candidate.is_file():
+                h.update(candidate.read_bytes())
+                return h.hexdigest()[:16]
+        except (OSError, ValueError):
+            continue
+    return ""
+
+
+def _stamp(d: Path, verdict: dict | None, digest: str) -> dict | None:
+    """Record which brief a verdict was given for, and (re)write it to the bundle.
+
+    Also restores the artifact after a failed escalation: `_sizer_pass` unlinks before each
+    run, so a fallback that returned the cheap verdict only in memory left the bundle with
+    no sizing record at all.
+    """
+    if verdict is None:
+        return None
+    stamped = {**verdict, "brief_sha": digest} if digest else dict(verdict)
+    try:
+        (d / SIZING_FILE).write_text(json.dumps(stamped, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass  # the stamp is a cache key, never a hard requirement
+    return stamped
 
 
 def _sizer_pass(leaf: LeafConfig, d: Path, cfg: Config, label: str) -> dict | None:
@@ -831,11 +968,27 @@ def _stub_sizer(d: Path) -> dict | None:
 
 def _split_prompt(d: Path, cfg: Config) -> str:
     tpl = cfg.templates_dir / "split-proposal.md.tpl"
-    est = sizing.estimate(d / "brief.md", cfg)
+    # READ the sizer's stored verdict, never re-invoke it: the leaf that judged this slice
+    # oversized already answered "how many independently shippable outcomes?" and proposed
+    # where they divide. Sizing the brief again here would pay a second model to rediscover
+    # what the first one wrote down — and the splitter is the one consumer that needs those
+    # seams most.
+    est = sizing.combine(sizing.estimate(d / "brief.md", cfg), _read_sizing(d))
+    verdict = _read_sizing(d) or {}
+    outcomes = [str(o) for o in (verdict.get("independent_outcomes") or [])]
+    seams = [str(s_) for s_ in (verdict.get("proposed_seams") or [])]
+    prior = ""
+    if outcomes or seams:
+        prior = (
+            "\n\nThe sizer has already looked at this brief. Treat its answer as a "
+            "STARTING POINT, not a verdict to ratify — it saw only the brief, you may "
+            "disagree, and saying so with a reason is more useful than agreeing.\n"
+            + ("  outcomes it identified: " + "; ".join(outcomes) + "\n" if outcomes else "")
+            + ("  seams it proposed: " + "; ".join(seams) + "\n" if seams else ""))
     return (
         f"You are the SPLITTER. Read {d / 'brief.md'}. This slice has been judged too "
         "large to build as one cycle. The driver sized it "
-        f"{est.band}: {'; '.join(est.reasons) or 'no structural signal'}.\n\n"
+        f"{est.band}: {'; '.join(est.reasons) or 'no structural signal'}.{prior}\n\n"
         f"Fill {tpl} and write the result to {d / split.PROPOSAL} — exactly one file, "
         "nothing else. Do NOT create bundles, branches or tracker items, and do NOT edit "
         "brief.md: Do does not split, Do reports. Splitting is the human's call at "
@@ -1045,7 +1198,7 @@ def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None
         env = guard.shim_env(cfg, env)
     # Watch the bundle d so the heartbeat shows patch.diff / build-notes.md appearing.
     _invoke(
-        builder, workdir, _build_prompt(d),
+        builder, workdir, _build_prompt(d, cfg, worktree_root=wt),
         label=f"Do {d.name}",
         status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
         stream_json=True,  # Tier 3: show the builder's live tool-use
@@ -1053,7 +1206,22 @@ def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None
     )
 
 
-def _build_prompt(d: Path) -> str:
+def _build_prompt(d: Path, cfg: Config | None = None, *,
+                  worktree_root: Path | None = None) -> str:
+    # The target repo's standing rubric (#314), so the builder self-reviews against
+    # the same criteria the reviewer will apply — the asymmetry that costs a
+    # guaranteed round. "" when unconfigured, so the prompt is byte-identical.
+    # APPENDED, not prepended (#314 review): prefixing glued the rubric's last rule
+    # straight onto "You are the Do builder…" with no separator, merging the two
+    # instructions. The task prompt also reads better first — the rubric is a standing
+    # constraint on the work, not the framing for it.
+    # `worktree_root` is what `worktree.ensure` ACTUALLY returned — None when setup failed
+    # and `_do_build_command` fell back to running in place. Passing it explicitly is the
+    # only way the rubric lookup can tell "this lane is mine and live" from "this lane is
+    # mine and stale": a failed ensure() leaves the directory and its owner stamp behind,
+    # so an ownership check alone would still prefer a tree the builder is not editing.
+    rubric = (rubric_mod.for_builder(d, cfg, worktree_root=worktree_root)
+              if cfg is not None else "")
     return (
         f"You are the Do builder. Read {d}/brief.md. If $PDCA_WORKTREE is set, make ALL "
         "target-source edits there — it is an isolated git worktree off the target's base "
@@ -1090,7 +1258,7 @@ def _build_prompt(d: Path) -> str:
         "runs the target's own hooks (formatter/linters), which no PDCA gate models, so a patch the target's "
         "commit hook would reject is not done even if every gate is green. Do NOT push, "
         "open, or mark any PR ready."
-    )
+    ) + rubric
 
 
 def _stub_build(d: Path, cfg: Config) -> None:
@@ -1553,7 +1721,7 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
         # A transient (no-output) reviewer failure is retried with backoff before it
         # degrades to a §6 placeholder; the failed attempts' stderr lands in error_log.
         err = _invoke_leaf_resilient(
-            cfg.reviewer, sandbox, _REVIEW_PROMPT,
+            cfg.reviewer, sandbox, _REVIEW_PROMPT + rubric_mod.for_reviewer(d, cfg),
             error_log=error_log,
             label=f"Check review {d.name}",
             status=lambda: progress.bundle_activity(sandbox, ("check-review.md",)),
@@ -1715,7 +1883,7 @@ def _advisory_applies(spec: dict, d: Path) -> bool:
     return _when_matches(spec.get("when"), d, default=True)
 
 
-def _advisory_prompt(spec: dict, leaf_id: str) -> str:
+def _advisory_prompt(spec: dict, leaf_id: str, rubric: str = "") -> str:
     role = spec.get("role") or "review the patch for correctness bugs and reuse / " \
         "simplification / efficiency cleanups"
     return (
@@ -1732,7 +1900,7 @@ def _advisory_prompt(spec: dict, leaf_id: str) -> str:
         "'- NEEDS-HUMAN — ' form for anything needing a human ARCHITECTURAL / scope / "
         "fitness-to-purpose decision; when in doubt, OMIT '[impl]'. You are ADVISORY — you "
         "never gate; the human decides at sign-off. If you find nothing, say so explicitly."
-    )
+    ) + rubric
 
 
 def _resolved_builder_family(d: Path) -> str:
@@ -1840,7 +2008,8 @@ def _run_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict, 
         out = sandbox / f"check-advisory-{leaf_id}.md"
         error_log = d / f"check-advisory-{leaf_id}.error.log"
         err = _invoke_leaf_resilient(
-            leaf, sandbox, _advisory_prompt(spec, leaf_id),
+            leaf, sandbox,
+            _advisory_prompt(spec, leaf_id, rubric_mod.for_reviewer(d, cfg)),
             error_log=error_log,
             label=f"Advisory {leaf_id} {d.name}",
             status=lambda: progress.bundle_activity(sandbox, (out.name,)),

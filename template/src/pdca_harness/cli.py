@@ -19,9 +19,9 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, manual_test, merged,
-               publish, queue, registry, revalidate, revert, signoff, sizing, sources, state,
-               split, sweep, waves, worktree)
+from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, leaves, manual_test,
+               merged, publish, queue, registry, revalidate, revert, signoff, sizing, sources,
+               split, state, sweep, waves, worktree)
 from .config import Config
 
 
@@ -491,6 +491,13 @@ def _run(cfg: Config, issue_id: str) -> int:
         return 1
     final = driver.run_issue(d, cfg)
     print(f"{final}\t{d}")
+    if driver.held(final):
+        # Non-zero, or automation reads a bundle blocked before Do as a completed run. The
+        # reasons were already printed by the driver; this is the exit code that carries
+        # them to a caller that never sees stderr.
+        print(f"run: {d.name} is held at {final} — resolve the item(s) above and re-run",
+              file=sys.stderr)
+        return 1
     if final == state.AWAITING_SIGNOFF:
         open_items = signoff.open_needs_human(d / "SUMMARY.md")
         if open_items:
@@ -687,11 +694,19 @@ def _size(cfg: Config, issue_ids: list[str]) -> int:
         print("(no briefed bundles to size)")
         return 0
     for d in bundles:
-        est = sizing.estimate(d / "brief.md", cfg)
+        # Fold in a STORED sizer verdict — read, never invoked: `pdca size` is documented
+        # read-only and must stay safe to run against a live queue. Without this the one
+        # deliberate way to ask "how big is this?" showed only the structural bands and
+        # never the decomposability answer the instance had already paid a model for.
+        est = sizing.combine(sizing.estimate(d / "brief.md", cfg), leaves._read_sizing(d))
         print(f"{est.band}\t{d.name}\tscore={est.score} "
-              f"churn={est.churn_band} patch={est.patch_band}")
+              f"churn={est.churn_band} patch={est.patch_band}"
+              + (f" sizer={est.model_band}" if est.model_band else ""))
         for reason in est.reasons:
             print(f"    - {reason}")
+        stored = leaves._read_sizing(d) or {}
+        for seam in stored.get("proposed_seams") or []:
+            print(f"    seam: {seam}")
     return 0
 
 
@@ -1175,6 +1190,14 @@ def _signoff(cfg: Config, args: argparse.Namespace) -> int:
     # Apply the transition: accept freezes; iterate clears and re-runs the body.
     final = driver.run_issue(d, cfg)
     print(f"{final}\t{d}")
+    if driver.held(final):
+        # Same contract as `pdca run` (#351 review): an iterate that archives the attempt,
+        # returns to PLANNED and is then held before Do has NOT rebuilt anything, and
+        # exiting 0 would tell automation the sign-off decision was carried out.
+        print(f"signoff: {d.name} is held at {final} — the transition was recorded but the "
+              "rebuild did not run; resolve the item(s) above and re-run",
+              file=sys.stderr)
+        return 1
 
     # Accept → publish by default, like `flow`'s closing step (#97): a standalone
     # `signoff --accept` otherwise left bundles COMPLETE-but-unpublished with no signal.
