@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -404,4 +405,152 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
     except Exception:
         _rollback(created)
         raise
+    return created
+
+
+# ---------------------------------------------------------------------------
+# Filing the child issues (issue #358)
+#
+# #323 left this to the human, on the grounds that it "keeps the tracker the source of
+# truth and avoids the driver creating issues nobody asked for". Inside an interactive
+# Plan session that objection is much weaker — the human is present and approving — and
+# the friction is real: leave the session, file N issues by hand, come back with the
+# numbers. `--ids` remains the explicit path for a human who has already filed them, or
+# for a tracker this cannot reach.
+# ---------------------------------------------------------------------------
+
+#: `gh issue create` prints the new issue's URL on stdout. The trailing path segment is
+#: the number — the only part of the output this depends on.
+_ISSUE_URL_RE = re.compile(r"/issues/(\d+)\s*$")
+
+#: The first `# Heading` of a child block, used as the tracker issue's title.
+_CHILD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*$")
+
+
+class TrackerUnavailable(SplitError):
+    """The driver cannot file issues here, and the human must pass ``--ids``.
+
+    A SUBCLASS of SplitError so every existing caller still handles it, but distinct so
+    the CLI can tell "your proposal is wrong" from "I cannot reach your tracker" — those
+    call for completely different actions and a single message would have to hedge.
+    """
+
+
+def can_file(cfg) -> tuple[bool, str]:
+    """``(True, repo)`` when the driver can file child issues itself, else ``(False, why)``.
+
+    Never a silent skip: the caller turns ``why`` into a message that names ``--ids``. A
+    split that quietly filed nothing and materialised nothing would look like a no-op.
+    """
+    from . import sources
+    is_github, repo = sources.tracker_github_repo(cfg)
+    if not is_github:
+        return False, (f"tracker {cfg.tracker_system or 'unset'!r} is not GitHub, so this "
+                       "cannot file the child issues for you")
+    if not repo:
+        return False, ("the GitHub repository could not be determined from "
+                       "[tracker].url, so this cannot file the child issues for you")
+    if shutil.which("gh") is None:
+        return False, "`gh` is not on PATH, so this cannot file the child issues for you"
+    return True, repo
+
+
+def _parent_number(parent: Path) -> str:
+    """The tracker number of the parent bundle, or "" when its name carries none."""
+    token = parent.name
+    if token.startswith("issue_"):
+        token = token[len("issue_"):]
+    return token if token.isdigit() else ""
+
+
+def child_title(child: Child, parent: Path) -> str:
+    """The tracker title for one child — its own heading, or its slug, or a fallback.
+
+    Read from the child's own text rather than generated, so the tracker shows what the
+    proposal actually says. A child that names neither still gets a title: an untitled
+    issue is worse than a dull one.
+    """
+    for line, fenced in _unfenced(child.body):
+        if fenced:
+            continue
+        m = _CHILD_HEADING_RE.match(line)
+        if m and m.group(1).strip():
+            return m.group(1).strip()
+    for line, fenced in _unfenced(child.body):
+        if fenced:
+            continue
+        m = re.match(r"^\s*-\s*\*{0,2}slug\*{0,2}:\*{0,2}\s*(.+?)\s*$", line, re.IGNORECASE)
+        if m and not m.group(1).startswith("<"):
+            return m.group(1).strip()
+    return f"{parent.name} — {child.label}"
+
+
+def _create_issue(repo: str, title: str, body: str, parent_no: str, root: Path) -> str:
+    """File ONE child issue; return its number. Raises SplitError naming the failure.
+
+    ``--parent`` makes this a real tracker sub-issue rather than a convention in the body
+    text, so the parent becomes an umbrella and each child gets its own PR — which is what
+    the one-PR-per-issue rule requires.
+    """
+    cmd = ["gh", "issue", "create", "--repo", repo, "--title", title, "--body", body]
+    if parent_no:
+        cmd += ["--parent", parent_no]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(root))
+    except OSError as exc:
+        raise SplitError(f"`gh issue create` could not be run ({exc})") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        raise SplitError("`gh issue create` failed"
+                         + (f": {detail[-1]}" if detail else ""))
+    m = _ISSUE_URL_RE.search((proc.stdout or "").strip())
+    if not m:
+        # The issue may well have been created — this is reported, never swallowed, so the
+        # caller can tell the human that a number it cannot name may now exist.
+        raise SplitError("`gh issue create` printed no issue URL, so the new issue's "
+                         f"number could not be read from: {(proc.stdout or '').strip()!r}")
+    return m.group(1)
+
+
+def file_children(parent: Path, children: list[Child], cfg) -> list[str]:
+    """File one tracker issue per child, parented to ``parent``. Returns ids in order.
+
+    ## Why this files first and materialises second
+
+    The DoD asks for filing to be transactional with the bundles. It cannot be, in the
+    strong sense: a tracker issue cannot be rolled back. Of the two orders it allows,
+    materialise-then-file is impossible here — a bundle directory is NAMED for its issue
+    id (``cfg.bundle(id)``), so there is nothing to materialise until the ids exist.
+
+    So: file, then report precisely. On a partial failure this raises with every number
+    already created spelled out, and the caller prints the exact ``--ids`` command that
+    resumes from there. The failure mode this forbids is the silent one — issues created
+    for children whose bundles never appeared, with nothing on screen naming them.
+    """
+    ok, why = can_file(cfg)
+    if not ok:
+        raise TrackerUnavailable(why)
+    parent_no = _parent_number(parent)
+    body_head = (f"Child slice of #{parent_no}, split during Plan.\n\n"
+                 if parent_no else "Child slice, split during Plan.\n\n")
+    created: list[str] = []
+    for child in children:
+        try:
+            created.append(_create_issue(
+                repo=why,                       # can_file returns the repo on success
+                title=child_title(child, parent),
+                body=body_head + child.body.strip() + "\n",
+                parent_no=parent_no,
+                root=cfg.root))
+        except SplitError as exc:
+            raise SplitError(
+                f"{exc}\n"
+                f"Filed {len(created)} of {len(children)} child issue(s) before this: "
+                f"{', '.join('#' + i for i in created) or '(none)'}. These are REAL issues "
+                "and cannot be rolled back — no bundle was created for any of them. Either "
+                "close them on the tracker and re-run, or file the remaining "
+                f"{len(children) - len(created)} by hand and pass every id explicitly:\n"
+                f"  pdca split {_parent_number(parent) or parent.name} --accept --ids "
+                f"{','.join(created + ['<id>'] * (len(children) - len(created)))}"
+            ) from exc
     return created

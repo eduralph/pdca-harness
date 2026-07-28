@@ -134,12 +134,53 @@ reviewer's C5 symptom-guard smell-test, moved to where the error starts. Keep it
 category-gated; a category graduates to an unconditional gate only on evidence
 (`docs/principles.md` §8).
 
+## If the slice is too big, split it HERE — the whole split happens in this beat
+
+A split produces briefs, and authoring briefs is your beat. Nobody downstream can do it:
+Do builds what it is given, and Check can only report that the thing it built is
+misshapen. So the decision belongs in this session, while you have the issue open.
+
+The driver sizes every slice before Do and prints its verdict. Treat `oversized` as a
+prompt to look, not an instruction to obey — it is a heuristic, and the human in this
+session is the one deciding.
+
+When the answer is "yes, this is several slices":
+
+```
+pdca split <id>              # the splitter drafts split-proposal.md — children, with
+                             # their inter-child `Depends on:` / `Conflicts with:`
+                             # …read it with the human, edit it if it is wrong…
+pdca split <id> --accept     # files one tracker issue per child as a SUB-ISSUE of this
+                             # one, materialises a bundle per child, marks this parent
+                             # split, and prints the `pdca flow …` command for them
+```
+
+You do **not** leave the session to file issues by hand. `--accept` does it (pass `--ids`
+instead only when the issues already exist, or when the tracker is not one the driver can
+reach — it will say so plainly rather than skipping).
+
+Then the run continues into waves on its own: independent children build in parallel,
+dependent ones stack. Nothing further is needed from you — which is exactly why the
+`Depends on:` / `Conflicts with:` fields between children are the part to get right.
+
+**Prefer fewer, larger children.** Each costs a full cycle, so a split into six that could
+have been two is its own kind of oversizing.
+
+**If the oversize is discovered later** — the patch arrives and Check will not converge —
+the route back here is `iterate-plan` at sign-off, which archives the attempt and returns
+the bundle to Plan. Not `iterate-do`: a rebuild cannot make two outcomes into one, and the
+findings look implementation-shaped every round while the budget drains. The split is then
+authored here, on a fresh brief.
+
 ## Boundaries
 
 Plan authors the brief and nothing else. Do **not** write `patch.diff`, run the
 fix, or pre-judge the outcome — that is Do and Check. If the right scope isn't
 clear from the documents and the human, say so and stop; an underspecified brief
 is worse than none.
+
+Splitting is the one exception, and it is not really one: a split *is* brief authoring —
+several briefs instead of one — which is why it belongs to this beat and not to a later.
 
 ## Verify before you hand off (every brief, unprompted)
 

@@ -14,9 +14,13 @@ from __future__ import annotations
 import shutil
 import tempfile
 import unittest
+import io
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
-from pdca_harness import driver, leaves, split, state, waves
+from pdca_harness import cli, driver, leaves, split, state, waves
 from pdca_harness.config import Config, LeafConfig
 
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
@@ -465,15 +469,37 @@ class TheDoctrineIsConsistent(unittest.TestCase):
 
     def test_no_RUNTIME_prompt_places_the_split_at_sign_off(self) -> None:
         """The role files were corrected and the task prompts were not, so every real
-        `pdca split` session was told the opposite of its own role. Scanning only the
-        role files missed it — the prompt actually sent to the model is built in code."""
-        import inspect
+        `pdca split` session was told the opposite of its own role.
+
+        This assertion has now failed to catch the same defect TWICE, each time for a
+        different reason, so it is worth stating what it must do rather than only what it
+        checks. First it scanned only the role files, and the prompt sent to the model is
+        built in code. Then it scanned `inspect.getsource`, and the offending sentence was
+        split across two adjacent string literals — `"…call at "` `"sign-off."` — so the
+        substring was never present in the source text although it was present in every
+        rendered prompt. The only text that means anything is the string the model
+        receives, so this RENDERS each prompt and scans that.
+        """
         from pdca_harness import leaves
+        d = self._rendered_bundle()
         for fn in (leaves._split_prompt, leaves._sizer_prompt):
             with self.subTest(prompt=fn.__name__):
-                self.assertNotIn("call at sign-off", inspect.getsource(fn))
-                self.assertNotIn("splitting is the human's call at sign-off",
-                                 inspect.getsource(fn))
+                rendered = fn(d, self._cfg)
+                self.assertNotIn("call at sign-off", rendered)
+                self.assertNotIn("human's call at sign-off", rendered)
+                self.assertIn("PLAN", rendered)
+
+    def _rendered_bundle(self) -> Path:
+        import tempfile
+        from types import SimpleNamespace
+        root = Path(tempfile.mkdtemp())
+        d = root / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** s\n- **Difficulty:** high\n",
+                                    encoding="utf-8")
+        self._cfg = SimpleNamespace(templates_dir=root / "templates", sizing={},
+                                    root=root, tracker_system="github", tracker_url="")
+        return d
 
     def test_the_splitter_says_the_split_is_authored_in_plan(self) -> None:
         self.assertIn("authored in PLAN", self._text("splitter"))
@@ -598,6 +624,332 @@ class AcceptIsSafe(unittest.TestCase):
             builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
         cfg.splitter = LeafConfig(mode="command", family="claude", argv=["splitter-cli"])
         self.assertIn("splitter", doctor._command_leaves(cfg))
+
+
+class FilingChildIssues(unittest.TestCase):
+    """`--accept` without `--ids` files the child issues itself (#358).
+
+    #323 left this to the human "to keep the tracker the source of truth". Inside an
+    interactive Plan session the human is present and approving, and the friction was
+    real: leave the session, file N issues by hand, come back with the numbers.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github",
+            tracker_url="https://github.com/acme/widgets",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
+        )
+        self.parent = self.cfg.bundle("500")
+        self.parent.mkdir(parents=True)
+        (self.parent / "brief.md").write_text("- **Slug:** parent\n", encoding="utf-8")
+        (self.parent / split.PROPOSAL).write_text(_proposal(_ONE, _TWO_DEP),
+                                                  encoding="utf-8")
+        self.calls: list[list[str]] = []
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _gh(self, numbers, *, fail_at=None, stdout=None):
+        """A fake `gh` that records its argv and hands back issue URLs."""
+        def run(cmd, capture_output=False, text=False, cwd=None):
+            self.calls.append(list(cmd))
+            n = len(self.calls)
+            if fail_at is not None and n == fail_at:
+                return SimpleNamespace(returncode=1, stdout="", stderr="gh: HTTP 403")
+            if stdout is not None:
+                return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+            url = f"https://github.com/acme/widgets/issues/{numbers[n - 1]}"
+            return SimpleNamespace(returncode=0, stdout=url + "\n", stderr="")
+        return run
+
+    def _patched(self, run):
+        return mock.patch.multiple(
+            "pdca_harness.split",
+            subprocess=SimpleNamespace(run=run),
+            shutil=SimpleNamespace(which=lambda _n: "/usr/bin/gh",
+                                   rmtree=shutil.rmtree, move=shutil.move))
+
+    def test_it_files_one_sub_issue_per_child_in_order(self) -> None:
+        children = split.parse((self.parent / split.PROPOSAL).read_text(encoding="utf-8"))
+        with self._patched(self._gh(["601", "602"])):
+            ids = split.file_children(self.parent, children, self.cfg)
+        self.assertEqual(ids, ["601", "602"])
+        self.assertEqual(len(self.calls), 2)
+        for call in self.calls:
+            self.assertEqual(call[:3], ["gh", "issue", "create"])
+            self.assertIn("--repo", call)
+            self.assertEqual(call[call.index("--repo") + 1], "acme/widgets")
+            # A REAL tracker relationship, not a convention in the body text — the parent
+            # becomes an umbrella and each child gets its own PR.
+            self.assertIn("--parent", call)
+            self.assertEqual(call[call.index("--parent") + 1], "500")
+
+    def test_the_title_comes_from_the_child_itself(self) -> None:
+        """Read from the proposal rather than generated, so the tracker shows what the
+        proposal actually says."""
+        text = _proposal("# Extract the parser\n\n- **Slug:** parser\n")
+        (self.parent / split.PROPOSAL).write_text(text, encoding="utf-8")
+        children = split.parse(text)
+        with self._patched(self._gh(["601"])):
+            split.file_children(self.parent, children, self.cfg)
+        self.assertIn("Extract the parser", self.calls[0])
+
+    def test_a_child_with_no_heading_still_gets_a_title(self) -> None:
+        """An untitled issue is worse than a dull one."""
+        child = split.parse(_proposal("- **Defect / goal:** a\n"))[0]
+        self.assertTrue(split.child_title(child, self.parent).strip())
+
+    def test_a_partial_failure_names_every_issue_it_already_created(self) -> None:
+        """Tracker issues cannot be rolled back. The failure this forbids is the SILENT
+        one — issues created for children whose bundles never appeared, with nothing on
+        screen naming them."""
+        children = split.parse((self.parent / split.PROPOSAL).read_text(encoding="utf-8"))
+        with self._patched(self._gh(["601", "602"], fail_at=2)):
+            with self.assertRaises(split.SplitError) as caught:
+                split.file_children(self.parent, children, self.cfg)
+        msg = str(caught.exception)
+        self.assertIn("#601", msg)
+        self.assertIn("Filed 1 of 2", msg)
+        self.assertIn("cannot be rolled back", msg)
+        self.assertIn("--ids 601,<id>", msg)
+
+    def test_an_unreadable_issue_url_is_reported_not_swallowed(self) -> None:
+        """The issue may well have been created; the caller must be told a number it
+        cannot name may now exist."""
+        children = split.parse(_proposal(_ONE))
+        with self._patched(self._gh([], stdout="created something\n")):
+            with self.assertRaises(split.SplitError) as caught:
+                split.file_children(self.parent, children, self.cfg)
+        self.assertIn("no issue URL", str(caught.exception))
+
+
+class TrackerUnavailableRequiresIds(unittest.TestCase):
+    """Never a silent skip — a split that filed nothing and materialised nothing would
+    look like a no-op."""
+
+    def _cfg(self, root: Path, **over) -> Config:
+        base = dict(tracker_system="github", tracker_url="https://github.com/acme/widgets")
+        base.update(over)
+        return Config(
+            root=root, bundle_root=root / "results", process_dir=root / "process",
+            templates_dir=TEMPLATES, default_branch="main", issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"), **base)
+
+    def test_a_non_github_tracker_refuses(self) -> None:
+        cfg = self._cfg(Path(tempfile.mkdtemp()), tracker_system="gitlab")
+        ok, why = split.can_file(cfg)
+        self.assertFalse(ok)
+        self.assertIn("not GitHub", why)
+
+    def test_an_unknown_repository_refuses(self) -> None:
+        cfg = self._cfg(Path(tempfile.mkdtemp()), tracker_url="")
+        ok, why = split.can_file(cfg)
+        self.assertFalse(ok)
+        self.assertIn("repository could not be determined", why)
+
+    def test_a_missing_gh_refuses(self) -> None:
+        cfg = self._cfg(Path(tempfile.mkdtemp()))
+        with mock.patch("pdca_harness.split.shutil.which", return_value=None):
+            ok, why = split.can_file(cfg)
+        self.assertFalse(ok)
+        self.assertIn("`gh` is not on PATH", why)
+
+    def test_the_refusal_is_a_SplitError_subclass(self) -> None:
+        """So every existing caller still handles it, while the CLI can still tell "your
+        proposal is wrong" from "I cannot reach your tracker"."""
+        self.assertTrue(issubclass(split.TrackerUnavailable, split.SplitError))
+
+
+class EndToEndThroughWaves(unittest.TestCase):
+    """The assertion 0.56 never made: proposal → accept → the children SCHEDULE.
+
+    #322 was designed around `flow_batch` enumerating bundles AFTER `do_plan_batch`, so
+    children created during Plan are picked up by the same run and scheduled with no new
+    code. That property had never been exercised end to end.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github",
+            tracker_url="https://github.com/acme/widgets", issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
+        )
+        self.parent = self.cfg.bundle("500")
+        self.parent.mkdir(parents=True)
+        (self.parent / "brief.md").write_text("- **Slug:** parent\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _accept(self, proposal_text: str) -> list[str]:
+        (self.parent / split.PROPOSAL).write_text(proposal_text, encoding="utf-8")
+        ids = ["601", "602"]
+        split.accept(self.parent, ids, self.cfg)
+        return ids
+
+    def _waves(self, ids: list[str]) -> list[list[str]]:
+        got = waves.compute_waves(self.cfg, [self.cfg.bundle(i) for i in ids])
+        return [sorted(d.name for d in wave) for wave in got]
+
+    def test_independent_children_schedule_in_ONE_wave(self) -> None:
+        ids = self._accept(_proposal(_ONE, _TWO_INDEP))
+        self.assertEqual(self._waves(ids), [["issue_601", "issue_602"]])
+
+    def test_a_dependent_child_schedules_in_TWO_waves_in_order(self) -> None:
+        """The `Depends on:` rewrite is what makes this work — the proposal names
+        `child-1`, and the materialised brief has to name `601`."""
+        ids = self._accept(_proposal(_ONE, _TWO_DEP))
+        self.assertEqual(self._waves(ids), [["issue_601"], ["issue_602"]])
+        self.assertIn("601", (self.cfg.bundle("602") / "brief.md").read_text(
+            encoding="utf-8"))
+
+    def test_the_parent_is_terminal_and_never_builds(self) -> None:
+        ids = self._accept(_proposal(_ONE, _TWO_DEP))
+        self.assertTrue((self.parent / state.CLOSE_MARKER).exists())
+        self.assertIn("issue_601", (self.parent / "build-notes.md").read_text(
+            encoding="utf-8"))
+        self.assertNotIn(self.parent.name, [n for w in self._waves(ids) for n in w])
+
+
+class CliFilesTheIssuesItself(unittest.TestCase):
+    """`pdca split <id> --accept` with no `--ids` — the flow #358 exists to create."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github",
+            tracker_url="https://github.com/acme/widgets", issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        self.parent = self.cfg.bundle("500")
+        self.parent.mkdir(parents=True)
+        (self.parent / "brief.md").write_text("- **Slug:** parent\n", encoding="utf-8")
+        (self.parent / split.PROPOSAL).write_text(_proposal(_ONE, _TWO_DEP),
+                                                  encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _args(self, ids: str = ""):
+        return SimpleNamespace(issue_id="500", accept=True, ids=ids)
+
+    def _run(self, filer):
+        err = io.StringIO()
+        with mock.patch("pdca_harness.split.file_children", filer), \
+             redirect_stderr(err), redirect_stdout(io.StringIO()):
+            rc = cli._split(self.cfg, self._args())
+        return rc, err.getvalue()
+
+    def test_no_ids_files_them_and_materialises_the_children(self) -> None:
+        rc, err = self._run(lambda parent, children, cfg: ["601", "602"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.cfg.bundle("601").is_dir())
+        self.assertTrue(self.cfg.bundle("602").is_dir())
+        self.assertIn("filed 2 child issue(s): #601, #602", err)
+        self.assertIn("flow 601 602", err)
+
+    def test_an_unreachable_tracker_refuses_and_names_ids(self) -> None:
+        """Never a silent skip: a split that filed nothing and materialised nothing would
+        look like a no-op."""
+        def filer(parent, children, cfg):
+            raise split.TrackerUnavailable("`gh` is not on PATH, so this cannot file "
+                                           "the child issues for you")
+        rc, err = self._run(filer)
+        self.assertEqual(rc, 1)
+        self.assertIn("gh` is not on PATH", err)
+        self.assertIn("--accept --ids <id-1>,<id-2>", err)
+        self.assertFalse(self.cfg.bundle("601").exists())
+        self.assertFalse((self.parent / state.CLOSE_MARKER).exists())
+
+    def test_a_malformed_proposal_is_refused_BEFORE_anything_is_filed(self) -> None:
+        """A tracker issue cannot be rolled back, so creating three of them for a proposal
+        that then fails to parse is the worst possible order."""
+        (self.parent / split.PROPOSAL).write_text("no marker here\n", encoding="utf-8")
+        called = []
+        rc, err = self._run(lambda *a: called.append(a) or ["601"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(called, [], "issues were filed for an unparseable proposal")
+        self.assertIn("split-proposal", err)
+
+    def test_a_failure_AFTER_filing_names_the_issues_it_cannot_withdraw(self) -> None:
+        """The one failure this feature must not have: real issues orphaned with nothing
+        on screen naming them."""
+        (self.cfg.bundle("602")).mkdir(parents=True)   # collides during accept
+        rc, err = self._run(lambda parent, children, cfg: ["601", "602"])
+        self.assertEqual(rc, 1)
+        self.assertIn("CANNOT be rolled back", err)
+        self.assertIn("#601", err)
+        self.assertIn("#602", err)
+        self.assertIn("--accept --ids 601,602", err)
+
+    def test_explicit_ids_never_reach_the_filer(self) -> None:
+        """`--ids` stays the path for a human who already filed them."""
+        called = []
+        with mock.patch("pdca_harness.split.file_children",
+                        lambda *a: called.append(a) or []), \
+             redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            rc = cli._split(self.cfg, self._args(ids="601,602"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(called, [])
+        self.assertTrue(self.cfg.bundle("601").is_dir())
+
+
+class ThePlannerIsToldItOwnsTheSplit(unittest.TestCase):
+    """#358's real subject. The planner role never mentioned splitting at all, so the
+    beat that owns the decision was the one beat never told about it."""
+
+    AGENTS = Path(__file__).resolve().parents[1] / "agents"
+
+    def _role(self, name: str) -> str:
+        for candidate in (f"{name}.md.jinja", f"{name}.md"):
+            path = self.AGENTS / candidate
+            if path.is_file():
+                return path.read_text(encoding="utf-8")
+        raise AssertionError(f"no role prompt for {name!r}")
+
+    def test_the_planner_role_names_the_command_and_the_beat(self) -> None:
+        text = self._role("planner")
+        self.assertIn("pdca split", text)
+        self.assertIn("--accept", text)
+        self.assertIn("iterate-plan", text)
+
+    def test_the_RUNTIME_plan_prompt_says_it_too(self) -> None:
+        """Rendered, not scanned as source — see `TheDoctrineIsConsistent` for why that
+        distinction has already cost this feature two missed defects."""
+        d = self.cfg.bundle("500")
+        prompt = leaves._plan_prompt(self.cfg, None, d)
+        self.assertIn("pdca split 500", prompt)
+        self.assertIn("--accept", prompt)
+        self.assertIn("SPLIT IT IN THIS BEAT", prompt)
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github", tracker_url="",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_no_role_still_tells_the_human_to_file_issues_by_hand(self) -> None:
+        """The friction #358 removes. If this string returns, the flow has regressed to
+        "leave the session, file N issues, come back with the numbers"."""
+        for role in ("planner", "splitter", "signoff"):
+            with self.subTest(role=role):
+                self.assertNotIn("file a tracker issue per child", self._role(role))
+                self.assertNotIn("files a tracker\nissue per child", self._role(role))
 
 
 if __name__ == "__main__":

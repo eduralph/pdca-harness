@@ -432,7 +432,19 @@ def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
         "restating it. Keep the parsed `- **Label:** value` field shape; resolve the repo + "
         "branch target per INTEGRATION §2; set `Difficulty` (the fix's blast-radius / "
         "cross-file reach, NOT edge-case density) so Do/review routing can key on it. "
-        "One bundle = one brief.md. Plan only."
+        "One bundle = one brief.md. Plan only.\n\n"
+        # The split belongs to THIS beat and no later one (#358): Do builds what it is
+        # given, and Check can only report that what it built is misshapen. Stated in the
+        # runtime prompt as well as agents/planner.md because the role file alone has
+        # twice proved insufficient — the prompt the model actually receives is built here.
+        "If this slice turns out to be several slices, SPLIT IT IN THIS BEAT — a split "
+        "produces briefs, and briefs are yours. Run `pdca split "
+        f"{issue_id}` to have the splitter draft a proposal, read it with the human, then "
+        f"`pdca split {issue_id} --accept`: that files one tracker issue per child as a "
+        "sub-issue of this one, materialises a bundle each, and the run continues into "
+        "waves by itself — independent children in parallel, dependent ones stacked. You "
+        "do not leave the session to file issues by hand. Prefer fewer, larger children: "
+        "each costs a full cycle."
     )
 
 
@@ -1074,8 +1086,9 @@ def _split_prompt(d: Path, cfg: Config) -> str:
         f"{est.band}: {'; '.join(est.reasons) or 'no structural signal'}.{prior}\n\n"
         f"Fill {tpl} and write the result to {d / split.PROPOSAL} — exactly one file, "
         "nothing else. Do NOT create bundles, branches or tracker items, and do NOT edit "
-        "brief.md: Do does not split, Do reports. Splitting is the human's call at "
-        "sign-off.\n\n"
+        "brief.md. The split is authored in PLAN, by the human: they read your proposal "
+        "and run `pdca split <id> --accept`, which files the child issues and materialises "
+        "the briefs. You write prose; that command does the rest.\n\n"
         "Each child must be independently shippable — its own defect, success criterion, "
         "test and PR. Prefer fewer, larger children: each costs a full cycle, so a split "
         "into six that could have been two is its own kind of oversizing.\n\n"
