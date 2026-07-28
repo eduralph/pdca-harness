@@ -20,19 +20,20 @@ rule                        fires    recall    precision
 patch ≥ 100 KB                  14       62%          71%
 patch touches ≥ 20 files         7       38%          86%
 ≥ 2 rounds already spent        21        —           76%
-union of the enabled two        15       69%          73%
+union of the three              23      100%          70%
 =========================  =======  ========  ===========
 
 The rounds rule has no meaningful recall figure: every bundle that reached 3 rounds passed
 through 2, so "recall" there is definitional, not evidence. Its 76% is the load-bearing
-number — the probability that a bundle sitting at two rounds goes on to a third. It ships
-**disabled** all the same, because enabling it would silently override
-``[driver].max_auto_iters`` — see :func:`_thresholds`.
+number — the probability that a bundle sitting at two rounds goes on to a third. It fires
+at 2 while ``[driver].max_auto_iters`` defaults to 3, so it deliberately stops the rebuild
+loop with a round still nominally available; see :func:`_thresholds` for why a ceiling and
+a stop signal are different things.
 
 ## Why this still does not gate
 
-73% precision is better than the a-priori 62%, and it is not 100%: roughly one firing in
-four is a coherent large change that would have converged. So the backstop raises a **§6 NEEDS-HUMAN
+70% precision is better than the a-priori 62%, and it is not 100%: roughly three firings
+in ten are a coherent large change that would have converged. So the backstop raises a **§6 NEEDS-HUMAN
 item** and the human decides — the same disposition #321 reached, on better evidence.
 
 ## The tag is the mechanism, and getting it wrong inverts the feature
@@ -69,9 +70,7 @@ SIGNAL_FILE = "size-signal.json"
 DEFAULT_THRESHOLDS = {
     "patch_kb": 100,     # 62% recall / 71% precision
     "patch_files": 20,   # 38% recall / 86% precision
-    # DISABLED by default (0), despite being the most precise rule of the three — see
-    # `_thresholds` for why. Set it to 2 to enable.
-    "rounds": 0,
+    "rounds": 2,         # 76% precision that a third round follows
 }
 
 #: A threshold of 0 (or less) switches its rule OFF. Needed because the rounds rule ships
@@ -85,20 +84,21 @@ def _thresholds(cfg) -> dict[str, int]:
     A malformed threshold falls back to the default rather than raising: this runs inside
     the Check beat, and a typo in an optional tuning table must not cost the cycle.
 
-    ## Why the rounds rule ships disabled
+    ## The rounds rule DOES cut the auto-iterate budget short, on purpose
 
-    It is the most precise of the three (76%), and it is also the one that would silently
-    override a setting the operator already made. ``[driver].max_auto_iters`` defaults to
-    **3**: with ``rounds`` at 2, the backstop raises a HUMAN item after the second archive,
-    auto-iterate declines, and a budget of 3 can never be spent. The operator configured a
-    number and would get a different one, with nothing naming the rule that changed it.
+    ``[driver].max_auto_iters`` defaults to 3 and this rule fires at 2, so a bundle that
+    reaches its second archive raises a HUMAN item and auto-iterate declines with a round
+    still nominally available. That is the intended behaviour, not a collision to design
+    around: the budget is a *ceiling* on how many rebuilds are worth attempting, and this
+    is evidence that further rebuilds are the wrong move — 76% of bundles sitting at two
+    rounds go on to a third, and a third round of implementation findings on a slice that
+    needs splitting is the exact spiral the backstop exists to break. A ceiling and a stop
+    signal are different things, and the stop signal should win.
 
-    The auto-iterate budget already answers "how many rebuild rounds is this worth?" —
-    explicitly, and per instance. What the budget *cannot* see is how big the patch came
-    out, and that is this module's actual contribution. So the round count is measured and
-    recorded (it belongs in ``size-signal.json``, and #359 will retune against it), but by
-    default it raises nothing. An instance that wants the stricter behaviour sets it, and
-    then the interaction with ``max_auto_iters`` is a decision someone made on purpose.
+    What must NOT happen is it winning *quietly*. An operator who set ``max_auto_iters = 3``
+    and sees the loop halt at 2 has to be able to read why, or the number they configured
+    just appears not to work. So :func:`is_size_item` lets the flow name this rule at the
+    point auto-iterate declines, rather than returning a bare False.
     """
     out = dict(DEFAULT_THRESHOLDS)
     for key, value in (getattr(cfg, "size_signal", None) or {}).items():
@@ -201,11 +201,22 @@ def oversize_reasons(signal: dict | None, cfg) -> list[str]:
     return reasons
 
 
+#: Prefix of the §6 item this module raises. `flow` matches on it to explain WHY
+#: auto-iterate declined — a heuristic that cuts an operator's configured budget short
+#: must say so, or the number they set simply appears not to work.
+SIZE_ITEM_PREFIX = "size backstop —"
+
+
+def is_size_item(text: str) -> bool:
+    """True for a §6 item raised by this module."""
+    return str(text).lstrip().startswith(SIZE_ITEM_PREFIX)
+
+
 def needs_human_text(reasons: list[str]) -> str:
     """The §6 line. Names the recommended answer explicitly, because the wrong one is the
     plausible one: findings on an oversized slice look implementation-shaped every round,
     so `iterate-do` reads as correct and never converges."""
-    return ("size backstop — this slice is behaving oversized: "
+    return (f"{SIZE_ITEM_PREFIX} this slice is behaving oversized: "
             + "; ".join(reasons)
             + ". Recommend answering `iterate-plan` at sign-off and authoring the split in "
               "the re-plan (`pdca split`), rather than `iterate-do`: a slice that is too "

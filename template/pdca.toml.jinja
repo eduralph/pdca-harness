@@ -175,13 +175,14 @@ size_guard = "off"
 # written — and much better at it: against "did this bundle churn >=3 rounds" over the same
 # 86 settled bundles, patch >=100 KB scores 71% precision and >=20 files 86%, where the
 # a-priori score peaks at 62%. Crossing a threshold raises a §6 NEEDS-HUMAN item (which
-# disqualifies auto-iterate) recommending `iterate-plan`; it never blocks — at 73% precision
-# for the two enabled rules, roughly one firing in four is a coherent large change.
+# disqualifies auto-iterate) recommending `iterate-plan`; it never blocks — at 70% precision
+# for the union, roughly three firings in ten are a coherent large change.
 #
-# `rounds` ships at 0 (OFF) although it is the most precise rule of the three (76%): with it
-# at 2 the backstop fires after the second archive, auto-iterate declines, and a max_auto_iters
-# of 3 could never be spent — a heuristic silently overriding a number you set. Turn it on and
-# that interaction becomes a choice someone made on purpose. 0 switches any rule off.
+# `rounds` fires at 2 while max_auto_iters above defaults to 3, so it deliberately stops the
+# rebuild loop with a round still nominally available: the budget is a CEILING on how many
+# rebuilds are worth attempting, and this is evidence that more rebuilds are the wrong move
+# (76% of bundles at two rounds reach a third). The flow names this rule on stderr when it
+# declines, so an early halt is never a mystery. Set any threshold to 0 to switch it off.
 #
 # Commented out because the defaults ARE the calibrated values; uncomment to retune against
 # your own corpus with `scripts/size-calibrate`. A sub-table, so it must sit after every bare

@@ -14,6 +14,7 @@ import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -151,46 +152,98 @@ class Thresholds(unittest.TestCase):
         self.assertEqual(size_signal.oversize_reasons(sig, _CFG), [])
 
 
-class RoundsRuleShipsDisabled(unittest.TestCase):
-    """It is the most precise rule of the three and it still ships off.
+class RoundsRuleCutsTheBudgetShort(unittest.TestCase):
+    """It fires at 2 while `[driver].max_auto_iters` defaults to 3 — deliberately.
 
-    `[driver].max_auto_iters` defaults to 3. With `rounds` at 2 the backstop raises a HUMAN
-    item after the second archive, auto-iterate declines, and a budget of 3 can never be
-    spent — an explicit operator setting silently overridden by a heuristic, with nothing
-    naming the rule that changed it.
+    The budget is a CEILING on how many rebuilds are worth attempting; this is evidence
+    that further rebuilds are the wrong move. 76% of bundles sitting at two rounds go on
+    to a third, and a third round of implementation findings on a slice that needs
+    splitting is the spiral the backstop exists to break. A ceiling and a stop signal are
+    different things, and the stop signal wins.
+
+    What must not happen is it winning QUIETLY — see `TheOverrideAnnouncesItself`.
     """
 
-    def test_two_rounds_alone_raises_nothing_by_default(self) -> None:
-        self.assertEqual(
-            size_signal.oversize_reasons({"rounds": 2, "patch_bytes": 0,
-                                          "patch_files": 0}, _CFG), [])
+    def test_two_rounds_raises_the_item(self) -> None:
+        reasons = size_signal.oversize_reasons(
+            {"rounds": 2, "patch_bytes": 0, "patch_files": 0}, _CFG)
+        self.assertEqual(len(reasons), 1)
+        self.assertIn("2 round(s) already spent", reasons[0])
 
-    def test_the_default_leaves_the_auto_iterate_budget_intact(self) -> None:
-        """The regression this default exists to prevent, pinned directly: a bundle part-way
-        through its auto-iterate budget must still look clean to the backstop."""
+    def test_it_fires_below_the_default_auto_iterate_ceiling(self) -> None:
+        """Pinned against `max_auto_iters`' own default so the two cannot drift apart: if
+        that default ever drops to 2, this rule stops adding anything and the interaction
+        needs rethinking rather than silently becoming a no-op."""
         from pdca_harness.config import Config as _C
-        default_budget = _C.__dataclass_fields__["max_auto_iters"].default
-        for spent in range(default_budget):
-            with self.subTest(rounds=spent):
-                sig = {"rounds": spent, "patch_bytes": 0, "patch_files": 0}
-                self.assertEqual(size_signal.oversize_reasons(sig, _CFG), [])
+        ceiling = _C.__dataclass_fields__["max_auto_iters"].default
+        threshold = size_signal.DEFAULT_THRESHOLDS["rounds"]
+        self.assertLess(threshold, ceiling,
+                        "the rounds rule no longer stops the loop before the budget does")
 
-    def test_but_it_still_gets_measured_and_recorded(self) -> None:
-        """Recorded even though it raises nothing — #359 retunes against this file, and a
-        signal that is never written cannot be calibrated later."""
-        d = _bundle(rounds=2)
-        self.assertEqual(size_signal.record(d, _CFG)["rounds"], 2)
-        self.assertEqual(size_signal.read(d)["rounds"], 2)
+    def test_one_round_is_still_below_it(self) -> None:
+        """A bundle on its first rebuild must not trip it — that is an ordinary iterate."""
+        self.assertEqual(size_signal.oversize_reasons(
+            {"rounds": 1, "patch_bytes": 0, "patch_files": 0}, _CFG), [])
 
-    def test_an_instance_can_turn_it_on(self) -> None:
-        cfg = SimpleNamespace(size_signal={"rounds": 2})
-        self.assertTrue(size_signal.oversize_reasons(
-            {"rounds": 2, "patch_bytes": 0, "patch_files": 0}, cfg))
+    def test_an_instance_can_turn_it_off(self) -> None:
+        cfg = SimpleNamespace(size_signal={"rounds": 0})
+        self.assertEqual(size_signal.oversize_reasons(
+            {"rounds": 9, "patch_bytes": 0, "patch_files": 0}, cfg), [])
 
     def test_zero_disables_any_rule(self) -> None:
-        cfg = SimpleNamespace(size_signal={"patch_kb": 0, "patch_files": 0})
+        cfg = SimpleNamespace(size_signal={"patch_kb": 0, "patch_files": 0, "rounds": 0})
         self.assertEqual(size_signal.oversize_reasons(
-            {"patch_bytes": 999 * 1024, "patch_files": 99, "rounds": 0}, cfg), [])
+            {"patch_bytes": 999 * 1024, "patch_files": 99, "rounds": 9}, cfg), [])
+
+
+class TheOverrideAnnouncesItself(unittest.TestCase):
+    """An operator who set `max_auto_iters = 3` and sees the loop halt at 2 has to be able
+    to read why, or the number they configured simply appears not to work."""
+
+    def test_the_size_item_is_recognisable_to_the_flow(self) -> None:
+        text = size_signal.needs_human_text(["2 round(s) already spent (threshold 2)"])
+        self.assertTrue(size_signal.is_size_item(text))
+        self.assertFalse(size_signal.is_size_item("C5 Causal adequacy — a real concern"))
+        self.assertFalse(size_signal.is_size_item(""))
+
+    def test_the_flow_names_the_rule_when_it_declines(self) -> None:
+        """The whole point of re-enabling this rule rather than leaving it off: the
+        override is fine, the SILENCE was not."""
+        from pdca_harness import flow
+        items = [NeedsHumanItem("a real defect", IMPL),
+                 NeedsHumanItem(size_signal.needs_human_text(
+                     ["2 round(s) already spent (threshold 2)"]), HUMAN)]
+        err = io.StringIO()
+        with mock.patch.object(flow.assemble, "collect_needs_human",
+                               lambda d, cfg: items), \
+             mock.patch.object(flow.state, "state",
+                               lambda d: flow.state.AWAITING_SIGNOFF), \
+             redirect_stderr(err):
+            fired = flow._maybe_auto_iterate(
+                SimpleNamespace(auto_iterate=True, max_auto_iters=3),
+                Path("/tmp/issue_1"), by="t", today="2026-07-28", apply_now=False)
+        self.assertFalse(fired)
+        out = err.getvalue()
+        self.assertIn("not auto-iterating", out)
+        self.assertIn("2 round(s) already spent", out)
+        self.assertIn("iterate-plan", out)
+
+    def test_an_ordinary_human_finding_declines_without_the_extra_line(self) -> None:
+        """Every other decline is a §6 item the human is about to read anyway; narrating
+        those too would bury the one message that carries new information."""
+        from pdca_harness import flow
+        items = [NeedsHumanItem("a real defect", IMPL),
+                 NeedsHumanItem("C5 Causal adequacy — a real concern", HUMAN)]
+        err = io.StringIO()
+        with mock.patch.object(flow.assemble, "collect_needs_human",
+                               lambda d, cfg: items), \
+             mock.patch.object(flow.state, "state",
+                               lambda d: flow.state.AWAITING_SIGNOFF), \
+             redirect_stderr(err):
+            flow._maybe_auto_iterate(
+                SimpleNamespace(auto_iterate=True, max_auto_iters=3),
+                Path("/tmp/issue_1"), by="t", today="2026-07-28", apply_now=False)
+        self.assertEqual(err.getvalue(), "")
 
 
 class Wording(unittest.TestCase):
