@@ -845,26 +845,54 @@ def run_sizer(d: Path, cfg: Config) -> dict | None:
     exactly when a stronger model earns its cost, and no brief field predicts that. At most
     one escalation runs: this is a corroborating signal, not a search.
     """
-    if not (d / "brief.md").exists():
+    bp = d / "brief.md"
+    if not bp.exists():
         return None
     if cfg.sizer.mode != "command":
         return _stub_sizer(d)
+
+    # One paid verdict per BRIEF, not per beat. The policy is evaluated before Do and
+    # again before Check (#321), so a naive re-invoke doubles the cost of every cycle —
+    # four calls with an escalation — and lets the second nondeterministic answer overwrite
+    # the first. The verdict is a function of the brief, so it is stamped with the brief's
+    # digest and reused while that digest holds; an iterate that rewrites the brief changes
+    # it and earns a fresh pass. This also subsumes the stale-artifact problem the
+    # unconditional unlink was guarding: a verdict from a DIFFERENT brief never matches.
+    digest = hashlib.sha256(bp.read_bytes()).hexdigest()[:16]
+    existing = _read_sizing(d)
+    if existing is not None and existing.get("brief_sha") == digest:
+        return existing
+
     verdict = _sizer_pass(cfg.sizer, d, cfg, "sizer")
     for spec in cfg.sizer_escalation:
         if _sizer_escalates(verdict, spec):
             escalated = _sizer_pass(_leaf_from_spec(spec, cfg.sizer), d, cfg,
                                     "sizer (escalated)")
             if escalated is not None:
-                return escalated
+                return _stamp(d, escalated, digest)
             # An escalation that produced nothing must not discard the first pass: the
             # cheap verdict is still the best evidence available. Restore it to DISK too —
             # the escalation pass unlinks the artifact before running, so returning it only
             # in memory would leave the bundle without the sizing record it did earn.
-            if verdict is not None:
-                (d / SIZING_FILE).write_text(json.dumps(verdict, indent=2) + "\n",
-                                             encoding="utf-8")
-            return verdict
-    return verdict
+            return _stamp(d, verdict, digest)
+    return _stamp(d, verdict, digest)
+
+
+def _stamp(d: Path, verdict: dict | None, digest: str) -> dict | None:
+    """Record which brief a verdict was given for, and (re)write it to the bundle.
+
+    Also restores the artifact after a failed escalation: `_sizer_pass` unlinks before each
+    run, so a fallback that returned the cheap verdict only in memory left the bundle with
+    no sizing record at all.
+    """
+    if verdict is None:
+        return None
+    stamped = {**verdict, "brief_sha": digest}
+    try:
+        (d / SIZING_FILE).write_text(json.dumps(stamped, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass  # the stamp is a cache key, never a hard requirement
+    return stamped
 
 
 def _sizer_pass(leaf: LeafConfig, d: Path, cfg: Config, label: str) -> dict | None:
