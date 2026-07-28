@@ -543,6 +543,30 @@ class AcceptIsSafe(unittest.TestCase):
         with self.assertRaises(split.SplitError):
             split.accept(self.parent, ["601", "602"], self.cfg)
 
+    def test_prefixed_ids_are_canonicalised(self) -> None:
+        """`#601` comes from issue_id_example; `issue_601` comes from copying a bundle
+        directory name. Both are the same tracker id, and `brief._id_list` strips either
+        when reading a dependency — so leaving them raw created `issue_issue_601` while the
+        rewritten `Depends on` resolved to `601`, and `pdca flow` aborted on an unresolved
+        dependency AFTER the parent had been marked split."""
+        from types import SimpleNamespace
+        from pdca_harness import cli, leaves
+        cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github", tracker_url="",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        leaves.do_split(self.parent, cfg)
+        rc = cli._split(cfg, SimpleNamespace(issue_id="500", accept=True,
+                                             ids="issue_601, #602"))
+        self.assertEqual(rc, 0)
+        self.assertTrue(cfg.bundle("601").is_dir())
+        self.assertTrue(cfg.bundle("602").is_dir())
+        self.assertFalse((cfg.bundle_root / "issue_issue_601").exists())
+        self.assertIn("- **Depends on:** 601",
+                      (cfg.bundle("602") / "brief.md").read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -650,7 +650,19 @@ def _split(cfg: Config, args) -> int:
     # parser strips the prefix from dependency lists, so `--ids '#601,#602'` is the natural
     # thing to type — but it would create `issue_#601` while `compute_waves` looked for
     # `issue_601`, and the printed follow-up command would be truncated by the shell at `#`.
-    ids = [t.strip().lstrip("#").strip() for t in args.ids.split(",") if t.strip("# ")]
+    # Normalise the two shapes an operator naturally types. `#601` comes from
+    # issue_id_example; `issue_601` comes from copying a bundle directory name. Both are
+    # the same tracker id, and `brief._id_list` already strips either when reading a
+    # dependency — so leaving them raw creates `issue_issue_601` while the rewritten
+    # `Depends on` resolves to `601`, and `pdca flow` aborts on an unresolved dependency
+    # AFTER the parent has been marked split.
+    ids = []
+    for token in args.ids.split(","):
+        token = token.strip().lstrip("#").strip()
+        if token.startswith("issue_"):
+            token = token[len("issue_"):]
+        if token:
+            ids.append(token)
     if not ids:
         print("split: --accept needs --ids <id>[,<id>…], one per child in proposal order",
               file=sys.stderr)
