@@ -681,8 +681,13 @@ def _status(cfg: Config, issue_id: str | None) -> int:
         # since the estimate is a pure read of the brief.
         # Computed first, APPENDED below — the sign-off annotation used to overwrite it,
         # hiding the marker precisely at the queue's human touch point.
-        oversized = ((d / "brief.md").exists()
-                     and sizing.estimate(d / "brief.md", cfg).band == sizing.OVERSIZED)
+        # Same combination `pdca size` uses. Structure alone would omit the marker in the
+        # one case the sizer exists for — a brief structure scores `ok`/`watch` that the
+        # model finds decomposable — so the two commands would disagree at the sign-off
+        # queue, which is where a human is actually looking.
+        oversized = (d / "brief.md").exists() and sizing.combine(
+            sizing.estimate(d / "brief.md", cfg),
+            leaves.current_sizing(d, cfg)).band == sizing.OVERSIZED
         if s == state.AWAITING_SIGNOFF:
             n = len(signoff.open_needs_human(d / "SUMMARY.md"))
             flag = "  [cheap: confirm]" if n == 0 else f"  [{n} NEEDS-HUMAN]"

@@ -448,6 +448,29 @@ class FinalReviewFixes(unittest.TestCase):
         cfg.sizer_escalation = list(reversed(rules))
         self.assertNotEqual(first, leaves._sizer_key(self.d, cfg, self.d / "brief.md"))
 
+    def test_status_and_size_agree_on_a_model_only_oversize(self) -> None:
+        """The case the sizer exists for: structure says `ok`, the model finds the brief
+        decomposable. `_status` read only the structural estimate, so the marker was
+        missing at the sign-off queue — which is where a human is actually looking —
+        while `pdca size` reported oversized."""
+        from pdca_harness import cli, leaves
+        from pdca_harness.config import Config
+        (self.d / "brief.md").write_text("- **Slug:** small\n", encoding="utf-8")
+        (self.d / "patch.diff").write_text("x", encoding="utf-8")
+        (self.d / "check-gates.json").write_text("[]", encoding="utf-8")
+        (self.d / "SUMMARY.md").write_text("## 6.\n", encoding="utf-8")
+        cfg = Config.load(self.tmp)
+        key = leaves._sizer_key(self.d, cfg, self.d / "brief.md")
+        (self.d / "sizing.json").write_text(json.dumps({
+            "band": "oversized", "independent_outcomes": ["a", "b"],
+            "brief_sha": key}), encoding="utf-8")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli._status(cfg, None)
+        self.assertIn("[oversized]", buf.getvalue(),
+                      "status omitted the marker for a model-only oversize")
+
 
 if __name__ == "__main__":
     unittest.main()
