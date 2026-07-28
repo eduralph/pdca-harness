@@ -663,6 +663,15 @@ def file_children(parent: Path, children: list[Child], cfg, *,
                     "The child after those MAY ALSO HAVE BEEN FILED — `gh` exited 0 and "
                     "only its number could not be read. Check the tracker before filing "
                     "anything by hand, or you will create a duplicate.\n")
+            else:
+                # A non-zero exit USUALLY means nothing was created — but `gh` can also
+                # time out or lose the response after GitHub has already committed the
+                # issue, and this code cannot tell those apart. Saying "nothing was filed"
+                # would be an overclaim that costs a duplicate on a tracker with no undo.
+                report += (
+                    "The child after those most likely was NOT filed — but a timeout or a "
+                    "lost response can happen after GitHub has already created the issue, "
+                    "so check the tracker before filing it by hand.\n")
             report += (
                 "Either close them on the tracker and re-run, or file the remaining "
                 f"{len(children) - len(created)} by hand and pass every id explicitly:\n"

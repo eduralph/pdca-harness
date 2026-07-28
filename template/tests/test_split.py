@@ -845,8 +845,18 @@ class EndToEndThroughWaves(unittest.TestCase):
         # routes `advance` past the builder. Asserting "terminal" instead was both wrong
         # about the design and, in its first form, unfalsifiable.
         self.assertEqual(_driver._close_class(self.parent, self.cfg), "split")
-        self.assertFalse((self.parent / "patch.diff").exists(),
-                         "the split parent carries a patch — the builder was not skipped")
+        # DRIVEN, not merely inspected. Asserting `patch.diff` is absent without ever
+        # advancing the bundle was unfalsifiable — nothing had run that could have created
+        # one. The parent is driven to a halt with the builder wired to fail the test.
+        def must_not_run(*a, **k):
+            raise AssertionError("the builder ran on a split parent")
+
+        with mock.patch.object(_driver.leaves, "do_build", must_not_run), \
+             mock.patch.object(_driver.leaves, "run_review", must_not_run), \
+             redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            final = _driver.run_issue(self.parent, self.cfg)
+        self.assertIn(final, ("AWAITING_SIGNOFF", "COMPLETE", "DISCONTINUED"))
+        self.assertFalse((self.parent / "patch.diff").exists())
 
 
 class CliFilesTheIssuesItself(unittest.TestCase):
@@ -1677,7 +1687,12 @@ class IrreversibleStateIsNeverLost(unittest.TestCase):
         with self._with(run):
             with self.assertRaises(split.SplitError) as caught:
                 split.file_children(self.parent, self.children, self.cfg)
-        self.assertNotIn("MAY ALSO HAVE BEEN FILED", str(caught.exception))
+        msg = str(caught.exception)
+        self.assertNotIn("MAY ALSO HAVE BEEN FILED", msg)
+        # …but it does not claim certainty either. `gh` can time out or lose the response
+        # after GitHub has already committed the issue, and this code cannot tell that
+        # apart from an outright rejection.
+        self.assertIn("check the tracker before filing it by hand", msg)
 
     def test_ctrl_c_still_reports_what_was_already_filed(self) -> None:
         """`KeyboardInterrupt` is not an `Exception`, so it walked past the handler and
