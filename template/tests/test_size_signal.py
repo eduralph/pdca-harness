@@ -428,5 +428,114 @@ class CodexReviewFixes(unittest.TestCase):
         self.assertTrue(state.has_cycle_evidence(d))
 
 
+class TheShippedExampleMatchesTheDefaults(unittest.TestCase):
+    """The commented `[driver.size_signal]` block in pdca.toml is presented as "the
+    defaults, uncomment to retune". If it drifts, uncommenting it CHANGES behaviour while
+    looking like it preserves it — and it had already drifted: the block still said
+    `rounds = 0` after the default became 2, so anyone uncommenting it to adjust
+    `patch_kb` would have silently switched the rounds rule off."""
+
+    def _template_config(self) -> str:
+        root = Path(__file__).resolve().parents[1]
+        for name in ("pdca.toml.jinja", "pdca.toml"):
+            p = root / name
+            if p.is_file():
+                return p.read_text(encoding="utf-8")
+        raise AssertionError("no pdca.toml template found")
+
+    def test_every_commented_threshold_equals_its_default(self) -> None:
+        import re as _re
+        text = self._template_config()
+        block = text.split("[driver.size_signal]", 1)
+        self.assertEqual(len(block), 2, "the example block is gone from pdca.toml")
+        found = dict(_re.findall(r"^#\s*(\w+)\s*=\s*(-?\d+)\s*$",
+                                 block[1], _re.MULTILINE))
+        self.assertTrue(found, "the example block declares no thresholds")
+        for key, value in found.items():
+            with self.subTest(key=key):
+                self.assertIn(key, size_signal.DEFAULT_THRESHOLDS,
+                              f"{key} is not a real threshold")
+                self.assertEqual(int(value), size_signal.DEFAULT_THRESHOLDS[key],
+                                 f"the shipped example sets {key}={value} but the default "
+                                 f"is {size_signal.DEFAULT_THRESHOLDS[key]}")
+
+    def test_every_default_appears_in_the_example(self) -> None:
+        """The other direction: a threshold added in code and not documented is one an
+        instance cannot discover."""
+        import re as _re
+        block = self._template_config().split("[driver.size_signal]", 1)[1]
+        found = dict(_re.findall(r"^#\s*(\w+)\s*=\s*(-?\d+)\s*$", block, _re.MULTILINE))
+        self.assertEqual(set(found), set(size_signal.DEFAULT_THRESHOLDS))
+
+
+class RoundsAreAttributedToTheCURRENTBrief(unittest.TestCase):
+    """An iterate-to-PLAN archives brief.md and the bundle is re-specified from scratch.
+
+    Counting every `iteration-v*` charged a predecessor's churn to a brief that never
+    caused it — and the failure is circular: a bundle re-planned BECAUSE this backstop
+    recommended it started its new spec already over the threshold, so its very first
+    Check raised "2 rounds already spent" and recommended the re-plan that had just
+    happened.
+    """
+
+    def _replanned(self) -> Path:
+        from pdca_harness import driver
+        d = _bundle(patch="x")
+        (d / "brief.md").write_text("- **Slug:** first\n", encoding="utf-8")
+        driver._archive_iteration(d, 1, include_brief=False)     # iterate-do
+        (d / "patch.diff").write_text("y", encoding="utf-8")
+        driver._archive_iteration(d, 2, include_brief=True)      # iterate-PLAN
+        (d / "brief.md").write_text("- **Slug:** respecified\n", encoding="utf-8")
+        (d / "patch.diff").write_text("z", encoding="utf-8")
+        return d
+
+    def test_a_replan_resets_the_count(self) -> None:
+        sig = size_signal.measure(self._replanned())
+        self.assertEqual(sig["rounds"], 0)
+        self.assertEqual(sig["replans"], 1)
+
+    def test_the_new_spec_does_not_fire_on_its_first_attempt(self) -> None:
+        sig = size_signal.measure(self._replanned())
+        self.assertEqual(size_signal.oversize_reasons(sig, _CFG), [],
+                         "the bundle was told to split again on the spec that split "
+                         "produced")
+
+    def test_rounds_since_the_replan_still_count(self) -> None:
+        """The complement: resetting must not blind the backstop to real churn on the new
+        brief."""
+        from pdca_harness import driver
+        d = self._replanned()
+        driver._archive_iteration(d, 3, include_brief=False)
+        (d / "patch.diff").write_text("q", encoding="utf-8")
+        driver._archive_iteration(d, 4, include_brief=False)
+        sig = size_signal.measure(d)
+        self.assertEqual(sig["rounds"], 2)
+        self.assertTrue(size_signal.oversize_reasons(sig, _CFG))
+
+    def test_an_iterate_do_history_is_unaffected(self) -> None:
+        from pdca_harness import driver
+        d = _bundle(patch="x")
+        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        for n in (1, 2):
+            driver._archive_iteration(d, n, include_brief=False)
+            (d / "patch.diff").write_text("x", encoding="utf-8")
+        self.assertEqual(size_signal.measure(d)["rounds"], 2)
+
+    def test_the_calibrator_uses_THIS_definition(self) -> None:
+        """The thresholds were derived with the calibrator's counter. A runtime counting
+        anything else measures a different quantity from the one the numbers describe —
+        the #355 defect, one milestone later. Asserted by import, not by comparison."""
+        script = (Path(__file__).resolve().parents[1] / "scripts" / "size-calibrate")
+        text = script.read_text(encoding="utf-8")
+        self.assertIn("from pdca_harness.size_signal import iteration_rounds", text)
+        self.assertNotIn("def iteration_rounds", text,
+                         "the calibrator has its own copy again")
+
+    def test_a_stray_file_named_like_an_archive_is_ignored(self) -> None:
+        d = _bundle()
+        (d / "iteration-v1").write_text("not a directory", encoding="utf-8")
+        self.assertEqual(size_signal.iteration_rounds(d), (0, 0))
+
+
 if __name__ == "__main__":
     unittest.main()

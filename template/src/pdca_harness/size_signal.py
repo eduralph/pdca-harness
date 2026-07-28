@@ -58,11 +58,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import re
+
 from . import waves
 
 #: Written at Check, read by `assemble.collect_needs_human`. A file rather than a
 #: recomputation so §6 and any later audit see the same numbers the decision was made on.
 SIGNAL_FILE = "size-signal.json"
+
+#: `iteration-v<N>` — the archive directory `driver._archive_iteration` writes.
+_ITERATION_DIR = re.compile(r"^iteration-v(\d+)$")
 
 #: Calibrated against 86 settled bundles (see the module docstring for recall/precision of
 #: each). In ``[driver.size_signal]`` so an instance retunes against its own corpus — the
@@ -113,6 +118,34 @@ def _thresholds(cfg) -> dict[str, int]:
     return out
 
 
+def iteration_rounds(d: Path) -> tuple[int, int]:
+    """``(rounds attributable to the CURRENT brief, replan count)``.
+
+    An iterate-to-**Do** archives the attempt and keeps the brief; an iterate-to-**Plan**
+    archives the brief too (``driver._archive_iteration(include_brief=True)``) and the
+    bundle is re-planned from scratch. So an archive containing a ``brief.md`` marks a
+    boundary: rounds before it were spent on a DIFFERENT brief and must not be charged to
+    the one on disk now.
+
+    Counting every archive is not a rounding error, it is the wrong measurement. A bundle
+    that has just been re-planned — often *because* this backstop recommended it — starts
+    its new spec already over the threshold, so its very first Check raises "2 rounds
+    already spent" and recommends the re-plan that has only just happened.
+
+    Shared with ``scripts/size-calibrate``, which defined it first: the thresholds were
+    calibrated on THIS definition, so a runtime counting anything else is measuring a
+    different quantity from the one the numbers describe.
+    """
+    archives = []
+    for a in d.glob("iteration-v*"):
+        m = _ITERATION_DIR.match(a.name)
+        if m and a.is_dir():
+            archives.append((int(m.group(1)), a))
+    replans = [n for n, a in archives if (a / "brief.md").is_file()]
+    boundary = max(replans, default=0)
+    return sum(1 for n, _ in archives if n > boundary), len(replans)
+
+
 def measure(d: Path) -> dict:
     """What the bundle has actually produced so far. Never raises.
 
@@ -137,12 +170,15 @@ def measure(d: Path) -> dict:
         # A diff this bundle produced can still be unparseable; an unmeasurable file count
         # is a missing signal, not a reason to abort Check.
         patch_files = 0
+    rounds, replans = iteration_rounds(d)
     return {
         "patch_bytes": patch_bytes,
         "patch_files": patch_files,
-        # Rounds ALREADY SPENT — one archive per rejected attempt. `iteration-v*` is the
-        # same evidence `driver._next_iteration_no` counts, so the two cannot disagree.
-        "rounds": len([p for p in d.glob("iteration-v*") if p.is_dir()]),
+        # Rounds spent ON THE BRIEF THAT IS THERE NOW — see `iteration_rounds`.
+        "rounds": rounds,
+        # Recorded but unweighted: a re-plan is a fact about the bundle's history that #359
+        # will want, and it is the boundary `rounds` is measured from.
+        "replans": replans,
         "auto_iters": autoiterate.count(d),
     }
 
