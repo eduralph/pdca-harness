@@ -233,11 +233,23 @@ def validate(children: list[Child], ids: list[str], cfg) -> None:
     # move installed to `results/foo`, nesting into a pre-existing directory and recording
     # it as created. A later failure then rolled that directory back: `rmtree` on something
     # this command never made.
+    from . import brief as _brief
     for issue_id in ids:
         if not re.fullmatch(r"[A-Za-z0-9._-]+", issue_id) or issue_id in (".", ".."):
             raise SplitError(
                 f"--ids contains {issue_id!r}, which is not a plain tracker id — ids may "
                 "hold letters, digits, dot, underscore and hyphen only")
+        # And it must survive the SCHEDULER's own parser. `_id_list` treats a lowercase
+        # token with no digit as prose, so `--ids alpha,beta` would write
+        # `Depends on: alpha`, `compute_waves` would read no dependency at all, and the
+        # children would run in one wave — the ordering fields failing silently, which is
+        # the one outcome this whole feature exists to prevent. Validated by round-trip
+        # rather than by a second pattern, so the two cannot drift.
+        if _brief._id_list(issue_id) != [issue_id]:
+            raise SplitError(
+                f"--ids contains {issue_id!r}, which the dependency parser does not read "
+                "as an id — a `Depends on` naming it would be silently ignored and the "
+                "children would run in one wave. Use a tracker id containing a digit")
 
     labels = {c.label for c in children}
     for child in children:

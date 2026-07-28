@@ -567,6 +567,38 @@ class AcceptIsSafe(unittest.TestCase):
         self.assertIn("- **Depends on:** 601",
                       (cfg.bundle("602") / "brief.md").read_text(encoding="utf-8"))
 
+    def test_ids_the_scheduler_cannot_parse_are_refused(self) -> None:
+        """`brief._id_list` treats a lowercase token with no digit as prose, so
+        `--ids alpha,beta` would write `Depends on: alpha`, `compute_waves` would read no
+        dependency, and the children would run in one wave — the ordering fields failing
+        silently, which is the one outcome this feature exists to prevent."""
+        from pdca_harness import brief as _brief
+        self.assertEqual(_brief._id_list("alpha"), [])
+        with self.assertRaises(split.SplitError):
+            split.accept(self.parent, ["alpha", "beta"], self.cfg)
+        self.assertEqual(list(self.cfg.bundle_root.glob("issue_alpha*")), [])
+
+    def test_ids_the_scheduler_does_parse_are_accepted(self) -> None:
+        """Validated by round-trip through `_id_list`, so the two cannot drift: anything
+        it reads back unchanged is usable, whatever its shape."""
+        for good in ("601", "MANT-1", "a1"):
+            with self.subTest(issue_id=good):
+                from pdca_harness import brief as _brief
+                self.assertEqual(_brief._id_list(good), [good])
+
+    def test_the_splitter_is_in_the_doctor_preflight(self) -> None:
+        """`pdca split` spawns it like any other command leaf; omitting it let
+        `--strict` pass while the split later died on an uninstalled CLI."""
+        from pdca_harness import doctor
+        cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github", tracker_url="",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        cfg.splitter = LeafConfig(mode="command", family="claude", argv=["splitter-cli"])
+        self.assertIn("splitter", doctor._command_leaves(cfg))
+
 
 if __name__ == "__main__":
     unittest.main()

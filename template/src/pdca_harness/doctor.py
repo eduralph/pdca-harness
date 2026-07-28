@@ -243,7 +243,10 @@ def _command_leaves(cfg: Config) -> dict[str, LeafConfig]:
              "signoff": cfg.signoff, "publisher": cfg.publisher, "act": cfg.act,
              # The sizer (#320) is a real command leaf the Plan beat spawns; omitting it
              # let `--strict` pass while the advisory later died on a missing CLI.
-             "sizer": getattr(cfg, "sizer", LeafConfig())}
+             "sizer": getattr(cfg, "sizer", LeafConfig()),
+             # `pdca split` spawns this like any other command leaf; omitting it let
+             # --strict pass while the split later died on a CLI nobody had installed.
+             "splitter": getattr(cfg, "splitter", LeafConfig())}
     out = {role: leaf for role, leaf in named.items()
            if leaf.mode == "command" and leaf.argv}
     # (kind, specs, base) — base is the leaf an omitted field inherits from (None ⇒
