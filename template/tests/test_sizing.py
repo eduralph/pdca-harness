@@ -574,6 +574,52 @@ class ThirdReviewFixes(unittest.TestCase):
             self.assertGreater(calls["n"], 1,
                                "a newly configured escalation reused the weak verdict")
 
+    def test_a_planning_artifact_cannot_escape_the_bundle_or_target(self) -> None:
+        """`Path(root) / "/etc/passwd"` returns `/etc/passwd` — an absolute join silently
+        discards the root. Without containment, a brief declaring
+        `Planning artifact: /etc/passwd` had the prompt instruct a command-mode sizer,
+        with `Read` pre-authorised, to open it.
+
+        The rubric loader refuses the same shapes, and the argument is stronger here: a
+        rubric path comes from `pdca.toml`, which a human wrote; a planning artifact comes
+        from `brief.md`, which a MODEL wrote.
+        """
+        import os
+        from pdca_harness import leaves
+        from pdca_harness.config import Config, LeafConfig
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        cfg = Config(root=tmp, bundle_root=tmp / "results", process_dir=tmp / "process",
+                     templates_dir=tmp / "templates", default_branch="main",
+                     tracker_system="github", tracker_url="", issue_id_example="#1",
+                     builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        (d / "plan.md").write_text("legit\n", encoding="utf-8")
+        os.symlink("/etc/passwd", d / "sneaky.md")
+
+        for escape in ("/etc/passwd", "../../../../etc/passwd", "sneaky.md"):
+            with self.subTest(artifact=escape):
+                self.assertIsNone(leaves._artifact_path(d, cfg, escape))
+        self.assertEqual(leaves._artifact_path(d, cfg, "plan.md"), (d / "plan.md").resolve())
+
+    def test_an_escaping_artifact_never_reaches_the_prompt(self) -> None:
+        """End to end: the refusal has to show up in what the leaf is told, not only in
+        the resolver."""
+        from pdca_harness import leaves
+        from pdca_harness.config import Config, LeafConfig
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        cfg = Config(root=tmp, bundle_root=tmp / "results", process_dir=tmp / "process",
+                     templates_dir=tmp / "templates", default_branch="main",
+                     tracker_system="github", tracker_url="", issue_id_example="#1",
+                     builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Planning artifact:** /etc/passwd\n", encoding="utf-8")
+        prompt = leaves._sizer_prompt(d, cfg)
+        self.assertNotIn("/etc/passwd)", prompt)
+        self.assertIn("not readable from here", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

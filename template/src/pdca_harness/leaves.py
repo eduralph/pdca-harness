@@ -964,12 +964,26 @@ def _artifact_path(d: Path, cfg: Config, artifact: str) -> Path | None:
     A URL, or a path that resolves nowhere, yields None: the leaf then sizes the brief
     alone and the verdict is not cached, since neither the model nor the digest can see
     what the pointer points at.
+
+    **CONTAINED to the bundle or the target checkout.** Absolute paths, `..` traversal and
+    symlink escapes are refused. `Path(root) / "/etc/passwd"` returns `/etc/passwd` — an
+    absolute join silently discards the root — so without this a brief declaring
+    `Planning artifact: /etc/passwd` would have the prompt instruct a command-mode sizer,
+    with `Read` pre-authorised, to open it.
+
+    The rubric loader already refuses the same shapes, and the argument is stronger here:
+    a rubric path comes from `pdca.toml`, which a human wrote, while a planning artifact
+    comes from `brief.md`, which a MODEL wrote.
     """
+    if not artifact or Path(artifact).is_absolute():
+        return None
     for root in (d, rubric_mod._target_root(d, cfg)):
         if root is None:
             continue
         try:
-            candidate = (Path(root) / artifact).resolve()
+            base = Path(root).resolve()
+            candidate = (base / artifact).resolve()
+            candidate.relative_to(base)          # refuses `..` and symlink escapes
             if candidate.is_file():
                 return candidate
         except (OSError, ValueError):
