@@ -502,6 +502,16 @@ _ISSUE_URL_RE = re.compile(r"^\s*https?://\S*/issues/(\d+)/?\s*$", re.MULTILINE)
 _CHILD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)(?:\s+#+)?\s*$")
 
 
+class UncertainFiling(SplitError):
+    """`gh` succeeded but its output could not be parsed, so an issue MAY exist.
+
+    Distinct from an ordinary failure because the remedy is opposite. A call that failed
+    filed nothing and should simply be retried; a call that succeeded without a readable
+    URL has probably created a real issue, and telling the operator to "file the remaining
+    one by hand" invites a duplicate against a tracker that cannot undo either.
+    """
+
+
 class TrackerUnavailable(SplitError):
     """The driver cannot file issues here, and the human must pass ``--ids``.
 
@@ -587,10 +597,12 @@ def _create_issue(repo: str, title: str, body: str, parent_no: str, root: Path) 
                          + (f": {detail[-1]}" if detail else ""))
     matches = _ISSUE_URL_RE.findall((proc.stdout or "").strip())
     if not matches:
-        # The issue may well have been created — this is reported, never swallowed, so the
-        # caller can tell the human that a number it cannot name may now exist.
-        raise SplitError("`gh issue create` printed no issue URL, so the new issue's "
-                         f"number could not be read from: {(proc.stdout or '').strip()!r}")
+        # `gh` EXITED ZERO. The issue was in all likelihood created and only its number is
+        # unreadable, so this is a different situation from a failed call and carries its
+        # own type — see `UncertainFiling`.
+        raise UncertainFiling(
+            "`gh issue create` exited 0 but printed no issue URL, so the new issue's "
+            f"number could not be read from: {(proc.stdout or '').strip()!r}")
     return matches[-1]
 
 
@@ -632,19 +644,35 @@ def file_children(parent: Path, children: list[Child], cfg, *,
                 body=body_head + child.body.strip() + "\n",
                 parent_no=parent_no,
                 root=cfg.root))
-        except Exception as exc:
-            # `Exception`, not `SplitError`: anything escaping here — an unexpected
-            # subprocess failure, a bad argument — would otherwise lose the list of issues
-            # already created, which is the one thing this function must never do.
-            raise SplitError(
-                f"{exc}\n"
+        except BaseException as exc:
+            # `BaseException`, not `Exception`. Ctrl-C during a run that has already filed
+            # issues is an ordinary operator action, and `KeyboardInterrupt` is not an
+            # `Exception` — so it walked straight past this handler and the irreversible
+            # numbers were lost with nothing on screen naming them, which is the single
+            # failure this function exists to prevent.
+            uncertain = isinstance(exc, UncertainFiling)
+            report = (
                 f"Filed {len(created)} of {len(children)} child issue(s) before this: "
                 f"{', '.join('#' + i for i in created) or '(none)'}. These are REAL issues "
-                "and cannot be rolled back — no bundle was created for any of them. Either "
-                "close them on the tracker and re-run, or file the remaining "
+                "and cannot be rolled back — no bundle was created for any of them.\n")
+            if uncertain:
+                # The call SUCCEEDED; only its number is unreadable. Telling the operator
+                # to file this child by hand would create a duplicate against a tracker
+                # that can undo neither.
+                report += (
+                    "The child after those MAY ALSO HAVE BEEN FILED — `gh` exited 0 and "
+                    "only its number could not be read. Check the tracker before filing "
+                    "anything by hand, or you will create a duplicate.\n")
+            report += (
+                "Either close them on the tracker and re-run, or file the remaining "
                 f"{len(children) - len(created)} by hand and pass every id explicitly:\n"
                 f"  {prog} split {_parent_number(parent) or parent.name} "
                 f"--accept --ids "
-                f"{','.join(created + ['<id>'] * (len(children) - len(created)))}"
-            ) from exc
+                f"{','.join(created + ['<id>'] * (len(children) - len(created)))}")
+            if not isinstance(exc, Exception):
+                # An interrupt stays an interrupt: report, then let it propagate, so Ctrl-C
+                # still aborts rather than being converted into an ordinary error.
+                print(f"split: {exc!r}\n{report}", file=sys.stderr)
+                raise
+            raise SplitError(f"{exc}\n{report}") from exc
     return created

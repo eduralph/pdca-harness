@@ -1617,5 +1617,97 @@ class TheRealPathConsultsTheTracker(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class IrreversibleStateIsNeverLost(unittest.TestCase):
+    """Two paths where real tracker issues existed and the operator was told otherwise."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github",
+            tracker_url="https://github.com/acme/widgets", issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        self.parent = self.cfg.bundle("500")
+        self.parent.mkdir(parents=True)
+        (self.parent / "brief.md").write_text("- **Slug:** parent\n", encoding="utf-8")
+        self.children = split.parse(_proposal(_ONE, _TWO_DEP))
+        self.n = 0
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _with(self, run):
+        return mock.patch.multiple(
+            "pdca_harness.split",
+            subprocess=SimpleNamespace(run=run),
+            shutil=SimpleNamespace(which=lambda _n: "/usr/bin/gh",
+                                   rmtree=shutil.rmtree, move=shutil.move))
+
+    def test_a_zero_exit_with_no_url_warns_that_the_issue_MAY_exist(self) -> None:
+        """`gh` succeeded; only its number is unreadable. Telling the operator to file
+        that child by hand invites a duplicate against a tracker that can undo neither."""
+        def run(cmd, capture_output=False, text=False, cwd=None):
+            self.n += 1
+            if self.n == 2:
+                return SimpleNamespace(returncode=0, stdout="created ok\n", stderr="")
+            return SimpleNamespace(
+                returncode=0, stderr="",
+                stdout="https://github.com/acme/widgets/issues/601\n")
+
+        with self._with(run):
+            with self.assertRaises(split.SplitError) as caught:
+                split.file_children(self.parent, self.children, self.cfg)
+        msg = str(caught.exception)
+        self.assertIn("#601", msg)
+        self.assertIn("MAY ALSO HAVE BEEN FILED", msg)
+        self.assertIn("duplicate", msg)
+
+    def test_an_ordinary_failure_does_NOT_claim_the_issue_may_exist(self) -> None:
+        """The complement: a call that genuinely failed filed nothing, and hedging there
+        would stop an operator from retrying something that is safe to retry."""
+        def run(cmd, capture_output=False, text=False, cwd=None):
+            self.n += 1
+            if self.n == 2:
+                return SimpleNamespace(returncode=1, stdout="", stderr="gh: HTTP 403")
+            return SimpleNamespace(
+                returncode=0, stderr="",
+                stdout="https://github.com/acme/widgets/issues/601\n")
+
+        with self._with(run):
+            with self.assertRaises(split.SplitError) as caught:
+                split.file_children(self.parent, self.children, self.cfg)
+        self.assertNotIn("MAY ALSO HAVE BEEN FILED", str(caught.exception))
+
+    def test_ctrl_c_still_reports_what_was_already_filed(self) -> None:
+        """`KeyboardInterrupt` is not an `Exception`, so it walked past the handler and
+        the irreversible numbers vanished with nothing on screen naming them."""
+        def run(cmd, capture_output=False, text=False, cwd=None):
+            self.n += 1
+            if self.n == 2:
+                raise KeyboardInterrupt
+            return SimpleNamespace(
+                returncode=0, stderr="",
+                stdout="https://github.com/acme/widgets/issues/601\n")
+
+        err = io.StringIO()
+        with self._with(run), redirect_stderr(err):
+            with self.assertRaises(KeyboardInterrupt):
+                split.file_children(self.parent, self.children, self.cfg)
+        out = err.getvalue()
+        self.assertIn("#601", out)
+        self.assertIn("cannot be rolled back", out)
+
+    def test_ctrl_c_stays_an_interrupt(self) -> None:
+        """Reported, then re-raised unchanged: converting it to a SplitError would make
+        Ctrl-C look like an ordinary error the caller might handle and continue past."""
+        def run(cmd, capture_output=False, text=False, cwd=None):
+            raise KeyboardInterrupt
+
+        with self._with(run), redirect_stderr(io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                split.file_children(self.parent, self.children, self.cfg)
+
+
 if __name__ == "__main__":
     unittest.main()
