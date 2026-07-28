@@ -552,8 +552,15 @@ def child_title(child: Child, parent: Path) -> str:
         if fenced:
             continue
         m = re.match(r"^\s*-\s*\*{0,2}slug\*{0,2}:\*{0,2}\s*(.+?)\s*$", line, re.IGNORECASE)
-        if m and not m.group(1).startswith("<"):
-            return m.group(1).strip()
+        if not m:
+            continue
+        # STRIP, then test. `.+?` matches a space, so `- **Slug:**` followed by nothing but
+        # whitespace captured a space, `.strip()` emptied it, and the function returned ""
+        # — breaking its own documented promise and handing `gh issue create` an empty
+        # `--title`, which fails and aborts filing for the whole batch.
+        value = m.group(1).strip()
+        if value and not value.startswith("<"):
+            return value
     return f"{parent.name} — {child.label}"
 
 

@@ -713,7 +713,10 @@ class FilingChildIssues(unittest.TestCase):
         children = split.parse(text)
         with self._patched(self._gh(["601"])):
             split.file_children(self.parent, children, self.cfg)
-        self.assertIn("Extract the parser", self.calls[0])
+        call = self.calls[0]
+        # Pinned to --title's POSITION. Membership in argv would also be satisfied if the
+        # heading were passed as some other flag's value.
+        self.assertEqual(call[call.index("--title") + 1], "Extract the parser")
 
     def test_a_child_with_no_heading_still_gets_a_title(self) -> None:
         """An untitled issue is worse than a dull one."""
@@ -828,11 +831,22 @@ class EndToEndThroughWaves(unittest.TestCase):
             encoding="utf-8"))
 
     def test_the_parent_is_terminal_and_never_builds(self) -> None:
-        ids = self._accept(_proposal(_ONE, _TWO_DEP))
+        """Asserted on the parent's STATE, not on its absence from a wave list it was
+        never in: `_waves(ids)` is handed the child bundles only, so the old assertion
+        could not have failed however the parent was left."""
+        from pdca_harness import driver as _driver
+        self._accept(_proposal(_ONE, _TWO_DEP))
         self.assertTrue((self.parent / state.CLOSE_MARKER).exists())
         self.assertIn("issue_601", (self.parent / "build-notes.md").read_text(
             encoding="utf-8"))
-        self.assertNotIn(self.parent.name, [n for w in self._waves(ids) for n in w])
+        # The real guarantee. The parent is NOT a halted state — it is `BUILT`, and it
+        # goes on to sign-off so the human confirms the split, which is the design. What
+        # must never happen is the BUILDER running on it, and `_close_class` is what
+        # routes `advance` past the builder. Asserting "terminal" instead was both wrong
+        # about the design and, in its first form, unfalsifiable.
+        self.assertEqual(_driver._close_class(self.parent, self.cfg), "split")
+        self.assertFalse((self.parent / "patch.diff").exists(),
+                         "the split parent carries a patch — the builder was not skipped")
 
 
 class CliFilesTheIssuesItself(unittest.TestCase):
@@ -1186,14 +1200,32 @@ class CodexVerifyFixes(unittest.TestCase):
             fn(*args, **kwargs)
         return seen
 
-    def test_a_CSV_batch_picks_up_a_bundle_nobody_named(self) -> None:
-        """The promise both prompts make: children born during the Plan beat are scheduled
-        by the same run. Modelled by a bundle that exists on disk and was never passed in."""
+    def test_a_CSV_batch_picks_up_a_child_CREATED_DURING_the_plan_beat(self) -> None:
+        """The promise both prompts make, and the ORDERING is the whole of it.
+
+        Creating the child before the call proved only that `flow_batch` reads the disk —
+        an implementation that enumerated BEFORE `do_plan_batch` would have passed too,
+        while failing at the one thing claimed. The child is now created by the stubbed
+        Plan beat itself, so the test fails unless enumeration genuinely follows it.
+        """
         from pdca_harness import flow
         self._planned("500")
-        self._planned("601")                      # the "child" nobody asked for
-        seen = self._scheduled_by(flow.flow_batch, self.cfg, csv=None)
-        self.assertIn("issue_601", seen)
+        seen: set[str] = set()
+
+        def capture(cfg, bundles, **kw):
+            seen.update(b.name for b in bundles)
+            return {}
+
+        def plan_creating_a_child(cfg, csv=None, **kw):
+            self._planned("601")                  # `pdca split --accept` during Plan
+
+        with mock.patch.object(flow, "_drive_and_act", capture), \
+             mock.patch.object(flow.leaves, "do_plan_batch", plan_creating_a_child), \
+             redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            flow.flow_batch(self.cfg, csv=None)
+        self.assertIn("issue_601", seen,
+                      "a child created during the Plan beat was not scheduled — either "
+                      "enumeration moved before do_plan_batch, or it no longer reads disk")
 
     def test_an_explicit_id_LIST_does_not(self) -> None:
         """The correction that took three attempts. `pdca flow 500 501` reads as a batch
@@ -1473,6 +1505,103 @@ class RollbackCoversAPartialMove(unittest.TestCase):
             split._rollback([self.parent])          # exists, and "cannot" be removed
         self.assertIn("could not remove", err.getvalue())
         self.assertIn(str(self.parent), err.getvalue())
+
+
+class TheRealPathConsultsTheTracker(unittest.TestCase):
+    """The refusal was tested only against `can_file` in isolation and against a mocked
+    `file_children`. Neither proves the command an operator runs consults the tracker at
+    all — delete the wiring and both keep passing, while a non-GitHub instance silently
+    files nothing and reports success."""
+
+    def _cfg(self, tmp: Path, **over) -> Config:
+        base = dict(tracker_system="github",
+                    tracker_url="https://github.com/acme/widgets")
+        base.update(over)
+        return Config(
+            root=tmp, bundle_root=tmp / "results", process_dir=tmp / "process",
+            templates_dir=TEMPLATES, default_branch="main", issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"), **base)
+
+    def _bundle(self, cfg: Config) -> Path:
+        parent = cfg.bundle("500")
+        parent.mkdir(parents=True)
+        (parent / "brief.md").write_text("- **Slug:** parent\n", encoding="utf-8")
+        (parent / split.PROPOSAL).write_text(_proposal(_ONE, _TWO_DEP), encoding="utf-8")
+        return parent
+
+    def _run(self, cfg: Config, *, gh: bool = True) -> tuple[int, str]:
+        ran = []
+
+        def never(cmd, **kw):
+            ran.append(cmd)
+            raise AssertionError("gh was invoked despite an unusable tracker")
+
+        err = io.StringIO()
+        with mock.patch("pdca_harness.split.subprocess", SimpleNamespace(run=never)), \
+             mock.patch("pdca_harness.split.shutil.which",
+                        return_value="/usr/bin/gh" if gh else None), \
+             redirect_stderr(err), redirect_stdout(io.StringIO()):
+            rc = cli._split(cfg, SimpleNamespace(issue_id="500", accept=True, ids=""))
+        self.assertEqual(ran, [])
+        return rc, err.getvalue()
+
+    def test_a_non_github_tracker_refuses_through_the_real_command(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            cfg = self._cfg(tmp, tracker_system="gitlab")
+            parent = self._bundle(cfg)
+            rc, err = self._run(cfg)
+            self.assertEqual(rc, 1)
+            self.assertIn("not GitHub", err)
+            self.assertIn("--accept --ids", err)
+            self.assertFalse(cfg.bundle("601").exists())
+            self.assertFalse((parent / state.CLOSE_MARKER).exists(),
+                             "the parent was marked split although nothing was created")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_a_missing_gh_refuses_through_the_real_command(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            cfg = self._cfg(tmp)
+            self._bundle(cfg)
+            rc, err = self._run(cfg, gh=False)
+            self.assertEqual(rc, 1)
+            self.assertIn("`gh` is not on PATH", err)
+            self.assertFalse(cfg.bundle("601").exists())
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_an_unknown_repository_refuses_through_the_real_command(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            cfg = self._cfg(tmp, tracker_url="")
+            self._bundle(cfg)
+            rc, err = self._run(cfg)
+            self.assertEqual(rc, 1)
+            self.assertIn("repository could not be determined", err)
+            self.assertFalse(cfg.bundle("601").exists())
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_a_blank_slug_still_yields_a_usable_title(self) -> None:
+        """`.+?` matches a space, so `- **Slug:**` with nothing after it captured one,
+        `.strip()` emptied it, and `child_title` returned "" — against its own docstring.
+        `gh issue create --title ""` fails, aborting the batch for an untitled child."""
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            cfg = self._cfg(tmp)
+            parent = cfg.bundle("500")
+            parent.mkdir(parents=True)
+            for body in ("- **Slug:**   \n", "- slug: \n", "- **Slug:** <fill me>\n",
+                         "- **Defect / goal:** a\n"):
+                with self.subTest(body=body.strip()):
+                    child = split.parse(_proposal(body))[0]
+                    title = split.child_title(child, parent)
+                    self.assertTrue(title.strip(),
+                                    f"empty title for {body!r} — gh would reject it")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
