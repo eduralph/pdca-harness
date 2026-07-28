@@ -42,12 +42,6 @@ templates_dir = "templates"
 # ergonomics actually bite (then prefer this over N separate workspaces).
 [driver]
 lanes = 1
-# Pre-dispatch size advisory (#321): "off" (default) | "warn". With "warn" the driver
-# prints an oversize note before Do and before Check, naming which signal fired, and
-# proceeds. There is deliberately NO blocking mode: calibrated over 86 real bundles the
-# structural signal peaks at 67% precision — one wrong hold for every two right — and a
-# gate at that rate is one people learn to override.
-size_guard = "off"
 # Sign-off pass budget for one `pdca flow` run (issue #260): how many build-all → sign-off
 # passes a wave gets (and how many iterations a single issue gets) before the driver stops
 # driving it. A hard bundle can legitimately need many sign-off iterations; when the budget
@@ -266,7 +260,19 @@ base_remote = "{{ 'upstream' if contribution_model == 'fork' else 'origin' }}"
 # Set PDCA_LEAVES_MODE=stub to force stubs everywhere (CI / `make` determinism).
 #
 # Headless leaves ----------------------------------------------------------------
-# Do builder — writes patch.diff + test + build-notes.md:
+# Do builder — writes patch.diff + test + build-notes.md:# Pre-dispatch size advisory (#321): "off" (default) | "warn". With "warn" the driver
+# prints an oversize note before Do, naming which signal fired, and proceeds. There is
+# deliberately NO blocking mode: calibrated over 86 real bundles the structural signal
+# peaks at 62% precision — nearly one wrong hold per right one — and a gate at that rate is
+# one people learn to override.
+#
+# Deliberately placed at the END of [driver], not beside `lanes`. `copier update` merges
+# three ways, so a NEW line adjacent to a line instances commonly edit (and `lanes` is the
+# most edited in this table) lands as a git conflict marker in pdca.toml — after which
+# every `pdca` command dies at config load. Add new keys here, away from the contested ones.
+size_guard = "off"
+
+
 [leaves.builder]
 mode = "{{ leaves_mode }}"
 family = "{{ builder_family }}"
