@@ -698,14 +698,19 @@ def _size(cfg: Config, issue_ids: list[str]) -> int:
         # read-only and must stay safe to run against a live queue. Without this the one
         # deliberate way to ask "how big is this?" showed only the structural bands and
         # never the decomposability answer the instance had already paid a model for.
-        est = sizing.combine(sizing.estimate(d / "brief.md", cfg), leaves._read_sizing(d))
+        est = sizing.combine(sizing.estimate(d / "brief.md", cfg), leaves.current_sizing(d, cfg))
         print(f"{est.band}\t{d.name}\tscore={est.score} "
               f"churn={est.churn_band} patch={est.patch_band}"
               + (f" sizer={est.model_band}" if est.model_band else ""))
         for reason in est.reasons:
             print(f"    - {reason}")
-        stored = leaves._read_sizing(d) or {}
-        for seam in stored.get("proposed_seams") or []:
+        stored = leaves.current_sizing(d, cfg) or {}
+        # LIST or nothing. The verdict is model output and the contract is deliberately
+        # tolerant of an untidy schema — but tolerant has to mean "ignored", not "iterated":
+        # `proposed_seams: 1` crashed this command, and a string printed one "seam" per
+        # character.
+        seams = stored.get("proposed_seams")
+        for seam in seams if isinstance(seams, list) else []:
             print(f"    seam: {seam}")
     return 0
 
@@ -727,8 +732,13 @@ def _status(cfg: Config, issue_id: str | None) -> int:
         # since the estimate is a pure read of the brief.
         # Computed first, APPENDED below — the sign-off annotation used to overwrite it,
         # hiding the marker precisely at the queue's human touch point.
-        oversized = ((d / "brief.md").exists()
-                     and sizing.estimate(d / "brief.md", cfg).band == sizing.OVERSIZED)
+        # Same combination `pdca size` uses. Structure alone would omit the marker in the
+        # one case the sizer exists for — a brief structure scores `ok`/`watch` that the
+        # model finds decomposable — so the two commands would disagree at the sign-off
+        # queue, which is where a human is actually looking.
+        oversized = (d / "brief.md").exists() and sizing.combine(
+            sizing.estimate(d / "brief.md", cfg),
+            leaves.current_sizing(d, cfg)).band == sizing.OVERSIZED
         if s == state.AWAITING_SIGNOFF:
             n = len(signoff.open_needs_human(d / "SUMMARY.md"))
             flag = "  [cheap: confirm]" if n == 0 else f"  [{n} NEEDS-HUMAN]"

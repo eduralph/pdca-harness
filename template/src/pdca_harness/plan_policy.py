@@ -117,7 +117,7 @@ def size_reasons(d, cfg, *, before_do: bool = True) -> list[HoldReason]:
     # for free.
     from . import leaves
     est = sizing.combine(est, leaves.run_sizer(d, cfg) if before_do
-                         else leaves._read_sizing(d))
+                         else leaves.current_sizing(d, cfg))
     if est.band != sizing.OVERSIZED:
         return []
 

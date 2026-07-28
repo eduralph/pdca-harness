@@ -777,13 +777,28 @@ def _explicit_model_variant(d: Path, cfg: Config) -> dict | None:
 SIZING_FILE = "sizing.json"
 
 
-def _sizer_prompt(d: Path) -> str:
+def _pointer_clause(d: Path, cfg: Config) -> str:
+    """What to tell the sizer about a pointer brief's planning artifact."""
+    artifact = brief.planning_artifact(d / "brief.md")
+    if not artifact:
+        return ""
+    resolved = _artifact_path(d, cfg, artifact)
+    if resolved is None:
+        # Say so rather than naming a path the leaf cannot open: a URL, or an artifact
+        # outside the tree. Sizing the pointer alone is then the honest answer, and the
+        # verdict is not cached because neither the model nor the digest saw the plan.
+        return (f" — the brief points at `{artifact}`, which is not readable from here, so "
+                "size what the brief itself states and say in `confidence` that the "
+                "authoritative plan was unavailable")
+    return (f" AND the planning artifact it points at ({resolved}) — for a pointer brief "
+            "THAT document is the plan, and sizing the pointer alone would score a "
+            "three-migration project as one small slice")
+
+
+def _sizer_prompt(d: Path, cfg: Config) -> str:
     return (
         "You are the SIZER. Read " + str(d / "brief.md")
-        + (f" AND the planning artifact it points at ({_pointer}) — for a pointer brief "
-           "THAT document is the plan, and sizing the pointer alone would score a "
-           "three-migration project as one small slice"
-           if (_pointer := brief.planning_artifact(d / "brief.md")) else "")
+        + _pointer_clause(d, cfg)
         + ". Answer ONE question: "
         "how many INDEPENDENTLY SHIPPABLE outcomes does this brief describe? An outcome is "
         "independently shippable if it could be its own PR — its own defect, its own success "
@@ -879,6 +894,26 @@ def run_sizer(d: Path, cfg: Config) -> dict | None:
     return _stamp(d, verdict, digest)
 
 
+def current_sizing(d: Path, cfg: Config) -> dict | None:
+    """The stored verdict IF it was given for the brief as it stands now — else None.
+
+    `_read_sizing` is the raw read and does not check the stamp. Every FREE reader — the
+    BUILT-time advisory, `pdca size` — must use this instead: `sizing.json` is not archived
+    by an iterate, so a bundle re-planned from `oversized` to a small single-outcome brief
+    still carries the old verdict on disk. Showing those seams, or folding that band into
+    a fresh estimate, states the opposite of the truth about the current brief.
+
+    A verdict whose inputs cannot be fingerprinted (an unfetchable planning artifact) was
+    never stamped, so it is not reusable either — the same safe direction `_sizer_key` takes.
+    """
+    verdict = _read_sizing(d)
+    bp = d / "brief.md"
+    if verdict is None or not bp.exists():
+        return None
+    key = _sizer_key(d, cfg, bp)
+    return verdict if key and verdict.get("brief_sha") == key else None
+
+
 def _sizer_key(d: Path, cfg: Config, bp: Path) -> str:
     """The cache key for a sizing verdict, or "" when the inputs cannot be fingerprinted.
 
@@ -899,23 +934,62 @@ def _sizer_key(d: Path, cfg: Config, bp: Path) -> str:
     h.update(repr([
         (cfg.sizer.mode, cfg.sizer.family, tuple(cfg.sizer.argv), cfg.sizer.agent,
          cfg.sizer.model, cfg.sizer.effort),
-        tuple(sorted((k, repr(v)) for spec in cfg.sizer_escalation
-                     for k, v in spec.items())),
+        # ORDERED per-spec, not a flattened sorted set: `run_sizer` returns on the FIRST
+        # matching escalation, so reordering two rules changes which stronger model runs.
+        # Flattening gave both orders the same key, and the cached verdict from the rule
+        # that used to win was returned instead of running the one now promoted.
+        tuple(tuple(sorted((k, repr(v)) for k, v in spec.items()))
+              for spec in cfg.sizer_escalation),
     ]).encode("utf-8"))
     artifact = brief.planning_artifact(bp)
     if not artifact:
         return h.hexdigest()[:16]
+    resolved = _artifact_path(d, cfg, artifact)
+    if resolved is None:
+        return ""
+    try:
+        h.update(resolved.read_bytes())
+    except OSError:
+        return ""
+    return h.hexdigest()[:16]
+
+
+def _artifact_path(d: Path, cfg: Config, artifact: str) -> Path | None:
+    """The planning artifact as a path the LEAF can open, or None.
+
+    Resolved against the bundle first and then the target checkout, and returned ABSOLUTE
+    — the sizer runs with the bundle as its cwd, so handing it the brief's target-relative
+    string (`docs/adr/0042.md`) names a file it cannot find. The prompt and the cache key
+    both go through here, or the key hashes a document the model never read.
+
+    A URL, or a path that resolves nowhere, yields None: the leaf then sizes the brief
+    alone and the verdict is not cached, since neither the model nor the digest can see
+    what the pointer points at.
+
+    **CONTAINED to the bundle or the target checkout.** Absolute paths, `..` traversal and
+    symlink escapes are refused. `Path(root) / "/etc/passwd"` returns `/etc/passwd` — an
+    absolute join silently discards the root — so without this a brief declaring
+    `Planning artifact: /etc/passwd` would have the prompt instruct a command-mode sizer,
+    with `Read` pre-authorised, to open it.
+
+    The rubric loader already refuses the same shapes, and the argument is stronger here:
+    a rubric path comes from `pdca.toml`, which a human wrote, while a planning artifact
+    comes from `brief.md`, which a MODEL wrote.
+    """
+    if not artifact or Path(artifact).is_absolute():
+        return None
     for root in (d, rubric_mod._target_root(d, cfg)):
         if root is None:
             continue
         try:
-            candidate = (Path(root) / artifact).resolve()
+            base = Path(root).resolve()
+            candidate = (base / artifact).resolve()
+            candidate.relative_to(base)          # refuses `..` and symlink escapes
             if candidate.is_file():
-                h.update(candidate.read_bytes())
-                return h.hexdigest()[:16]
+                return candidate
         except (OSError, ValueError):
             continue
-    return ""
+    return None
 
 
 def _stamp(d: Path, verdict: dict | None, digest: str) -> dict | None:
@@ -949,7 +1023,7 @@ def _sizer_pass(leaf: LeafConfig, d: Path, cfg: Config, label: str) -> dict | No
     """
     (d / SIZING_FILE).unlink(missing_ok=True)
     try:
-        _invoke(leaf, d, _sizer_prompt(d), cfg=cfg, label=label)
+        _invoke(leaf, d, _sizer_prompt(d, cfg), cfg=cfg, label=label)
     except Exception as exc:  # noqa: BLE001 — an advisory leaf never aborts the beat
         print(f"leaves: {label} did not run ({exc}) — continuing on the structural "
               "estimate alone", file=sys.stderr)

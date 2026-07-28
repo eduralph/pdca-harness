@@ -265,11 +265,16 @@ class TheVerdictHasAConsumer(unittest.TestCase):
         (self.d / "brief.md").write_text(
             "- **Slug:** s\n- **Difficulty:** high\n- **Conflicts with:** 1\n",
             encoding="utf-8")
+        # Stamped with the brief's digest: a FREE read now honours it, so an unstamped
+        # verdict is treated as belonging to some other brief and correctly ignored.
+        from pdca_harness import leaves
+        from pdca_harness.config import Config
+        key = leaves._sizer_key(self.d, Config.load(self.tmp), self.d / "brief.md")
         (self.d / "sizing.json").write_text(json.dumps({
             "band": "oversized",
             "independent_outcomes": ["parser", "renderer"],
             "proposed_seams": ["split at the parser/renderer boundary"],
-            "confidence": "high"}), encoding="utf-8")
+            "confidence": "high", "brief_sha": key}), encoding="utf-8")
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -348,6 +353,123 @@ class TheRemedyFollowsTheBeat(unittest.TestCase):
         self.assertIn("iterate-plan", r[0].detail)
         self.assertNotIn("pdca split` first", r[0].detail,
                          "advised splitting a bundle that already has a patch")
+
+
+class FinalReviewFixes(unittest.TestCase):
+    """Pre-merge review of #351."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.d = self.tmp / "results" / "issue_9"
+        self.d.mkdir(parents=True)
+        (self.tmp / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n',
+                                            encoding="utf-8")
+        (self.d / "brief.md").write_text(_OVERSIZED, encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _store(self, cfg, **over):
+        from pdca_harness import leaves
+        key = leaves._sizer_key(self.d, cfg, self.d / "brief.md")
+        (self.d / "sizing.json").write_text(json.dumps({
+            "band": "oversized", "independent_outcomes": ["a", "b"],
+            "proposed_seams": ["old seam"], "brief_sha": key, **over}), encoding="utf-8")
+
+    def test_size_guard_is_read_from_the_driver_table(self) -> None:
+        """It sat AFTER the next `[table]` header, so TOML parsed it into that table and
+        `driver.size_guard` was absent — setting it to "warn" did nothing at all."""
+        (self.tmp / "pdca.toml").write_text(
+            '[paths]\nbundle_root = "results"\n\n[driver]\nsize_guard = "warn"\n',
+            encoding="utf-8")
+        from pdca_harness.config import Config
+        self.assertEqual(Config.load(self.tmp).size_guard, "warn")
+
+    def test_a_stale_verdict_is_not_shown_by_pdca_size(self) -> None:
+        """`sizing.json` is not archived by an iterate, so a bundle re-planned from
+        oversized to a small brief still carries the old verdict on disk."""
+        from pdca_harness import cli
+        from pdca_harness.config import Config
+        cfg = Config.load(self.tmp)
+        self._store(cfg)
+        (self.d / "brief.md").write_text("- **Slug:** small\n", encoding="utf-8")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli._size(cfg, [])
+        out = buf.getvalue()
+        self.assertNotIn("old seam", out, "seams from a replaced brief were shown")
+        self.assertNotIn("sizer=", out, "a stale band was folded into a fresh estimate")
+
+    def test_a_matching_verdict_is_still_shown(self) -> None:
+        from pdca_harness import cli
+        from pdca_harness.config import Config
+        cfg = Config.load(self.tmp)
+        self._store(cfg)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli._size(cfg, [])
+        self.assertIn("old seam", buf.getvalue())
+
+    def test_the_built_advisory_ignores_a_stale_verdict_too(self) -> None:
+        from pdca_harness.config import Config
+        cfg = Config.load(self.tmp)
+        cfg.size_guard = "warn"
+        self._store(cfg)
+        (self.d / "brief.md").write_text("- **Slug:** small\n", encoding="utf-8")
+        self.assertEqual(plan_policy.evaluate(self.d, cfg, before_do=False), [])
+
+    def test_a_malformed_seams_field_is_ignored_not_iterated(self) -> None:
+        """The verdict is model output and the contract is deliberately tolerant of an
+        untidy schema — but tolerant must mean IGNORED, not iterated. `proposed_seams: 1`
+        crashed the command; a string printed one "seam" per character."""
+        from pdca_harness import cli
+        from pdca_harness.config import Config
+        cfg = Config.load(self.tmp)
+        for bad in (1, "a string", None, {"x": 1}):
+            with self.subTest(proposed_seams=bad):
+                self._store(cfg, proposed_seams=bad)
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self.assertEqual(cli._size(cfg, []), 0)
+                self.assertNotIn("seam:", buf.getvalue())
+
+    def test_reordering_escalations_changes_the_cache_key(self) -> None:
+        """`run_sizer` returns on the FIRST matching escalation, so order decides which
+        stronger model runs. A flattened, sorted key gave both orders the same digest, so
+        promoting a rule returned the cached verdict from the one it replaced."""
+        from pdca_harness import leaves
+        from pdca_harness.config import Config, LeafConfig
+        cfg = Config.load(self.tmp)
+        cfg.sizer = LeafConfig(mode="command", family="generic", argv=["true"])
+        rules = [{"on_band": ["watch"], "argv": ["model-a"]},
+                 {"on_confidence": ["low"], "argv": ["model-b"]}]
+        cfg.sizer_escalation = rules
+        first = leaves._sizer_key(self.d, cfg, self.d / "brief.md")
+        cfg.sizer_escalation = list(reversed(rules))
+        self.assertNotEqual(first, leaves._sizer_key(self.d, cfg, self.d / "brief.md"))
+
+    def test_status_and_size_agree_on_a_model_only_oversize(self) -> None:
+        """The case the sizer exists for: structure says `ok`, the model finds the brief
+        decomposable. `_status` read only the structural estimate, so the marker was
+        missing at the sign-off queue — which is where a human is actually looking —
+        while `pdca size` reported oversized."""
+        from pdca_harness import cli, leaves
+        from pdca_harness.config import Config
+        (self.d / "brief.md").write_text("- **Slug:** small\n", encoding="utf-8")
+        (self.d / "patch.diff").write_text("x", encoding="utf-8")
+        (self.d / "check-gates.json").write_text("[]", encoding="utf-8")
+        (self.d / "SUMMARY.md").write_text("## 6.\n", encoding="utf-8")
+        cfg = Config.load(self.tmp)
+        key = leaves._sizer_key(self.d, cfg, self.d / "brief.md")
+        (self.d / "sizing.json").write_text(json.dumps({
+            "band": "oversized", "independent_outcomes": ["a", "b"],
+            "brief_sha": key}), encoding="utf-8")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli._status(cfg, None)
+        self.assertIn("[oversized]", buf.getvalue(),
+                      "status omitted the marker for a model-only oversize")
 
 
 if __name__ == "__main__":
