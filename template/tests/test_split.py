@@ -1584,6 +1584,19 @@ class TheRealPathConsultsTheTracker(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_atx_closing_hashes_are_not_part_of_the_title(self) -> None:
+        """`# Extract the parser ##` is valid ATX and renders as "Extract the parser"
+        everywhere else, so carrying the hashes through would put raw markup in the title
+        of a real tracker item."""
+        parent = Path(tempfile.mkdtemp())
+        for heading, want in (("# Extract the parser ##", "Extract the parser"),
+                              ("## Split the reader ######", "Split the reader"),
+                              ("# Keep this # inside", "Keep this # inside"),
+                              ("# Plain", "Plain")):
+            with self.subTest(heading=heading):
+                child = split.parse(_proposal(f"{heading}\n\n- **Slug:** s\n"))[0]
+                self.assertEqual(split.child_title(child, parent), want)
+
     def test_a_blank_slug_still_yields_a_usable_title(self) -> None:
         """`.+?` matches a space, so `- **Slug:**` with nothing after it captured one,
         `.strip()` emptied it, and `child_title` returned "" — against its own docstring.

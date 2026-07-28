@@ -495,8 +495,11 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
 #: silently, and against a real tracker item. A bare URL line cannot be confused that way.
 _ISSUE_URL_RE = re.compile(r"^\s*https?://\S*/issues/(\d+)/?\s*$", re.MULTILINE)
 
-#: The first `# Heading` of a child block, used as the tracker issue's title.
-_CHILD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*$")
+#: The first `# Heading` of a child block, used as the tracker issue's title. The optional
+#: CLOSING run of hashes is dropped: `# Extract the parser ##` is valid ATX and renders as
+#: "Extract the parser" everywhere else, so carrying the hashes into a real tracker item
+#: would put markup in a title a human reads.
+_CHILD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)(?:\s+#+)?\s*$")
 
 
 class TrackerUnavailable(SplitError):
