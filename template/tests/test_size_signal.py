@@ -353,5 +353,53 @@ class ReachesSectionSix(unittest.TestCase):
         self.assertIn("size backstop", err.getvalue())
 
 
+class CodexReviewFixes(unittest.TestCase):
+    """Findings from the codex review of this PR."""
+
+    def test_an_infinite_threshold_does_not_abort_check(self) -> None:
+        """`int(float("inf"))` raises OverflowError, which is NOT a TypeError or a
+        ValueError — and TOML writes `inf` as a bare literal, so `patch_kb = inf` (a
+        plausible way to try to switch a rule off) aborted the Check beat. The docstring
+        promised a typo in an optional tuning table would not cost the cycle."""
+        for value in (float("inf"), float("-inf"), "twenty", None, [1]):
+            with self.subTest(value=value):
+                cfg = SimpleNamespace(size_signal={"patch_kb": value})
+                self.assertEqual(
+                    size_signal.oversize_reasons({"patch_bytes": 0, "patch_files": 0,
+                                                  "rounds": 0}, cfg), [])
+
+    def test_the_same_hole_is_closed_in_the_a_priori_estimator(self) -> None:
+        """`sizing._cfg_int` and `sizing._weights` carried the identical defect, so an
+        `inf` in [driver.sizing] aborted the PLAN beat the same way."""
+        from pdca_harness import sizing
+        cfg = SimpleNamespace(sizing={"watch": float("inf"),
+                                      "difficulty_high": float("-inf")})
+        self.assertEqual(sizing._cfg_int(cfg, "watch", 4), 4)
+        self.assertEqual(sizing._weights(cfg)["difficulty_high"],
+                         sizing.DEFAULT_WEIGHTS["difficulty_high"])
+
+    def test_the_signal_is_archived_with_the_attempt_it_measured(self) -> None:
+        """It is measured FROM patch.diff, which an iterate archives. Left behind it would
+        describe an attempt that is no longer there, and the archive of a rejected attempt
+        would lack the numbers that justified rejecting it."""
+        from pdca_harness import driver, state
+        self.assertIn(size_signal.SIGNAL_FILE, state.DOWNSTREAM_OF_BRIEF)
+        d = _bundle(patch=_diff(30))
+        size_signal.record(d, _CFG)
+        driver._archive_iteration(d, 1, include_brief=False)
+        self.assertFalse((d / size_signal.SIGNAL_FILE).exists())
+        self.assertTrue((d / "iteration-v1" / size_signal.SIGNAL_FILE).is_file())
+
+    def test_a_bundle_holding_one_counts_as_having_run_a_cycle(self) -> None:
+        """The other half of DOWNSTREAM_OF_BRIEF membership: it is written at Check, so a
+        bundle holding one has demonstrably run Do and Check, and a tracker `resolved`
+        marker must not silently abandon it."""
+        from pdca_harness import state
+        d = _bundle()
+        self.assertFalse(state.has_cycle_evidence(d))
+        size_signal.record(d, _CFG)
+        self.assertTrue(state.has_cycle_evidence(d))
+
+
 if __name__ == "__main__":
     unittest.main()

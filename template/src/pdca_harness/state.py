@@ -55,6 +55,12 @@ DOWNSTREAM_OF_BRIEF = [
     # the rebuild takes a fresh one — a rubric that changed between attempts SHOULD apply
     # to the next.
     "rubric-snapshot.md",
+    # The empirical size measurement (#324). Same reasoning, plus a sharper one: it is
+    # measured FROM patch.diff, which this list archives. Left behind it would describe an
+    # attempt that is no longer there — and the archive of a rejected attempt would lack
+    # the very numbers that justified rejecting it. Not in CYCLE_EVIDENCE_ONLY: unlike the
+    # auto-iterate budget it does not accumulate, it is rewritten wholesale each Check.
+    "size-signal.json",
 ]
 
 # Cycle artifacts matched by pattern rather than name. ONE definition, read by both

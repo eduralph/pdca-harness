@@ -83,6 +83,9 @@ def _thresholds(cfg) -> dict[str, int]:
 
     A malformed threshold falls back to the default rather than raising: this runs inside
     the Check beat, and a typo in an optional tuning table must not cost the cycle.
+    ``OverflowError`` is caught alongside the obvious two because it is NOT one of them:
+    `int(float("inf"))` raises it, and TOML writes `inf` as a bare literal, so
+    `patch_kb = inf` — a plausible way to try to switch a rule off — aborted Check.
 
     ## The rounds rule DOES cut the auto-iterate budget short, on purpose
 
@@ -105,7 +108,7 @@ def _thresholds(cfg) -> dict[str, int]:
         if key in out:
             try:
                 out[key] = int(value)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 pass
     return out
 
