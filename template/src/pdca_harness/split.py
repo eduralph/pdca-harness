@@ -27,6 +27,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -420,8 +421,11 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
 # ---------------------------------------------------------------------------
 
 #: `gh issue create` prints the new issue's URL on stdout. The trailing path segment is
-#: the number — the only part of the output this depends on.
-_ISSUE_URL_RE = re.compile(r"/issues/(\d+)\s*$")
+#: the number — the only part of the output this depends on. Matched per LINE and the LAST
+#: match wins: `gh` also emits notices ("Warning: N uncommitted changes") and, with some
+#: configurations, a "Creating issue in owner/repo" preamble, so anchoring to the end of
+#: the whole output failed on a call that had in fact created the issue.
+_ISSUE_URL_RE = re.compile(r"/issues/(\d+)\s*$", re.MULTILINE)
 
 #: The first `# Heading` of a child block, used as the tracker issue's title.
 _CHILD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*$")
@@ -503,13 +507,13 @@ def _create_issue(repo: str, title: str, body: str, parent_no: str, root: Path) 
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
         raise SplitError("`gh issue create` failed"
                          + (f": {detail[-1]}" if detail else ""))
-    m = _ISSUE_URL_RE.search((proc.stdout or "").strip())
-    if not m:
+    matches = _ISSUE_URL_RE.findall((proc.stdout or "").strip())
+    if not matches:
         # The issue may well have been created — this is reported, never swallowed, so the
         # caller can tell the human that a number it cannot name may now exist.
         raise SplitError("`gh issue create` printed no issue URL, so the new issue's "
                          f"number could not be read from: {(proc.stdout or '').strip()!r}")
-    return m.group(1)
+    return matches[-1]
 
 
 def file_children(parent: Path, children: list[Child], cfg) -> list[str]:
@@ -531,6 +535,13 @@ def file_children(parent: Path, children: list[Child], cfg) -> list[str]:
     if not ok:
         raise TrackerUnavailable(why)
     parent_no = _parent_number(parent)
+    if not parent_no:
+        # A bundle whose directory name carries no tracker number (a hand-made bundle, a
+        # non-numeric id). The children can still be filed, but NOT as sub-issues — and
+        # the umbrella relationship is half the reason this exists, so say so rather than
+        # quietly producing a flat set of unrelated issues.
+        print(f"split: {parent.name} carries no numeric tracker id — filing the children "
+              "as standalone issues, NOT as sub-issues", file=sys.stderr)
     body_head = (f"Child slice of #{parent_no}, split during Plan.\n\n"
                  if parent_no else "Child slice, split during Plan.\n\n")
     created: list[str] = []
@@ -542,7 +553,10 @@ def file_children(parent: Path, children: list[Child], cfg) -> list[str]:
                 body=body_head + child.body.strip() + "\n",
                 parent_no=parent_no,
                 root=cfg.root))
-        except SplitError as exc:
+        except Exception as exc:
+            # `Exception`, not `SplitError`: anything escaping here — an unexpected
+            # subprocess failure, a bad argument — would otherwise lose the list of issues
+            # already created, which is the one thing this function must never do.
             raise SplitError(
                 f"{exc}\n"
                 f"Filed {len(created)} of {len(children)} child issue(s) before this: "

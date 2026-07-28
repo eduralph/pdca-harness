@@ -952,5 +952,103 @@ class ThePlannerIsToldItOwnsTheSplit(unittest.TestCase):
                 self.assertNotIn("files a tracker\nissue per child", self._role(role))
 
 
+class CodexReviewHardening(unittest.TestCase):
+    """The paths the codex review of this PR was examining when its budget ran out."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github",
+            tracker_url="https://github.com/acme/widgets", issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        self.parent = self.cfg.bundle("500")
+        self.parent.mkdir(parents=True)
+        self.calls: list[list[str]] = []
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _patched(self, run):
+        return mock.patch.multiple(
+            "pdca_harness.split",
+            subprocess=SimpleNamespace(run=run),
+            shutil=SimpleNamespace(which=lambda _n: "/usr/bin/gh",
+                                   rmtree=shutil.rmtree, move=shutil.move))
+
+    def _run_returning(self, stdout: str):
+        def run(cmd, capture_output=False, text=False, cwd=None):
+            self.calls.append(list(cmd))
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        return run
+
+    def test_a_notice_printed_before_the_url_does_not_lose_the_number(self) -> None:
+        """`gh` also emits notices and, in some configurations, a "Creating issue in
+        owner/repo" preamble. Anchoring to the end of the WHOLE output failed on a call
+        that had in fact created the issue — the worst case, since it is then reported as
+        a number we cannot name."""
+        children = split.parse(_proposal(_ONE))
+        stdout = ("Creating issue in acme/widgets\n"
+                  "Warning: 3 uncommitted changes\n"
+                  "https://github.com/acme/widgets/issues/601\n")
+        with self._patched(self._run_returning(stdout)):
+            self.assertEqual(split.file_children(self.parent, children, self.cfg), ["601"])
+
+    def test_no_url_at_all_is_still_reported(self) -> None:
+        children = split.parse(_proposal(_ONE))
+        with self._patched(self._run_returning("created something\n")):
+            with self.assertRaises(split.SplitError) as caught:
+                split.file_children(self.parent, children, self.cfg)
+        self.assertIn("no issue URL", str(caught.exception))
+
+    def test_an_unexpected_exception_still_names_what_was_filed(self) -> None:
+        """`except Exception`, not `except SplitError`: anything escaping the loop would
+        otherwise lose the list of issues already created — the one thing this function
+        must never do."""
+        children = split.parse(_proposal(_ONE, _TWO_DEP))
+        state_ = {"n": 0}
+
+        def run(cmd, capture_output=False, text=False, cwd=None):
+            state_["n"] += 1
+            if state_["n"] == 2:
+                raise RuntimeError("something nobody predicted")
+            return SimpleNamespace(
+                returncode=0, stdout="https://github.com/acme/widgets/issues/601\n",
+                stderr="")
+        with self._patched(run):
+            with self.assertRaises(split.SplitError) as caught:
+                split.file_children(self.parent, children, self.cfg)
+        msg = str(caught.exception)
+        self.assertIn("#601", msg)
+        self.assertIn("cannot be rolled back", msg)
+
+    def test_a_non_numeric_parent_files_flat_and_SAYS_so(self) -> None:
+        """The umbrella relationship is half the reason this exists, so producing a flat
+        set of unrelated issues has to be announced rather than inferred."""
+        parent = self.cfg.bundle("hotfix-alpha")
+        parent.mkdir(parents=True)
+        children = split.parse(_proposal(_ONE))
+        err = io.StringIO()
+        with self._patched(self._run_returning(
+                "https://github.com/acme/widgets/issues/601\n")), redirect_stderr(err):
+            split.file_children(parent, children, self.cfg)
+        self.assertNotIn("--parent", self.calls[0])
+        self.assertIn("NOT as sub-issues", err.getvalue())
+
+    def test_the_command_is_an_argv_list_so_the_shell_never_sees_it(self) -> None:
+        """Titles and bodies come from a MODEL-authored proposal file. Passed as a list
+        with shell=False they are arguments, not script."""
+        nasty = "- **Slug:** a\n\n# ; rm -rf / $(whoami) `id` && echo pwned\n"
+        children = split.parse(_proposal(nasty))
+        with self._patched(self._run_returning(
+                "https://github.com/acme/widgets/issues/601\n")):
+            split.file_children(self.parent, children, self.cfg)
+        cmd = self.calls[0]
+        self.assertIsInstance(cmd, list)
+        self.assertIn("; rm -rf / $(whoami) `id` && echo pwned", " ".join(cmd))
+        self.assertEqual(cmd[0], "gh")
+
+
 if __name__ == "__main__":
     unittest.main()
