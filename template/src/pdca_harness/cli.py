@@ -647,13 +647,13 @@ def _size(cfg: Config, issue_ids: list[str]) -> int:
         # read-only and must stay safe to run against a live queue. Without this the one
         # deliberate way to ask "how big is this?" showed only the structural bands and
         # never the decomposability answer the instance had already paid a model for.
-        est = sizing.combine(sizing.estimate(d / "brief.md", cfg), leaves._read_sizing(d))
+        est = sizing.combine(sizing.estimate(d / "brief.md", cfg), leaves.current_sizing(d, cfg))
         print(f"{est.band}\t{d.name}\tscore={est.score} "
               f"churn={est.churn_band} patch={est.patch_band}"
               + (f" sizer={est.model_band}" if est.model_band else ""))
         for reason in est.reasons:
             print(f"    - {reason}")
-        stored = leaves._read_sizing(d) or {}
+        stored = leaves.current_sizing(d, cfg) or {}
         for seam in stored.get("proposed_seams") or []:
             print(f"    seam: {seam}")
     return 0

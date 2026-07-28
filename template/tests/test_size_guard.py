@@ -265,11 +265,16 @@ class TheVerdictHasAConsumer(unittest.TestCase):
         (self.d / "brief.md").write_text(
             "- **Slug:** s\n- **Difficulty:** high\n- **Conflicts with:** 1\n",
             encoding="utf-8")
+        # Stamped with the brief's digest: a FREE read now honours it, so an unstamped
+        # verdict is treated as belonging to some other brief and correctly ignored.
+        from pdca_harness import leaves
+        from pdca_harness.config import Config
+        key = leaves._sizer_key(self.d, Config.load(self.tmp), self.d / "brief.md")
         (self.d / "sizing.json").write_text(json.dumps({
             "band": "oversized",
             "independent_outcomes": ["parser", "renderer"],
             "proposed_seams": ["split at the parser/renderer boundary"],
-            "confidence": "high"}), encoding="utf-8")
+            "confidence": "high", "brief_sha": key}), encoding="utf-8")
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -348,6 +353,70 @@ class TheRemedyFollowsTheBeat(unittest.TestCase):
         self.assertIn("iterate-plan", r[0].detail)
         self.assertNotIn("pdca split` first", r[0].detail,
                          "advised splitting a bundle that already has a patch")
+
+
+class FinalReviewFixes(unittest.TestCase):
+    """Pre-merge review of #351."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.d = self.tmp / "results" / "issue_9"
+        self.d.mkdir(parents=True)
+        (self.tmp / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n',
+                                            encoding="utf-8")
+        (self.d / "brief.md").write_text(_OVERSIZED, encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _store(self, cfg, **over):
+        from pdca_harness import leaves
+        key = leaves._sizer_key(self.d, cfg, self.d / "brief.md")
+        (self.d / "sizing.json").write_text(json.dumps({
+            "band": "oversized", "independent_outcomes": ["a", "b"],
+            "proposed_seams": ["old seam"], "brief_sha": key, **over}), encoding="utf-8")
+
+    def test_size_guard_is_read_from_the_driver_table(self) -> None:
+        """It sat AFTER the next `[table]` header, so TOML parsed it into that table and
+        `driver.size_guard` was absent — setting it to "warn" did nothing at all."""
+        (self.tmp / "pdca.toml").write_text(
+            '[paths]\nbundle_root = "results"\n\n[driver]\nsize_guard = "warn"\n',
+            encoding="utf-8")
+        from pdca_harness.config import Config
+        self.assertEqual(Config.load(self.tmp).size_guard, "warn")
+
+    def test_a_stale_verdict_is_not_shown_by_pdca_size(self) -> None:
+        """`sizing.json` is not archived by an iterate, so a bundle re-planned from
+        oversized to a small brief still carries the old verdict on disk."""
+        from pdca_harness import cli
+        from pdca_harness.config import Config
+        cfg = Config.load(self.tmp)
+        self._store(cfg)
+        (self.d / "brief.md").write_text("- **Slug:** small\n", encoding="utf-8")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli._size(cfg, [])
+        out = buf.getvalue()
+        self.assertNotIn("old seam", out, "seams from a replaced brief were shown")
+        self.assertNotIn("sizer=", out, "a stale band was folded into a fresh estimate")
+
+    def test_a_matching_verdict_is_still_shown(self) -> None:
+        from pdca_harness import cli
+        from pdca_harness.config import Config
+        cfg = Config.load(self.tmp)
+        self._store(cfg)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli._size(cfg, [])
+        self.assertIn("old seam", buf.getvalue())
+
+    def test_the_built_advisory_ignores_a_stale_verdict_too(self) -> None:
+        from pdca_harness.config import Config
+        cfg = Config.load(self.tmp)
+        cfg.size_guard = "warn"
+        self._store(cfg)
+        (self.d / "brief.md").write_text("- **Slug:** small\n", encoding="utf-8")
+        self.assertEqual(plan_policy.evaluate(self.d, cfg, before_do=False), [])
 
 
 if __name__ == "__main__":

@@ -878,6 +878,26 @@ def run_sizer(d: Path, cfg: Config) -> dict | None:
     return _stamp(d, verdict, digest)
 
 
+def current_sizing(d: Path, cfg: Config) -> dict | None:
+    """The stored verdict IF it was given for the brief as it stands now — else None.
+
+    `_read_sizing` is the raw read and does not check the stamp. Every FREE reader — the
+    BUILT-time advisory, `pdca size` — must use this instead: `sizing.json` is not archived
+    by an iterate, so a bundle re-planned from `oversized` to a small single-outcome brief
+    still carries the old verdict on disk. Showing those seams, or folding that band into
+    a fresh estimate, states the opposite of the truth about the current brief.
+
+    A verdict whose inputs cannot be fingerprinted (an unfetchable planning artifact) was
+    never stamped, so it is not reusable either — the same safe direction `_sizer_key` takes.
+    """
+    verdict = _read_sizing(d)
+    bp = d / "brief.md"
+    if verdict is None or not bp.exists():
+        return None
+    key = _sizer_key(d, cfg, bp)
+    return verdict if key and verdict.get("brief_sha") == key else None
+
+
 def _sizer_key(d: Path, cfg: Config, bp: Path) -> str:
     """The cache key for a sizing verdict, or "" when the inputs cannot be fingerprinted.
 

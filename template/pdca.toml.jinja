@@ -155,6 +155,20 @@ sweep_worktrees = "clean"
 # against the disposition value. Retune this list to your tracker's vocabulary; omit it
 # to use the built-in default shown here.
 # close_dispositions = ["likely-close", "wontfix", "by-design", "duplicate", "not-reproducible", "manual-verification", "upstream", "external"]
+# Pre-dispatch size advisory (#321): "off" (default) | "warn". With "warn" the driver
+# prints an oversize note before Do, naming which signal fired, and proceeds. There is
+# deliberately NO blocking mode: calibrated over 86 real bundles the structural signal
+# peaks at 62% precision — nearly one wrong hold per right one — and a gate at that rate is
+# one people learn to override.
+#
+# Placed at the END of [driver] but INSIDE it — a key after the next `[table]` header
+# belongs to that table, so this sat in `publisher.checkouts` and `driver.size_guard`
+# was absent: setting it to "warn" did nothing at all. Not beside `lanes` either, `copier update` merges
+# three ways, so a NEW line adjacent to a line instances commonly edit (and `lanes` is the
+# most edited in this table) lands as a git conflict marker in pdca.toml — after which
+# every `pdca` command dies at config load. Add new keys here, away from the contested ones.
+size_guard = "off"
+
 
 # Install bootstrap (issue #207). `make install` runs scripts/bootstrap-tools.sh, which
 # provisions the harness-universal tools (git, gh, a pip-capable venv) and the leaf backends
@@ -260,18 +274,7 @@ base_remote = "{{ 'upstream' if contribution_model == 'fork' else 'origin' }}"
 # Set PDCA_LEAVES_MODE=stub to force stubs everywhere (CI / `make` determinism).
 #
 # Headless leaves ----------------------------------------------------------------
-# Do builder — writes patch.diff + test + build-notes.md:# Pre-dispatch size advisory (#321): "off" (default) | "warn". With "warn" the driver
-# prints an oversize note before Do, naming which signal fired, and proceeds. There is
-# deliberately NO blocking mode: calibrated over 86 real bundles the structural signal
-# peaks at 62% precision — nearly one wrong hold per right one — and a gate at that rate is
-# one people learn to override.
-#
-# Deliberately placed at the END of [driver], not beside `lanes`. `copier update` merges
-# three ways, so a NEW line adjacent to a line instances commonly edit (and `lanes` is the
-# most edited in this table) lands as a git conflict marker in pdca.toml — after which
-# every `pdca` command dies at config load. Add new keys here, away from the contested ones.
-size_guard = "off"
-
+# Do builder — writes patch.diff + test + build-notes.md:
 
 [leaves.builder]
 mode = "{{ leaves_mode }}"
