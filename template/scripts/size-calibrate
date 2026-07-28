@@ -64,6 +64,10 @@ from pathlib import Path
 try:
     from pdca_harness import autoiterate, brief, state, waves
     from pdca_harness.config import Config
+    # ONE definition of "rounds attributable to the current brief", shared with the
+    # runtime backstop (#324). This file defined it; the estimator was counting every
+    # archive, so it measured a different quantity from the one these thresholds describe.
+    from pdca_harness.size_signal import iteration_rounds
 except ImportError as exc:  # pragma: no cover - environment error, not logic
     sys.exit(f"size-calibrate: cannot import pdca_harness ({exc}).\n"
              "Run with the harness on PYTHONPATH, e.g. "
@@ -268,25 +272,6 @@ def _clauses(block: str) -> int:
     Counting bare separators would make a single-clause criterion (0 separators)
     indistinguishable from a field that is not there at all."""
     return _CLAUSE_SEP.subn("", block)[1] + 1 if block.strip() else 0
-
-
-def iteration_rounds(d: Path) -> tuple[int, int]:
-    """``(rounds attributable to the current brief, replan count)``.
-
-    An iterate-to-**Do** archives the attempt and keeps the brief; an iterate-to-**Plan**
-    archives the brief too (``driver._archive_iteration(include_brief=True)``) and the bundle is
-    re-planned from scratch. So an archive containing a ``brief.md`` marks a boundary: rounds
-    before it were spent on a DIFFERENT brief and must not be charged to the one on disk now.
-    Counting every archive would attribute a predecessor's churn to a brief that never caused it.
-    """
-    archives = []
-    for a in d.glob("iteration-v*"):
-        m = _ITERATION_DIR.match(a.name)
-        if m and a.is_dir():
-            archives.append((int(m.group(1)), a))
-    replans = [n for n, a in archives if (a / "brief.md").is_file()]
-    boundary = max(replans, default=0)
-    return sum(1 for n, _ in archives if n > boundary), len(replans)
 
 
 @dataclass(frozen=True)

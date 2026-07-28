@@ -320,6 +320,10 @@ class Config:
     # table so an instance can retune against its OWN corpus without patching the engine —
     # the whole point of #324's calibration loop. Empty => sizing.DEFAULT_* apply.
     sizing: dict = field(default_factory=dict)
+    # Empirical Check-time backstop thresholds ([driver.size_signal], issue #324). Same
+    # shape and same reason as `sizing` above: an instance retunes against its own corpus.
+    # Empty => size_signal.DEFAULT_THRESHOLDS apply.
+    size_signal: dict = field(default_factory=dict)
     # Pre-dispatch size advisory ([driver].size_guard, #321): "off" (default) | "warn".
     # Default OFF, not "warn": a rendered default that emits output and consults a leaf
     # would change behaviour for every instance taking a `copier update` — the property
@@ -560,6 +564,7 @@ class Config:
         close_dispositions = list(
             driver_cfg.get("close_dispositions", DEFAULT_CLOSE_DISPOSITIONS))
         sizing = dict(driver_cfg.get("sizing", {}))
+        size_signal = dict(driver_cfg.get("size_signal", {}))
         size_guard = str(driver_cfg.get("size_guard", "off"))
         dependency_guard = str(driver_cfg.get("dependency_guard", "hold"))
 
@@ -624,6 +629,7 @@ class Config:
             doctor_min_free_gb=doctor_min_free_gb,
             close_dispositions=close_dispositions,
             sizing=sizing,
+            size_signal=size_signal,
             size_guard=size_guard,
             dependency_guard=dependency_guard,
             families={k.strip().lower(): dict(v)

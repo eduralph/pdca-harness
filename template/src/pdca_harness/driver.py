@@ -16,7 +16,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import assemble, brief, gates, leaves, plan_policy, signoff, state
+from . import assemble, brief, gates, leaves, plan_policy, signoff, size_signal, state
 from .config import Config
 
 
@@ -80,6 +80,11 @@ def advance(d: Path, cfg: Config) -> None:
         else:
             _say(f"→ {d.name}: Check — running gates…")
             gates.run_gates(d, cfg)  # deterministic gates
+            # Measure what the patch ACTUALLY came to, before the reviewer runs (#324).
+            # Recorded here rather than recomputed at assembly so §6 and any later audit
+            # read the same numbers the decision was made on. Advisory only: it raises a
+            # §6 HUMAN item, and the human decides whether to split.
+            _size_backstop(d, cfg)
             _say(f"→ {d.name}: Check — advisory reviewer{_headless_note(cfg.reviewer)}…")
             leaves.run_review(d, cfg)  # leaf 2 — reviewer (advisory)
             if cfg.advisory_leaves:  # optional extra advisory reviewers (issue #64)
@@ -219,6 +224,19 @@ def _is_manual_verification(close_class: str) -> bool:
 # Iterate transitions — a deliberate ARCHIVE, not a delete: the previous attempt is
 # moved into iteration-v<N>/ so a rejected attempt is preserved, never lost.
 # ----------------------------------------------------------------------------
+def _size_backstop(d: Path, cfg: Config) -> None:
+    """Record the empirical size signal and say so when it has crossed a threshold.
+
+    The §6 item is raised by `assemble.collect_needs_human`, not here — one classifier, so
+    the rendered §6 and the auto-iterate decision can never disagree. This writes the
+    evidence and gives the operator the same warning at the point it is measured.
+    """
+    reasons = size_signal.oversize_reasons(size_signal.record(d, cfg), cfg)
+    if reasons:
+        _say(f"→ {d.name}: size backstop — {'; '.join(reasons)}. "
+             "Raising a §6 NEEDS-HUMAN item; auto-iterate will decline.")
+
+
 def _next_iteration_no(d: Path) -> int:
     """Next iteration number = (count of existing iteration-v* archives) + 1."""
     return len(list(d.glob("iteration-v*"))) + 1

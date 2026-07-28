@@ -26,8 +26,8 @@ import threading
 from pathlib import Path
 
 from . import (act, assemble, autoiterate, brief, driver, gates, integrate, lane, leaves,
-               merge, merged, preflight, publish, queue, signoff, sources, state, sweep,
-               waves)
+               merge, merged, preflight, publish, queue, signoff, size_signal, sources,
+               state, sweep, waves)
 from .config import Config
 
 
@@ -240,6 +240,17 @@ def _maybe_auto_iterate(
               f"not auto-iterating", file=sys.stderr)
         return False
     if not autoiterate.eligible(items):
+        # Say WHY when it was the size backstop (#324). This rule fires at 2 rounds while
+        # `max_auto_iters` defaults to 3, so it deliberately stops the loop with a round
+        # still nominally available — and an operator who set that number and sees the
+        # loop halt early has to be able to read the reason, or their setting simply
+        # appears not to work. Every other decline is an ordinary HUMAN finding the human
+        # is about to read in §6 anyway.
+        for item in items:
+            if size_signal.is_size_item(item.text):
+                print(f"flow: {d.name} — not auto-iterating: {item.text}",
+                      file=sys.stderr)
+                break
         return False
     spent = autoiterate.count(d)
     if spent >= cfg.max_auto_iters:
