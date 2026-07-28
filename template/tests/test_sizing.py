@@ -320,12 +320,32 @@ class SecondReviewFixes(unittest.TestCase):
         """For a pointer brief THAT document is the plan; sizing the pointer alone scores a
         three-migration project as one small slice."""
         from pdca_harness import leaves
-        d = Path(tempfile.mkdtemp())
+        from pdca_harness.config import Config, LeafConfig
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        cfg = Config(root=tmp, bundle_root=tmp / "results", process_dir=tmp / "process",
+                     templates_dir=tmp / "templates", default_branch="main",
+                     tracker_system="github", tracker_url="", issue_id_example="#1",
+                     builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
         (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
-        self.assertNotIn("planning artifact", leaves._sizer_prompt(d).lower())
+        self.assertNotIn("planning artifact", leaves._sizer_prompt(d, cfg).lower())
+
+        # The RESOLVED path, not the brief's target-relative string: the leaf runs with the
+        # bundle as its cwd, so `docs/migration.md` names a file it cannot open — while the
+        # cache key hashes the one it resolved. Both go through `_artifact_path` now.
+        (d / "migration.md").write_text("the real plan\n", encoding="utf-8")
         (d / "brief.md").write_text(
-            "- **Slug:** s\n- **Planning artifact:** docs/migration.md\n", encoding="utf-8")
-        self.assertIn("docs/migration.md", leaves._sizer_prompt(d))
+            "- **Slug:** s\n- **Planning artifact:** migration.md\n", encoding="utf-8")
+        self.assertIn(str(d / "migration.md"), leaves._sizer_prompt(d, cfg))
+
+        # A URL cannot be opened either; say so rather than naming an unreachable path.
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Planning artifact:** https://example/plan\n",
+            encoding="utf-8")
+        prompt = leaves._sizer_prompt(d, cfg)
+        self.assertIn("not readable from here", prompt)
+        self.assertNotIn("https://example/plan)", prompt)
 
 
 class ThirdReviewFixes(unittest.TestCase):

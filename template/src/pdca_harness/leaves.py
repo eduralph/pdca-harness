@@ -776,13 +776,28 @@ def _explicit_model_variant(d: Path, cfg: Config) -> dict | None:
 SIZING_FILE = "sizing.json"
 
 
-def _sizer_prompt(d: Path) -> str:
+def _pointer_clause(d: Path, cfg: Config) -> str:
+    """What to tell the sizer about a pointer brief's planning artifact."""
+    artifact = brief.planning_artifact(d / "brief.md")
+    if not artifact:
+        return ""
+    resolved = _artifact_path(d, cfg, artifact)
+    if resolved is None:
+        # Say so rather than naming a path the leaf cannot open: a URL, or an artifact
+        # outside the tree. Sizing the pointer alone is then the honest answer, and the
+        # verdict is not cached because neither the model nor the digest saw the plan.
+        return (f" — the brief points at `{artifact}`, which is not readable from here, so "
+                "size what the brief itself states and say in `confidence` that the "
+                "authoritative plan was unavailable")
+    return (f" AND the planning artifact it points at ({resolved}) — for a pointer brief "
+            "THAT document is the plan, and sizing the pointer alone would score a "
+            "three-migration project as one small slice")
+
+
+def _sizer_prompt(d: Path, cfg: Config) -> str:
     return (
         "You are the SIZER. Read " + str(d / "brief.md")
-        + (f" AND the planning artifact it points at ({_pointer}) — for a pointer brief "
-           "THAT document is the plan, and sizing the pointer alone would score a "
-           "three-migration project as one small slice"
-           if (_pointer := brief.planning_artifact(d / "brief.md")) else "")
+        + _pointer_clause(d, cfg)
         + ". Answer ONE question: "
         "how many INDEPENDENTLY SHIPPABLE outcomes does this brief describe? An outcome is "
         "independently shippable if it could be its own PR — its own defect, its own success "
@@ -928,17 +943,38 @@ def _sizer_key(d: Path, cfg: Config, bp: Path) -> str:
     artifact = brief.planning_artifact(bp)
     if not artifact:
         return h.hexdigest()[:16]
+    resolved = _artifact_path(d, cfg, artifact)
+    if resolved is None:
+        return ""
+    try:
+        h.update(resolved.read_bytes())
+    except OSError:
+        return ""
+    return h.hexdigest()[:16]
+
+
+def _artifact_path(d: Path, cfg: Config, artifact: str) -> Path | None:
+    """The planning artifact as a path the LEAF can open, or None.
+
+    Resolved against the bundle first and then the target checkout, and returned ABSOLUTE
+    — the sizer runs with the bundle as its cwd, so handing it the brief's target-relative
+    string (`docs/adr/0042.md`) names a file it cannot find. The prompt and the cache key
+    both go through here, or the key hashes a document the model never read.
+
+    A URL, or a path that resolves nowhere, yields None: the leaf then sizes the brief
+    alone and the verdict is not cached, since neither the model nor the digest can see
+    what the pointer points at.
+    """
     for root in (d, rubric_mod._target_root(d, cfg)):
         if root is None:
             continue
         try:
             candidate = (Path(root) / artifact).resolve()
             if candidate.is_file():
-                h.update(candidate.read_bytes())
-                return h.hexdigest()[:16]
+                return candidate
         except (OSError, ValueError):
             continue
-    return ""
+    return None
 
 
 def _stamp(d: Path, verdict: dict | None, digest: str) -> dict | None:
@@ -972,7 +1008,7 @@ def _sizer_pass(leaf: LeafConfig, d: Path, cfg: Config, label: str) -> dict | No
     """
     (d / SIZING_FILE).unlink(missing_ok=True)
     try:
-        _invoke(leaf, d, _sizer_prompt(d), cfg=cfg, label=label)
+        _invoke(leaf, d, _sizer_prompt(d, cfg), cfg=cfg, label=label)
     except Exception as exc:  # noqa: BLE001 — an advisory leaf never aborts the beat
         print(f"leaves: {label} did not run ({exc}) — continuing on the structural "
               "estimate alone", file=sys.stderr)
