@@ -47,6 +47,7 @@ from pathlib import Path
 
 from . import act as act_mod
 from . import rubric as rubric_mod
+from . import sizing, split
 from . import assemble
 from . import brief
 from . import families
@@ -810,7 +811,8 @@ def _sizer_prompt(d: Path, cfg: Config) -> str:
         '"proposed_seams": ["…"], "confidence": "low|medium|high"}\n\n'
         "band: `ok` = one outcome. `watch` = arguably two, or one with a large uncertain "
         "surface. `oversized` = two or more that could each ship alone.\n"
-        "Propose seams; do NOT cut them — splitting is the human's call at sign-off."
+        "Propose seams; do NOT cut them — the split is authored in PLAN, by the human, "
+        "before Do dispatches."
     )
 
 
@@ -1037,6 +1039,110 @@ def _stub_sizer(d: Path) -> dict | None:
                "confidence": "low", "stub": True}
     (d / SIZING_FILE).write_text(json.dumps(verdict, indent=2) + "\n", encoding="utf-8")
     return verdict
+
+
+def _split_prompt(d: Path, cfg: Config) -> str:
+    tpl = cfg.templates_dir / "split-proposal.md.tpl"
+    # READ the sizer's stored verdict, never re-invoke it: the leaf that judged this slice
+    # oversized already answered "how many independently shippable outcomes?" and proposed
+    # where they divide. Sizing the brief again here would pay a second model to rediscover
+    # what the first one wrote down — and the splitter is the one consumer that needs those
+    # seams most.
+    # `current_sizing`, not the raw read: after an iterate-plan the brief changes while
+    # `sizing.json` stays, and handing the splitter seams drawn from a replaced brief tells
+    # it the old decomposition describes the current one.
+    verdict = current_sizing(d, cfg) or {}
+    est = sizing.combine(sizing.estimate(d / "brief.md", cfg), verdict or None)
+    # LIST or nothing. The verdict is model output and the contract tolerates an untidy
+    # schema — but tolerant has to mean ignored, not iterated: `proposed_seams: 1` raised
+    # TypeError here, and `do_split` has already unlinked the previous proposal by then.
+    _out = verdict.get("independent_outcomes")
+    _seam = verdict.get("proposed_seams")
+    outcomes = [str(o) for o in _out] if isinstance(_out, list) else []
+    seams = [str(s_) for s_ in _seam] if isinstance(_seam, list) else []
+    prior = ""
+    if outcomes or seams:
+        prior = (
+            "\n\nThe sizer has already looked at this brief. Treat its answer as a "
+            "STARTING POINT, not a verdict to ratify — it saw only the brief, you may "
+            "disagree, and saying so with a reason is more useful than agreeing.\n"
+            + ("  outcomes it identified: " + "; ".join(outcomes) + "\n" if outcomes else "")
+            + ("  seams it proposed: " + "; ".join(seams) + "\n" if seams else ""))
+    return (
+        f"You are the SPLITTER. Read {d / 'brief.md'}. This slice has been judged too "
+        "large to build as one cycle. The driver sized it "
+        f"{est.band}: {'; '.join(est.reasons) or 'no structural signal'}.{prior}\n\n"
+        f"Fill {tpl} and write the result to {d / split.PROPOSAL} — exactly one file, "
+        "nothing else. Do NOT create bundles, branches or tracker items, and do NOT edit "
+        "brief.md: Do does not split, Do reports. Splitting is the human's call at "
+        "sign-off.\n\n"
+        "Each child must be independently shippable — its own defect, success criterion, "
+        "test and PR. Prefer fewer, larger children: each costs a full cycle, so a split "
+        "into six that could have been two is its own kind of oversizing.\n\n"
+        "The `Depends on:` / `Conflicts with:` fields BETWEEN children are the point. Get "
+        "them right and the scheduler needs no new code — independent children run in one "
+        "parallel wave, dependent ones stack. Keep the `<!-- pdca:child … -->` delimiters "
+        "exactly as the template writes them: a child body is a full draft brief and may "
+        "contain arbitrary headings and fenced code, so nothing that could appear inside a "
+        "child can mark its edge."
+    )
+
+
+def do_split(d: Path, cfg: Config) -> int:
+    """Run the splitter leaf over a briefed bundle (#322). Returns a process code."""
+    if not (d / "brief.md").exists():
+        print(f"split: {d.name} has no brief.md to split", file=sys.stderr)
+        return 1
+    # A frozen bundle is history. Writing a fresh proposal into a COMPLETE or DISCONTINUED
+    # record — and letting --accept overwrite its close marker and build notes — would
+    # rewrite an audit trail and spawn work nobody asked for.
+    st = state.state(d)
+    if st in (state.COMPLETE, state.DISCONTINUED, state.RESOLVED):
+        print(f"split: {d.name} is {st} — refusing to split a frozen bundle",
+              file=sys.stderr)
+        return 1
+    # Clear any previous proposal FIRST: `_invoke` ignores an interactive leaf's exit code,
+    # so a cancelled rerun would otherwise leave the old file in place and report success,
+    # and --accept would materialise a proposal for an earlier version of the brief.
+    (d / split.PROPOSAL).unlink(missing_ok=True)
+    if cfg.splitter.mode == "command":
+        _invoke(cfg.splitter, d, _split_prompt(d, cfg), cfg=cfg, label="splitter")
+    else:
+        _stub_split(d)
+    if not (d / split.PROPOSAL).exists():
+        print(f"split: the splitter produced no {split.PROPOSAL} in {d}", file=sys.stderr)
+        return 1
+    print(f"{d / split.PROPOSAL}")
+    return 0
+
+
+def _stub_split(d: Path) -> None:
+    """Offline placeholder: a two-child proposal, the second DEPENDING on the first.
+
+    Deliberately not two independent children: a stub whose output produced a single wave
+    would let the round-trip test pass without ever exercising the label→id rewrite, which
+    is the part of `--accept` most worth proving.
+    """
+    (d / split.PROPOSAL).write_text(
+        "<!-- pdca:split-proposal v1 -->\n"
+        f"# Split proposal — {d.name}\n\n## Wave sketch\n\n"
+        "child-2 stacks on child-1 (stub).\n\n"
+        "<!-- pdca:child child-1 -->\n"
+        "- **Slug:** stub-child-one\n"
+        "- **Defect / goal:** the first independently shippable outcome\n"
+        "- **Success criterion:** it ships alone\n"
+        "- **Test file:** tests/test_one.py\n"
+        "- **Difficulty:** low\n"
+        "<!-- pdca:end child-1 -->\n\n"
+        "<!-- pdca:child child-2 -->\n"
+        "- **Slug:** stub-child-two\n"
+        "- **Defect / goal:** the second, which builds on the first\n"
+        "- **Success criterion:** it ships after child-1\n"
+        "- **Test file:** tests/test_two.py\n"
+        "- **Difficulty:** low\n"
+        "- **Depends on:** child-1\n"
+        "<!-- pdca:end child-2 -->\n",
+        encoding="utf-8")
 
 
 def select_builder(d: Path, cfg: Config, n: int) -> LeafConfig:

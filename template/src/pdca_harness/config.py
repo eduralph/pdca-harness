@@ -28,6 +28,11 @@ DEFAULT_CLOSE_DISPOSITIONS = [
     # UPSTREAM = "not this repo's defect", EXTERNAL = "not a defect in scope at all".
     "upstream",
     "external",
+    # NB: "split" is deliberately NOT here. `close_class` SUBSTRING-matches every token, so
+    # a generic "split" would send `likely-fix — split parser failure`, `split-brain
+    # repro` and `not-split` down the close fast path, skipping builder and reviewer for
+    # ordinary fixes. An accepted split writes an explicit close MARKER, which
+    # `driver._close_class` honours outright — no hint token is needed for it (#323 review).
 ]
 
 
@@ -89,6 +94,9 @@ class Config:
     #: The cheap-model size judgment (#320). Absent from pdca.toml => stub => never runs,
     #: so an instance taking a `copier update` gains no model call it did not ask for.
     sizer: LeafConfig = field(default_factory=LeafConfig)
+    #: The splitter (#322) — interactive, like the other human-in-the-loop leaves. Absent
+    #: from pdca.toml => stub => `pdca split` still works offline.
+    splitter: LeafConfig = field(default_factory=LeafConfig)
     signoff: LeafConfig = field(default_factory=LeafConfig)
     publisher: LeafConfig = field(default_factory=LeafConfig)
     act: LeafConfig = field(default_factory=LeafConfig)
@@ -597,6 +605,7 @@ class Config:
             plan_advisory_selection=plan_advisory_selection,
             builder_escalation=builder_escalation,
             sizer=leaf("sizer"),
+            splitter=leaf("splitter"),
             sizer_escalation=sizer_escalation,
             builder_variants=builder_variants,
             gates_runner=gates_runner,
