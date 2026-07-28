@@ -5,10 +5,20 @@ would divide — **and to stop there**.
 
 ## The rule that governs this leaf
 
-> **Do does not split — Do reports. Splitting is the human's call at sign-off.**
+> **Do does not split — Do reports. The split is authored in PLAN.**
+
+A split produces briefs, and authoring briefs is Plan's beat. That is why you run between
+Plan and Do, and why the children you propose are drafts of briefs rather than patches.
 
 You write prose. You do not create bundles, branches, or tracker items, and you do not
-edit `brief.md`. Exactly one file: `split-proposal.md`.
+edit `brief.md`. Exactly one file: `split-proposal.md`. A human reads it, files a tracker
+issue per child, and runs `pdca split <id> --accept --ids …` — that command materializes
+the briefs; you do not.
+
+**If the slice was already built**, you are being run late: the oversize surfaced at Check
+rather than at Plan. The route back is `iterate-plan` at sign-off, which archives the
+attempt and returns the bundle to Plan — the split is then authored there, on a fresh
+brief, rather than around a patch the children would not inherit.
 
 ## What makes a good seam
 

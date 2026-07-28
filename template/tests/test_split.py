@@ -429,5 +429,41 @@ class TheSplitterReadsTheSizer(unittest.TestCase):
         sizer.assert_not_called()
 
 
+class TheDoctrineIsConsistent(unittest.TestCase):
+    """Splitting is a PLAN activity, and every role prompt has to say the same thing.
+
+    The sizer was corrected to "they decide at Plan" in an earlier round while the splitter
+    still said "the human's call at sign-off" — two prompts in one feature disagreeing about
+    when the decision is made. A split authors briefs, and authoring briefs is Plan's beat.
+    """
+
+    AGENTS = Path(__file__).resolve().parents[1] / "agents"
+
+    def _text(self, name: str) -> str:
+        return (self.AGENTS / f"{name}.md.jinja").read_text(encoding="utf-8")
+
+    def test_no_role_prompt_places_the_split_at_sign_off(self) -> None:
+        for role in ("splitter", "sizer"):
+            with self.subTest(role=role):
+                self.assertNotIn("call at sign-off", self._text(role))
+
+    def test_the_splitter_says_the_split_is_authored_in_plan(self) -> None:
+        self.assertIn("authored in PLAN", self._text("splitter"))
+
+    def test_the_splitter_routes_a_late_discovery_through_iterate_plan(self) -> None:
+        """Run after a build, the answer is not "split anyway" — it is to go back to Plan,
+        because the children would inherit nothing from the attempt."""
+        self.assertIn("iterate-plan", self._text("splitter"))
+
+    def test_signoff_maps_too_big_to_iterate_plan(self) -> None:
+        """`iterate-do` is the tempting wrong answer: the findings look
+        implementation-shaped every round, which is how a bundle burns its whole iterate
+        budget without converging."""
+        text = self._text("signoff")
+        self.assertIn("too big is `iterate-plan`", text)
+        self.assertIn("Not `iterate-do`", text)
+        self.assertIn("Not\n`discontinue`", text.replace("—", "—"))
+
+
 if __name__ == "__main__":
     unittest.main()
