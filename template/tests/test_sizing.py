@@ -780,6 +780,40 @@ class CodexReviewFixes(unittest.TestCase):
         self.assertEqual(ap.stem, "brief")
         self.assertEqual(ap.suffix, ".md")
 
+    def test_a_legitimate_heading_MENTIONING_carry_forward_is_not_a_boundary(self) -> None:
+        """`\\s+.*carry-forward` matched `## Iteration 2 plan for carry-forward
+        compatibility` — truncating a brief at a heading the driver never wrote, and
+        scoring a large slice as small. The separator must be a dash, as the driver
+        writes it."""
+        big = "x" * 20000
+        for heading in ("## Iteration 2 plan for carry-forward compatibility",
+                        "## Iteration 3 notes on carry-forward semantics",
+                        "## Iteration strategy"):
+            with self.subTest(heading=heading):
+                p = Path(tempfile.mkdtemp()) / "brief.md"
+                p.write_text(f"- **Slug:** s\n\n{heading}\n\n{big}\n", encoding="utf-8")
+                self.assertIn(big, sizing.apriori_text(p),
+                              "a legitimate heading was treated as carry-forward")
+
+    def test_every_dash_the_driver_or_a_human_writes_is_a_boundary(self) -> None:
+        for dash in ("\u2014", "\u2013", "-"):
+            with self.subTest(dash=dash):
+                p = Path(tempfile.mkdtemp()) / "brief.md"
+                p.write_text(f"above\n## Iteration 2 {dash} carry-forward\nbelow\n",
+                             encoding="utf-8")
+                self.assertEqual(sizing.apriori_text(p), "above")
+
+    def test_the_drivers_exact_heading_is_a_boundary(self) -> None:
+        """Read from `driver` rather than restated, so the two cannot drift."""
+        from pdca_harness import driver
+        import inspect
+        self.assertIn("## Iteration {n} \u2014 carry-forward",
+                      inspect.getsource(driver._carry_forward_into_brief))
+        p = Path(tempfile.mkdtemp()) / "brief.md"
+        p.write_text("above\n## Iteration 2 \u2014 carry-forward (from the previous "
+                     "attempt)\nbelow\n", encoding="utf-8")
+        self.assertEqual(sizing.apriori_text(p), "above")
+
     def test_the_case_insensitive_heading_is_the_shared_behaviour(self) -> None:
         """The two copies had drifted — the calibrator matched MULTILINE, the estimator
         MULTILINE|IGNORECASE. The shared definition keeps the WIDER match, so a heading

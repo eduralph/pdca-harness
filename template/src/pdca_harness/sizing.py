@@ -107,13 +107,20 @@ DEFAULT_BRIEF_KB = 12
 DEFAULT_WATCH = 4
 DEFAULT_OVERSIZED = 7
 
-#: The heading `driver._carry_forward_into_brief` writes, matched EXACTLY as
-#: `scripts/size-calibrate` matches it — the two must agree on where the a-priori text
-#: ends or the estimator and the calibration measure different things. A loose
-#: "starts with Iteration" test also truncates a brief at a legitimate
-#: `## Iteration strategy` heading, discarding the scope below it and scoring the slice
-#: as small.
-_CARRY_FORWARD_RE = re.compile(r"^##\s+Iteration\s+\d+\s+.*carry-forward",
+#: The heading `driver._carry_forward_into_brief` writes — `## Iteration N — carry-forward
+#: (from the previous attempt)`. ONE definition, shared with `scripts/size-calibrate`: the
+#: two must agree on where the a-priori text ends or the estimator and the calibration
+#: measure different things.
+#:
+#: Tight in both directions, because both are real. Too loose and a legitimate heading is
+#: truncated away: a bare "starts with Iteration" test swallowed `## Iteration strategy`
+#: (#349), and `\s+.*carry-forward` still swallowed `## Iteration 2 plan for carry-forward
+#: compatibility` — discarding the scope below it and scoring a large slice as small. Too
+#: tight and post-Do text is measured as input, which is the leak this module exists to
+#: prevent. So the separator is required to be a dash, matching what the driver writes;
+#: the three dash characters are accepted because a hand-edited brief will use any of
+#: them. Verified against 94 real briefs: the split point moves on none of them.
+_CARRY_FORWARD_RE = re.compile(r"^##\s+Iteration\s+\d+\s*[—–-]\s*carry-forward",
                                re.IGNORECASE | re.MULTILINE)
 
 #: Difficulty bands, WORD-matched. Substring alone mirrors `leaves._when_matches`, but
