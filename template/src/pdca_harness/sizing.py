@@ -117,10 +117,22 @@ DEFAULT_OVERSIZED = 7
 #: (#349), and `\s+.*carry-forward` still swallowed `## Iteration 2 plan for carry-forward
 #: compatibility` — discarding the scope below it and scoring a large slice as small. Too
 #: tight and post-Do text is measured as input, which is the leak this module exists to
-#: prevent. So the separator is required to be a dash, matching what the driver writes;
-#: the three dash characters are accepted because a hand-edited brief will use any of
-#: them. Verified against 94 real briefs: the split point moves on none of them.
-_CARRY_FORWARD_RE = re.compile(r"^##\s+Iteration\s+\d+\s*[—–-]\s*carry-forward",
+#: prevent.
+#:
+#: So the rule is stated as itself: after the number, NOTHING BUT PUNCTUATION before
+#: `carry-forward`. `[^\w\n]*` is that sentence — prose cannot intervene, because prose
+#: contains word characters, so `## Iteration 2 plan for carry-forward compatibility` is
+#: rejected; and every separator a human might type is accepted without enumerating them.
+#:
+#: Enumerating was the mistake. Requiring a dash missed `## Iteration 2 carry-forward`;
+#: allowing an optional dash still missed `## Iteration 2 : carry-forward`. Each was a
+#: MISS, which is the leak direction and the more expensive of the two errors — and each
+#: was a new guess at which punctuation a human would choose. `\n` is excluded because
+#: `[^\w]` matches newlines, and without that the scan would run past the heading's own
+#: line into the body.
+#:
+#: Verified against 94 real briefs: the split point moves on none of them.
+_CARRY_FORWARD_RE = re.compile(r"^##\s+Iteration\s+\d+[^\w\n]*carry-forward",
                                re.IGNORECASE | re.MULTILINE)
 
 #: Difficulty bands, WORD-matched. Substring alone mirrors `leaves._when_matches`, but

@@ -795,13 +795,25 @@ class CodexReviewFixes(unittest.TestCase):
                 self.assertIn(big, sizing.apriori_text(p),
                               "a legitimate heading was treated as carry-forward")
 
-    def test_every_dash_the_driver_or_a_human_writes_is_a_boundary(self) -> None:
-        for dash in ("\u2014", "\u2013", "-"):
-            with self.subTest(dash=dash):
+    def test_ANY_punctuation_between_the_number_and_the_label_is_a_boundary(self) -> None:
+        """Two rounds were lost guessing which punctuation a human would type. Requiring a
+        dash missed `## Iteration 2 carry-forward`; allowing an optional dash still missed
+        `## Iteration 2 : carry-forward`. Each was a MISS — the leak direction, and the
+        more expensive error. The rule is stated as itself: nothing but punctuation."""
+        for sep in ("\u2014", "\u2013", "-", "", ":", " :", "...", " \u2014 ", "--"):
+            with self.subTest(sep=repr(sep)):
                 p = Path(tempfile.mkdtemp()) / "brief.md"
-                p.write_text(f"above\n## Iteration 2 {dash} carry-forward\nbelow\n",
+                p.write_text(f"above\n## Iteration 2 {sep} carry-forward\nbelow\n",
                              encoding="utf-8")
                 self.assertEqual(sizing.apriori_text(p), "above")
+
+    def test_the_scan_never_runs_past_the_headings_own_line(self) -> None:
+        """`[^\\w]` matches newlines, so without excluding them the boundary would match a
+        heading on one line and the word `carry-forward` several lines below it."""
+        p = Path(tempfile.mkdtemp()) / "brief.md"
+        p.write_text("above\n## Iteration 2\n\nsome prose about carry-forward\n",
+                     encoding="utf-8")
+        self.assertIn("some prose", sizing.apriori_text(p))
 
     def test_the_drivers_exact_heading_is_a_boundary(self) -> None:
         """Read from `driver` rather than restated, so the two cannot drift."""
