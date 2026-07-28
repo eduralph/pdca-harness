@@ -367,7 +367,10 @@ argv = []
 # run in one parallel wave, dependent ones stack.
 #
 # It proposes seams and never cuts them: no bundles, no branches, no tracker calls.
-# `pdca split <id> --accept --ids 640,641` is the deterministic half that materializes them.
+# `pdca split <id> --accept` is the deterministic half: it files one tracker issue per child
+# as a SUB-ISSUE of the parent, materializes a bundle each, and the run continues into waves
+# by itself (#358). Pass `--ids 640,641` instead when the issues already exist — or when the
+# tracker is not a GitHub one this can reach, in which case it says so rather than skipping.
 [leaves.splitter]
 mode = "{{ leaves_mode }}"
 family = "{{ interactive_family }}"

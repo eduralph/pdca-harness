@@ -188,9 +188,12 @@ def main(argv: list[str] | None = None) -> int:
                              help="propose a split for an oversized slice, then materialize it (#322/#323)")
     p_split.add_argument("issue_id")
     p_split.add_argument("--accept", action="store_true",
-                         help="materialize the proposal's children (needs --ids)")
+                         help="materialize the proposal's children; files their tracker "
+                              "issues too unless --ids says they already exist")
     p_split.add_argument("--ids", default="",
-                         help="comma-separated tracker ids, one per child, IN PROPOSAL ORDER")
+                         help="comma-separated tracker ids, one per child, IN PROPOSAL "
+                              "ORDER. Omit to have the child issues filed for you, each as "
+                              "a sub-issue of the parent")
 
     p_status = sub.add_parser("status", help="list bundle states (cheap-first queue)")
     p_status.add_argument("issue_id", nargs="?")
@@ -635,12 +638,18 @@ def _prog() -> str:
 
 
 def _split(cfg: Config, args) -> int:
-    """`pdca split <id>` drafts a proposal; `--accept --ids …` materializes it.
+    """`pdca split <id>` drafts a proposal; `--accept` materializes it.
 
     Two verbs in one because they are two halves of one decision and the second is
-    meaningless without the first: the human reads the proposal, then accepts it with the
-    tracker ids they filed. Every PR needs its own issue, and child slices are no
-    exception — which is why the ids come from the human rather than being invented here.
+    meaningless without the first: the human reads the proposal, then accepts it.
+
+    Every PR needs its own issue, and child slices are no exception. Without `--ids` this
+    now FILES those issues — one per child, each a real sub-issue of the parent (#358).
+    #323 left that to the human to keep the tracker the source of truth; inside an
+    interactive Plan session that objection is much weaker (the human is present and
+    approving) and the friction is real — leave the session, file N issues by hand, come
+    back with the numbers. `--ids` stays for a human who has already filed them, and is
+    REQUIRED for a tracker this cannot reach.
     """
     d = cfg.bundle(args.issue_id)
     if not args.accept:
@@ -663,14 +672,72 @@ def _split(cfg: Config, args) -> int:
             token = token[len("issue_"):]
         if token:
             ids.append(token)
+    filed = False
     if not ids:
-        print("split: --accept needs --ids <id>[,<id>…], one per child in proposal order",
-              file=sys.stderr)
-        return 1
+        # No ids given: file one issue per child, parented to this bundle's issue. Reading
+        # the proposal here rather than inside `accept` so a malformed one is refused
+        # BEFORE anything is filed — a tracker issue cannot be rolled back, and creating
+        # three of them for a proposal that then fails to parse is the worst order.
+        try:
+            children = split.parse((d / split.PROPOSAL).read_text(encoding="utf-8"))
+            # Every reason acceptance would fail that does not need the ids — run BEFORE a
+            # single issue is filed. Without it, a second `--accept` filed a whole second
+            # set of real sub-issues and only then discovered the parent was already
+            # split; a cyclic proposal filed its children before `validate` refused them.
+            # Tracker issues cannot be withdrawn, so the order is the whole guarantee.
+            split.preflight(d, children, cfg)
+        except OSError:
+            print(f"split: {d.name} has no {split.PROPOSAL} — run "
+                  f"`{_prog()} split {args.issue_id}` first", file=sys.stderr)
+            return 1
+        except split.SplitError as exc:
+            print(f"split: {exc}", file=sys.stderr)
+            return 1
+        try:
+            ids = split.file_children(d, children, cfg, prog=_prog())
+        except split.TrackerUnavailable as exc:
+            # Never a silent skip: name the reason AND the way forward. A split that
+            # filed nothing and materialised nothing would otherwise look like a no-op.
+            print(f"split: {exc}. File one issue per child yourself and pass them in "
+                  f"proposal order:\n  {_prog()} split {args.issue_id} --accept --ids "
+                  + ",".join(f"<id-{n}>" for n in range(1, len(children) + 1)),
+                  file=sys.stderr)
+            return 1
+        except split.SplitError as exc:
+            print(f"split: {exc}", file=sys.stderr)
+            return 1
+        filed = True
+        try:
+            print(f"filed {len(ids)} child issue(s): "
+                  + ", ".join("#" + i for i in ids), file=sys.stderr)
+        except OSError:
+            # A closed or full stderr must not abort the run HERE: the issues exist, and
+            # stopping between filing and accepting is the one state with no artifact
+            # naming them. Carry on; the failure paths below re-print the numbers.
+            pass
     try:
         created = split.accept(d, ids, cfg)
     except split.SplitError as exc:
         print(f"split: {exc}", file=sys.stderr)
+        if filed:
+            # The issues are real and cannot be withdrawn. Say so explicitly and give the
+            # command that resumes against them, or they are orphaned with nothing on
+            # screen naming them — the one failure this feature must not have.
+            print("split: the child issues were already filed and CANNOT be rolled back: "
+                  + ", ".join("#" + i for i in ids) + ".", file=sys.stderr)
+            if "already marked" in str(exc):
+                # `preflight` passed and `accept` then found the parent terminal, so
+                # ANOTHER acceptance won the race between them. Printing the ordinary
+                # retry here would be a false instruction: it cannot succeed against an
+                # already-split parent, and following it would file a third set.
+                print("split: the parent was marked split by another run while these were "
+                      "being filed, so its children already exist. Do NOT re-run --accept: "
+                      "close the issues above as duplicates, or reopen the parent if this "
+                      "run's split is the one you want.", file=sys.stderr)
+            else:
+                print("Fix the problem above, then re-run against them:\n"
+                      f"  {_prog()} split {args.issue_id} --accept --ids {','.join(ids)}",
+                      file=sys.stderr)
         return 1
     for child in created:
         print(child)
