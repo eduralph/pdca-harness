@@ -542,6 +542,12 @@ class BatchSweep(_Base):
         check fired and the wave returned after only TWO auto rounds, stranding the bundle
         with both `max_auto_iters` and `max_passes` budget to spare."""
         self.cfg.max_auto_iters = 3
+        # The size backstop is switched OFF for this bundle: it fires at 2 rounds by
+        # design (#324) and would stop the loop here for a completely different — and
+        # correct — reason, hiding whether the no-progress check still misfires. This test
+        # is about the stuck-wave detector; `test_the_size_backstop_stops_the_loop_early`
+        # in test_size_signal.py asserts the interaction itself.
+        self.cfg.size_signal = {"rounds": 0}
         d = self._bundle("WAVELOOP", gate=_FAIL)     # a gate that stays red across rebuilds
         signed_off: list[str] = []
 

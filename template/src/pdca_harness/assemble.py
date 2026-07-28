@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import NamedTuple
 
-from . import brief, doctor
+from . import brief, doctor, size_signal
 from .config import Config
 from .gates import canonical_elements
 
@@ -213,6 +213,16 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
     for ptext in [p.read_text(encoding="utf-8")
                   for p in sorted(d.glob("plan-advisory-*.md"))]:
         items += _items_from_artifact(ptext)
+    # The empirical size backstop (#324). HUMAN, never IMPL — and that tag is the whole
+    # mechanism: `autoiterate.eligible()` requires every item be IMPL or STANDING, so this
+    # DISQUALIFIES auto-iterate, which is what should happen to a bundle behaving
+    # oversized. Tagged IMPL it would instead count as a reason to rebuild, turning the
+    # backstop into an accelerator for the very failure it exists to stop.
+    # `current`, not `read`: the recorded file wins, but its ABSENCE must not read as
+    # "measured and small". A failed write would otherwise delete the backstop.
+    size_reasons = size_signal.oversize_reasons(size_signal.current(d, cfg), cfg)
+    if size_reasons:
+        items += [NeedsHumanItem(size_signal.needs_human_text(size_reasons), HUMAN)]
     return items
 
 
