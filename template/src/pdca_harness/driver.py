@@ -48,8 +48,23 @@ def advance(d: Path, cfg: Config) -> None:
     # about work that never enters Do. BUILT is covered as well as PLANNED: a partial
     # build lands there and never re-enters PLANNED, and Check is a real spend too.
     if not close and s in (state.PLANNED, state.BUILT):
-        for reason in plan_policy.evaluate(d, cfg):
+        # The paid sizer runs only before Do. The blocking dependency check and the free
+        # structural estimate still run at BUILT — a resumed or partially-built bundle
+        # must not buy a reviewer at xhigh plus an adversary to discover something two
+        # files already answer.
+        reasons = plan_policy.evaluate(d, cfg, before_do=(s == state.PLANNED))
+        for reason in reasons:
             _say(f"⚠ {d.name}: {reason.detail}")
+        # A BLOCKING reason stops the beat; advisories are reported and passed. Only a
+        # deterministic verdict earns a block — the unregistered dependency is set
+        # membership (#333), where the size band is a heuristic that peaks at 62%
+        # precision (#321). The bundle stays in-flight, so registering the row and
+        # re-running is all it takes: the policy is recomputed every beat.
+        blockers = plan_policy.blocking(reasons)
+        if blockers:
+            _say(f"→ {d.name}: held before {'Do' if s == state.PLANNED else 'Check'} — "
+                 f"{len(blockers)} blocking item(s) above; resolve, then re-run.")
+            raise plan_policy.PolicyHold(blockers)
     if s == state.PLANNED:
         if close:
             _say(f"→ {d.name}: close disposition '{close}' — skipping builder leaf (no patch to build)…")
@@ -87,10 +102,32 @@ def advance(d: Path, cfg: Config) -> None:
 
 
 def run_issue(d: Path, cfg: Config) -> str:
-    """Advance until the bundle reaches a halted state; return that state."""
+    """Advance until the bundle halts OR a pre-dispatch policy holds it; return its state.
+
+    Two exits, not one. The ordinary exit is a state in :data:`state.HALTED`. The other is
+    a :class:`plan_policy.PolicyHold` — an unregistered external dependency, say — which
+    leaves the bundle in-flight at PLANNED or BUILT: nothing about a hold changes the state
+    it is held in, so the caller gets a NON-halted state back and must not read it as
+    completion. :func:`held` answers that question for callers that care (``pdca run``
+    exits non-zero on it, so automation does not read a blocked run as a success).
+    """
     while state.state(d) not in state.HALTED:
-        advance(d, cfg)
+        try:
+            advance(d, cfg)
+        except plan_policy.PolicyHold:
+            # The bundle stays in-flight in a NON-halted state, so the loop must exit here
+            # or spin forever: nothing about a hold changes the state it is held in.
+            break
     return state.state(d)
+
+
+def held(final: str) -> bool:
+    """True if ``final`` came back from :func:`run_issue` without the bundle finishing.
+
+    A non-halted state can ONLY mean a policy hold — the loop has no other early exit — so
+    this is the one predicate a caller needs to tell "stopped for a human" from "done".
+    """
+    return final not in state.HALTED
 
 
 # ----------------------------------------------------------------------------

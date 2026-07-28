@@ -320,12 +320,32 @@ class SecondReviewFixes(unittest.TestCase):
         """For a pointer brief THAT document is the plan; sizing the pointer alone scores a
         three-migration project as one small slice."""
         from pdca_harness import leaves
-        d = Path(tempfile.mkdtemp())
+        from pdca_harness.config import Config, LeafConfig
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        cfg = Config(root=tmp, bundle_root=tmp / "results", process_dir=tmp / "process",
+                     templates_dir=tmp / "templates", default_branch="main",
+                     tracker_system="github", tracker_url="", issue_id_example="#1",
+                     builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
         (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
-        self.assertNotIn("planning artifact", leaves._sizer_prompt(d).lower())
+        self.assertNotIn("planning artifact", leaves._sizer_prompt(d, cfg).lower())
+
+        # The RESOLVED path, not the brief's target-relative string: the leaf runs with the
+        # bundle as its cwd, so `docs/migration.md` names a file it cannot open — while the
+        # cache key hashes the one it resolved. Both go through `_artifact_path` now.
+        (d / "migration.md").write_text("the real plan\n", encoding="utf-8")
         (d / "brief.md").write_text(
-            "- **Slug:** s\n- **Planning artifact:** docs/migration.md\n", encoding="utf-8")
-        self.assertIn("docs/migration.md", leaves._sizer_prompt(d))
+            "- **Slug:** s\n- **Planning artifact:** migration.md\n", encoding="utf-8")
+        self.assertIn(str(d / "migration.md"), leaves._sizer_prompt(d, cfg))
+
+        # A URL cannot be opened either; say so rather than naming an unreachable path.
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Planning artifact:** https://example/plan\n",
+            encoding="utf-8")
+        prompt = leaves._sizer_prompt(d, cfg)
+        self.assertIn("not readable from here", prompt)
+        self.assertNotIn("https://example/plan)", prompt)
 
 
 class ThirdReviewFixes(unittest.TestCase):
@@ -388,6 +408,217 @@ class ThirdReviewFixes(unittest.TestCase):
         for model in (None, {}, {"band": ""}, {"band": "enormous"}, "nope", []):
             with self.subTest(model=model):
                 self.assertEqual(sizing.combine(base, model), base)
+
+    def test_a_failed_escalation_restores_the_first_verdict_to_disk(self) -> None:
+        """The escalation pass unlinks the artifact before running, so returning the first
+        verdict only in memory left the bundle without the sizing record it had earned."""
+        from unittest import mock
+        from pdca_harness import leaves
+        from pdca_harness.config import Config, LeafConfig
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        cfg = Config(root=tmp, bundle_root=tmp / "results", process_dir=tmp / "process",
+                     templates_dir=tmp / "templates", default_branch="main",
+                     tracker_system="github", tracker_url="", issue_id_example="#1",
+                     builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        cfg.sizer = LeafConfig(mode="command", family="generic", argv=["true"])
+        cfg.sizer_escalation = [{"on_band": ["watch"], "argv": ["also-true"]}]
+
+        calls = {"n": 0}
+
+        def _fake(leaf, workdir, prompt, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                (Path(workdir) / leaves.SIZING_FILE).write_text(
+                    '{"band": "watch", "confidence": "low"}', encoding="utf-8")
+            else:
+                raise OSError("escalation binary missing")
+
+        with mock.patch.object(leaves, "_invoke", side_effect=_fake):
+            verdict = leaves.run_sizer(d, cfg)
+        self.assertEqual(verdict["band"], "watch")
+        self.assertTrue((d / leaves.SIZING_FILE).exists(),
+                        "the first verdict's artifact was destroyed by a failed escalation")
+
+    def _sizer_cfg(self, tmp: Path):
+        from pdca_harness.config import Config, LeafConfig
+        cfg = Config(root=tmp, bundle_root=tmp / "results", process_dir=tmp / "process",
+                     templates_dir=tmp / "templates", default_branch="main",
+                     tracker_system="github", tracker_url="", issue_id_example="#1",
+                     builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        cfg.sizer = LeafConfig(mode="command", family="generic", argv=["true"])
+        return cfg
+
+    def test_one_paid_verdict_per_brief_not_per_beat(self) -> None:
+        """The policy is evaluated before Do AND before Check, so a naive re-invoke doubles
+        the cost of every cycle — four calls with an escalation — and lets the second
+        nondeterministic answer overwrite the first."""
+        from unittest import mock
+        from pdca_harness import leaves
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        cfg = self._sizer_cfg(tmp)
+        calls = {"n": 0}
+
+        def _fake(leaf, workdir, prompt, **kw):
+            calls["n"] += 1
+            (Path(workdir) / leaves.SIZING_FILE).write_text(
+                '{"band": "watch", "confidence": "high"}', encoding="utf-8")
+
+        with mock.patch.object(leaves, "_invoke", side_effect=_fake):
+            leaves.run_sizer(d, cfg)          # PLANNED
+            leaves.run_sizer(d, cfg)          # BUILT
+            self.assertEqual(calls["n"], 1, "the sizer was paid for twice on one brief")
+            # An iterate rewrites the brief, which must earn a fresh pass.
+            (d / "brief.md").write_text("- **Slug:** s\n- **Difficulty:** high\n",
+                                        encoding="utf-8")
+            leaves.run_sizer(d, cfg)
+            self.assertEqual(calls["n"], 2, "a rewritten brief reused a stale verdict")
+
+    def test_a_verdict_from_another_brief_is_never_reused(self) -> None:
+        """The digest subsumes the stale-artifact problem the unconditional unlink guarded:
+        a verdict left by a different brief simply does not match."""
+        from unittest import mock
+        from pdca_harness import leaves
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        (d / leaves.SIZING_FILE).write_text(
+            '{"band": "oversized", "brief_sha": "deadbeefdeadbeef"}', encoding="utf-8")
+        cfg = self._sizer_cfg(tmp)
+        with mock.patch.object(leaves, "_invoke") as inv:
+            leaves.run_sizer(d, cfg)
+        inv.assert_called_once()
+
+    def test_a_pointer_briefs_artifact_is_part_of_the_cache_key(self) -> None:
+        """For a pointer brief the artifact IS the plan, so hashing brief.md alone reused
+        an `ok` verdict after the artifact grew from one outcome to three — suppressing
+        exactly the advisory the pointer case exists to produce."""
+        from unittest import mock
+        from pdca_harness import leaves
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "plan.md").write_text("one outcome\n", encoding="utf-8")
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Planning artifact:** plan.md\n", encoding="utf-8")
+        cfg = self._sizer_cfg(tmp)
+        calls = {"n": 0}
+
+        def _fake(leaf, workdir, prompt, **kw):
+            calls["n"] += 1
+            (Path(workdir) / leaves.SIZING_FILE).write_text('{"band": "ok"}',
+                                                            encoding="utf-8")
+
+        with mock.patch.object(leaves, "_invoke", side_effect=_fake):
+            leaves.run_sizer(d, cfg)
+            leaves.run_sizer(d, cfg)
+            self.assertEqual(calls["n"], 1, "an unchanged pointer brief re-paid")
+            (d / "plan.md").write_text("one\ntwo\nthree outcomes\n", encoding="utf-8")
+            leaves.run_sizer(d, cfg)
+            self.assertEqual(calls["n"], 2, "the artifact changed but the verdict was reused")
+
+    def test_an_unfetchable_artifact_is_not_cached(self) -> None:
+        """A URL cannot be fingerprinted. Paying for a re-run is the safe direction when
+        the alternative is trusting a verdict whose input may have moved."""
+        from unittest import mock
+        from pdca_harness import leaves
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Planning artifact:** https://example/plan\n",
+            encoding="utf-8")
+        cfg = self._sizer_cfg(tmp)
+        calls = {"n": 0}
+
+        def _fake(leaf, workdir, prompt, **kw):
+            calls["n"] += 1
+            (Path(workdir) / leaves.SIZING_FILE).write_text('{"band": "ok"}',
+                                                            encoding="utf-8")
+
+        with mock.patch.object(leaves, "_invoke", side_effect=_fake):
+            leaves.run_sizer(d, cfg)
+            leaves.run_sizer(d, cfg)
+        self.assertEqual(calls["n"], 2, "an unfingerprintable input was cached anyway")
+
+    def test_changing_the_sizer_config_invalidates_the_verdict(self) -> None:
+        """Adding an escalation that fires on low confidence must earn a fresh pass —
+        otherwise the cached answer from the weaker model is returned and the escalation
+        the operator just configured never runs."""
+        from unittest import mock
+        from pdca_harness import leaves
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        cfg = self._sizer_cfg(tmp)
+        calls = {"n": 0}
+
+        def _fake(leaf, workdir, prompt, **kw):
+            calls["n"] += 1
+            (Path(workdir) / leaves.SIZING_FILE).write_text(
+                '{"band": "watch", "confidence": "low"}', encoding="utf-8")
+
+        with mock.patch.object(leaves, "_invoke", side_effect=_fake):
+            leaves.run_sizer(d, cfg)
+            leaves.run_sizer(d, cfg)
+            self.assertEqual(calls["n"], 1)
+            cfg.sizer_escalation = [{"on_confidence": ["low"], "argv": ["stronger"]}]
+            leaves.run_sizer(d, cfg)
+            self.assertGreater(calls["n"], 1,
+                               "a newly configured escalation reused the weak verdict")
+
+    def test_a_planning_artifact_cannot_escape_the_bundle_or_target(self) -> None:
+        """`Path(root) / "/etc/passwd"` returns `/etc/passwd` — an absolute join silently
+        discards the root. Without containment, a brief declaring
+        `Planning artifact: /etc/passwd` had the prompt instruct a command-mode sizer,
+        with `Read` pre-authorised, to open it.
+
+        The rubric loader refuses the same shapes, and the argument is stronger here: a
+        rubric path comes from `pdca.toml`, which a human wrote; a planning artifact comes
+        from `brief.md`, which a MODEL wrote.
+        """
+        import os
+        from pdca_harness import leaves
+        from pdca_harness.config import Config, LeafConfig
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        cfg = Config(root=tmp, bundle_root=tmp / "results", process_dir=tmp / "process",
+                     templates_dir=tmp / "templates", default_branch="main",
+                     tracker_system="github", tracker_url="", issue_id_example="#1",
+                     builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        (d / "plan.md").write_text("legit\n", encoding="utf-8")
+        os.symlink("/etc/passwd", d / "sneaky.md")
+
+        for escape in ("/etc/passwd", "../../../../etc/passwd", "sneaky.md"):
+            with self.subTest(artifact=escape):
+                self.assertIsNone(leaves._artifact_path(d, cfg, escape))
+        self.assertEqual(leaves._artifact_path(d, cfg, "plan.md"), (d / "plan.md").resolve())
+
+    def test_an_escaping_artifact_never_reaches_the_prompt(self) -> None:
+        """End to end: the refusal has to show up in what the leaf is told, not only in
+        the resolver."""
+        from pdca_harness import leaves
+        from pdca_harness.config import Config, LeafConfig
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        cfg = Config(root=tmp, bundle_root=tmp / "results", process_dir=tmp / "process",
+                     templates_dir=tmp / "templates", default_branch="main",
+                     tracker_system="github", tracker_url="", issue_id_example="#1",
+                     builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Planning artifact:** /etc/passwd\n", encoding="utf-8")
+        prompt = leaves._sizer_prompt(d, cfg)
+        self.assertNotIn("/etc/passwd)", prompt)
+        self.assertIn("not readable from here", prompt)
 
 
 if __name__ == "__main__":

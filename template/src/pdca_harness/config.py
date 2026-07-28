@@ -317,6 +317,14 @@ class Config:
     # would change behaviour for every instance taking a `copier update` — the property
     # #342's update test asserts. An instance opts in.
     size_guard: str = "off"
+    # Plan-exit reconciliation of brief-declared external dependencies
+    # ([driver].dependency_guard, #333): "hold" (default) | "warn" | "off".
+    #
+    # Defaults to HOLD, unlike size_guard, because the verdict is set membership rather
+    # than a heuristic — there is no false-positive class to trade against — and because
+    # it moves an EXISTING block earlier rather than adding one: the same condition
+    # already refuses `signoff --accept` through the C6 guard.
+    dependency_guard: str = "hold"
     close_dispositions: list[str] = field(
         default_factory=lambda: list(DEFAULT_CLOSE_DISPOSITIONS))
     # Family-profile overrides ([families.<name>] in pdca.toml): per-vendor CLI
@@ -545,6 +553,7 @@ class Config:
             driver_cfg.get("close_dispositions", DEFAULT_CLOSE_DISPOSITIONS))
         sizing = dict(driver_cfg.get("sizing", {}))
         size_guard = str(driver_cfg.get("size_guard", "off"))
+        dependency_guard = str(driver_cfg.get("dependency_guard", "hold"))
 
         return cls(
             root=root,
@@ -607,6 +616,7 @@ class Config:
             close_dispositions=close_dispositions,
             sizing=sizing,
             size_guard=size_guard,
+            dependency_guard=dependency_guard,
             families={k.strip().lower(): dict(v)
                       for k, v in data.get("families", {}).items()},
             doctor_checks=list(data.get("doctor", {}).get("checks", [])),

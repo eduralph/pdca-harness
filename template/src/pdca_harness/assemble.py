@@ -494,31 +494,14 @@ def _declared_external_deps(build_notes_text: str) -> list[str]:
 
 
 def _unregistered_dependency_items(brief_path: Path, cfg: Config) -> list[str]:
-    """A brief-declared external dependency with no registered ``[[doctor.checks]]`` row (#263).
+    """The Check-time BACKSTOP for #263, delegating to the one implementation (#333).
 
-    The principle: when a change needs something a human must install or provide, the system
-    must REGISTER it — a doctor row with a detect ``cmd`` and an install ``hint`` — rather
-    than let it surface mid-cycle as a cryptic build failure. Registration has to be a
-    forcing function, so an unregistered declaration becomes a §6 item and the C6 guard
-    blocks accept until the row exists (or the human clears it as a false positive).
-
-    This cannot be the reviewer's job: its sandbox holds only ``REVIEWER_INPUTS``, so it
-    never sees ``pdca.toml`` and cannot know which rows are registered. Nor is it a judgment
-    call — it is set membership — so the driver decides it deterministically here.
-
-    :func:`doctor.registered_ids` owns what "registered" means: a row that would actually
-    RUN (it has a detect ``cmd``), read from ``pdca.toml`` as it stands **now** rather than
-    from the snapshot the run opened with — Plan and Do both add rows mid-cycle (PR #269
-    review).
+    #333 moved the primary check to Plan exit, before Do dispatches. This stays, and is
+    not redundant: ``pdca.toml`` can gain or lose rows mid-cycle, which is exactly why the
+    reconciliation reads the file as it stands now rather than from the run's opening
+    snapshot (PR #269 review). A row deleted after Plan passed is still caught here.
     """
-    registered = doctor.registered_ids(cfg)
-    return [
-        f"external dependency `{token}` is declared in the brief but has no matching "
-        f"[[doctor.checks]] row — register a detect cmd + install hint in pdca.toml, or "
-        f"annotate it `(no-check: …)` if nothing can detect it"
-        for token in brief.external_dependency_tokens(brief_path)
-        if token.strip().lower() not in registered
-    ]
+    return doctor.unregistered_dependencies(brief_path, cfg)
 
 
 def _needs_human_block(items: list[str]) -> str:

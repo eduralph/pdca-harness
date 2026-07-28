@@ -776,13 +776,28 @@ def _explicit_model_variant(d: Path, cfg: Config) -> dict | None:
 SIZING_FILE = "sizing.json"
 
 
-def _sizer_prompt(d: Path) -> str:
+def _pointer_clause(d: Path, cfg: Config) -> str:
+    """What to tell the sizer about a pointer brief's planning artifact."""
+    artifact = brief.planning_artifact(d / "brief.md")
+    if not artifact:
+        return ""
+    resolved = _artifact_path(d, cfg, artifact)
+    if resolved is None:
+        # Say so rather than naming a path the leaf cannot open: a URL, or an artifact
+        # outside the tree. Sizing the pointer alone is then the honest answer, and the
+        # verdict is not cached because neither the model nor the digest saw the plan.
+        return (f" — the brief points at `{artifact}`, which is not readable from here, so "
+                "size what the brief itself states and say in `confidence` that the "
+                "authoritative plan was unavailable")
+    return (f" AND the planning artifact it points at ({resolved}) — for a pointer brief "
+            "THAT document is the plan, and sizing the pointer alone would score a "
+            "three-migration project as one small slice")
+
+
+def _sizer_prompt(d: Path, cfg: Config) -> str:
     return (
         "You are the SIZER. Read " + str(d / "brief.md")
-        + (f" AND the planning artifact it points at ({_pointer}) — for a pointer brief "
-           "THAT document is the plan, and sizing the pointer alone would score a "
-           "three-migration project as one small slice"
-           if (_pointer := brief.planning_artifact(d / "brief.md")) else "")
+        + _pointer_clause(d, cfg)
         + ". Answer ONE question: "
         "how many INDEPENDENTLY SHIPPABLE outcomes does this brief describe? An outcome is "
         "independently shippable if it could be its own PR — its own defect, its own success "
@@ -845,18 +860,174 @@ def run_sizer(d: Path, cfg: Config) -> dict | None:
     exactly when a stronger model earns its cost, and no brief field predicts that. At most
     one escalation runs: this is a corroborating signal, not a search.
     """
-    if not (d / "brief.md").exists():
+    bp = d / "brief.md"
+    if not bp.exists():
         return None
     if cfg.sizer.mode != "command":
         return _stub_sizer(d)
-    _invoke(cfg.sizer, d, _sizer_prompt(d), cfg=cfg, label="sizer")
-    verdict = _read_sizing(d)
+
+    # One paid verdict per BRIEF, not per beat. The policy is evaluated before Do and
+    # again before Check (#321), so a naive re-invoke doubles the cost of every cycle —
+    # four calls with an escalation — and lets the second nondeterministic answer overwrite
+    # the first. The verdict is a function of the brief, so it is stamped with the brief's
+    # digest and reused while that digest holds; an iterate that rewrites the brief changes
+    # it and earns a fresh pass. This also subsumes the stale-artifact problem the
+    # unconditional unlink was guarding: a verdict from a DIFFERENT brief never matches.
+    digest = _sizer_key(d, cfg, bp)
+    existing = _read_sizing(d)
+    if digest and existing is not None and existing.get("brief_sha") == digest:
+        return existing
+
+    verdict = _sizer_pass(cfg.sizer, d, cfg, "sizer")
     for spec in cfg.sizer_escalation:
         if _sizer_escalates(verdict, spec):
-            _invoke(_leaf_from_spec(spec, cfg.sizer), d, _sizer_prompt(d),
-                    cfg=cfg, label="sizer (escalated)")
-            return _read_sizing(d)
-    return verdict
+            escalated = _sizer_pass(_leaf_from_spec(spec, cfg.sizer), d, cfg,
+                                    "sizer (escalated)")
+            if escalated is not None:
+                return _stamp(d, escalated, digest)
+            # An escalation that produced nothing must not discard the first pass: the
+            # cheap verdict is still the best evidence available. Restore it to DISK too —
+            # the escalation pass unlinks the artifact before running, so returning it only
+            # in memory would leave the bundle without the sizing record it did earn.
+            return _stamp(d, verdict, digest)
+    return _stamp(d, verdict, digest)
+
+
+def current_sizing(d: Path, cfg: Config) -> dict | None:
+    """The stored verdict IF it was given for the brief as it stands now — else None.
+
+    `_read_sizing` is the raw read and does not check the stamp. Every FREE reader — the
+    BUILT-time advisory, `pdca size` — must use this instead: `sizing.json` is not archived
+    by an iterate, so a bundle re-planned from `oversized` to a small single-outcome brief
+    still carries the old verdict on disk. Showing those seams, or folding that band into
+    a fresh estimate, states the opposite of the truth about the current brief.
+
+    A verdict whose inputs cannot be fingerprinted (an unfetchable planning artifact) was
+    never stamped, so it is not reusable either — the same safe direction `_sizer_key` takes.
+    """
+    verdict = _read_sizing(d)
+    bp = d / "brief.md"
+    if verdict is None or not bp.exists():
+        return None
+    key = _sizer_key(d, cfg, bp)
+    return verdict if key and verdict.get("brief_sha") == key else None
+
+
+def _sizer_key(d: Path, cfg: Config, bp: Path) -> str:
+    """The cache key for a sizing verdict, or "" when the inputs cannot be fingerprinted.
+
+    A POINTER brief is the reason this is not just the brief's digest: for those, the
+    planning artifact IS the plan and the sizer is told to read it, so hashing `brief.md`
+    alone would reuse an `ok` verdict after the artifact grew from one outcome to three —
+    suppressing exactly the advisory the pointer case exists to produce.
+
+    An artifact that cannot be read — a URL, or a path outside the tree — yields "" and the
+    verdict is NOT cached. Paying for a re-run is the safe direction when the alternative
+    is silently trusting a verdict whose input may have changed underneath it.
+    """
+    h = hashlib.sha256(bp.read_bytes())
+    # The CONFIGURATION is an input too. Adding a `[[leaves.sizer_escalation]]` that fires
+    # on low confidence, or pointing the leaf at a stronger model, must earn a fresh
+    # verdict — otherwise the cached answer from the weaker pass is returned and the
+    # escalation the operator just configured never runs.
+    h.update(repr([
+        (cfg.sizer.mode, cfg.sizer.family, tuple(cfg.sizer.argv), cfg.sizer.agent,
+         cfg.sizer.model, cfg.sizer.effort),
+        # ORDERED per-spec, not a flattened sorted set: `run_sizer` returns on the FIRST
+        # matching escalation, so reordering two rules changes which stronger model runs.
+        # Flattening gave both orders the same key, and the cached verdict from the rule
+        # that used to win was returned instead of running the one now promoted.
+        tuple(tuple(sorted((k, repr(v)) for k, v in spec.items()))
+              for spec in cfg.sizer_escalation),
+    ]).encode("utf-8"))
+    artifact = brief.planning_artifact(bp)
+    if not artifact:
+        return h.hexdigest()[:16]
+    resolved = _artifact_path(d, cfg, artifact)
+    if resolved is None:
+        return ""
+    try:
+        h.update(resolved.read_bytes())
+    except OSError:
+        return ""
+    return h.hexdigest()[:16]
+
+
+def _artifact_path(d: Path, cfg: Config, artifact: str) -> Path | None:
+    """The planning artifact as a path the LEAF can open, or None.
+
+    Resolved against the bundle first and then the target checkout, and returned ABSOLUTE
+    — the sizer runs with the bundle as its cwd, so handing it the brief's target-relative
+    string (`docs/adr/0042.md`) names a file it cannot find. The prompt and the cache key
+    both go through here, or the key hashes a document the model never read.
+
+    A URL, or a path that resolves nowhere, yields None: the leaf then sizes the brief
+    alone and the verdict is not cached, since neither the model nor the digest can see
+    what the pointer points at.
+
+    **CONTAINED to the bundle or the target checkout.** Absolute paths, `..` traversal and
+    symlink escapes are refused. `Path(root) / "/etc/passwd"` returns `/etc/passwd` — an
+    absolute join silently discards the root — so without this a brief declaring
+    `Planning artifact: /etc/passwd` would have the prompt instruct a command-mode sizer,
+    with `Read` pre-authorised, to open it.
+
+    The rubric loader already refuses the same shapes, and the argument is stronger here:
+    a rubric path comes from `pdca.toml`, which a human wrote, while a planning artifact
+    comes from `brief.md`, which a MODEL wrote.
+    """
+    if not artifact or Path(artifact).is_absolute():
+        return None
+    for root in (d, rubric_mod._target_root(d, cfg)):
+        if root is None:
+            continue
+        try:
+            base = Path(root).resolve()
+            candidate = (base / artifact).resolve()
+            candidate.relative_to(base)          # refuses `..` and symlink escapes
+            if candidate.is_file():
+                return candidate
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _stamp(d: Path, verdict: dict | None, digest: str) -> dict | None:
+    """Record which brief a verdict was given for, and (re)write it to the bundle.
+
+    Also restores the artifact after a failed escalation: `_sizer_pass` unlinks before each
+    run, so a fallback that returned the cheap verdict only in memory left the bundle with
+    no sizing record at all.
+    """
+    if verdict is None:
+        return None
+    stamped = {**verdict, "brief_sha": digest} if digest else dict(verdict)
+    try:
+        (d / SIZING_FILE).write_text(json.dumps(stamped, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass  # the stamp is a cache key, never a hard requirement
+    return stamped
+
+
+def _sizer_pass(leaf: LeafConfig, d: Path, cfg: Config, label: str) -> dict | None:
+    """One sizer invocation. Never raises, never reuses a previous verdict.
+
+    ADVISORY means advisory: a non-zero exit, a rate limit or a missing executable must
+    leave the structural estimate usable rather than abort the beat that consulted it —
+    an optional corroborating signal has no business taking the cycle down with it.
+
+    The artifact is unlinked FIRST so a pass that exits cleanly without writing cannot be
+    read as having produced the previous run's answer — most likely when an existing
+    bundle is switched from stub to command mode, where a stale `ok` would silently stand
+    in for a verdict the model never gave.
+    """
+    (d / SIZING_FILE).unlink(missing_ok=True)
+    try:
+        _invoke(leaf, d, _sizer_prompt(d, cfg), cfg=cfg, label=label)
+    except Exception as exc:  # noqa: BLE001 — an advisory leaf never aborts the beat
+        print(f"leaves: {label} did not run ({exc}) — continuing on the structural "
+              "estimate alone", file=sys.stderr)
+        return None
+    return _read_sizing(d)
 
 
 def _stub_sizer(d: Path) -> dict | None:

@@ -19,9 +19,9 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, manual_test, merged,
-               publish, queue, registry, revalidate, revert, signoff, sizing, sources, state,
-               sweep, waves, worktree)
+from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, leaves, manual_test,
+               merged, publish, queue, registry, revalidate, revert, signoff, sizing, sources,
+               state, sweep, waves, worktree)
 from .config import Config
 
 
@@ -481,6 +481,13 @@ def _run(cfg: Config, issue_id: str) -> int:
         return 1
     final = driver.run_issue(d, cfg)
     print(f"{final}\t{d}")
+    if driver.held(final):
+        # Non-zero, or automation reads a bundle blocked before Do as a completed run. The
+        # reasons were already printed by the driver; this is the exit code that carries
+        # them to a caller that never sees stderr.
+        print(f"run: {d.name} is held at {final} — resolve the item(s) above and re-run",
+              file=sys.stderr)
+        return 1
     if final == state.AWAITING_SIGNOFF:
         open_items = signoff.open_needs_human(d / "SUMMARY.md")
         if open_items:
@@ -618,7 +625,16 @@ def _size(cfg: Config, issue_ids: list[str]) -> int:
     fired (#320).
     """
     if issue_ids:
-        bundles = [cfg.bundle(i) for i in issue_ids]
+        bundles = []
+        for i in issue_ids:
+            d = cfg.bundle(i)
+            # An explicit id that names nothing must be REPORTED, not sized: the estimator
+            # fail-opens to `ok` by design (a detector that crashes Plan is worse than one
+            # that abstains), so a typo would otherwise print a confident `ok` and exit 0.
+            if not (d / "brief.md").is_file():
+                print(f"size: {d.name} has no brief.md — nothing to size", file=sys.stderr)
+                return 1
+            bundles.append(d)
     else:
         bundles = sorted(b for b in cfg.bundle_root.glob("issue_*")
                          if b.is_dir() and (b / "brief.md").exists()) \
@@ -627,11 +643,24 @@ def _size(cfg: Config, issue_ids: list[str]) -> int:
         print("(no briefed bundles to size)")
         return 0
     for d in bundles:
-        est = sizing.estimate(d / "brief.md", cfg)
+        # Fold in a STORED sizer verdict — read, never invoked: `pdca size` is documented
+        # read-only and must stay safe to run against a live queue. Without this the one
+        # deliberate way to ask "how big is this?" showed only the structural bands and
+        # never the decomposability answer the instance had already paid a model for.
+        est = sizing.combine(sizing.estimate(d / "brief.md", cfg), leaves.current_sizing(d, cfg))
         print(f"{est.band}\t{d.name}\tscore={est.score} "
-              f"churn={est.churn_band} patch={est.patch_band}")
+              f"churn={est.churn_band} patch={est.patch_band}"
+              + (f" sizer={est.model_band}" if est.model_band else ""))
         for reason in est.reasons:
             print(f"    - {reason}")
+        stored = leaves.current_sizing(d, cfg) or {}
+        # LIST or nothing. The verdict is model output and the contract is deliberately
+        # tolerant of an untidy schema — but tolerant has to mean "ignored", not "iterated":
+        # `proposed_seams: 1` crashed this command, and a string printed one "seam" per
+        # character.
+        seams = stored.get("proposed_seams")
+        for seam in seams if isinstance(seams, list) else []:
+            print(f"    seam: {seam}")
     return 0
 
 
@@ -650,9 +679,15 @@ def _status(cfg: Config, issue_id: str | None) -> int:
         flag = ""
         # Oversize marker (#320/#321): visible in the queue without running anything,
         # since the estimate is a pure read of the brief.
-        if (d / "brief.md").exists() and \
-                sizing.estimate(d / "brief.md", cfg).band == sizing.OVERSIZED:
-            flag = "  [oversized]"
+        # Computed first, APPENDED below — the sign-off annotation used to overwrite it,
+        # hiding the marker precisely at the queue's human touch point.
+        # Same combination `pdca size` uses. Structure alone would omit the marker in the
+        # one case the sizer exists for — a brief structure scores `ok`/`watch` that the
+        # model finds decomposable — so the two commands would disagree at the sign-off
+        # queue, which is where a human is actually looking.
+        oversized = (d / "brief.md").exists() and sizing.combine(
+            sizing.estimate(d / "brief.md", cfg),
+            leaves.current_sizing(d, cfg)).band == sizing.OVERSIZED
         if s == state.AWAITING_SIGNOFF:
             n = len(signoff.open_needs_human(d / "SUMMARY.md"))
             flag = "  [cheap: confirm]" if n == 0 else f"  [{n} NEEDS-HUMAN]"
@@ -661,6 +696,8 @@ def _status(cfg: Config, issue_id: str | None) -> int:
         blocked = _blocked_by(cfg, d) if s != state.COMPLETE else []
         if blocked:
             flag += f"  [blocked-by: {', '.join(blocked)}]"
+        if oversized:
+            flag += "  [oversized]"
         print(f"{s:18}{d.name}{flag}")
     return 0
 
@@ -1112,6 +1149,14 @@ def _signoff(cfg: Config, args: argparse.Namespace) -> int:
     # Apply the transition: accept freezes; iterate clears and re-runs the body.
     final = driver.run_issue(d, cfg)
     print(f"{final}\t{d}")
+    if driver.held(final):
+        # Same contract as `pdca run` (#351 review): an iterate that archives the attempt,
+        # returns to PLANNED and is then held before Do has NOT rebuilt anything, and
+        # exiting 0 would tell automation the sign-off decision was carried out.
+        print(f"signoff: {d.name} is held at {final} — the transition was recorded but the "
+              "rebuild did not run; resolve the item(s) above and re-run",
+              file=sys.stderr)
+        return 1
 
     # Accept → publish by default, like `flow`'s closing step (#97): a standalone
     # `signoff --accept` otherwise left bundles COMPLETE-but-unpublished with no signal.

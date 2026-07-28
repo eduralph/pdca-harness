@@ -15,6 +15,9 @@ PLANNED at all.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import shutil
 import tempfile
 import unittest
@@ -24,10 +27,12 @@ from unittest import mock
 from pdca_harness import driver, plan_policy, sizing, state
 from pdca_harness.config import Config, LeafConfig
 
+# Deliberately declares NO external dependency: an unregistered one is #333's blocking
+# check, and mixing it in here would test that instead of the size advisory.
 _OVERSIZED = ("- **Slug:** wide\n"
               "- **Difficulty:** high\n"
               "- **Conflicts with:** 12\n"
-              "- **External dependencies:** `protoc`\n")
+              "- **Scope:** " + ("pad " * 4000) + "\n")
 _SMALL = "- **Slug:** narrow\n"
 
 
@@ -188,6 +193,283 @@ class ConfigIsASnapshot(unittest.TestCase):
         deliver, which is how this was found in the first place."""
         self.assertNotIn("reads config from disk", plan_policy.__doc__ or "")
         self.assertIn("CONFIG is a snapshot", plan_policy.__doc__ or "")
+
+
+class ThirdReviewFixes(unittest.TestCase):
+    """Round three on #351."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.d = self.tmp / "results" / "issue_1"
+        self.d.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_the_model_verdict_survives_an_unchanged_band(self) -> None:
+        """A structurally `oversized` brief plus a sizer saying `oversized` used to drop
+        the model's evidence entirely, because combine returned early when the band did
+        not move — losing the one signal that can see decomposability."""
+        base = sizing.SizeEstimate(9, sizing.OVERSIZED, ["structural"],
+                                   churn_band=sizing.WATCH, patch_band=sizing.OVERSIZED)
+        out = sizing.combine(base, {"band": "oversized",
+                                    "independent_outcomes": ["a", "b"]})
+        self.assertEqual(out.model_band, sizing.OVERSIZED)
+        self.assertIn("2 independently shippable outcome(s)", "; ".join(out.reasons))
+
+    def test_a_model_split_verdict_overrides_the_coherent_patch_advice(self) -> None:
+        """patch=oversized with churn=watch normally reads "large but coherent". If the
+        SIZER says the slice decomposes, advising against a split contradicts it."""
+        from unittest import mock
+        (self.d / "brief.md").write_text(_OVERSIZED, encoding="utf-8")
+        cfg = _cfg(self.tmp, "warn")
+        with mock.patch("pdca_harness.leaves.run_sizer",
+                        return_value={"band": "oversized",
+                                      "independent_outcomes": ["a", "b"]}):
+            reasons = plan_policy.evaluate(self.d, cfg)
+        self.assertTrue(reasons)
+        self.assertIn("pdca split", reasons[0].detail)
+        self.assertNotIn("COHERENT", reasons[0].detail)
+
+    def test_a_blocking_check_runs_before_the_paid_advisory(self) -> None:
+        """No sense buying a model advisory for a bundle about to be held on set
+        membership — the human pays again on the retry after registering the row."""
+        from unittest import mock
+        (self.tmp / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n',
+                                            encoding="utf-8")
+        (self.d / "brief.md").write_text(
+            _OVERSIZED + "- **External dependencies:** `protoc`\n", encoding="utf-8")
+        cfg = _cfg(self.tmp, "warn")
+        cfg.dependency_guard = "hold"
+        with mock.patch("pdca_harness.leaves.run_sizer") as sizer:
+            reasons = plan_policy.evaluate(self.d, cfg)
+        sizer.assert_not_called()
+        self.assertEqual([r.code for r in reasons], ["unregistered-dependency"])
+
+
+class TheVerdictHasAConsumer(unittest.TestCase):
+    """The paid verdict was written and then read by nothing (#351 review).
+
+    `sizing.json` was consulted only by its own cache: `pdca size` recomputed the
+    STRUCTURAL estimate, SUMMARY never saw it, and the operator's only glimpse was a
+    stderr line at the moment Plan exited. An instance paid a model to answer "how many
+    independently shippable outcomes?" and the answer went nowhere.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.d = self.tmp / "results" / "issue_9"
+        self.d.mkdir(parents=True)
+        (self.tmp / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n',
+                                            encoding="utf-8")
+        (self.d / "brief.md").write_text(
+            "- **Slug:** s\n- **Difficulty:** high\n- **Conflicts with:** 1\n",
+            encoding="utf-8")
+        # Stamped with the brief's digest: a FREE read now honours it, so an unstamped
+        # verdict is treated as belonging to some other brief and correctly ignored.
+        from pdca_harness import leaves
+        from pdca_harness.config import Config
+        key = leaves._sizer_key(self.d, Config.load(self.tmp), self.d / "brief.md")
+        (self.d / "sizing.json").write_text(json.dumps({
+            "band": "oversized",
+            "independent_outcomes": ["parser", "renderer"],
+            "proposed_seams": ["split at the parser/renderer boundary"],
+            "confidence": "high", "brief_sha": key}), encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_pdca_size_shows_the_stored_verdict_and_its_seams(self) -> None:
+        from pdca_harness import cli
+        from pdca_harness.config import Config
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(cli._size(Config.load(self.tmp), []), 0)
+        out = buf.getvalue()
+        self.assertIn("sizer=oversized", out)
+        self.assertIn("2 independently shippable outcome(s)", out)
+        self.assertIn("seam: split at the parser/renderer boundary", out,
+                      "the seams the sizer proposed were not shown")
+
+    def test_pdca_size_never_invokes_the_paid_leaf(self) -> None:
+        """It is documented read-only and must stay safe to run against a live queue."""
+        from unittest import mock
+        from pdca_harness import cli, leaves
+        from pdca_harness.config import Config
+        with mock.patch.object(leaves, "run_sizer") as sizer, \
+                contextlib.redirect_stdout(io.StringIO()):
+            cli._size(Config.load(self.tmp), [])
+        sizer.assert_not_called()
+
+    def test_the_paid_leaf_is_not_invoked_before_check(self) -> None:
+        """At BUILT the patch already exists, the advisory does not block, and nothing
+        persists it — so a second call buys a log line about work already paid for. A
+        verdict Plan already produced is read for free."""
+        from unittest import mock
+        from pdca_harness import leaves
+        cfg = _cfg(self.tmp, "warn")
+        with mock.patch.object(leaves, "run_sizer") as sizer:
+            reasons = plan_policy.evaluate(self.d, cfg, before_do=False)
+        sizer.assert_not_called()
+        self.assertTrue(any("sizer says oversized" in r.detail for r in reasons),
+                        "the stored verdict was not folded into the BUILT advisory")
+
+    def test_the_paid_leaf_is_invoked_before_do(self) -> None:
+        from unittest import mock
+        from pdca_harness import leaves
+        cfg = _cfg(self.tmp, "warn")
+        with mock.patch.object(leaves, "run_sizer", return_value=None) as sizer:
+            plan_policy.evaluate(self.d, cfg, before_do=True)
+        sizer.assert_called_once()
+
+
+class TheRemedyFollowsTheBeat(unittest.TestCase):
+    """A split authors BRIEFS, so it belongs to Plan — and the advice has to say so.
+
+    Before Do, the answer is "split now". After Do, telling the human to run `pdca split`
+    would decompose a bundle that already has a patch, producing children that inherit
+    none of it. The route back to Plan is `iterate-plan`, which archives the brief and
+    returns the bundle to the beat that authors them.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.d = self.tmp / "results" / "issue_1"
+        self.d.mkdir(parents=True)
+        (self.tmp / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n',
+                                            encoding="utf-8")
+        (self.d / "brief.md").write_text(_OVERSIZED, encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_before_do_it_says_split_now(self) -> None:
+        r = plan_policy.evaluate(self.d, _cfg(self.tmp, "warn"), before_do=True)
+        self.assertIn("pdca split", r[0].detail)
+        self.assertNotIn("iterate-plan", r[0].detail)
+
+    def test_after_do_it_routes_through_iterate_plan(self) -> None:
+        r = plan_policy.evaluate(self.d, _cfg(self.tmp, "warn"), before_do=False)
+        self.assertIn("iterate-plan", r[0].detail)
+        self.assertNotIn("pdca split` first", r[0].detail,
+                         "advised splitting a bundle that already has a patch")
+
+
+class FinalReviewFixes(unittest.TestCase):
+    """Pre-merge review of #351."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.d = self.tmp / "results" / "issue_9"
+        self.d.mkdir(parents=True)
+        (self.tmp / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n',
+                                            encoding="utf-8")
+        (self.d / "brief.md").write_text(_OVERSIZED, encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _store(self, cfg, **over):
+        from pdca_harness import leaves
+        key = leaves._sizer_key(self.d, cfg, self.d / "brief.md")
+        (self.d / "sizing.json").write_text(json.dumps({
+            "band": "oversized", "independent_outcomes": ["a", "b"],
+            "proposed_seams": ["old seam"], "brief_sha": key, **over}), encoding="utf-8")
+
+    def test_size_guard_is_read_from_the_driver_table(self) -> None:
+        """It sat AFTER the next `[table]` header, so TOML parsed it into that table and
+        `driver.size_guard` was absent — setting it to "warn" did nothing at all."""
+        (self.tmp / "pdca.toml").write_text(
+            '[paths]\nbundle_root = "results"\n\n[driver]\nsize_guard = "warn"\n',
+            encoding="utf-8")
+        from pdca_harness.config import Config
+        self.assertEqual(Config.load(self.tmp).size_guard, "warn")
+
+    def test_a_stale_verdict_is_not_shown_by_pdca_size(self) -> None:
+        """`sizing.json` is not archived by an iterate, so a bundle re-planned from
+        oversized to a small brief still carries the old verdict on disk."""
+        from pdca_harness import cli
+        from pdca_harness.config import Config
+        cfg = Config.load(self.tmp)
+        self._store(cfg)
+        (self.d / "brief.md").write_text("- **Slug:** small\n", encoding="utf-8")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli._size(cfg, [])
+        out = buf.getvalue()
+        self.assertNotIn("old seam", out, "seams from a replaced brief were shown")
+        self.assertNotIn("sizer=", out, "a stale band was folded into a fresh estimate")
+
+    def test_a_matching_verdict_is_still_shown(self) -> None:
+        from pdca_harness import cli
+        from pdca_harness.config import Config
+        cfg = Config.load(self.tmp)
+        self._store(cfg)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli._size(cfg, [])
+        self.assertIn("old seam", buf.getvalue())
+
+    def test_the_built_advisory_ignores_a_stale_verdict_too(self) -> None:
+        from pdca_harness.config import Config
+        cfg = Config.load(self.tmp)
+        cfg.size_guard = "warn"
+        self._store(cfg)
+        (self.d / "brief.md").write_text("- **Slug:** small\n", encoding="utf-8")
+        self.assertEqual(plan_policy.evaluate(self.d, cfg, before_do=False), [])
+
+    def test_a_malformed_seams_field_is_ignored_not_iterated(self) -> None:
+        """The verdict is model output and the contract is deliberately tolerant of an
+        untidy schema — but tolerant must mean IGNORED, not iterated. `proposed_seams: 1`
+        crashed the command; a string printed one "seam" per character."""
+        from pdca_harness import cli
+        from pdca_harness.config import Config
+        cfg = Config.load(self.tmp)
+        for bad in (1, "a string", None, {"x": 1}):
+            with self.subTest(proposed_seams=bad):
+                self._store(cfg, proposed_seams=bad)
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self.assertEqual(cli._size(cfg, []), 0)
+                self.assertNotIn("seam:", buf.getvalue())
+
+    def test_reordering_escalations_changes_the_cache_key(self) -> None:
+        """`run_sizer` returns on the FIRST matching escalation, so order decides which
+        stronger model runs. A flattened, sorted key gave both orders the same digest, so
+        promoting a rule returned the cached verdict from the one it replaced."""
+        from pdca_harness import leaves
+        from pdca_harness.config import Config, LeafConfig
+        cfg = Config.load(self.tmp)
+        cfg.sizer = LeafConfig(mode="command", family="generic", argv=["true"])
+        rules = [{"on_band": ["watch"], "argv": ["model-a"]},
+                 {"on_confidence": ["low"], "argv": ["model-b"]}]
+        cfg.sizer_escalation = rules
+        first = leaves._sizer_key(self.d, cfg, self.d / "brief.md")
+        cfg.sizer_escalation = list(reversed(rules))
+        self.assertNotEqual(first, leaves._sizer_key(self.d, cfg, self.d / "brief.md"))
+
+    def test_status_and_size_agree_on_a_model_only_oversize(self) -> None:
+        """The case the sizer exists for: structure says `ok`, the model finds the brief
+        decomposable. `_status` read only the structural estimate, so the marker was
+        missing at the sign-off queue — which is where a human is actually looking —
+        while `pdca size` reported oversized."""
+        from pdca_harness import cli, leaves
+        from pdca_harness.config import Config
+        (self.d / "brief.md").write_text("- **Slug:** small\n", encoding="utf-8")
+        (self.d / "patch.diff").write_text("x", encoding="utf-8")
+        (self.d / "check-gates.json").write_text("[]", encoding="utf-8")
+        (self.d / "SUMMARY.md").write_text("## 6.\n", encoding="utf-8")
+        cfg = Config.load(self.tmp)
+        key = leaves._sizer_key(self.d, cfg, self.d / "brief.md")
+        (self.d / "sizing.json").write_text(json.dumps({
+            "band": "oversized", "independent_outcomes": ["a", "b"],
+            "brief_sha": key}), encoding="utf-8")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli._status(cfg, None)
+        self.assertIn("[oversized]", buf.getvalue(),
+                      "status omitted the marker for a model-only oversize")
 
 
 if __name__ == "__main__":

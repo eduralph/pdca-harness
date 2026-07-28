@@ -319,6 +319,37 @@ def registered_ids(cfg: Config) -> set[str]:
     }
 
 
+def unregistered_dependencies(brief_path, cfg) -> list[str]:
+    """Brief-declared external dependencies with no registered ``[[doctor.checks]]`` row.
+
+    The principle (#263): when a change needs something a human must install or provide,
+    the system must REGISTER it — a row with a detect ``cmd`` and an install ``hint`` —
+    rather than let it surface mid-cycle as a cryptic build failure.
+
+    A pure function of ``brief.md`` + ``pdca.toml``, and **not a judgment call**: it is set
+    membership. That is what lets the Plan-exit policy block on it where the size advisory
+    can only warn (#333/#321).
+
+    :func:`registered_ids` owns what "registered" means — a row that would actually RUN
+    (it has a detect ``cmd``), read from ``pdca.toml`` as it stands NOW rather than from
+    the snapshot the run opened with, because Plan and Do both add rows mid-cycle (PR #269
+    review). That is also what makes the Plan-exit hold self-clearing: register the row and
+    the next beat proceeds, with no replan.
+
+    Lives here rather than in ``assemble`` (#333) so the Plan-exit check and the Check-time
+    backstop cannot drift apart; ``assemble`` imports this module already.
+    """
+    from . import brief as _brief  # local: brief has no dependency on doctor
+    registered = registered_ids(cfg)
+    return [
+        f"external dependency `{token}` is declared in the brief but has no matching "
+        f"[[doctor.checks]] row — register a detect cmd + install hint in pdca.toml, or "
+        f"annotate it `(no-check: …)` if nothing can detect it"
+        for token in _brief.external_dependency_tokens(brief_path)
+        if token.strip().lower() not in registered
+    ]
+
+
 def run(cfg: Config, *, strict: bool = False) -> int:
     r = _Report()
 
