@@ -162,13 +162,16 @@ reach — it will say so plainly rather than skipping).
 What happens next depends on how this run was started, and the difference is worth
 knowing:
 
-- **A batch run** (`pdca flow` over a tracker CSV, or several ids) enumerates its bundles
-  *after* the Plan beat, so the children you just created are picked up by the same run and
-  scheduled into waves automatically — independent ones in parallel, dependent ones
-  stacked. Nothing further is needed from you.
-- **A single-issue run** (`pdca flow <id>`) is driving this one bundle and stops when it
-  goes terminal. `--accept` prints the exact `pdca flow <child-ids>` command; that command
-  drives the children as waves.
+- **A CSV-driven batch run** (`pdca flow --csv …`, no ids) re-enumerates every in-flight
+  bundle *from disk* after the Plan beat, so the children you just created are picked up by
+  the same run and scheduled into waves automatically — independent ones in parallel,
+  dependent ones stacked. Nothing further is needed from you.
+- **Every other shape** — `pdca flow <id>`, and an explicit list like `pdca flow 500 501` —
+  drives exactly the ids it was given and never looks for new ones. `--accept` prints the
+  exact `pdca flow <child-ids>` command; run it, and the children are driven as waves.
+
+An explicit id list looks like a batch and is not one on this point: it iterates the ids
+you named, so children born during its Plan beat are not among them.
 
 Either way the `Depends on:` / `Conflicts with:` fields between children are what makes the
 scheduling work, which is why they are the part to get right.

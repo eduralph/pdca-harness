@@ -1124,20 +1124,51 @@ class CodexVerifyFixes(unittest.TestCase):
         with self.assertRaises(split.SplitError):
             split.accept(self.parent, ["601", "602"], self.cfg)
 
-    def test_the_prompts_do_not_claim_a_single_run_schedules_the_children(self) -> None:
-        """P2. `flow()` drives one bundle and stops when it goes terminal; only
-        `flow_batch` re-enumerates after the Plan beat. Telling the planner the run
-        continues by itself left the children unbuilt for anyone following it."""
-        role = (Path(__file__).resolve().parents[1] / "agents" / "planner.md.jinja")
-        text = role.read_text(encoding="utf-8") if role.is_file() else (
-            Path(__file__).resolve().parents[1] / "agents" / "planner.md"
-        ).read_text(encoding="utf-8")
-        prompt = leaves._plan_prompt(self.cfg, None, self.parent)
-        for where, body in (("role", text), ("runtime", prompt)):
+    def _prompts(self) -> dict[str, str]:
+        role = Path(__file__).resolve().parents[1] / "agents" / "planner.md.jinja"
+        if not role.is_file():
+            role = Path(__file__).resolve().parents[1] / "agents" / "planner.md"
+        return {"role": role.read_text(encoding="utf-8"),
+                "runtime": leaves._plan_prompt(self.cfg, None, self.parent)}
+
+    def test_ONLY_the_csv_batch_path_re_enumerates(self) -> None:
+        """The claim both prompts make, checked against the code that implements it.
+
+        `flow_batch` builds its set from `_bundle_dirs(cfg)` — the disk — AFTER
+        `do_plan_batch`, so children born in the Plan beat are in it. `flow_ids` loops
+        `for iid in ids`, so they are not. An explicit list like `pdca flow 500 501` looks
+        like a batch and is not one on this point.
+        """
+        import inspect
+        from pdca_harness import flow
+        batch = inspect.getsource(flow.flow_batch)
+        self.assertIn("_bundle_dirs(cfg)", batch,
+                      "flow_batch no longer enumerates from disk — the prompts' promise "
+                      "that a CSV run picks up new children is now false")
+        ids_src = inspect.getsource(flow.flow_ids)
+        self.assertNotIn("_bundle_dirs(cfg)", ids_src,
+                         "flow_ids now re-enumerates too — the prompts' warning that an "
+                         "explicit id list does NOT is now wrong in the other direction")
+
+    def test_the_prompts_name_the_csv_batch_as_the_only_self_scheduling_shape(self) -> None:
+        """P1 on the second attempt at this. The first said "the run continues into waves
+        on its own" (false for every single-issue run); the correction said "a batch run
+        (CSV, or several ids)", which is still false for `pdca flow 500 501` — that goes
+        through `flow_ids` and iterates only the ids it was handed, so the children are
+        silently never built."""
+        for where, body in self._prompts().items():
             with self.subTest(where=where):
-                self.assertIn("batch", body.lower())
-                self.assertIn("single-issue", body.lower())
-                self.assertIn("pdca flow", body.lower())
+                low = body.lower()
+                self.assertIn("csv", low)
+                self.assertIn("pdca flow 500 501", low if where == "runtime" else low,
+                              "the explicit-id-list case is the one that reads as a batch "
+                              "and is not one — it has to be named, not implied")
+                self.assertIn("pdca flow <child-ids>", body)
+
+    def test_neither_prompt_calls_an_explicit_id_list_a_batch(self) -> None:
+        for where, body in self._prompts().items():
+            with self.subTest(where=where):
+                self.assertNotIn("or several ids", body)
 
 
 if __name__ == "__main__":
