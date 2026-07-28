@@ -424,7 +424,13 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
         if any((parent / n).exists() for n in driver.DOWNSTREAM_OF_BRIEF):
             driver._archive_iteration(parent, driver._next_iteration_no(parent),
                                       include_brief=False)
-        (parent / state.CLOSE_MARKER).write_text("split\n", encoding="utf-8")
+        # The breadcrumb FIRST, the state-changing marker LAST. `CLOSE_MARKER` is what
+        # makes the parent terminal, and `_rollback` only removes child directories — so
+        # writing it first meant a failure on `build-notes.md` (a full disk, a path
+        # collision) deleted the children while leaving the parent marked `split`, with
+        # the tracker issues filed and every retry refused as "already marked". There was
+        # no ordinary way back. Ordered this way the same failure leaves the parent
+        # exactly as it was and the printed `--accept --ids …` retry works.
         (parent / "build-notes.md").write_text(
             "# Build notes — NO PATCH (split)\n\n"
             "This slice was decomposed rather than built. The work lives in the child "
@@ -433,8 +439,16 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
             "The human confirms the split at sign-off; reopening to a fix path (iterate-to-Do) "
             "archives this marker and re-enables the full Do+Check band.\n",
             encoding="utf-8")
+        (parent / state.CLOSE_MARKER).write_text("split\n", encoding="utf-8")
     except Exception:
         _rollback(created)
+        # Belt and braces: if the marker itself was the write that landed before the
+        # failure, remove it, so "children rolled back" and "parent still terminal" can
+        # never coexist.
+        try:
+            (parent / state.CLOSE_MARKER).unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
     return created
 
@@ -546,7 +560,8 @@ def _create_issue(repo: str, title: str, body: str, parent_no: str, root: Path) 
     return matches[-1]
 
 
-def file_children(parent: Path, children: list[Child], cfg) -> list[str]:
+def file_children(parent: Path, children: list[Child], cfg, *,
+                  prog: str = "pdca") -> list[str]:
     """File one tracker issue per child, parented to ``parent``. Returns ids in order.
 
     ## Why this files first and materialises second
@@ -594,7 +609,8 @@ def file_children(parent: Path, children: list[Child], cfg) -> list[str]:
                 "and cannot be rolled back — no bundle was created for any of them. Either "
                 "close them on the tracker and re-run, or file the remaining "
                 f"{len(children) - len(created)} by hand and pass every id explicitly:\n"
-                f"  pdca split {_parent_number(parent) or parent.name} --accept --ids "
+                f"  {prog} split {_parent_number(parent) or parent.name} "
+                f"--accept --ids "
                 f"{','.join(created + ['<id>'] * (len(children) - len(created)))}"
             ) from exc
     return created

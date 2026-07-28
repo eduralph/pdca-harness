@@ -850,7 +850,7 @@ class CliFilesTheIssuesItself(unittest.TestCase):
         return rc, err.getvalue()
 
     def test_no_ids_files_them_and_materialises_the_children(self) -> None:
-        rc, err = self._run(lambda parent, children, cfg: ["601", "602"])
+        rc, err = self._run(lambda parent, children, cfg, **kw: ["601", "602"])
         self.assertEqual(rc, 0)
         self.assertTrue(self.cfg.bundle("601").is_dir())
         self.assertTrue(self.cfg.bundle("602").is_dir())
@@ -860,7 +860,7 @@ class CliFilesTheIssuesItself(unittest.TestCase):
     def test_an_unreachable_tracker_refuses_and_names_ids(self) -> None:
         """Never a silent skip: a split that filed nothing and materialised nothing would
         look like a no-op."""
-        def filer(parent, children, cfg):
+        def filer(parent, children, cfg, **kw):
             raise split.TrackerUnavailable("`gh` is not on PATH, so this cannot file "
                                            "the child issues for you")
         rc, err = self._run(filer)
@@ -875,7 +875,7 @@ class CliFilesTheIssuesItself(unittest.TestCase):
         that then fails to parse is the worst possible order."""
         (self.parent / split.PROPOSAL).write_text("no marker here\n", encoding="utf-8")
         called = []
-        rc, err = self._run(lambda *a: called.append(a) or ["601"])
+        rc, err = self._run(lambda *a, **kw: called.append(a) or ["601"])
         self.assertEqual(rc, 1)
         self.assertEqual(called, [], "issues were filed for an unparseable proposal")
         self.assertIn("split-proposal", err)
@@ -884,7 +884,7 @@ class CliFilesTheIssuesItself(unittest.TestCase):
         """The one failure this feature must not have: real issues orphaned with nothing
         on screen naming them."""
         (self.cfg.bundle("602")).mkdir(parents=True)   # collides during accept
-        rc, err = self._run(lambda parent, children, cfg: ["601", "602"])
+        rc, err = self._run(lambda parent, children, cfg, **kw: ["601", "602"])
         self.assertEqual(rc, 1)
         self.assertIn("CANNOT be rolled back", err)
         self.assertIn("#601", err)
@@ -895,7 +895,7 @@ class CliFilesTheIssuesItself(unittest.TestCase):
         """`--ids` stays the path for a human who already filed them."""
         called = []
         with mock.patch("pdca_harness.split.file_children",
-                        lambda *a: called.append(a) or []), \
+                        lambda *a, **kw: called.append(a) or []), \
              redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
             rc = cli._split(self.cfg, self._args(ids="601,602"))
         self.assertEqual(rc, 0)
@@ -1072,7 +1072,7 @@ class CodexVerifyFixes(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _accept(self, ids: str = ""):
-        def filer(parent, children, cfg):
+        def filer(parent, children, cfg, **kw):
             self.filed.append(children)
             return ["601", "602"]
         err = io.StringIO()
@@ -1169,6 +1169,91 @@ class CodexVerifyFixes(unittest.TestCase):
         for where, body in self._prompts().items():
             with self.subTest(where=where):
                 self.assertNotIn("or several ids", body)
+
+
+class CodexRound4(unittest.TestCase):
+    """Round four."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github",
+            tracker_url="https://github.com/acme/widgets", issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        self.parent = self.cfg.bundle("500")
+        self.parent.mkdir(parents=True)
+        (self.parent / "brief.md").write_text("- **Slug:** parent\n", encoding="utf-8")
+        (self.parent / split.PROPOSAL).write_text(_proposal(_ONE, _TWO_DEP),
+                                                  encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_a_failed_breadcrumb_leaves_the_parent_RECOVERABLE(self) -> None:
+        """P1. `CLOSE_MARKER` is what makes the parent terminal and `_rollback` only
+        removes child directories, so writing the marker BEFORE `build-notes.md` meant a
+        failure on the breadcrumb deleted the children and left the parent marked `split`
+        — tracker issues filed, every retry refused as "already marked", and no ordinary
+        way back. The breadcrumb is written first now, and the marker is removed on the
+        way out regardless."""
+        real_write = Path.write_text
+
+        def boom(self_, data, *a, **k):
+            if self_.name == "build-notes.md":
+                raise OSError(28, "No space left on device")
+            return real_write(self_, data, *a, **k)
+
+        with mock.patch.object(Path, "write_text", boom):
+            with self.assertRaises(OSError):
+                split.accept(self.parent, ["601", "602"], self.cfg)
+
+        self.assertFalse((self.parent / state.CLOSE_MARKER).exists(),
+                         "the parent stayed terminal with its children rolled back")
+        self.assertFalse(self.cfg.bundle("601").exists())
+        self.assertFalse(self.cfg.bundle("602").exists())
+        # …and the documented retry actually works now.
+        created = split.accept(self.parent, ["601", "602"], self.cfg)
+        self.assertEqual(len(created), 2)
+        self.assertTrue((self.parent / state.CLOSE_MARKER).exists())
+
+    def test_the_recovery_command_uses_the_installed_program_name(self) -> None:
+        """P2. A rendered project installs its own console script (`pdca-gramps`), which
+        is why the CLI has `_prog()`. The one command printed for recovering already-filed
+        tracker issues hard-coded `pdca` — guidance that does not exist there."""
+        children = split.parse((self.parent / split.PROPOSAL).read_text(encoding="utf-8"))
+        calls = {"n": 0}
+
+        def run(cmd, capture_output=False, text=False, cwd=None):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                return SimpleNamespace(returncode=1, stdout="", stderr="gh: HTTP 403")
+            return SimpleNamespace(
+                returncode=0, stdout="https://github.com/acme/widgets/issues/601\n",
+                stderr="")
+
+        with mock.patch.multiple(
+                "pdca_harness.split",
+                subprocess=SimpleNamespace(run=run),
+                shutil=SimpleNamespace(which=lambda _n: "/usr/bin/gh",
+                                       rmtree=shutil.rmtree, move=shutil.move)):
+            with self.assertRaises(split.SplitError) as caught:
+                split.file_children(self.parent, children, self.cfg, prog="pdca-gramps")
+        self.assertIn("pdca-gramps split 500 --accept --ids", str(caught.exception))
+
+    def test_the_cli_passes_its_own_program_name_through(self) -> None:
+        seen = {}
+
+        def filer(parent, children, cfg, *, prog="pdca"):
+            seen["prog"] = prog
+            raise split.SplitError("stop here")
+
+        with mock.patch("pdca_harness.split.file_children", filer), \
+             mock.patch.object(cli.sys, "argv", ["pdca-gramps", "split"]), \
+             redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            cli._split(self.cfg, SimpleNamespace(issue_id="500", accept=True, ids=""))
+        self.assertEqual(seen["prog"], "pdca-gramps")
 
 
 if __name__ == "__main__":

@@ -694,7 +694,7 @@ def _split(cfg: Config, args) -> int:
             print(f"split: {exc}", file=sys.stderr)
             return 1
         try:
-            ids = split.file_children(d, children, cfg)
+            ids = split.file_children(d, children, cfg, prog=_prog())
         except split.TrackerUnavailable as exc:
             # Never a silent skip: name the reason AND the way forward. A split that
             # filed nothing and materialised nothing would otherwise look like a no-op.
