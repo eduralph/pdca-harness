@@ -19,9 +19,9 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, manual_test, merged,
-               publish, queue, registry, revalidate, revert, signoff, sizing, sources, state,
-               sweep, waves, worktree)
+from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, leaves, manual_test,
+               merged, publish, queue, registry, revalidate, revert, signoff, sizing, sources,
+               state, sweep, waves, worktree)
 from .config import Config
 
 
@@ -643,11 +643,19 @@ def _size(cfg: Config, issue_ids: list[str]) -> int:
         print("(no briefed bundles to size)")
         return 0
     for d in bundles:
-        est = sizing.estimate(d / "brief.md", cfg)
+        # Fold in a STORED sizer verdict — read, never invoked: `pdca size` is documented
+        # read-only and must stay safe to run against a live queue. Without this the one
+        # deliberate way to ask "how big is this?" showed only the structural bands and
+        # never the decomposability answer the instance had already paid a model for.
+        est = sizing.combine(sizing.estimate(d / "brief.md", cfg), leaves._read_sizing(d))
         print(f"{est.band}\t{d.name}\tscore={est.score} "
-              f"churn={est.churn_band} patch={est.patch_band}")
+              f"churn={est.churn_band} patch={est.patch_band}"
+              + (f" sizer={est.model_band}" if est.model_band else ""))
         for reason in est.reasons:
             print(f"    - {reason}")
+        stored = leaves._read_sizing(d) or {}
+        for seam in stored.get("proposed_seams") or []:
+            print(f"    seam: {seam}")
     return 0
 
 

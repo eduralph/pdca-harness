@@ -84,7 +84,7 @@ class HoldReason(NamedTuple):
     detail: str    # one line for the human
 
 
-def size_reasons(d, cfg) -> list[HoldReason]:
+def size_reasons(d, cfg, *, may_invoke: bool = True) -> list[HoldReason]:
     """Size advisories for a bundle, per ``[driver].size_guard``.
 
     **There is no `hold` mode, and that is an evidence-based decision.** Calibrated over
@@ -109,8 +109,15 @@ def size_reasons(d, cfg) -> list[HoldReason]:
     # how many independently shippable outcomes the brief describes — and every configured
     # `[leaves.sizer]` escalation is dead config. `combine` escalates only, so a stub, a
     # missing verdict or a malformed one leaves the structural estimate byte-identical.
+    # `may_invoke` is False before CHECK. The paid leaf answers "how many independently
+    # shippable outcomes?" — advice that can prevent a build, and therefore worth buying
+    # only while one can still be prevented. At BUILT the patch already exists, the
+    # advisory does not block, and nothing persists it, so a second call would buy a log
+    # line about work already paid for. A verdict the Plan beat already produced is read
+    # for free.
     from . import leaves
-    est = sizing.combine(est, leaves.run_sizer(d, cfg))
+    est = sizing.combine(est, leaves.run_sizer(d, cfg) if may_invoke
+                         else leaves._read_sizing(d))
     if est.band != sizing.OVERSIZED:
         return []
 
@@ -178,7 +185,7 @@ def blocking(reasons) -> list[HoldReason]:
     return [r for r in reasons if r.code in _BLOCKING]
 
 
-def evaluate(d, cfg) -> list[HoldReason]:
+def evaluate(d, cfg, *, may_invoke: bool = True) -> list[HoldReason]:
     """Every pre-dispatch reason to pause on this bundle. Empty ⇒ proceed.
 
     Advisory by construction today: the driver prints these and continues. The return
@@ -192,4 +199,4 @@ def evaluate(d, cfg) -> list[HoldReason]:
     deps = list(dependency_reasons(d, cfg))
     if blocking(deps):
         return deps
-    return list(size_reasons(d, cfg)) + deps
+    return list(size_reasons(d, cfg, may_invoke=may_invoke)) + deps

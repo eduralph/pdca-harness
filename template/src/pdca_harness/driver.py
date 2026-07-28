@@ -48,12 +48,16 @@ def advance(d: Path, cfg: Config) -> None:
     # about work that never enters Do. BUILT is covered as well as PLANNED: a partial
     # build lands there and never re-enters PLANNED, and Check is a real spend too.
     if not close and s in (state.PLANNED, state.BUILT):
-        reasons = plan_policy.evaluate(d, cfg)
+        # The paid sizer runs only before Do. The blocking dependency check and the free
+        # structural estimate still run at BUILT — a resumed or partially-built bundle
+        # must not buy a reviewer at xhigh plus an adversary to discover something two
+        # files already answer.
+        reasons = plan_policy.evaluate(d, cfg, may_invoke=(s == state.PLANNED))
         for reason in reasons:
             _say(f"⚠ {d.name}: {reason.detail}")
         # A BLOCKING reason stops the beat; advisories are reported and passed. Only a
         # deterministic verdict earns a block — the unregistered dependency is set
-        # membership (#333), where the size band is a heuristic that peaks at 67%
+        # membership (#333), where the size band is a heuristic that peaks at 62%
         # precision (#321). The bundle stays in-flight, so registering the row and
         # re-running is all it takes: the policy is recomputed every beat.
         blockers = plan_policy.blocking(reasons)

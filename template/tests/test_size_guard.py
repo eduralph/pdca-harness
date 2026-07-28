@@ -15,6 +15,9 @@ PLANNED at all.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import shutil
 import tempfile
 import unittest
@@ -242,6 +245,77 @@ class ThirdReviewFixes(unittest.TestCase):
             reasons = plan_policy.evaluate(self.d, cfg)
         sizer.assert_not_called()
         self.assertEqual([r.code for r in reasons], ["unregistered-dependency"])
+
+
+class TheVerdictHasAConsumer(unittest.TestCase):
+    """The paid verdict was written and then read by nothing (#351 review).
+
+    `sizing.json` was consulted only by its own cache: `pdca size` recomputed the
+    STRUCTURAL estimate, SUMMARY never saw it, and the operator's only glimpse was a
+    stderr line at the moment Plan exited. An instance paid a model to answer "how many
+    independently shippable outcomes?" and the answer went nowhere.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.d = self.tmp / "results" / "issue_9"
+        self.d.mkdir(parents=True)
+        (self.tmp / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n',
+                                            encoding="utf-8")
+        (self.d / "brief.md").write_text(
+            "- **Slug:** s\n- **Difficulty:** high\n- **Conflicts with:** 1\n",
+            encoding="utf-8")
+        (self.d / "sizing.json").write_text(json.dumps({
+            "band": "oversized",
+            "independent_outcomes": ["parser", "renderer"],
+            "proposed_seams": ["split at the parser/renderer boundary"],
+            "confidence": "high"}), encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_pdca_size_shows_the_stored_verdict_and_its_seams(self) -> None:
+        from pdca_harness import cli
+        from pdca_harness.config import Config
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(cli._size(Config.load(self.tmp), []), 0)
+        out = buf.getvalue()
+        self.assertIn("sizer=oversized", out)
+        self.assertIn("2 independently shippable outcome(s)", out)
+        self.assertIn("seam: split at the parser/renderer boundary", out,
+                      "the seams the sizer proposed were not shown")
+
+    def test_pdca_size_never_invokes_the_paid_leaf(self) -> None:
+        """It is documented read-only and must stay safe to run against a live queue."""
+        from unittest import mock
+        from pdca_harness import cli, leaves
+        from pdca_harness.config import Config
+        with mock.patch.object(leaves, "run_sizer") as sizer, \
+                contextlib.redirect_stdout(io.StringIO()):
+            cli._size(Config.load(self.tmp), [])
+        sizer.assert_not_called()
+
+    def test_the_paid_leaf_is_not_invoked_before_check(self) -> None:
+        """At BUILT the patch already exists, the advisory does not block, and nothing
+        persists it — so a second call buys a log line about work already paid for. A
+        verdict Plan already produced is read for free."""
+        from unittest import mock
+        from pdca_harness import leaves
+        cfg = _cfg(self.tmp, "warn")
+        with mock.patch.object(leaves, "run_sizer") as sizer:
+            reasons = plan_policy.evaluate(self.d, cfg, may_invoke=False)
+        sizer.assert_not_called()
+        self.assertTrue(any("sizer says oversized" in r.detail for r in reasons),
+                        "the stored verdict was not folded into the BUILT advisory")
+
+    def test_the_paid_leaf_is_invoked_before_do(self) -> None:
+        from unittest import mock
+        from pdca_harness import leaves
+        cfg = _cfg(self.tmp, "warn")
+        with mock.patch.object(leaves, "run_sizer", return_value=None) as sizer:
+            plan_policy.evaluate(self.d, cfg, may_invoke=True)
+        sizer.assert_called_once()
 
 
 if __name__ == "__main__":
