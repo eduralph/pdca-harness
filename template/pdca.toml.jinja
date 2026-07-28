@@ -170,6 +170,28 @@ sweep_worktrees = "clean"
 size_guard = "off"
 
 
+# Empirical size backstop thresholds (issue #324). Measured at Check from the patch that
+# actually arrived, unlike [driver.sizing] which guesses from the brief before a line is
+# written — and much better at it: against "did this bundle churn >=3 rounds" over the same
+# 86 settled bundles, patch >=100 KB scores 71% precision and >=20 files 86%, where the
+# a-priori score peaks at 62%. Crossing a threshold raises a §6 NEEDS-HUMAN item (which
+# disqualifies auto-iterate) recommending `iterate-plan`; it never blocks — at 73% precision
+# for the two enabled rules, roughly one firing in four is a coherent large change.
+#
+# `rounds` ships at 0 (OFF) although it is the most precise rule of the three (76%): with it
+# at 2 the backstop fires after the second archive, auto-iterate declines, and a max_auto_iters
+# of 3 could never be spent — a heuristic silently overriding a number you set. Turn it on and
+# that interaction becomes a choice someone made on purpose. 0 switches any rule off.
+#
+# Commented out because the defaults ARE the calibrated values; uncomment to retune against
+# your own corpus with `scripts/size-calibrate`. A sub-table, so it must sit after every bare
+# [driver] key — see the note above size_guard for what happens when that ordering slips.
+# [driver.size_signal]
+# patch_kb = 100
+# patch_files = 20
+# rounds = 0
+
+
 # Install bootstrap (issue #207). `make install` runs scripts/bootstrap-tools.sh, which
 # provisions the harness-universal tools (git, gh, a pip-capable venv) and the leaf backends
 # your [leaves.*].family use. It hardcodes NO project gate toolchain — that is instance-owned.
