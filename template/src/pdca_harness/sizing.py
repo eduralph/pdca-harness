@@ -179,7 +179,7 @@ def _cfg_int(cfg, key: str, default: int) -> int:
     sizing = getattr(cfg, "sizing", None) or {}
     try:
         return int(sizing.get(key, default))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -190,7 +190,7 @@ def _weights(cfg) -> dict[str, int]:
         if name in sizing:
             try:
                 weights[name] = int(sizing[name])
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 pass
     return weights
 

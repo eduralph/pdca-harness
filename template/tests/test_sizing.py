@@ -868,6 +868,37 @@ class CodexReviewFixes(unittest.TestCase):
                       (d / "brief.md").read_text(encoding="utf-8"),
                       "fixture no longer valid — the driver did not append that line")
 
+    def test_an_inf_threshold_or_weight_does_not_crash_the_plan_beat(self) -> None:
+        """`int(float("inf"))` raises OverflowError, which is neither TypeError nor
+        ValueError — and TOML writes `inf` as a bare literal, so a `[driver.sizing]` typo
+        aborted Plan. Pre-existing since #349; fixed here because this PR owns the file."""
+        for value in (float("inf"), float("-inf"), "seven", None, [1]):
+            with self.subTest(value=value):
+                cfg = SimpleNamespace(sizing={"watch": value, "difficulty_high": value})
+                est = sizing.estimate(
+                    _brief("- **Slug:** s\n- **Difficulty:** high\n"), cfg)
+                self.assertEqual(est.score, sizing.DEFAULT_WEIGHTS["difficulty_high"])
+
+    def test_the_calibrator_IMPORTS_the_split_rather_than_copying_it(self) -> None:
+        """The DoD asks for ONE definition. Comparing behaviour cannot show that: two
+        identical copies behave identically right up until someone edits one. Asserted by
+        object identity, which only holds if the calibrator imports these very objects."""
+        import importlib.machinery, importlib.util, sys as _sys
+        script = Path(__file__).resolve().parents[1] / "scripts" / "size-calibrate"
+        loader = importlib.machinery.SourceFileLoader("_sc_identity", str(script))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        _sys.modules[loader.name] = mod
+        try:
+            loader.exec_module(mod)
+            for name in ("apriori_text", "carry_forward_bytes", "AprioriBrief"):
+                with self.subTest(name=name):
+                    self.assertIs(getattr(mod, name), getattr(sizing, name),
+                                  f"{name} is a COPY in the calibrator, not the shared "
+                                  "definition — the two can now drift silently")
+        finally:
+            _sys.modules.pop(loader.name, None)
+
     def test_the_case_insensitive_heading_is_the_shared_behaviour(self) -> None:
         """The two copies had drifted — the calibrator matched MULTILINE, the estimator
         MULTILINE|IGNORECASE. The shared definition keeps the WIDER match, so a heading
