@@ -655,8 +655,18 @@ class FilingChildIssues(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _gh(self, numbers, *, fail_at=None, stdout=None):
-        """A fake `gh` that records its argv and hands back issue URLs."""
+        """A fake `gh` that records its argv and hands back issue URLs.
+
+        It ASSERTS the calling convention rather than accepting anything: `cmd` must be a
+        list (a string would be handed to a shell), and `capture_output`/`text` must both
+        be true (without `text` the real `subprocess.run` returns bytes, and `.strip()` on
+        bytes would silently never match the URL regex). Recording `list(cmd)` while
+        ignoring the flags meant dropping either one still passed every test here.
+        """
         def run(cmd, capture_output=False, text=False, cwd=None):
+            assert isinstance(cmd, list), f"argv must be a list, not {type(cmd).__name__}"
+            assert capture_output is True, "stdout must be captured to read the issue URL"
+            assert text is True, "text=True is required or stdout arrives as bytes"
             self.calls.append(list(cmd))
             n = len(self.calls)
             if fail_at is not None and n == fail_at:
@@ -680,8 +690,14 @@ class FilingChildIssues(unittest.TestCase):
             ids = split.file_children(self.parent, children, self.cfg)
         self.assertEqual(ids, ["601", "602"])
         self.assertEqual(len(self.calls), 2)
-        for call in self.calls:
+        for call, child in zip(self.calls, split.parse(_proposal(_ONE, _TWO_DEP))):
             self.assertEqual(call[:3], ["gh", "issue", "create"])
+            # The BODY, which nothing asserted: filing an issue whose body is empty (or
+            # another child's) loses the slice the human is being asked to approve.
+            self.assertIn("--body", call)
+            body = call[call.index("--body") + 1]
+            self.assertIn(child.body.strip().splitlines()[0], body)
+            self.assertIn("#500", body, "the body does not name its parent")
             self.assertIn("--repo", call)
             self.assertEqual(call[call.index("--repo") + 1], "acme/widgets")
             # A REAL tracker relationship, not a convention in the body text — the parent
@@ -900,7 +916,11 @@ class CliFilesTheIssuesItself(unittest.TestCase):
             rc = cli._split(self.cfg, self._args(ids="601,602"))
         self.assertEqual(rc, 0)
         self.assertEqual(called, [])
+        # BOTH, not just the first: silently dropping the second id still passed.
         self.assertTrue(self.cfg.bundle("601").is_dir())
+        self.assertTrue(self.cfg.bundle("602").is_dir())
+        self.assertIn("- **Depends on:** 601",
+                      (self.cfg.bundle("602") / "brief.md").read_text(encoding="utf-8"))
 
 
 class ThePlannerIsToldItOwnsTheSplit(unittest.TestCase):
@@ -1044,10 +1064,16 @@ class CodexReviewHardening(unittest.TestCase):
         with self._patched(self._run_returning(
                 "https://github.com/acme/widgets/issues/601\n")):
             split.file_children(self.parent, children, self.cfg)
+        # `assertIsInstance(cmd, list)` here was vacuous — the fake recorded `list(cmd)`,
+        # which coerces a string into a list of characters. The fake now ASSERTS the type
+        # at the call, so a string command fails before it is recorded; what is left to
+        # check here is that the payload travelled as ONE argv element rather than being
+        # split or interpolated.
         cmd = self.calls[0]
-        self.assertIsInstance(cmd, list)
-        self.assertIn("; rm -rf / $(whoami) `id` && echo pwned", " ".join(cmd))
         self.assertEqual(cmd[0], "gh")
+        self.assertIn("; rm -rf / $(whoami) `id` && echo pwned", cmd,
+                      "the payload is not a single argv element — it was split or the "
+                      "shell would see it")
 
 
 class CodexVerifyFixes(unittest.TestCase):
@@ -1131,24 +1157,55 @@ class CodexVerifyFixes(unittest.TestCase):
         return {"role": role.read_text(encoding="utf-8"),
                 "runtime": leaves._plan_prompt(self.cfg, None, self.parent)}
 
-    def test_ONLY_the_csv_batch_path_re_enumerates(self) -> None:
-        """The claim both prompts make, checked against the code that implements it.
+    def _planned(self, iid: str) -> Path:
+        d = self.cfg.bundle(iid)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "brief.md").write_text(f"- **Slug:** s{iid}\n", encoding="utf-8")
+        return d
 
-        `flow_batch` builds its set from `_bundle_dirs(cfg)` — the disk — AFTER
-        `do_plan_batch`, so children born in the Plan beat are in it. `flow_ids` loops
-        `for iid in ids`, so they are not. An explicit list like `pdca flow 500 501` looks
-        like a batch and is not one on this point.
+    def _scheduled_by(self, fn, *args, **kwargs) -> set[str]:
+        """The bundle names a flow entry point actually hands to the driver.
+
+        Observed at `_drive_and_act`, which is where the set is finally decided — so this
+        measures behaviour rather than the presence of a token in the source. The previous
+        version scanned `inspect.getsource` for `_bundle_dirs(cfg)`, which is the same
+        anti-pattern that let a stale doctrine survive in `_split_prompt` and two heading
+        variants survive in `sizing`: source text is not behaviour, and a helper rename or
+        an indirection would have kept it green while reversing what it asserts.
         """
-        import inspect
         from pdca_harness import flow
-        batch = inspect.getsource(flow.flow_batch)
-        self.assertIn("_bundle_dirs(cfg)", batch,
-                      "flow_batch no longer enumerates from disk — the prompts' promise "
-                      "that a CSV run picks up new children is now false")
-        ids_src = inspect.getsource(flow.flow_ids)
-        self.assertNotIn("_bundle_dirs(cfg)", ids_src,
-                         "flow_ids now re-enumerates too — the prompts' warning that an "
-                         "explicit id list does NOT is now wrong in the other direction")
+        seen: set[str] = set()
+
+        def capture(cfg, bundles, **kw):
+            seen.update(b.name for b in bundles)
+            return {}
+
+        with mock.patch.object(flow, "_drive_and_act", capture), \
+             mock.patch.object(flow.leaves, "do_plan_batch", lambda *a, **k: None), \
+             redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            fn(*args, **kwargs)
+        return seen
+
+    def test_a_CSV_batch_picks_up_a_bundle_nobody_named(self) -> None:
+        """The promise both prompts make: children born during the Plan beat are scheduled
+        by the same run. Modelled by a bundle that exists on disk and was never passed in."""
+        from pdca_harness import flow
+        self._planned("500")
+        self._planned("601")                      # the "child" nobody asked for
+        seen = self._scheduled_by(flow.flow_batch, self.cfg, csv=None)
+        self.assertIn("issue_601", seen)
+
+    def test_an_explicit_id_LIST_does_not(self) -> None:
+        """The correction that took three attempts. `pdca flow 500 501` reads as a batch
+        and is not one: it iterates the ids it was handed, so a child created during its
+        Plan beat is silently never built."""
+        from pdca_harness import flow
+        self._planned("500")
+        self._planned("501")
+        self._planned("601")                      # created during Plan, never named
+        seen = self._scheduled_by(flow.flow_ids, self.cfg, ["500", "501"])
+        self.assertEqual(seen, {"issue_500", "issue_501"})
+        self.assertNotIn("issue_601", seen)
 
     def test_the_prompts_name_the_csv_batch_as_the_only_self_scheduling_shape(self) -> None:
         """P1 on the second attempt at this. The first said "the run continues into waves
@@ -1254,6 +1311,168 @@ class CodexRound4(unittest.TestCase):
              redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
             cli._split(self.cfg, SimpleNamespace(issue_id="500", accept=True, ids=""))
         self.assertEqual(seen["prog"], "pdca-gramps")
+
+
+class TheWholeChainUnmocked(unittest.TestCase):
+    """CLI -> preflight -> file_children -> _create_issue -> accept, with ONLY `gh` faked.
+
+    Every other test of this flow patches `split.file_children`, so the filing code itself
+    — argv construction, URL parsing, the parent link, the id handed to `accept` — was
+    never exercised from the command the operator actually runs. A test that mocks the
+    unit under test passes whether or not that unit works.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github",
+            tracker_url="https://github.com/acme/widgets", issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        self.parent = self.cfg.bundle("500")
+        self.parent.mkdir(parents=True)
+        (self.parent / "brief.md").write_text("- **Slug:** parent\n", encoding="utf-8")
+        (self.parent / split.PROPOSAL).write_text(_proposal(_ONE, _TWO_DEP),
+                                                  encoding="utf-8")
+        self.calls: list[list[str]] = []
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _fake_gh(self, numbers):
+        def run(cmd, capture_output=False, text=False, cwd=None):
+            assert isinstance(cmd, list) and capture_output is True and text is True
+            self.calls.append(list(cmd))
+            n = numbers[len(self.calls) - 1]
+            return SimpleNamespace(
+                returncode=0, stderr="",
+                # Realistic output: a preamble line, the URL alone, then a notice that
+                # itself mentions a DIFFERENT issue.
+                # The trailing notice ENDS with a different issue URL. That is what makes
+                # this fixture load-bearing: a regex matching "line ending in /issues/N"
+                # picks 999 here. Only a WHOLE-LINE URL match gets the right answer.
+                stdout=(f"Creating issue in acme/widgets\n"
+                        f"https://github.com/acme/widgets/issues/{n}\n"
+                        f"Note: related to https://github.com/acme/widgets/issues/999\n"))
+        return run
+
+    def test_end_to_end_with_only_gh_faked(self) -> None:
+        with mock.patch("pdca_harness.split.subprocess",
+                        SimpleNamespace(run=self._fake_gh(["601", "602"]))), \
+             mock.patch("pdca_harness.split.shutil.which", return_value="/usr/bin/gh"), \
+             redirect_stderr(io.StringIO()) as err, redirect_stdout(io.StringIO()):
+            rc = cli._split(self.cfg, SimpleNamespace(issue_id="500", accept=True, ids=""))
+
+        self.assertEqual(rc, 0)
+        # The number came from the URL LINE, not from the notice mentioning #999.
+        self.assertTrue(self.cfg.bundle("601").is_dir())
+        self.assertTrue(self.cfg.bundle("602").is_dir())
+        self.assertFalse(self.cfg.bundle("999").exists(),
+                         "the id was read from a notice rather than the created issue")
+        # …the ordering field was rewritten to the REAL id…
+        self.assertIn("- **Depends on:** 601",
+                      (self.cfg.bundle("602") / "brief.md").read_text(encoding="utf-8"))
+        # …each child was filed as a sub-issue of the parent…
+        for call in self.calls:
+            self.assertEqual(call[call.index("--parent") + 1], "500")
+        # …and the parent is terminal with its breadcrumb.
+        self.assertTrue((self.parent / state.CLOSE_MARKER).exists())
+        self.assertIn("issue_601", (self.parent / "build-notes.md").read_text(
+            encoding="utf-8"))
+        self.assertIn("flow 601 602", err.getvalue())
+
+    def test_the_children_then_schedule_as_waves(self) -> None:
+        """The end of the chain #358 exists to create — asserted on bundles produced by
+        the real filing path rather than hand-written ones."""
+        with mock.patch("pdca_harness.split.subprocess",
+                        SimpleNamespace(run=self._fake_gh(["601", "602"]))), \
+             mock.patch("pdca_harness.split.shutil.which", return_value="/usr/bin/gh"), \
+             redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            cli._split(self.cfg, SimpleNamespace(issue_id="500", accept=True, ids=""))
+        got = waves.compute_waves(
+            self.cfg, [self.cfg.bundle("601"), self.cfg.bundle("602")])
+        self.assertEqual([sorted(d.name for d in w) for w in got],
+                         [["issue_601"], ["issue_602"]])
+
+    def test_a_gh_failure_midway_names_the_issue_it_already_filed(self) -> None:
+        """The partial-failure path, also never run unmocked."""
+        def run(cmd, capture_output=False, text=False, cwd=None):
+            self.calls.append(list(cmd))
+            if len(self.calls) == 2:
+                return SimpleNamespace(returncode=1, stdout="", stderr="gh: HTTP 403")
+            return SimpleNamespace(
+                returncode=0, stderr="",
+                stdout="https://github.com/acme/widgets/issues/601\n")
+
+        with mock.patch("pdca_harness.split.subprocess", SimpleNamespace(run=run)), \
+             mock.patch("pdca_harness.split.shutil.which", return_value="/usr/bin/gh"), \
+             redirect_stderr(io.StringIO()) as err, redirect_stdout(io.StringIO()):
+            rc = cli._split(self.cfg, SimpleNamespace(issue_id="500", accept=True, ids=""))
+        self.assertEqual(rc, 1)
+        out = err.getvalue()
+        self.assertIn("#601", out)
+        self.assertIn("cannot be rolled back", out)
+        self.assertFalse((self.parent / state.CLOSE_MARKER).exists())
+        self.assertFalse(self.cfg.bundle("601").exists(),
+                         "a bundle was created for a batch that never completed filing")
+
+
+class RollbackCoversAPartialMove(unittest.TestCase):
+    """`shutil.move` is not atomic across filesystems: it can create the destination, copy
+    part of the tree, and then raise. Recording `created` AFTER the move meant such a
+    bundle was invisible to `_rollback` and left behind with its parent unmarked — after
+    which every retry refused it as an existing bundle."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github", tracker_url="",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        self.parent = self.cfg.bundle("500")
+        self.parent.mkdir(parents=True)
+        (self.parent / "brief.md").write_text("- **Slug:** parent\n", encoding="utf-8")
+        (self.parent / split.PROPOSAL).write_text(_proposal(_ONE, _TWO_DEP),
+                                                  encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_a_move_that_creates_the_destination_then_fails_is_rolled_back(self) -> None:
+        real_move = shutil.move
+        calls = {"n": 0}
+
+        def half_move(src, dst, *a, **k):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                Path(dst).mkdir(parents=True, exist_ok=True)      # partially arrived…
+                (Path(dst) / "brief.md").write_text("half\n", encoding="utf-8")
+                raise OSError(28, "No space left on device")       # …then failed
+            return real_move(src, dst, *a, **k)
+
+        with mock.patch.object(split.shutil, "move", half_move):
+            with self.assertRaises(OSError):
+                split.accept(self.parent, ["601", "602"], self.cfg)
+
+        self.assertFalse(self.cfg.bundle("601").exists(),
+                         "the completed child was not rolled back")
+        self.assertFalse(self.cfg.bundle("602").exists(),
+                         "the HALF-MOVED child survived the rollback and now blocks "
+                         "every retry as an existing bundle")
+        self.assertFalse((self.parent / state.CLOSE_MARKER).exists())
+
+    def test_a_rollback_that_cannot_delete_says_so(self) -> None:
+        """`ignore_errors=True` alone left a bundle on disk and said nothing, so the
+        printed retry failed on an "already exists" nobody could have anticipated."""
+        err = io.StringIO()
+        with mock.patch.object(split.shutil, "rmtree", lambda *a, **k: None), \
+             redirect_stderr(err):
+            split._rollback([self.parent])          # exists, and "cannot" be removed
+        self.assertIn("could not remove", err.getvalue())
+        self.assertIn(str(self.parent), err.getvalue())
 
 
 if __name__ == "__main__":

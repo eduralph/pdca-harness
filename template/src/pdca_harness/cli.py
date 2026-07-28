@@ -707,8 +707,14 @@ def _split(cfg: Config, args) -> int:
             print(f"split: {exc}", file=sys.stderr)
             return 1
         filed = True
-        print(f"filed {len(ids)} child issue(s): "
-              + ", ".join("#" + i for i in ids), file=sys.stderr)
+        try:
+            print(f"filed {len(ids)} child issue(s): "
+                  + ", ".join("#" + i for i in ids), file=sys.stderr)
+        except OSError:
+            # A closed or full stderr must not abort the run HERE: the issues exist, and
+            # stopping between filing and accepting is the one state with no artifact
+            # naming them. Carry on; the failure paths below re-print the numbers.
+            pass
     try:
         created = split.accept(d, ids, cfg)
     except split.SplitError as exc:
@@ -718,10 +724,20 @@ def _split(cfg: Config, args) -> int:
             # command that resumes against them, or they are orphaned with nothing on
             # screen naming them — the one failure this feature must not have.
             print("split: the child issues were already filed and CANNOT be rolled back: "
-                  + ", ".join("#" + i for i in ids)
-                  + f".\nFix the problem above, then re-run against them:\n"
-                  f"  {_prog()} split {args.issue_id} --accept --ids {','.join(ids)}",
-                  file=sys.stderr)
+                  + ", ".join("#" + i for i in ids) + ".", file=sys.stderr)
+            if "already marked" in str(exc):
+                # `preflight` passed and `accept` then found the parent terminal, so
+                # ANOTHER acceptance won the race between them. Printing the ordinary
+                # retry here would be a false instruction: it cannot succeed against an
+                # already-split parent, and following it would file a third set.
+                print("split: the parent was marked split by another run while these were "
+                      "being filed, so its children already exist. Do NOT re-run --accept: "
+                      "close the issues above as duplicates, or reopen the parent if this "
+                      "run's split is the one you want.", file=sys.stderr)
+            else:
+                print("Fix the problem above, then re-run against them:\n"
+                      f"  {_prog()} split {args.issue_id} --accept --ids {','.join(ids)}",
+                      file=sys.stderr)
         return 1
     for child in created:
         print(child)

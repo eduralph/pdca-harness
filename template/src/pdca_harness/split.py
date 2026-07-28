@@ -365,9 +365,22 @@ def materialise(children: list[Child], ids: list[str], cfg, staging: Path) -> li
 def _rollback(created: list[Path]) -> None:
     """Undo the child bundles that landed. A part-applied accept is worse than either
     outcome: the human can neither re-run (the ids exist) nor proceed (the batch is
-    incomplete), so every failure path after the first move goes through here."""
+    incomplete), so every failure path after the first move goes through here.
+
+    A directory that cannot be removed is NAMED. `ignore_errors=True` alone left a bundle
+    on disk with its parent unmarked and said nothing, so the printed retry failed on an
+    "already exists" the operator had no way to anticipate — a rollback that silently does
+    not roll back is worse than one that fails loudly.
+    """
+    stuck: list[Path] = []
     for d in created:
         shutil.rmtree(d, ignore_errors=True)
+        if d.exists():
+            stuck.append(d)
+    if stuck:
+        print("split: could not remove " + ", ".join(str(d) for d in stuck)
+              + " while rolling back. Delete them by hand before retrying, or the retry "
+                "will refuse them as existing bundles.", file=sys.stderr)
 
 
 def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
@@ -399,8 +412,14 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
             dst = cfg.bundle(issue_id)          # the SAME path validate() checked
             if dst.exists():                    # re-checked at the moment of writing
                 raise SplitError(f"{dst} appeared while accepting — refusing to overwrite")
-            shutil.move(str(src), str(dst))
+            # Recorded BEFORE the move, not after. `shutil.move` is not atomic across
+            # filesystems — it can create `dst`, copy part of the tree and then raise — so
+            # appending afterwards meant a half-moved bundle was invisible to `_rollback`
+            # and left behind with its parent unmarked. Every retry then refused it as an
+            # existing bundle. Recording first can only ever ask the rollback to remove
+            # something that does not exist, which it tolerates.
             created.append(dst)
+            shutil.move(str(src), str(dst))
     except Exception:
         _rollback(created)
         raise
@@ -464,12 +483,17 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
 # for a tracker this cannot reach.
 # ---------------------------------------------------------------------------
 
-#: `gh issue create` prints the new issue's URL on stdout. The trailing path segment is
-#: the number — the only part of the output this depends on. Matched per LINE and the LAST
-#: match wins: `gh` also emits notices ("Warning: N uncommitted changes") and, with some
-#: configurations, a "Creating issue in owner/repo" preamble, so anchoring to the end of
-#: the whole output failed on a call that had in fact created the issue.
-_ISSUE_URL_RE = re.compile(r"/issues/(\d+)\s*$", re.MULTILINE)
+#: `gh issue create` prints the new issue's URL, alone on its own line. The trailing path
+#: segment is the number — the only part of the output this depends on.
+#:
+#: The line must be NOTHING BUT the URL. Anchoring to the end of the whole output failed
+#: on a call that had in fact created the issue, because `gh` also emits notices and, in
+#: some configurations, a "Creating issue in owner/repo" preamble. But relaxing that to
+#: "the last line ending in /issues/N" is worse than the bug it fixed: a trailing notice
+#: that merely MENTIONS another issue ("see https://…/issues/999") would be read as the
+#: number just created, and the child bundle would be named for an unrelated issue —
+#: silently, and against a real tracker item. A bare URL line cannot be confused that way.
+_ISSUE_URL_RE = re.compile(r"^\s*https?://\S*/issues/(\d+)/?\s*$", re.MULTILINE)
 
 #: The first `# Heading` of a child block, used as the tracker issue's title.
 _CHILD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*$")
