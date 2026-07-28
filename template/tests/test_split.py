@@ -440,7 +440,18 @@ class TheDoctrineIsConsistent(unittest.TestCase):
     AGENTS = Path(__file__).resolve().parents[1] / "agents"
 
     def _text(self, name: str) -> str:
-        return (self.AGENTS / f"{name}.md.jinja").read_text(encoding="utf-8")
+        """`<name>.md.jinja` in the template checkout, `<name>.md` in a rendered instance.
+
+        This suite runs in BOTH — `tests/test_render_and_run` drives the generated
+        project's own tests — and reading only the `.jinja` name passes locally while
+        failing every render. Third occurrence of this shape after the `.gitignore` and
+        `pdca.toml` assertions, which is why it is stated here rather than just fixed.
+        """
+        for candidate in (f"{name}.md.jinja", f"{name}.md"):
+            path = self.AGENTS / candidate
+            if path.is_file():
+                return path.read_text(encoding="utf-8")
+        raise AssertionError(f"no role prompt found for {name!r} in {self.AGENTS}")
 
     def test_no_role_prompt_places_the_split_at_sign_off(self) -> None:
         for role in ("splitter", "sizer"):
