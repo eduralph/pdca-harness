@@ -130,6 +130,11 @@ class SizeEstimate:
     reasons: list[str] = field(default_factory=list)
     churn_band: str = OK
     patch_band: str = OK
+    #: The sizer's own band, when one was given. Recorded even where it did not raise the
+    #: combined band, because "two independently shippable outcomes" is the evidence that
+    #: justifies a SPLIT — and a caller choosing between "split this" and "expect a large
+    #: coherent patch" needs it whether or not it moved the number.
+    model_band: str = ""
 
 
 def _cfg_int(cfg, key: str, default: int) -> int:
@@ -284,9 +289,6 @@ def combine(structural: SizeEstimate, model: dict | None) -> SizeEstimate:
     if band not in _ORDER:
         return structural
     combined = higher(structural.band, band)
-    if combined == structural.band:
-        return structural
-
     reasons = list(structural.reasons)
     outcomes = model.get("independent_outcomes")
     detail = f"sizer says {band}"
@@ -302,4 +304,5 @@ def combine(structural: SizeEstimate, model: dict | None) -> SizeEstimate:
     reasons.append(detail)
     return SizeEstimate(structural.score, combined, reasons,
                         churn_band=structural.churn_band,
-                        patch_band=structural.patch_band)
+                        patch_band=structural.patch_band,
+                        model_band=band)

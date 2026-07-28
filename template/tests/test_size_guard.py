@@ -192,5 +192,57 @@ class ConfigIsASnapshot(unittest.TestCase):
         self.assertIn("CONFIG is a snapshot", plan_policy.__doc__ or "")
 
 
+class ThirdReviewFixes(unittest.TestCase):
+    """Round three on #351."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.d = self.tmp / "results" / "issue_1"
+        self.d.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_the_model_verdict_survives_an_unchanged_band(self) -> None:
+        """A structurally `oversized` brief plus a sizer saying `oversized` used to drop
+        the model's evidence entirely, because combine returned early when the band did
+        not move — losing the one signal that can see decomposability."""
+        base = sizing.SizeEstimate(9, sizing.OVERSIZED, ["structural"],
+                                   churn_band=sizing.WATCH, patch_band=sizing.OVERSIZED)
+        out = sizing.combine(base, {"band": "oversized",
+                                    "independent_outcomes": ["a", "b"]})
+        self.assertEqual(out.model_band, sizing.OVERSIZED)
+        self.assertIn("2 independently shippable outcome(s)", "; ".join(out.reasons))
+
+    def test_a_model_split_verdict_overrides_the_coherent_patch_advice(self) -> None:
+        """patch=oversized with churn=watch normally reads "large but coherent". If the
+        SIZER says the slice decomposes, advising against a split contradicts it."""
+        from unittest import mock
+        (self.d / "brief.md").write_text(_OVERSIZED, encoding="utf-8")
+        cfg = _cfg(self.tmp, "warn")
+        with mock.patch("pdca_harness.leaves.run_sizer",
+                        return_value={"band": "oversized",
+                                      "independent_outcomes": ["a", "b"]}):
+            reasons = plan_policy.evaluate(self.d, cfg)
+        self.assertTrue(reasons)
+        self.assertIn("pdca split", reasons[0].detail)
+        self.assertNotIn("COHERENT", reasons[0].detail)
+
+    def test_a_blocking_check_runs_before_the_paid_advisory(self) -> None:
+        """No sense buying a model advisory for a bundle about to be held on set
+        membership — the human pays again on the retry after registering the row."""
+        from unittest import mock
+        (self.tmp / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n',
+                                            encoding="utf-8")
+        (self.d / "brief.md").write_text(
+            _OVERSIZED + "- **External dependencies:** `protoc`\n", encoding="utf-8")
+        cfg = _cfg(self.tmp, "warn")
+        cfg.dependency_guard = "hold"
+        with mock.patch("pdca_harness.leaves.run_sizer") as sizer:
+            reasons = plan_policy.evaluate(self.d, cfg)
+        sizer.assert_not_called()
+        self.assertEqual([r.code for r in reasons], ["unregistered-dependency"])
+
+
 if __name__ == "__main__":
     unittest.main()

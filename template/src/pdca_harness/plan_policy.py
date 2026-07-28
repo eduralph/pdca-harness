@@ -119,7 +119,13 @@ def size_reasons(d, cfg) -> list[HoldReason]:
     # and the sizing contract is explicit that a large COHERENT patch is not a slice that
     # needs splitting — recommending a split there is advice the estimator's own model
     # contradicts.
-    if est.churn_band == sizing.OVERSIZED or est.patch_band != sizing.OVERSIZED:
+    # The MODEL's verdict counts here even when it did not raise the band: "two
+    # independently shippable outcomes" is the evidence that justifies a split, and
+    # telling the human "large but coherent" over the top of it contradicts the one
+    # signal that can actually see decomposability.
+    if (est.churn_band == sizing.OVERSIZED
+            or est.model_band == sizing.OVERSIZED
+            or est.patch_band != sizing.OVERSIZED):
         remedy = "consider `pdca split` first"
     else:
         remedy = ("expect a large patch — worth a look before Do, but a large COHERENT "
@@ -180,4 +186,10 @@ def evaluate(d, cfg) -> list[HoldReason]:
     verdict is set membership rather than a heuristic, and therefore *can* justify a
     block) slots in beside it without another mechanism.
     """
-    return list(size_reasons(d, cfg)) + list(dependency_reasons(d, cfg))
+    # Deterministic checks FIRST. The size advisory may invoke a paid model leaf, and
+    # there is no sense buying an advisory for a bundle that is about to be held on set
+    # membership — the human would pay for it again on the retry after registering the row.
+    deps = list(dependency_reasons(d, cfg))
+    if blocking(deps):
+        return deps
+    return list(size_reasons(d, cfg)) + deps

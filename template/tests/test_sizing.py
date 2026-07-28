@@ -389,6 +389,39 @@ class ThirdReviewFixes(unittest.TestCase):
             with self.subTest(model=model):
                 self.assertEqual(sizing.combine(base, model), base)
 
+    def test_a_failed_escalation_restores_the_first_verdict_to_disk(self) -> None:
+        """The escalation pass unlinks the artifact before running, so returning the first
+        verdict only in memory left the bundle without the sizing record it had earned."""
+        from unittest import mock
+        from pdca_harness import leaves
+        from pdca_harness.config import Config, LeafConfig
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        cfg = Config(root=tmp, bundle_root=tmp / "results", process_dir=tmp / "process",
+                     templates_dir=tmp / "templates", default_branch="main",
+                     tracker_system="github", tracker_url="", issue_id_example="#1",
+                     builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        cfg.sizer = LeafConfig(mode="command", family="generic", argv=["true"])
+        cfg.sizer_escalation = [{"on_band": ["watch"], "argv": ["also-true"]}]
+
+        calls = {"n": 0}
+
+        def _fake(leaf, workdir, prompt, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                (Path(workdir) / leaves.SIZING_FILE).write_text(
+                    '{"band": "watch", "confidence": "low"}', encoding="utf-8")
+            else:
+                raise OSError("escalation binary missing")
+
+        with mock.patch.object(leaves, "_invoke", side_effect=_fake):
+            verdict = leaves.run_sizer(d, cfg)
+        self.assertEqual(verdict["band"], "watch")
+        self.assertTrue((d / leaves.SIZING_FILE).exists(),
+                        "the first verdict's artifact was destroyed by a failed escalation")
+
 
 if __name__ == "__main__":
     unittest.main()

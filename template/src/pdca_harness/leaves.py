@@ -854,9 +854,16 @@ def run_sizer(d: Path, cfg: Config) -> dict | None:
         if _sizer_escalates(verdict, spec):
             escalated = _sizer_pass(_leaf_from_spec(spec, cfg.sizer), d, cfg,
                                     "sizer (escalated)")
+            if escalated is not None:
+                return escalated
             # An escalation that produced nothing must not discard the first pass: the
-            # cheap verdict is still the best evidence available.
-            return escalated if escalated is not None else verdict
+            # cheap verdict is still the best evidence available. Restore it to DISK too —
+            # the escalation pass unlinks the artifact before running, so returning it only
+            # in memory would leave the bundle without the sizing record it did earn.
+            if verdict is not None:
+                (d / SIZING_FILE).write_text(json.dumps(verdict, indent=2) + "\n",
+                                             encoding="utf-8")
+            return verdict
     return verdict
 
 
