@@ -680,6 +680,12 @@ def _split(cfg: Config, args) -> int:
         # three of them for a proposal that then fails to parse is the worst order.
         try:
             children = split.parse((d / split.PROPOSAL).read_text(encoding="utf-8"))
+            # Every reason acceptance would fail that does not need the ids — run BEFORE a
+            # single issue is filed. Without it, a second `--accept` filed a whole second
+            # set of real sub-issues and only then discovered the parent was already
+            # split; a cyclic proposal filed its children before `validate` refused them.
+            # Tracker issues cannot be withdrawn, so the order is the whole guarantee.
+            split.preflight(d, children, cfg)
         except OSError:
             print(f"split: {d.name} has no {split.PROPOSAL} — run "
                   f"`{_prog()} split {args.issue_id}` first", file=sys.stderr)

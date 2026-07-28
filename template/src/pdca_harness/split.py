@@ -221,6 +221,50 @@ def _cycles(children: list[Child]) -> list[str]:
     return bad
 
 
+def preflight(parent: Path, children: list[Child], cfg) -> None:
+    """Every reason acceptance would fail that does NOT depend on the ids.
+
+    Split out of :func:`validate` because filing happens BEFORE the ids exist, and a
+    tracker issue cannot be withdrawn (#358). Without this, `pdca split <id> --accept`
+    run a second time filed a whole second set of real sub-issues and only THEN
+    discovered the parent was already split — and a proposal with a dependency cycle
+    filed its children before `validate` refused them.
+    """
+    proposal = parent / PROPOSAL
+    if not proposal.exists():
+        raise SplitError(f"{parent.name} has no {PROPOSAL} — run `pdca split "
+                         f"{parent.name.replace('issue_', '')}` first")
+    if (parent / state.CLOSE_MARKER).exists():
+        raise SplitError(
+            f"{parent.name} is already marked "
+            f"{(parent / state.CLOSE_MARKER).read_text(encoding='utf-8').strip()!r} — a "
+            "second acceptance would create a duplicate set of children and leave the "
+            "first orphaned from the parent's breadcrumb. Reopen it first if that is what "
+            "you want")
+    _validate_ordering(children)
+
+
+def _validate_ordering(children: list[Child]) -> None:
+    """The proposal's internal consistency — no ids involved."""
+    labels = {c.label for c in children}
+    for child in children:
+        for field in ORDERING_FIELDS:
+            for ref in child.ordering(field):
+                if ref not in labels:
+                    raise SplitError(
+                        f"{child.label}'s `{field}` names {ref!r}, which is not a child of "
+                        "this proposal — ordering fields reference sibling labels, not "
+                        "tracker ids (those are assigned by --ids)")
+                if ref == child.label:
+                    raise SplitError(f"{child.label}'s `{field}` names itself")
+    cyclic = _cycles(children)
+    if cyclic:
+        raise SplitError(
+            f"the proposal's `Depends on` fields form a cycle among {', '.join(cyclic)} — "
+            "the children could be created but never driven (compute_waves would refuse "
+            "them). Fix the ordering in the proposal first")
+
+
 def validate(children: list[Child], ids: list[str], cfg) -> None:
     """Every reason acceptance would fail, checked before a single file is written."""
     if len(children) != len(ids):
@@ -253,24 +297,10 @@ def validate(children: list[Child], ids: list[str], cfg) -> None:
                 "as an id — a `Depends on` naming it would be silently ignored and the "
                 "children would run in one wave. Use a tracker id containing a digit")
 
-    labels = {c.label for c in children}
-    for child in children:
-        for field in ORDERING_FIELDS:
-            for ref in child.ordering(field):
-                if ref not in labels:
-                    raise SplitError(
-                        f"{child.label}'s `{field}` names {ref!r}, which is not a child of "
-                        "this proposal — ordering fields reference sibling labels, not "
-                        "tracker ids (those are assigned by --ids)")
-                if ref == child.label:
-                    raise SplitError(f"{child.label}'s `{field}` names itself")
-
-    cyclic = _cycles(children)
-    if cyclic:
-        raise SplitError(
-            f"the proposal's `Depends on` fields form a cycle among {', '.join(cyclic)} — "
-            "the children could be created but never driven (compute_waves would refuse "
-            "them). Fix the ordering in the proposal first")
+    # The same checks `preflight` runs before filing. Repeated here, not merely delegated
+    # from the CLI, because `accept()` is reachable directly (`--ids`, and every test) and
+    # must never depend on a caller having run them.
+    _validate_ordering(children)
 
     for issue_id in ids:
         d = cfg.bundle(issue_id)

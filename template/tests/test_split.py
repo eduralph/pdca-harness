@@ -1050,5 +1050,95 @@ class CodexReviewHardening(unittest.TestCase):
         self.assertEqual(cmd[0], "gh")
 
 
+class CodexVerifyFixes(unittest.TestCase):
+    """Findings from the verification pass."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github",
+            tracker_url="https://github.com/acme/widgets", issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        self.parent = self.cfg.bundle("500")
+        self.parent.mkdir(parents=True)
+        (self.parent / "brief.md").write_text("- **Slug:** parent\n", encoding="utf-8")
+        (self.parent / split.PROPOSAL).write_text(_proposal(_ONE, _TWO_DEP),
+                                                  encoding="utf-8")
+        self.filed: list[object] = []
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _accept(self, ids: str = ""):
+        def filer(parent, children, cfg):
+            self.filed.append(children)
+            return ["601", "602"]
+        err = io.StringIO()
+        with mock.patch("pdca_harness.split.file_children", filer), \
+             redirect_stderr(err), redirect_stdout(io.StringIO()):
+            rc = cli._split(self.cfg, SimpleNamespace(issue_id="500", accept=True, ids=ids))
+        return rc, err.getvalue()
+
+    def test_a_SECOND_accept_files_nothing(self) -> None:
+        """P1. Filing happened before `accept()`'s preconditions, so re-running a
+        successful `--accept` created a whole second set of REAL sub-issues and only then
+        discovered the parent was already split. Tracker issues cannot be withdrawn, so the
+        order is the entire guarantee."""
+        rc, _ = self._accept()
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.filed), 1)
+
+        rc, err = self._accept()
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(self.filed), 1, "a second set of real issues was filed")
+        self.assertIn("already marked", err)
+
+    def test_a_cyclic_proposal_files_nothing(self) -> None:
+        """Same order defect, different trigger: `validate` caught the cycle only after
+        the children had been filed."""
+        cyclic = _proposal("- **Slug:** a\n- **Depends on:** child-2\n",
+                           "- **Slug:** b\n- **Depends on:** child-1\n")
+        (self.parent / split.PROPOSAL).write_text(cyclic, encoding="utf-8")
+        rc, err = self._accept()
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.filed, [], "issues were filed for an unschedulable proposal")
+        self.assertIn("cycle", err)
+
+    def test_a_proposal_naming_an_unknown_sibling_files_nothing(self) -> None:
+        bad = _proposal("- **Slug:** a\n- **Depends on:** child-9\n")
+        (self.parent / split.PROPOSAL).write_text(bad, encoding="utf-8")
+        rc, err = self._accept()
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.filed, [])
+        self.assertIn("not a child of this proposal", err)
+
+    def test_accept_still_checks_everything_itself(self) -> None:
+        """`preflight` is a pre-filing gate, not a replacement: `accept()` is reachable
+        directly via `--ids` and from every test, and must never depend on a caller
+        having run the checks."""
+        cyclic = _proposal("- **Slug:** a\n- **Depends on:** child-2\n",
+                           "- **Slug:** b\n- **Depends on:** child-1\n")
+        (self.parent / split.PROPOSAL).write_text(cyclic, encoding="utf-8")
+        with self.assertRaises(split.SplitError):
+            split.accept(self.parent, ["601", "602"], self.cfg)
+
+    def test_the_prompts_do_not_claim_a_single_run_schedules_the_children(self) -> None:
+        """P2. `flow()` drives one bundle and stops when it goes terminal; only
+        `flow_batch` re-enumerates after the Plan beat. Telling the planner the run
+        continues by itself left the children unbuilt for anyone following it."""
+        role = (Path(__file__).resolve().parents[1] / "agents" / "planner.md.jinja")
+        text = role.read_text(encoding="utf-8") if role.is_file() else (
+            Path(__file__).resolve().parents[1] / "agents" / "planner.md"
+        ).read_text(encoding="utf-8")
+        prompt = leaves._plan_prompt(self.cfg, None, self.parent)
+        for where, body in (("role", text), ("runtime", prompt)):
+            with self.subTest(where=where):
+                self.assertIn("batch", body.lower())
+                self.assertIn("single-issue", body.lower())
+                self.assertIn("pdca flow", body.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

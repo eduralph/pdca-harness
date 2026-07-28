@@ -441,10 +441,12 @@ def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
         "produces briefs, and briefs are yours. Run `pdca split "
         f"{issue_id}` to have the splitter draft a proposal, read it with the human, then "
         f"`pdca split {issue_id} --accept`: that files one tracker issue per child as a "
-        "sub-issue of this one, materialises a bundle each, and the run continues into "
-        "waves by itself — independent children in parallel, dependent ones stacked. You "
-        "do not leave the session to file issues by hand. Prefer fewer, larger children: "
-        "each costs a full cycle."
+        "sub-issue of this one and materialises a bundle each. You do not leave the "
+        "session to file issues by hand. A BATCH run enumerates its bundles after the Plan "
+        "beat, so it picks the children up and schedules them into waves by itself — "
+        "independent ones in parallel, dependent ones stacked; a single-issue run drives "
+        "only this bundle, and `--accept` prints the `pdca flow <child-ids>` command that "
+        "drives them. Prefer fewer, larger children: each costs a full cycle."
     )
 
 
