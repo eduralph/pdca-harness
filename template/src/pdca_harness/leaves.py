@@ -858,9 +858,9 @@ def run_sizer(d: Path, cfg: Config) -> dict | None:
     # digest and reused while that digest holds; an iterate that rewrites the brief changes
     # it and earns a fresh pass. This also subsumes the stale-artifact problem the
     # unconditional unlink was guarding: a verdict from a DIFFERENT brief never matches.
-    digest = hashlib.sha256(bp.read_bytes()).hexdigest()[:16]
+    digest = _sizer_key(d, cfg, bp)
     existing = _read_sizing(d)
-    if existing is not None and existing.get("brief_sha") == digest:
+    if digest and existing is not None and existing.get("brief_sha") == digest:
         return existing
 
     verdict = _sizer_pass(cfg.sizer, d, cfg, "sizer")
@@ -878,6 +878,35 @@ def run_sizer(d: Path, cfg: Config) -> dict | None:
     return _stamp(d, verdict, digest)
 
 
+def _sizer_key(d: Path, cfg: Config, bp: Path) -> str:
+    """The cache key for a sizing verdict, or "" when the inputs cannot be fingerprinted.
+
+    A POINTER brief is the reason this is not just the brief's digest: for those, the
+    planning artifact IS the plan and the sizer is told to read it, so hashing `brief.md`
+    alone would reuse an `ok` verdict after the artifact grew from one outcome to three —
+    suppressing exactly the advisory the pointer case exists to produce.
+
+    An artifact that cannot be read — a URL, or a path outside the tree — yields "" and the
+    verdict is NOT cached. Paying for a re-run is the safe direction when the alternative
+    is silently trusting a verdict whose input may have changed underneath it.
+    """
+    h = hashlib.sha256(bp.read_bytes())
+    artifact = brief.planning_artifact(bp)
+    if not artifact:
+        return h.hexdigest()[:16]
+    for root in (d, rubric_mod._target_root(d, cfg)):
+        if root is None:
+            continue
+        try:
+            candidate = (Path(root) / artifact).resolve()
+            if candidate.is_file():
+                h.update(candidate.read_bytes())
+                return h.hexdigest()[:16]
+        except (OSError, ValueError):
+            continue
+    return ""
+
+
 def _stamp(d: Path, verdict: dict | None, digest: str) -> dict | None:
     """Record which brief a verdict was given for, and (re)write it to the bundle.
 
@@ -887,7 +916,7 @@ def _stamp(d: Path, verdict: dict | None, digest: str) -> dict | None:
     """
     if verdict is None:
         return None
-    stamped = {**verdict, "brief_sha": digest}
+    stamped = {**verdict, "brief_sha": digest} if digest else dict(verdict)
     try:
         (d / SIZING_FILE).write_text(json.dumps(stamped, indent=2) + "\n", encoding="utf-8")
     except OSError:

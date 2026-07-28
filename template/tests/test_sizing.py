@@ -475,6 +475,58 @@ class ThirdReviewFixes(unittest.TestCase):
             leaves.run_sizer(d, cfg)
         inv.assert_called_once()
 
+    def test_a_pointer_briefs_artifact_is_part_of_the_cache_key(self) -> None:
+        """For a pointer brief the artifact IS the plan, so hashing brief.md alone reused
+        an `ok` verdict after the artifact grew from one outcome to three — suppressing
+        exactly the advisory the pointer case exists to produce."""
+        from unittest import mock
+        from pdca_harness import leaves
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "plan.md").write_text("one outcome\n", encoding="utf-8")
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Planning artifact:** plan.md\n", encoding="utf-8")
+        cfg = self._sizer_cfg(tmp)
+        calls = {"n": 0}
+
+        def _fake(leaf, workdir, prompt, **kw):
+            calls["n"] += 1
+            (Path(workdir) / leaves.SIZING_FILE).write_text('{"band": "ok"}',
+                                                            encoding="utf-8")
+
+        with mock.patch.object(leaves, "_invoke", side_effect=_fake):
+            leaves.run_sizer(d, cfg)
+            leaves.run_sizer(d, cfg)
+            self.assertEqual(calls["n"], 1, "an unchanged pointer brief re-paid")
+            (d / "plan.md").write_text("one\ntwo\nthree outcomes\n", encoding="utf-8")
+            leaves.run_sizer(d, cfg)
+            self.assertEqual(calls["n"], 2, "the artifact changed but the verdict was reused")
+
+    def test_an_unfetchable_artifact_is_not_cached(self) -> None:
+        """A URL cannot be fingerprinted. Paying for a re-run is the safe direction when
+        the alternative is trusting a verdict whose input may have moved."""
+        from unittest import mock
+        from pdca_harness import leaves
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text(
+            "- **Slug:** s\n- **Planning artifact:** https://example/plan\n",
+            encoding="utf-8")
+        cfg = self._sizer_cfg(tmp)
+        calls = {"n": 0}
+
+        def _fake(leaf, workdir, prompt, **kw):
+            calls["n"] += 1
+            (Path(workdir) / leaves.SIZING_FILE).write_text('{"band": "ok"}',
+                                                            encoding="utf-8")
+
+        with mock.patch.object(leaves, "_invoke", side_effect=_fake):
+            leaves.run_sizer(d, cfg)
+            leaves.run_sizer(d, cfg)
+        self.assertEqual(calls["n"], 2, "an unfingerprintable input was cached anyway")
+
 
 if __name__ == "__main__":
     unittest.main()
