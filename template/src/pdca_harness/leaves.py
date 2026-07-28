@@ -918,8 +918,12 @@ def _sizer_key(d: Path, cfg: Config, bp: Path) -> str:
     h.update(repr([
         (cfg.sizer.mode, cfg.sizer.family, tuple(cfg.sizer.argv), cfg.sizer.agent,
          cfg.sizer.model, cfg.sizer.effort),
-        tuple(sorted((k, repr(v)) for spec in cfg.sizer_escalation
-                     for k, v in spec.items())),
+        # ORDERED per-spec, not a flattened sorted set: `run_sizer` returns on the FIRST
+        # matching escalation, so reordering two rules changes which stronger model runs.
+        # Flattening gave both orders the same key, and the cached verdict from the rule
+        # that used to win was returned instead of running the one now promoted.
+        tuple(tuple(sorted((k, repr(v)) for k, v in spec.items()))
+              for spec in cfg.sizer_escalation),
     ]).encode("utf-8"))
     artifact = brief.planning_artifact(bp)
     if not artifact:

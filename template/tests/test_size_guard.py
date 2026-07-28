@@ -418,6 +418,36 @@ class FinalReviewFixes(unittest.TestCase):
         (self.d / "brief.md").write_text("- **Slug:** small\n", encoding="utf-8")
         self.assertEqual(plan_policy.evaluate(self.d, cfg, before_do=False), [])
 
+    def test_a_malformed_seams_field_is_ignored_not_iterated(self) -> None:
+        """The verdict is model output and the contract is deliberately tolerant of an
+        untidy schema — but tolerant must mean IGNORED, not iterated. `proposed_seams: 1`
+        crashed the command; a string printed one "seam" per character."""
+        from pdca_harness import cli
+        from pdca_harness.config import Config
+        cfg = Config.load(self.tmp)
+        for bad in (1, "a string", None, {"x": 1}):
+            with self.subTest(proposed_seams=bad):
+                self._store(cfg, proposed_seams=bad)
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self.assertEqual(cli._size(cfg, []), 0)
+                self.assertNotIn("seam:", buf.getvalue())
+
+    def test_reordering_escalations_changes_the_cache_key(self) -> None:
+        """`run_sizer` returns on the FIRST matching escalation, so order decides which
+        stronger model runs. A flattened, sorted key gave both orders the same digest, so
+        promoting a rule returned the cached verdict from the one it replaced."""
+        from pdca_harness import leaves
+        from pdca_harness.config import Config, LeafConfig
+        cfg = Config.load(self.tmp)
+        cfg.sizer = LeafConfig(mode="command", family="generic", argv=["true"])
+        rules = [{"on_band": ["watch"], "argv": ["model-a"]},
+                 {"on_confidence": ["low"], "argv": ["model-b"]}]
+        cfg.sizer_escalation = rules
+        first = leaves._sizer_key(self.d, cfg, self.d / "brief.md")
+        cfg.sizer_escalation = list(reversed(rules))
+        self.assertNotEqual(first, leaves._sizer_key(self.d, cfg, self.d / "brief.md"))
+
 
 if __name__ == "__main__":
     unittest.main()

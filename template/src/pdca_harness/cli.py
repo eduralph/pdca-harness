@@ -654,7 +654,12 @@ def _size(cfg: Config, issue_ids: list[str]) -> int:
         for reason in est.reasons:
             print(f"    - {reason}")
         stored = leaves.current_sizing(d, cfg) or {}
-        for seam in stored.get("proposed_seams") or []:
+        # LIST or nothing. The verdict is model output and the contract is deliberately
+        # tolerant of an untidy schema — but tolerant has to mean "ignored", not "iterated":
+        # `proposed_seams: 1` crashed this command, and a string printed one "seam" per
+        # character.
+        seams = stored.get("proposed_seams")
+        for seam in seams if isinstance(seams, list) else []:
             print(f"    seam: {seam}")
     return 0
 
