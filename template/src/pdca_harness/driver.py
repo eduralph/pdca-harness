@@ -52,7 +52,7 @@ def advance(d: Path, cfg: Config) -> None:
         # structural estimate still run at BUILT — a resumed or partially-built bundle
         # must not buy a reviewer at xhigh plus an adversary to discover something two
         # files already answer.
-        reasons = plan_policy.evaluate(d, cfg, may_invoke=(s == state.PLANNED))
+        reasons = plan_policy.evaluate(d, cfg, before_do=(s == state.PLANNED))
         for reason in reasons:
             _say(f"⚠ {d.name}: {reason.detail}")
         # A BLOCKING reason stops the beat; advisories are reported and passed. Only a

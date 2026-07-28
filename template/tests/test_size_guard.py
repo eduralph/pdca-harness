@@ -304,7 +304,7 @@ class TheVerdictHasAConsumer(unittest.TestCase):
         from pdca_harness import leaves
         cfg = _cfg(self.tmp, "warn")
         with mock.patch.object(leaves, "run_sizer") as sizer:
-            reasons = plan_policy.evaluate(self.d, cfg, may_invoke=False)
+            reasons = plan_policy.evaluate(self.d, cfg, before_do=False)
         sizer.assert_not_called()
         self.assertTrue(any("sizer says oversized" in r.detail for r in reasons),
                         "the stored verdict was not folded into the BUILT advisory")
@@ -314,8 +314,40 @@ class TheVerdictHasAConsumer(unittest.TestCase):
         from pdca_harness import leaves
         cfg = _cfg(self.tmp, "warn")
         with mock.patch.object(leaves, "run_sizer", return_value=None) as sizer:
-            plan_policy.evaluate(self.d, cfg, may_invoke=True)
+            plan_policy.evaluate(self.d, cfg, before_do=True)
         sizer.assert_called_once()
+
+
+class TheRemedyFollowsTheBeat(unittest.TestCase):
+    """A split authors BRIEFS, so it belongs to Plan — and the advice has to say so.
+
+    Before Do, the answer is "split now". After Do, telling the human to run `pdca split`
+    would decompose a bundle that already has a patch, producing children that inherit
+    none of it. The route back to Plan is `iterate-plan`, which archives the brief and
+    returns the bundle to the beat that authors them.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.d = self.tmp / "results" / "issue_1"
+        self.d.mkdir(parents=True)
+        (self.tmp / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n',
+                                            encoding="utf-8")
+        (self.d / "brief.md").write_text(_OVERSIZED, encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_before_do_it_says_split_now(self) -> None:
+        r = plan_policy.evaluate(self.d, _cfg(self.tmp, "warn"), before_do=True)
+        self.assertIn("pdca split", r[0].detail)
+        self.assertNotIn("iterate-plan", r[0].detail)
+
+    def test_after_do_it_routes_through_iterate_plan(self) -> None:
+        r = plan_policy.evaluate(self.d, _cfg(self.tmp, "warn"), before_do=False)
+        self.assertIn("iterate-plan", r[0].detail)
+        self.assertNotIn("pdca split` first", r[0].detail,
+                         "advised splitting a bundle that already has a patch")
 
 
 if __name__ == "__main__":
