@@ -9,6 +9,7 @@ lock the shape of the decision.
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -283,14 +284,27 @@ class SecondReviewFixes(unittest.TestCase):
             f.write_text(body, encoding="utf-8")
         return f
 
-    def test_invalid_utf8_abstains_instead_of_raising(self) -> None:
-        """`_apriori_bytes` reads with errors="replace" and survives, but the field helpers
-        decode strictly — so one stray byte aborted the Plan beat, which is exactly what
-        "a detector that crashes Plan is worse than one that abstains" forbids."""
+    def test_invalid_utf8_is_sized_rather_than_abstained(self) -> None:
+        """One stray byte must neither raise nor cost the whole estimate (#355).
+
+        It used to do the latter: the field helpers decoded strictly, so a single bad byte
+        anywhere in the brief returned score 0 / `ok` — a confident "small" for a brief
+        nobody read. Now `apriori_text` is the only read and it replaces, so the declared
+        `Difficulty: high` in the very same file is still scored.
+        """
         f = self._brief("", raw=b"- **Slug:** s\n- **Difficulty:** high\n\xff\xfe\n")
         est = sizing.estimate(f, _CFG)
+        self.assertIn("difficulty=high", est.reasons)
+        self.assertEqual(est.score, sizing.DEFAULT_WEIGHTS["difficulty_high"])
+
+    def test_unreadable_brief_still_abstains(self) -> None:
+        """An OSError is a different thing from a decode error and keeps the abstention."""
+        d = Path(tempfile.mkdtemp())
+        (d / "brief.md").mkdir()          # a directory where the brief should be: OSError
+        est = sizing.estimate(d / "brief.md", _CFG)
         self.assertEqual(est.band, sizing.OK)
         self.assertEqual(est.score, 0)
+        self.assertEqual(est.reasons, ["brief unreadable — not sized"])
 
     def test_only_the_drivers_carry_forward_heading_truncates(self) -> None:
         """A loose "starts with Iteration" test discarded everything under a legitimate
@@ -619,6 +633,124 @@ class ThirdReviewFixes(unittest.TestCase):
         prompt = leaves._sizer_prompt(d, cfg)
         self.assertNotIn("/etc/passwd)", prompt)
         self.assertIn("not readable from here", prompt)
+
+
+class NoOutcomeLeak(unittest.TestCase):
+    """#355 — every weighted feature reads the a-priori text, not the file.
+
+    `driver._carry_forward_into_brief` appends its section only when an attempt was
+    REJECTED, and `brief.parse_fields` keeps the first match for a label. So a weighted
+    field that appears only below the heading switches its predictor on exactly on the
+    bundles that churned — the predictor recovering the outcome it is meant to predict.
+    """
+
+    CARRY = ("\n\n## Iteration 2 — carry-forward\n\n"
+             "Sign-off rationale quoted the brief:\n"
+             "- **Difficulty:** high\n"
+             "- **Conflicts with:** issue_900\n"
+             "- **External dependencies:** `ripgrep`, `jq`\n"
+             "- **Planning artifact:** docs/adr/0007.md\n")
+
+    def _brief(self, body: str) -> Path:
+        f = Path(tempfile.mkdtemp()) / "brief.md"
+        f.write_text(body, encoding="utf-8")
+        return f
+
+    def test_a_field_only_in_carry_forward_does_not_move_the_score(self) -> None:
+        base = "- **Slug:** s\n- **Scope:** one small thing\n"
+        clean = sizing.estimate(self._brief(base), _CFG)
+        churned = sizing.estimate(self._brief(base + self.CARRY), _CFG)
+        self.assertEqual(churned.score, clean.score,
+                         f"carry-forward leaked into the score: {churned.reasons}")
+        self.assertEqual(churned.reasons, clean.reasons)
+        self.assertEqual(churned.score, 0)
+
+    def test_each_weighted_field_leaks_independently(self) -> None:
+        """One case per feature, so a partial fix cannot pass on the strength of the others.
+
+        Each case carries its own POSITIVE CONTROL: the identical field placed *above* the
+        heading must move the score. Without it a fixture that simply fails to fire the
+        feature passes the leak assertion for the wrong reason — which is exactly what a
+        bare `ripgrep` did here, since `external_dependency_tokens` only counts backticked
+        tokens.
+        """
+        base = "- **Slug:** s\n"
+        for label, value in (("Difficulty", "high"),
+                             ("Conflicts with", "issue_900"),
+                             ("External dependencies", "`ripgrep`"),
+                             ("Planning artifact", "docs/adr/0007.md")):
+            field = f"- **{label}:** {value}\n"
+            with self.subTest(field=label):
+                above = sizing.estimate(self._brief(base + field), _CFG)
+                self.assertNotEqual(
+                    above.score, 0,
+                    f"fixture does not fire {label} at all — the leak case below would "
+                    f"pass vacuously")
+                leaked = self._brief(
+                    base + "\n## Iteration 2 — carry-forward\n\n" + field)
+                est = sizing.estimate(leaked, _CFG)
+                self.assertEqual(est.score, 0, f"{label} leaked: {est.reasons}")
+
+    def test_a_field_declared_above_is_still_read(self) -> None:
+        """The complement — narrowing the read must not blind the estimator to real
+        fields, which is how a leak fix silently becomes a regression."""
+        f = self._brief("- **Slug:** s\n- **Difficulty:** high\n"
+                        "- **Conflicts with:** issue_900\n" + self.CARRY)
+        est = sizing.estimate(f, _CFG)
+        self.assertIn("difficulty=high", est.reasons)
+        self.assertIn("1 conflict(s) declared", "; ".join(est.reasons))
+
+    def test_brief_bytes_ignores_the_appended_section(self) -> None:
+        """The feature that already respected the split, asserted here beside the four
+        that did not, so the guarantee is stated in one place."""
+        body = "- **Slug:** s\n- **Scope:** " + "x" * 20000 + "\n"
+        small = "- **Slug:** s\n" + "\n## Iteration 2 — carry-forward\n\n" + "x" * 20000
+        self.assertIn("cutoff", "; ".join(sizing.estimate(self._brief(body), _CFG).reasons))
+        self.assertEqual(sizing.estimate(self._brief(small), _CFG).score, 0)
+
+
+class AprioriBriefShim(unittest.TestCase):
+    """The shim is the whole guard: if it hands back a real Path, the leak is back."""
+
+    def _ap(self, text: str) -> sizing.AprioriBrief:
+        p = Path(tempfile.mkdtemp()) / "brief.md"
+        p.write_text(text + "\n## Iteration 2 — carry-forward\n\nleaked\n", encoding="utf-8")
+        return sizing.AprioriBrief(p, sizing.apriori_text(p))
+
+    def test_read_text_withholds_the_carry_forward(self) -> None:
+        ap = self._ap("- **Slug:** s\n")
+        self.assertNotIn("leaked", ap.read_text())
+        self.assertNotIn("leaked", ap.read_text(encoding="utf-8", errors="replace"))
+
+    def test_path_returning_attributes_are_refused(self) -> None:
+        """`parent`, `resolve()`, `with_name()` each hand back a genuine Path whose
+        read_text() returns the whole file — which is why this is an allowlist."""
+        ap = self._ap("- **Slug:** s\n")
+        for attr in ("parent", "resolve", "with_name", "absolute", "open", "read_bytes"):
+            with self.subTest(attr=attr):
+                with self.assertRaises(AttributeError) as caught:
+                    getattr(ap, attr)
+                self.assertIn("does not delegate", str(caught.exception))
+
+    def test_os_fspath_refuses_rather_than_yielding_the_real_file(self) -> None:
+        with self.assertRaises(TypeError):
+            os.fspath(self._ap("- **Slug:** s\n"))
+
+    def test_name_attributes_still_work(self) -> None:
+        ap = self._ap("- **Slug:** s\n")
+        self.assertEqual(ap.name, "brief.md")
+        self.assertTrue(ap.is_file())
+
+    def test_carry_forward_bytes_is_the_complement(self) -> None:
+        p = Path(tempfile.mkdtemp()) / "brief.md"
+        p.write_text("abc\n## Iteration 2 — carry-forward\nxyz\n", encoding="utf-8")
+        self.assertEqual(sizing.apriori_text(p), "abc")
+        self.assertEqual(sizing.carry_forward_bytes(p),
+                         len("## Iteration 2 — carry-forward\nxyz\n".encode("utf-8")))
+        plain = Path(tempfile.mkdtemp()) / "brief.md"
+        plain.write_text("abc\n", encoding="utf-8")
+        self.assertEqual(sizing.carry_forward_bytes(plain), 0,
+                         "a brief that never iterated has nothing carried forward")
 
 
 if __name__ == "__main__":

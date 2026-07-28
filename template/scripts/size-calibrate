@@ -64,6 +64,10 @@ from pathlib import Path
 try:
     from pdca_harness import autoiterate, brief, state, waves
     from pdca_harness.config import Config
+    # ONE definition of the a-priori split, shared with the runtime estimator (#355). A
+    # second copy here drifted from `sizing` the moment either side changed — and the drift
+    # would be invisible, because both sides would still look self-consistent.
+    from pdca_harness.sizing import AprioriBrief, apriori_text, carry_forward_bytes
 except ImportError as exc:  # pragma: no cover - environment error, not logic
     sys.exit(f"size-calibrate: cannot import pdca_harness ({exc}).\n"
              "Run with the harness on PYTHONPATH, e.g. "
@@ -76,9 +80,6 @@ _FIELD_START = re.compile(r"^\s*-\s*\*{0,2}([^:*]+?)\*{0,2}:\*{0,2}\s*(.*?)\s*$"
 # A markdown heading needs the space: a continuation line may legitimately open with an issue
 # reference like ``#318``, which a bare ``^#`` test would mistake for a section break.
 _HEADING = re.compile(r"^\s*#{1,6}\s")
-#: Where the driver's iterate carry-forward begins. Everything from here down is written AFTER
-#: Do ran, so it is outcome, not input — see the module docstring.
-_CARRY_FORWARD = re.compile(r"^##\s+Iteration\s+\d+\s+.*carry-forward", re.MULTILINE)
 _ITERATION_DIR = re.compile(r"^iteration-v(\d+)$")
 # Clause separators that suggest a field enumerates several independent things rather than
 # stating one. Deliberately crude — the correlation decides whether it carries signal.
@@ -117,25 +118,6 @@ def normalize_difficulty(raw: str) -> str:
         if any(n in value for n in needles):
             return band
     return ""
-
-
-def apriori_text(brief_path: Path) -> str:
-    """The brief as it stood BEFORE any iterate — everything above the first carry-forward
-    heading. This is the only text a brief feature may be measured from (module docstring)."""
-    text = brief_path.read_text(encoding="utf-8", errors="replace")
-    m = _CARRY_FORWARD.search(text)
-    # rstrip: the append begins with its own newline, which would otherwise land on this side
-    # of the split and make brief_bytes depend on whether an iterate happened — a one-byte
-    # version of exactly the leakage this function exists to prevent.
-    return (text[:m.start()] if m else text).rstrip()
-
-
-def carry_forward_bytes(brief_path: Path) -> int:
-    """Bytes of appended carry-forward — the outcome-dependent text excluded from every brief
-    feature. Reported as its own column so the leakage is auditable rather than invisible."""
-    text = brief_path.read_text(encoding="utf-8", errors="replace")
-    m = _CARRY_FORWARD.search(text)
-    return len(text[m.start():].encode("utf-8")) if m else 0
 
 
 def field_block(text: str, *labels: str) -> str:
@@ -178,70 +160,6 @@ def field_block(text: str, *labels: str) -> str:
             break  # a heading, or unindented prose: no longer this field's value
         out.append(line.strip())
     return "\n".join(out).strip()
-
-
-#: The ONLY attributes :class:`AprioriBrief` delegates to the real path — an allowlist, and it
-#: has to be. Blocking known escape routes cannot work: ``resolve()``, ``absolute()``,
-#: ``with_name()``, even ``parent``, each hand back a genuine ``Path`` whose ``read_text``
-#: returns the FULL brief, and ``Path`` has more path-returning methods than a denylist could
-#: chase. So the default is refuse, and the exceptions are the ones that provably cannot reach
-#: the file's bytes: strings about the name, and existence predicates. A helper needing more
-#: gets a loud AttributeError pointing here — which is the right trade, because the failure this
-#: guards against is a silently wrong predictor, not a crash.
-_DELEGATED = frozenset({"name", "stem", "suffix", "exists", "is_file"})
-
-
-class AprioriBrief:
-    """A stand-in for ``brief.md`` whose text is only the pre-iterate portion.
-
-    Every ``brief`` / ``waves`` helper reads its brief through ``Path.read_text``, so handing
-    them one of these instead of the real path makes them parse the *a priori* text while
-    keeping their own (authoritative) field semantics. That matters: every brief feature below
-    except ``brief_bytes`` reaches the text through one of those helpers, and read straight from
-    disk they defeat the guard the rest of this file is built around.
-
-    The leak they admit is one-directional but real. ``brief.parse_fields`` keeps the FIRST
-    match for a label, so carry-forward cannot overwrite a field the brief already declared —
-    but a field the brief never declared, appearing below, flips its predictor on *because the
-    bundle churned*. The route is live: ``driver._carry_forward_into_brief`` folds in a bullet
-    per failing gate, and ``driver._failing_gate_lines`` falls back to the row's ``oracle``,
-    which ``gates`` populates with the raw gate command — a value a config may write as a TOML
-    multi-line string, so arbitrary extra bullet lines can land in the brief.
-
-    Re-parsing the fields here instead would mean a second implementation of the harness's field
-    grammar, drifting silently the first time either side changed. So this narrows *what is
-    read* rather than reimplementing ``Path``: :func:`read_text` answers with the a-priori text,
-    a short allowlist of name-and-existence attributes delegates to the real path, and
-    everything else is refused — see :data:`_DELEGATED` for why that has to be an allowlist
-    rather than a list of blocked escape routes.
-    """
-
-    def __init__(self, path: Path, text: str) -> None:
-        self._path = path
-        self._text = text
-
-    def read_text(self, *_args, **_kwargs) -> str:
-        """The a-priori text, whatever encoding arguments the caller passed.
-
-        The text is already decoded, so ``encoding`` / ``errors`` are accepted and ignored
-        rather than rejected — a helper passing them is asking for the brief, not for a
-        different decoding of it.
-        """
-        return self._text
-
-    # No __fspath__: without it os.fspath() / open() raise TypeError at the call site instead
-    # of quietly yielding the real file. AttributeError (not a custom type) is deliberate for
-    # the rest — it is the signal "no such attribute", so incidental dunder probing by copy,
-    # pickle or a test framework degrades normally instead of exploding.
-    def __getattr__(self, name: str):
-        if name not in _DELEGATED:
-            raise AttributeError(
-                f"AprioriBrief does not delegate {name!r}. It offers read_text() — the a-priori "
-                f"text — plus {sorted(_DELEGATED)}. Anything else risks handing back a real "
-                "Path, whose read_text() returns the whole brief.md including the post-Do "
-                "carry-forward this class exists to withhold. Add a name here only if it "
-                "cannot reach the file's bytes.")
-        return getattr(self._path, name)
 
 
 def value_block(brief_path: Path | AprioriBrief, text: str, *labels: str) -> str:
