@@ -84,7 +84,7 @@ class HoldReason(NamedTuple):
     detail: str    # one line for the human
 
 
-def size_reasons(d, cfg, *, may_invoke: bool = True) -> list[HoldReason]:
+def size_reasons(d, cfg, *, before_do: bool = True) -> list[HoldReason]:
     """Size advisories for a bundle, per ``[driver].size_guard``.
 
     **There is no `hold` mode, and that is an evidence-based decision.** Calibrated over
@@ -109,14 +109,14 @@ def size_reasons(d, cfg, *, may_invoke: bool = True) -> list[HoldReason]:
     # how many independently shippable outcomes the brief describes — and every configured
     # `[leaves.sizer]` escalation is dead config. `combine` escalates only, so a stub, a
     # missing verdict or a malformed one leaves the structural estimate byte-identical.
-    # `may_invoke` is False before CHECK. The paid leaf answers "how many independently
+    # `before_do` is False before CHECK. The paid leaf answers "how many independently
     # shippable outcomes?" — advice that can prevent a build, and therefore worth buying
     # only while one can still be prevented. At BUILT the patch already exists, the
     # advisory does not block, and nothing persists it, so a second call would buy a log
     # line about work already paid for. A verdict the Plan beat already produced is read
     # for free.
     from . import leaves
-    est = sizing.combine(est, leaves.run_sizer(d, cfg) if may_invoke
+    est = sizing.combine(est, leaves.run_sizer(d, cfg) if before_do
                          else leaves._read_sizing(d))
     if est.band != sizing.OVERSIZED:
         return []
@@ -130,13 +130,22 @@ def size_reasons(d, cfg, *, may_invoke: bool = True) -> list[HoldReason]:
     # independently shippable outcomes" is the evidence that justifies a split, and
     # telling the human "large but coherent" over the top of it contradicts the one
     # signal that can actually see decomposability.
-    if (est.churn_band == sizing.OVERSIZED
-            or est.model_band == sizing.OVERSIZED
-            or est.patch_band != sizing.OVERSIZED):
-        remedy = "consider `pdca split` first"
-    else:
+    splittable = (est.churn_band == sizing.OVERSIZED
+                  or est.model_band == sizing.OVERSIZED
+                  or est.patch_band != sizing.OVERSIZED)
+    if not splittable:
         remedy = ("expect a large patch — worth a look before Do, but a large COHERENT "
                   "change is not a split candidate")
+    elif before_do:
+        remedy = "consider `pdca split` first"
+    else:
+        # A split authors BRIEFS, and authoring briefs is what Plan does — so the route
+        # back is `iterate-plan`, which archives this brief and returns the bundle to
+        # Plan, where the split belongs. Telling the human to run `pdca split` on a bundle
+        # that already has a patch would decompose it AFTER the build the children will
+        # not inherit.
+        remedy = ("if this will not converge, answer `iterate-plan` at sign-off and split "
+                  "in the re-plan — a split authors briefs, which is Plan's beat")
     detail = f"oversized — {remedy} ({'; '.join(est.reasons)})"
     if mode not in (OFF, WARN):
         detail += (f" [size_guard={mode!r} is treated as 'warn': a blocking mode is "
@@ -185,7 +194,7 @@ def blocking(reasons) -> list[HoldReason]:
     return [r for r in reasons if r.code in _BLOCKING]
 
 
-def evaluate(d, cfg, *, may_invoke: bool = True) -> list[HoldReason]:
+def evaluate(d, cfg, *, before_do: bool = True) -> list[HoldReason]:
     """Every pre-dispatch reason to pause on this bundle. Empty ⇒ proceed.
 
     Advisory by construction today: the driver prints these and continues. The return
@@ -199,4 +208,4 @@ def evaluate(d, cfg, *, may_invoke: bool = True) -> list[HoldReason]:
     deps = list(dependency_reasons(d, cfg))
     if blocking(deps):
         return deps
-    return list(size_reasons(d, cfg, may_invoke=may_invoke)) + deps
+    return list(size_reasons(d, cfg, before_do=before_do)) + deps
