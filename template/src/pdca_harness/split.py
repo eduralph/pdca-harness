@@ -86,6 +86,7 @@ class Child:
         otherwise have its EXAMPLE validated as a real sibling reference, failing the
         cycle or unknown-label check on a proposal that is perfectly well formed.
         """
+        found: list[str] | None = None
         for line, fenced in _unfenced(self.body):
             if fenced:
                 continue
@@ -94,9 +95,16 @@ class Child:
             if m:
                 value = m.group(1).strip()
                 if value.startswith("<"):
-                    return []          # unfilled template placeholder
+                    # An unfilled placeholder is not an answer — keep looking. Returning
+                    # here let a placeholder followed by a REAL value pass validation
+                    # unchecked while `rewrite_ordering` still rewrote the real one, so the
+                    # child shipped a dependency nobody had reviewed. `brief.parse_fields`
+                    # then keeps the FIRST field, so `compute_waves` read the placeholder,
+                    # saw no dependency, and scheduled both children in one wave.
+                    found = found if found is not None else []
+                    continue
                 return [t.strip() for t in value.split(",") if t.strip()]
-        return []
+        return found or []
 
 
 def parse(text: str) -> list[Child]:
@@ -220,6 +228,17 @@ def validate(children: list[Child], ids: list[str], cfg) -> None:
     if len(set(ids)) != len(ids):
         raise SplitError(f"--ids contains duplicates: {', '.join(ids)}")
 
+    # A tracker id is a token, not a path. `cfg.bundle("x/foo")` yields
+    # `results/issue_x/foo`, whose NAME is "foo" — so validation checked one path while the
+    # move installed to `results/foo`, nesting into a pre-existing directory and recording
+    # it as created. A later failure then rolled that directory back: `rmtree` on something
+    # this command never made.
+    for issue_id in ids:
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", issue_id) or issue_id in (".", ".."):
+            raise SplitError(
+                f"--ids contains {issue_id!r}, which is not a plain tracker id — ids may "
+                "hold letters, digits, dot, underscore and hyphen only")
+
     labels = {c.label for c in children}
     for child in children:
         for field in ORDERING_FIELDS:
@@ -332,8 +351,10 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
     created: list[Path] = []
     try:
         staged = materialise(children, ids, cfg, staging)
-        for src in staged:
-            dst = cfg.bundle_root / src.name
+        for src, issue_id in zip(staged, ids):
+            dst = cfg.bundle(issue_id)          # the SAME path validate() checked
+            if dst.exists():                    # re-checked at the moment of writing
+                raise SplitError(f"{dst} appeared while accepting — refusing to overwrite")
             shutil.move(str(src), str(dst))
             created.append(dst)
     except Exception:

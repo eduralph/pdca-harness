@@ -811,7 +811,8 @@ def _sizer_prompt(d: Path, cfg: Config) -> str:
         '"proposed_seams": ["…"], "confidence": "low|medium|high"}\n\n'
         "band: `ok` = one outcome. `watch` = arguably two, or one with a large uncertain "
         "surface. `oversized` = two or more that could each ship alone.\n"
-        "Propose seams; do NOT cut them — splitting is the human's call at sign-off."
+        "Propose seams; do NOT cut them — the split is authored in PLAN, by the human, "
+        "before Do dispatches."
     )
 
 
@@ -1047,10 +1048,18 @@ def _split_prompt(d: Path, cfg: Config) -> str:
     # where they divide. Sizing the brief again here would pay a second model to rediscover
     # what the first one wrote down — and the splitter is the one consumer that needs those
     # seams most.
-    est = sizing.combine(sizing.estimate(d / "brief.md", cfg), _read_sizing(d))
-    verdict = _read_sizing(d) or {}
-    outcomes = [str(o) for o in (verdict.get("independent_outcomes") or [])]
-    seams = [str(s_) for s_ in (verdict.get("proposed_seams") or [])]
+    # `current_sizing`, not the raw read: after an iterate-plan the brief changes while
+    # `sizing.json` stays, and handing the splitter seams drawn from a replaced brief tells
+    # it the old decomposition describes the current one.
+    verdict = current_sizing(d, cfg) or {}
+    est = sizing.combine(sizing.estimate(d / "brief.md", cfg), verdict or None)
+    # LIST or nothing. The verdict is model output and the contract tolerates an untidy
+    # schema — but tolerant has to mean ignored, not iterated: `proposed_seams: 1` raised
+    # TypeError here, and `do_split` has already unlinked the previous proposal by then.
+    _out = verdict.get("independent_outcomes")
+    _seam = verdict.get("proposed_seams")
+    outcomes = [str(o) for o in _out] if isinstance(_out, list) else []
+    seams = [str(s_) for s_ in _seam] if isinstance(_seam, list) else []
     prior = ""
     if outcomes or seams:
         prior = (

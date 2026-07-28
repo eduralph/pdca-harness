@@ -394,12 +394,17 @@ class TheSplitterReadsTheSizer(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _verdict(self, **kw) -> None:
+        """Stamped with the brief's digest — `_split_prompt` reads through
+        `current_sizing`, so an unstamped verdict is treated as belonging to some other
+        brief and correctly ignored."""
         import json
+        from pdca_harness import leaves as _lv
+        key = _lv._sizer_key(self.d, self.cfg, self.d / "brief.md")
         (self.d / "sizing.json").write_text(json.dumps({
             "band": "oversized",
             "independent_outcomes": ["parser rewrite", "renderer rewrite"],
-            "proposed_seams": ["split at the parser/renderer boundary"], **kw}),
-            encoding="utf-8")
+            "proposed_seams": ["split at the parser/renderer boundary"],
+            "brief_sha": key, **kw}), encoding="utf-8")
 
     def test_the_seams_and_outcomes_reach_the_prompt(self) -> None:
         self._verdict()
@@ -458,6 +463,18 @@ class TheDoctrineIsConsistent(unittest.TestCase):
             with self.subTest(role=role):
                 self.assertNotIn("call at sign-off", self._text(role))
 
+    def test_no_RUNTIME_prompt_places_the_split_at_sign_off(self) -> None:
+        """The role files were corrected and the task prompts were not, so every real
+        `pdca split` session was told the opposite of its own role. Scanning only the
+        role files missed it — the prompt actually sent to the model is built in code."""
+        import inspect
+        from pdca_harness import leaves
+        for fn in (leaves._split_prompt, leaves._sizer_prompt):
+            with self.subTest(prompt=fn.__name__):
+                self.assertNotIn("call at sign-off", inspect.getsource(fn))
+                self.assertNotIn("splitting is the human's call at sign-off",
+                                 inspect.getsource(fn))
+
     def test_the_splitter_says_the_split_is_authored_in_plan(self) -> None:
         self.assertIn("authored in PLAN", self._text("splitter"))
 
@@ -474,6 +491,57 @@ class TheDoctrineIsConsistent(unittest.TestCase):
         self.assertIn("too big is `iterate-plan`", text)
         self.assertIn("Not `iterate-do`", text)
         self.assertIn("Not\n`discontinue`", text.replace("—", "—"))
+
+
+class AcceptIsSafe(unittest.TestCase):
+    """Pre-merge review of #354."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github", tracker_url="",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        self.parent = self.cfg.bundle("500")
+        self.parent.mkdir(parents=True)
+        (self.parent / "brief.md").write_text("- **Slug:** p\n", encoding="utf-8")
+        (self.parent / split.PROPOSAL).write_text(_proposal(_ONE, _TWO_INDEP),
+                                                  encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_a_path_shaped_id_is_refused(self) -> None:
+        """`cfg.bundle("x/foo")` is `results/issue_x/foo`, whose NAME is "foo" — so
+        validation checked one path and the move installed to `results/foo`, nesting into a
+        pre-existing directory, recording it as created, and rolling it back on a later
+        failure. `rmtree` on something this command never made."""
+        victim = self.cfg.bundle_root / "foo"
+        victim.mkdir(parents=True)
+        (victim / "keep.txt").write_text("pre-existing\n", encoding="utf-8")
+        for bad in ("x/foo", "../escape", "a b"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(split.SplitError):
+                    split.accept(self.parent, [bad, "602"], self.cfg)
+        self.assertTrue((victim / "keep.txt").exists(),
+                        "rollback deleted a directory the command never created")
+
+    def test_a_placeholder_does_not_hide_a_later_dependency(self) -> None:
+        """`ordering()` returned [] at the first placeholder, so a real value below it
+        passed validation unchecked while `rewrite_ordering` still rewrote it — and
+        `parse_fields` keeps the FIRST field, so compute_waves saw no dependency and put
+        both children in one wave."""
+        body = "- **Slug:** b\n- **Depends on:** <child-N…>\n- **Depends on:** child-1\n"
+        self.assertEqual(split.Child("child-2", body).ordering("Depends on"), ["child-1"])
+
+    def test_a_bogus_label_below_a_placeholder_is_still_refused(self) -> None:
+        (self.parent / split.PROPOSAL).write_text(_proposal(
+            _ONE, "- **Slug:** b\n- **Depends on:** <id>\n- **Depends on:** child-9\n"),
+            encoding="utf-8")
+        with self.assertRaises(split.SplitError):
+            split.accept(self.parent, ["601", "602"], self.cfg)
 
 
 if __name__ == "__main__":
