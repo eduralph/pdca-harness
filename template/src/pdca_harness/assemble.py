@@ -218,7 +218,9 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
     # DISQUALIFIES auto-iterate, which is what should happen to a bundle behaving
     # oversized. Tagged IMPL it would instead count as a reason to rebuild, turning the
     # backstop into an accelerator for the very failure it exists to stop.
-    size_reasons = size_signal.oversize_reasons(size_signal.read(d), cfg)
+    # `current`, not `read`: the recorded file wins, but its ABSENCE must not read as
+    # "measured and small". A failed write would otherwise delete the backstop.
+    size_reasons = size_signal.oversize_reasons(size_signal.current(d, cfg), cfg)
     if size_reasons:
         items += [NeedsHumanItem(size_signal.needs_human_text(size_reasons), HUMAN)]
     return items

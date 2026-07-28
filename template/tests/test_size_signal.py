@@ -151,6 +151,12 @@ class Thresholds(unittest.TestCase):
         sig = {"patch_bytes": None, "patch_files": "lots", "rounds": []}
         self.assertEqual(size_signal.oversize_reasons(sig, _CFG), [])
 
+    def test_an_absurd_recorded_number_does_not_abort_assembly(self) -> None:
+        """JSON parses `1e309` as `inf`, and `int(inf)` raises OverflowError — from a file
+        this module wrote itself. Same class as the config fix, a different function."""
+        self.assertEqual(size_signal.oversize_reasons(
+            {"patch_bytes": 1e309, "patch_files": -1e309, "rounds": 0}, _CFG), [])
+
 
 class RoundsRuleCutsTheBudgetShort(unittest.TestCase):
     """It fires at 2 while `[driver].max_auto_iters` defaults to 3 — deliberately.
@@ -336,11 +342,32 @@ class ReachesSectionSix(unittest.TestCase):
         self.assertFalse([i for i in assemble.collect_needs_human(d, self.cfg)
                           if "size backstop" in i.text])
 
-    def test_a_bundle_never_measured_raises_nothing(self) -> None:
-        """No `size-signal.json` — an older bundle, or one whose write failed. Absence
-        must not be read as either "fine" or "oversized"."""
+    def test_a_bundle_with_no_recorded_file_is_MEASURED_not_skipped(self) -> None:
+        """The file is a RECORD, not the source of truth. Reading it as the source of
+        truth meant an unwritable `size-signal.json` deleted the backstop: `_size_backstop`
+        warned from the in-memory signal at Check while `collect_needs_human` found
+        nothing, so an oversized bundle with an IMPL finding auto-iterated anyway."""
         d = self._checked_bundle(_diff(30))
         self.assertFalse((d / size_signal.SIGNAL_FILE).exists())
+        items = [i for i in assemble.collect_needs_human(d, self.cfg)
+                 if "size backstop" in i.text]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].kind, HUMAN)
+
+    def test_a_bundle_whose_write_FAILED_still_raises_the_item(self) -> None:
+        """The failure codex found, pinned end to end."""
+        d = self._checked_bundle(_diff(30))
+        (d / size_signal.SIGNAL_FILE).mkdir()          # write_text will raise OSError
+        size_signal.record(d, self.cfg)
+        items = assemble.collect_needs_human(d, self.cfg)
+        self.assertTrue([i for i in items if "size backstop" in i.text])
+        self.assertFalse(autoiterate.eligible(items),
+                         "an unwritable record deleted the backstop and let the rebuild "
+                         "loop continue")
+
+    def test_a_small_bundle_with_no_record_still_raises_nothing(self) -> None:
+        """The complement — falling back to measuring must not invent a finding."""
+        d = self._checked_bundle(_diff(1))
         self.assertFalse([i for i in assemble.collect_needs_human(d, self.cfg)
                           if "size backstop" in i.text])
 

@@ -161,6 +161,23 @@ def record(d: Path, cfg) -> dict:
     return signal
 
 
+def current(d: Path, cfg=None) -> dict:
+    """The signal to judge this bundle on: the recorded one, else a fresh measurement.
+
+    The recorded file wins so §6 and any later audit read the numbers the decision was made
+    on. But it is a RECORD, not the source of truth — :func:`record` is allowed to fail
+    (a read-only bundle) and older bundles predate the file entirely. Reading it as the
+    source of truth meant an unwritable ``size-signal.json`` made the backstop vanish
+    silently: `_size_backstop` warned from the in-memory signal at Check while
+    `collect_needs_human` found nothing, so an oversized bundle with an IMPL finding
+    auto-iterated anyway — the exact failure this module exists to stop, and the direct
+    opposite of the "degrades to no record, never no backstop" this file claimed.
+
+    Measuring is a stat and a diff parse, so the fallback is cheap and deterministic.
+    """
+    return read(d) or measure(d)
+
+
 def read(d: Path) -> dict | None:
     """The recorded signal, or None when absent or garbled.
 
@@ -175,9 +192,12 @@ def read(d: Path) -> dict | None:
 
 
 def _int(signal: dict, key: str) -> int:
+    """A recorded value as an int, or 0. ``OverflowError`` for the same reason it is caught
+    in :func:`_thresholds`, and it bites harder here: JSON parses ``1e309`` as ``inf``, so a
+    single absurd number in a file this module wrote itself aborted summary assembly."""
     try:
         return int(signal.get(key, 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
