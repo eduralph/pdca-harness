@@ -753,5 +753,43 @@ class AprioriBriefShim(unittest.TestCase):
                          "a brief that never iterated has nothing carried forward")
 
 
+class CodexReviewFixes(unittest.TestCase):
+    """Findings from the codex review of this PR."""
+
+    def _ap(self, text: str) -> sizing.AprioriBrief:
+        p = Path(tempfile.mkdtemp()) / "brief.md"
+        p.write_text(text + "\n## Iteration 2 — carry-forward\n\nSECRET\n",
+                     encoding="utf-8")
+        return sizing.AprioriBrief(p, sizing.apriori_text(p))
+
+    def test_a_delegated_predicate_does_not_hand_back_the_real_path(self) -> None:
+        """`exists` and `is_file` were returned as BOUND methods, so `__self__` was the
+        real Path and `ap.exists.__self__.read_text()` returned the whole brief — through
+        an attribute the allowlist had explicitly approved."""
+        ap = self._ap("- **Slug:** s\n")
+        for attr in ("exists", "is_file"):
+            with self.subTest(attr=attr):
+                bound = getattr(ap, attr)
+                self.assertTrue(bound(), "the predicate must still work")
+                self.assertFalse(hasattr(bound, "__self__"),
+                                 f"{attr} still carries a bound Path")
+
+    def test_the_string_attributes_are_unaffected(self) -> None:
+        ap = self._ap("- **Slug:** s\n")
+        self.assertEqual(ap.name, "brief.md")
+        self.assertEqual(ap.stem, "brief")
+        self.assertEqual(ap.suffix, ".md")
+
+    def test_the_case_insensitive_heading_is_the_shared_behaviour(self) -> None:
+        """The two copies had drifted — the calibrator matched MULTILINE, the estimator
+        MULTILINE|IGNORECASE. The shared definition keeps the WIDER match, so a heading
+        the driver wrote with different casing is still recognised as carry-forward
+        (truncating too little is the leak; truncating a real heading is the #349 bug,
+        and that is guarded by the `## Iteration strategy` test above)."""
+        p = Path(tempfile.mkdtemp()) / "brief.md"
+        p.write_text("above\n## ITERATION 2 — CARRY-FORWARD\nbelow\n", encoding="utf-8")
+        self.assertEqual(sizing.apriori_text(p), "above")
+
+
 if __name__ == "__main__":
     unittest.main()

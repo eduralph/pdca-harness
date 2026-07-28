@@ -311,10 +311,17 @@ def carry_forward_bytes(brief_path: Path) -> int:
 #: it has to be. Blocking known escape routes cannot work: ``resolve()``, ``absolute()``,
 #: ``with_name()``, even ``parent``, each hand back a genuine ``Path`` whose ``read_text``
 #: returns the FULL brief, and ``Path`` has more path-returning methods than a denylist could
-#: chase. So the default is refuse, and the exceptions are the ones that provably cannot
-#: reach the file's bytes: strings about the name, and existence predicates. A helper needing
-#: more gets a loud AttributeError pointing here — the right trade, because the failure this
-#: guards against is a silently wrong predictor, not a crash.
+#: chase. So the default is refuse, and the exceptions are narrowed to strings about the
+#: name and existence predicates. A helper needing more gets a loud AttributeError pointing
+#: here — the right trade, because the failure this guards against is a silently wrong
+#: predictor, not a crash.
+#:
+#: What this is NOT: a sandbox. `ap._path` is an ordinary instance attribute and hands back
+#: the real `Path` to anyone who asks for it by name, and no `__getattr__` can prevent that.
+#: The guarantee is narrower and is the one that matters here — no helper reaches the file's
+#: bytes through an attribute this class *approves*, so a brief helper written against the
+#: `Path` API cannot silently defeat the split. Deliberate misuse is out of scope; the threat
+#: model is a colleague's helper, not an adversary.
 _DELEGATED = frozenset({"name", "stem", "suffix", "exists", "is_file"})
 
 
@@ -360,7 +367,14 @@ class AprioriBrief:
                 "back a real Path, whose read_text() returns the whole brief.md including "
                 "the post-Do carry-forward this class exists to withhold. Add a name here "
                 "only if it cannot reach the file's bytes.")
-        return getattr(self._path, name)
+        value = getattr(self._path, name)
+        if callable(value):
+            # Hand back a plain function, not the BOUND method. A bound method carries
+            # `__self__` — the real `Path` — so `ap.exists.__self__.read_text()` returned
+            # the whole brief through an attribute the allowlist had approved. `name` /
+            # `stem` / `suffix` are plain strings and carry nothing.
+            return lambda *a, **k: value(*a, **k)
+        return value
 
 
 def combine(structural: SizeEstimate, model: dict | None) -> SizeEstimate:
