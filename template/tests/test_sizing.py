@@ -9,6 +9,7 @@ lock the shape of the decision.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -693,12 +694,29 @@ class NoOutcomeLeak(unittest.TestCase):
 
     def test_a_field_declared_above_is_still_read(self) -> None:
         """The complement — narrowing the read must not blind the estimator to real
-        fields, which is how a leak fix silently becomes a regression."""
+        fields, which is how a leak fix silently becomes a regression.
+
+        ALL FOUR moved features, not the two that happened to be convenient: covering only
+        `Difficulty` and `Conflicts with` left a shim that broke `External dependencies` or
+        `Planning artifact` specifically to pass both this test and the leak test.
+        """
         f = self._brief("- **Slug:** s\n- **Difficulty:** high\n"
-                        "- **Conflicts with:** issue_900\n" + self.CARRY)
+                        "- **Conflicts with:** issue_900\n"
+                        "- **External dependencies:** `ripgrep`\n"
+                        "- **Planning artifact:** docs/adr/0007.md\n" + self.CARRY)
         est = sizing.estimate(f, _CFG)
+        joined = "; ".join(est.reasons)
         self.assertIn("difficulty=high", est.reasons)
-        self.assertIn("1 conflict(s) declared", "; ".join(est.reasons))
+        self.assertIn("1 conflict(s) declared", joined)
+        self.assertIn("external dependenc", joined.lower())
+        # The plan pointer is the one NEGATIVE term, so it shows as a lower score rather
+        # than an added reason — asserted against the same brief without it.
+        without_pointer = self._brief(
+            "- **Slug:** s\n- **Difficulty:** high\n"
+            "- **Conflicts with:** issue_900\n"
+            "- **External dependencies:** `ripgrep`\n" + self.CARRY)
+        self.assertLess(est.score, sizing.estimate(without_pointer, _CFG).score,
+                        "the plan-pointer field was not read through the shim")
 
     def test_brief_bytes_ignores_the_appended_section(self) -> None:
         """The feature that already respected the split, asserted here beside the four
@@ -815,16 +833,40 @@ class CodexReviewFixes(unittest.TestCase):
                      encoding="utf-8")
         self.assertIn("some prose", sizing.apriori_text(p))
 
-    def test_the_drivers_exact_heading_is_a_boundary(self) -> None:
-        """Read from `driver` rather than restated, so the two cannot drift."""
+    def test_the_heading_the_driver_ACTUALLY_WRITES_is_a_boundary(self) -> None:
+        """Drives `_carry_forward_into_brief` and splits on its real output.
+
+        The previous version grepped `inspect.getsource` for the format string — the same
+        mistake that let `## Iteration 2 carry-forward` through twice in this file's own
+        history, and that let a stale doctrine survive in `_split_prompt`: source text is
+        not the artifact. If the driver ever writes a different heading, this fails; a
+        source scan would have kept passing.
+        """
         from pdca_harness import driver
-        import inspect
-        self.assertIn("## Iteration {n} \u2014 carry-forward",
-                      inspect.getsource(driver._carry_forward_into_brief))
-        p = Path(tempfile.mkdtemp()) / "brief.md"
-        p.write_text("above\n## Iteration 2 \u2014 carry-forward (from the previous "
-                     "attempt)\nbelow\n", encoding="utf-8")
-        self.assertEqual(sizing.apriori_text(p), "above")
+        d = Path(tempfile.mkdtemp())
+        (d / "brief.md").write_text("- **Slug:** s\n- **Difficulty:** high\n",
+                                    encoding="utf-8")
+        # A failing gate is the simpler of the two inputs `_carry_forward_into_brief`
+        # accepts, and it needs no §9 to be well formed.
+        (d / "check-gates.json").write_text(json.dumps(
+            {"rows": [{"check": "unit tests", "result": "fail", "gating": True,
+                       "oracle": "pytest"}]}), encoding="utf-8")
+        driver._carry_forward_into_brief(d, 2)
+        text = (d / "brief.md").read_text(encoding="utf-8")
+        self.assertNotEqual(text, "- **Slug:** s\n- **Difficulty:** high\n",
+                            "the driver wrote no carry-forward — fixture no longer valid")
+        apriori = sizing.apriori_text(d / "brief.md")
+        self.assertIn("- **Difficulty:** high", apriori)
+        # Anchored on the appended BODY, not on the word "carry-forward". Asserting the
+        # latter was vacuous: reword the heading and the word disappears with it, so the
+        # test passed on precisely the mutation it claimed to catch. This line is a
+        # sentence the driver writes below the heading whatever the heading says.
+        self.assertNotIn("Full previous attempt preserved", apriori,
+                         "the boundary did not match the heading the driver just wrote, "
+                         "so post-Do text is being measured as a-priori input")
+        self.assertIn("Full previous attempt preserved",
+                      (d / "brief.md").read_text(encoding="utf-8"),
+                      "fixture no longer valid — the driver did not append that line")
 
     def test_the_case_insensitive_heading_is_the_shared_behaviour(self) -> None:
         """The two copies had drifted — the calibrator matched MULTILINE, the estimator

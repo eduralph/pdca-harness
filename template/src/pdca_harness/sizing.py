@@ -392,6 +392,14 @@ class AprioriBrief:
             # `__self__` — the real `Path` — so `ap.exists.__self__.read_text()` returned
             # the whole brief through an attribute the allowlist had approved. `name` /
             # `stem` / `suffix` are plain strings and carry nothing.
+            #
+            # This closes the ATTRIBUTE route, not every route: the wrapper's closure
+            # still holds the bound method, so `ap.exists.__closure__[0].cell_contents`
+            # reaches it. That is the same category as `self._path` above — deliberate
+            # introspection, not a helper written against the `Path` API — and no
+            # `__getattr__` can close it while the object still holds the path it needs.
+            # Accepted knowingly; the line between the two is "would a colleague's helper
+            # do this by accident", and closure-walking is on the far side of it.
             return lambda *a, **k: value(*a, **k)
         return value
 
