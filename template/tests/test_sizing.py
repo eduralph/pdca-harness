@@ -527,6 +527,33 @@ class ThirdReviewFixes(unittest.TestCase):
             leaves.run_sizer(d, cfg)
         self.assertEqual(calls["n"], 2, "an unfingerprintable input was cached anyway")
 
+    def test_changing_the_sizer_config_invalidates_the_verdict(self) -> None:
+        """Adding an escalation that fires on low confidence must earn a fresh pass —
+        otherwise the cached answer from the weaker model is returned and the escalation
+        the operator just configured never runs."""
+        from unittest import mock
+        from pdca_harness import leaves
+        tmp = Path(tempfile.mkdtemp())
+        d = tmp / "results" / "issue_1"
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
+        cfg = self._sizer_cfg(tmp)
+        calls = {"n": 0}
+
+        def _fake(leaf, workdir, prompt, **kw):
+            calls["n"] += 1
+            (Path(workdir) / leaves.SIZING_FILE).write_text(
+                '{"band": "watch", "confidence": "low"}', encoding="utf-8")
+
+        with mock.patch.object(leaves, "_invoke", side_effect=_fake):
+            leaves.run_sizer(d, cfg)
+            leaves.run_sizer(d, cfg)
+            self.assertEqual(calls["n"], 1)
+            cfg.sizer_escalation = [{"on_confidence": ["low"], "argv": ["stronger"]}]
+            leaves.run_sizer(d, cfg)
+            self.assertGreater(calls["n"], 1,
+                               "a newly configured escalation reused the weak verdict")
+
 
 if __name__ == "__main__":
     unittest.main()

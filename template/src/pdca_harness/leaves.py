@@ -891,6 +891,16 @@ def _sizer_key(d: Path, cfg: Config, bp: Path) -> str:
     is silently trusting a verdict whose input may have changed underneath it.
     """
     h = hashlib.sha256(bp.read_bytes())
+    # The CONFIGURATION is an input too. Adding a `[[leaves.sizer_escalation]]` that fires
+    # on low confidence, or pointing the leaf at a stronger model, must earn a fresh
+    # verdict — otherwise the cached answer from the weaker pass is returned and the
+    # escalation the operator just configured never runs.
+    h.update(repr([
+        (cfg.sizer.mode, cfg.sizer.family, tuple(cfg.sizer.argv), cfg.sizer.agent,
+         cfg.sizer.model, cfg.sizer.effort),
+        tuple(sorted((k, repr(v)) for spec in cfg.sizer_escalation
+                     for k, v in spec.items())),
+    ]).encode("utf-8"))
     artifact = brief.planning_artifact(bp)
     if not artifact:
         return h.hexdigest()[:16]
