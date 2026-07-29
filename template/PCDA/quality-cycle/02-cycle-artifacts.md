@@ -305,7 +305,7 @@ process/
 ```
 
 The leaf instruction files Act also maintains live at `.claude/agents/*.md` (the
-six subagents: planner, builder, reviewer, signoff, publisher, act) plus `AGENTS.md`
-for the cross-vendor reviewer.
+eight subagents: planner, builder, reviewer, signoff, publisher, act, sizer,
+splitter) plus `AGENTS.md` for the cross-vendor reviewer.
 
 The minimal per-cycle bundle is `SUMMARY.md`, `patch.diff`, `pr-description.md`, `tracker-comment.md`, `MANUAL-VERIFICATION.md`. The operational layer above adds `brief.md` (names the Plan artifact explicitly), `build-notes.md` (separates builder rationale for the independence contract), and the two `check-*` artifacts (makes Check's product auditable rather than implicit), and reframes `SUMMARY.md` as ending in **Check sign-off** (§9), with §10 as a lightweight feeder to the *project-level* Act log.

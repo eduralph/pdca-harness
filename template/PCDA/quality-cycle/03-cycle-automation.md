@@ -10,7 +10,7 @@ status: active
 
 > One level below [02 - Cycle Artifacts](02-cycle-artifacts.md). How the PDCA cycle runs as a pipeline. Core principle: **automate where the work is mechanical (Do, plus Check's gates and reviewer), instrument where the work is human (Plan, Check's sign-off step, Act), never automate the human work away.** The pipeline runs unattended from the brief to the sign-off queue (where Check stops for the human) and resumes only when the human signs off Check; Act fires later, on a cadence, across batches of completed cycles. Living document.
 
-> **Continuous-flow extension.** Beyond the unattended `pdca run`, the driver can run the whole cycle as one continuous, Claude-driven flow — `pdca flow <id> [--from-csv …] [--no-publish] [--no-act]` (or batch: `pdca flow --from-csv …`, one Plan session → several issues; Act runs by default after COMPLETE, `--no-act` to skip). This lifts the model from **two** leaves to **six**, *without* moving any control flow into a model: the planner (Plan — interactive, turns the human's documents into `brief.md`), the sign-off and act leaves (interactive) instrument the human steps the principle above keeps human, and the publisher opens the draft PR on accept (Check's closing step); Do (builder) and Check's reviewer stay **headless**. The state transitions, the gates, and the **C6 accept-guard remain deterministic code** — a leaf only fills an artifact. Leaves are configured in `pdca.toml` (`[leaves.*]`: `mode = stub|command`, `interactive`); set `PDCA_LEAVES_MODE=stub` to force the offline placeholders (CI / `make`).
+> **Continuous-flow extension.** Beyond the unattended `pdca run`, the driver can run the whole cycle as one continuous, Claude-driven flow — `pdca flow <id> [--from-csv …] [--no-publish] [--no-act]` (or batch: `pdca flow --from-csv …`, one Plan session → several issues; Act runs by default after COMPLETE, `--no-act` to skip). This lifts the model from **two** leaves to **eight**, *without* moving any control flow into a model: the planner (Plan — interactive, turns the human's documents into `brief.md`), the sign-off and act leaves (interactive) instrument the human steps the principle above keeps human, and the publisher opens the draft PR on accept (Check's closing step); Do (builder) and Check's reviewer stay **headless**; and two more sit inside Plan's own boundary — the sizer (headless, judges a brief's size) and the splitter (interactive, invoked by the planner on itself when a brief is really several slices — see §Plan below). The state transitions, the gates, and the **C6 accept-guard remain deterministic code** — a leaf only fills an artifact. Leaves are configured in `pdca.toml` (`[leaves.*]`: `mode = stub|command`, `interactive`); set `PDCA_LEAVES_MODE=stub` to force the offline placeholders (CI / `make`).
 
 > **Parallel-lanes extension.** Because the bundle is the unit of isolation, several cycles can run **concurrently** for throughput — see [09 - Parallel Lanes](09-parallel-lanes.md). The key discipline: mechanical isolation (a private working tree per lane) makes concurrent *execution* safe, but correctness *across* the parallel results is a separate problem — handled by **lane planning** (group same-area issues into one lane) and the **merge re-gate** (`gates.run_working_tree` over the merged tree + the draft PR), never by isolation alone. Parallelism stays in the unattended Do + Check band; the human touch points remain serial. Two realizations: N separate workspaces (zero machinery), or the **in-driver worker pool** — `[driver].lanes = N` (`PDCA_LANES` / `--lanes N`) fans the Do + Check band across N workers in one workspace, each exposing its lane slot to gates as `$PDCA_LANE`.
 
@@ -39,6 +39,7 @@ Do not build a monolith. Each issue's **state is its files** in `results/issue_<
 
 ```
 (no bundle)        →  PLAN   →  brief.md present
+                       tracker settles it first (no brief ever authored) → RESOLVED (terminal; issue #302)
 brief.md           →  DO     →  patch.diff + test + build-notes.md present
 patch.diff         →  CHECK  →  check-gates + check-review + SUMMARY.md present
 SUMMARY.md         →  (AWAITING_SIGNOFF)  ← pipeline STOPS here
@@ -48,6 +49,14 @@ SUMMARY.md §9 set  →  sign-off applied:
                        iterate-to-Plan  → driver archives the attempt (incl. brief.md) into iteration-v<N>/; state ← UNPLANNED (human authors a new brief.md, then Do re-runs)
                        discontinue      → state ← DISCONTINUED (no transition, no archive; bundle deliberately abandoned and dropped from the active set)
 ```
+
+**RESOLVED** is a fifth halted state alongside UNPLANNED / AWAITING_SIGNOFF /
+COMPLETE / DISCONTINUED (issue #302): a briefless bundle whose tracker item was
+closed — duplicate, wontfix, fixed elsewhere — *before* anyone authored a
+brief. It is written by `pdca cleanup`'s tracker reconciliation, never
+fabricated by Plan, and is distinct from DISCONTINUED (a human abandoning a
+bundle that *did* run a cycle) precisely because a RESOLVED bundle never
+entered one.
 
 The driver stops the issue at AWAITING_SIGNOFF every time — including on iteration. After sign-off, an accepted bundle is **frozen**: it becomes input for the *next* Act review (a separate, cross-cycle pass — see below).
 
@@ -59,11 +68,71 @@ Properties this buys, cheaply:
 
 The driver is a thin loop: for each issue, look at which files exist, run the next beat's command, write its artifact, advance. Stop the issue when it reaches AWAITING_SIGNOFF.
 
+## Pre-dispatch guards — [built] (issues #321, #333)
+
+Gates verify the *built artifact* at Check; the pre-dispatch guards verify the
+*brief* before Do is even allowed to spend a builder on it. They are plain
+code inside `advance()` itself — not a hook at the literal end of Plan, since
+several distinct code paths (`pdca flow <id>`, `pdca flow <ids…>`, the zero-id
+batch sweep, `pdca run <id>`) all converge on `advance()` and only one of them
+is a true "Plan just finished" event. Two independent checks, evaluated fresh
+every beat (never cached, never pinned by a stale marker) — so editing the
+brief or registering a missing row un-holds a bundle on the very next attempt:
+
+- **The dependency guard** (`[driver].dependency_guard`, default `hold`) —
+  **blocking**. Every backticked token in the brief's `External dependencies`
+  field is checked against the project's registered `[[doctor.checks]]` rows;
+  an unmatched one raises a `PolicyHold` and stops the beat before a builder
+  runs. This is set membership, not a heuristic — a token either names a
+  registered row or it doesn't — so unlike the size guard below, `hold` here
+  is real and is the default. It is also not a *new* block: the same
+  unregistered dependency already refuses `signoff --accept` through the C6
+  guard ([06 - Quality Cycle Guidelines](06-quality-cycle-guidelines.md)); the
+  pre-dispatch guard just moves that refusal earlier, so a missing dependency
+  costs a human a minute instead of a full builder + reviewer pass.
+- **The size guard** (`[driver].size_guard`, default `off`) — **advisory
+  only, never blocking**, even set to `hold` (silently treated as `warn`).
+  Calibrated over 86 real bundles, the best structural size signal reaches
+  62% precision against ≥3 sign-off rounds — nearly one wrong flag for every
+  right one, and a blocking gate at that rate trains people to override it.
+  With `size_guard = "warn"`, an oversized brief prints the signal that fired
+  and a remedy (`pdca split`) and the beat proceeds regardless.
+
+Both fire **twice**: once with the bundle at PLANNED, before Do dispatches
+(the size guard pays for a fresh `[leaves.sizer]` verdict here, since a
+verdict now can still prevent a build), and again with the bundle at BUILT,
+before Check dispatches (the size guard reads the *stored* sizer verdict for
+free instead of buying a second opinion on work already done) — because a
+bundle can reach BUILT without passing back through a fresh Plan exit (a
+resumed run, a builder that wrote `patch.diff` and then crashed), and Check is
+a real spend too. The size guard's remedy differs by firing: at PLANNED,
+`pdca split` runs directly; at BUILT, the remedy is `iterate-plan` at
+sign-off, because splitting means authoring new briefs, and that's Plan's
+beat, not something done to a bundle mid-build.
+
 ## Per-beat automation
 
 ### Plan — instrumented (project scaffolding + human)
 
 Reuse an existing scrape / handoff pipeline as the Plan scaffolder (scrape → emit a `brief.md` with a TRIAGE VERDICT scaffold and auto-flags), drawn from the **current process-baseline spec template** that Act maintains. That *is* the draft `brief.md`. The human fills the spec + success criterion + resolved branch target and confirms/overrides the disposition hint. Automated: everything except the judgment. Not automated: the judgment.
+
+**Splitting is owned by Plan, not a maintenance task run after it (issue
+#358).** The design-proposal pattern in [01 - The Quality Cycle](01-the-quality-cycle.md)
+§Solution-approach design — "one Plan, many child cycles" — now has a
+deterministic tool for the brief-scale case too. When the planner leaf, still
+co-authoring `brief.md` with the human, judges the slice to be several
+independently-shippable outcomes, it runs `pdca split <id>` **on itself**,
+inline, in the same interactive session: the splitter leaf drafts
+`split-proposal.md` (seeded by the sizer's `proposed_seams`, if a verdict
+exists), the human reads it there, and `pdca split <id> --accept` materializes
+one child bundle per proposed slice — filing a real tracker sub-issue per
+child itself (`gh issue create --parent`) unless the human already filed them.
+Nobody leaves the session to file issues by hand. The parent bundle is then
+marked via the same close-disposition fast path a duplicate/wontfix uses, so
+it routes to sign-off instead of pretending it still needs a builder, and each
+child schedules into [dependency waves](09-parallel-lanes.md) via the
+`Depends on` / `Conflicts with` fields the proposal already declared between
+siblings.
 
 ### Do — full (headless builder, subagent scope)
 
