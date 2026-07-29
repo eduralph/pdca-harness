@@ -28,18 +28,28 @@ machine and **stops only at the three points where a human is irreducible**:
 authoring the Plan, signing off the Check, and the cross-cycle Act review.
 Everything between those points is automated.
 
-```
-UNPLANNED ─Plan→ PLANNED ─Do→ BUILT ─Check→ CHECKED ─assemble→ AWAITING_SIGNOFF
-                                                                      │  (driver STOPS — human)
-                                          ┌───────────────────────────┤
-                                  accept ─┤ iterate-do  → back to PLANNED (rebuild)
-                              (COMPLETE)  │ iterate-plan → back to UNPLANNED (re-spec)
-                                          └ discontinue → DISCONTINUED (abandon)
+```mermaid
+stateDiagram-v2
+    [*] --> UNPLANNED
+    UNPLANNED --> PLANNED: Plan
+    PLANNED --> BUILT: Do
+    BUILT --> CHECKED: Check
+    CHECKED --> AWAITING_SIGNOFF: assemble — driver STOPS
+    UNPLANNED --> RESOLVED: tracker settles it first
+
+    AWAITING_SIGNOFF --> COMPLETE: accept
+    AWAITING_SIGNOFF --> PLANNED: iterate-do (rebuild)
+    AWAITING_SIGNOFF --> UNPLANNED: iterate-plan (re-spec)
+    AWAITING_SIGNOFF --> DISCONTINUED: discontinue
+
+    COMPLETE --> [*]
+    DISCONTINUED --> [*]
+    RESOLVED --> [*]
 ```
 
-The four **halted** states — `UNPLANNED`, `AWAITING_SIGNOFF`, `COMPLETE`,
-`DISCONTINUED` — are where the driver hands control back. Everything else it
-advances through unattended.
+The five **halted** states — `UNPLANNED`, `AWAITING_SIGNOFF`, `COMPLETE`,
+`DISCONTINUED`, `RESOLVED` — are where the driver hands control back. Everything
+else it advances through unattended.
 
 ## The steps
 
@@ -53,9 +63,9 @@ shows the real gramps-testbed-v2 artifact it produces.
 | [02](02-rehearse-offline.md) | Rehearse offline | — | Drive the bundled `TOY` issue with stub leaves + stub gates — no model, no live gates, instant |
 | [03](03-plan.md) | Plan | **P** | Author `brief.md` — the contribution spec (real: gramps issue 11589) |
 | [04](04-do.md) | Do | **D** | Builder writes `patch.diff` + the test + `build-notes.md` |
-| [05](05-check.md) | Check | **C** | Gates + reviewer run; driver assembles `SUMMARY.md` (the 5/5/1 verdict + §6 NEEDS-HUMAN) |
-| [06](06-signoff.md) | Sign-off | **C** | You record §9: `--accept` / `--iterate-do` / `--iterate-plan` / `--discontinue` (real: issue 46's two iterations) |
-| [07](07-publish-and-act.md) | Publish & Act | **C / A** | Publish the accepted fix as a draft PR; later, the cross-cycle Act review turns recurring misses into process deltas |
+| [05](05-check.md) | Check (gates, reviewer, sign-off, publish) | **C** | Gates + reviewer run; you record §9 (`--accept` / `--iterate-do` / `--iterate-plan` / `--discontinue`, real: issue 46's two iterations); accept publishes a draft PR |
+| [06](06-act.md) | Act | **A** | The cross-cycle review that turns recurring misses into spec/gate/rule deltas |
+| [07](07-crosscutting.md) | Cross-cutting | — | Mechanisms that span beats, not owned by one: size & `pdca split`, iteration/carry-forward + auto-iterate, parallel lanes, sweep & cleanup |
 
 ## The whole cycle in one command
 
@@ -69,7 +79,7 @@ pdca flow --from-csv issues.csv   # one Plan session briefs SEVERAL from the exp
 pdca status                   # every bundle and its state (also the bare `pdca`)
 ```
 
-The per-beat detail in steps 03–07 is what `pdca flow` orchestrates for you —
+The per-beat detail in steps 03–06 is what `pdca flow` orchestrates for you —
 worth understanding once, even though you'll mostly drive from the top.
 
 ## Prerequisites (for a live run)

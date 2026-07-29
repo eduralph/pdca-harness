@@ -69,12 +69,24 @@ as an explicit NEEDS-HUMAN item for a person to adjudicate. The gating path that
 decides "can this be accepted?" contains **no LLM at all** — it reads only
 deterministic gate results.
 
+**AI coding best practices, codified — not tribal knowledge.** The harness bakes
+in discipline that's usually left to an individual's habits: implement against a
+written spec, not vibes (the brief); prove correctness with a test that's
+red-before/green-after, not a model's say-so; scope the builder's tools narrowly
+so it can edit and run tests but never merge or open a PR unsupervised
+([step 04](04-do.md)); decorrelate the reviewer from the builder — a different
+model family, no visibility into the builder's notes — so review isn't the same
+blind spot checking itself ([step 05](05-check.md)); and ship every fix as a
+*draft* PR by default, so a human is always the one who makes it live
+([step 05](05-check.md#publishs-stop-discipline-and-batches)). None of it
+depends on a maintainer remembering to ask for it on any given contribution.
+
 **The process gets better over time.** The **Act** beat turns recurring
 misses — something a maintainer caught at review that no gate owned — into
 permanent improvements: a new gate, a new brief field, a tightened rule. Each
 future cycle starts from a better baseline. (The walkthrough shows a real
 example: a maintainer's review comment about a translation-manifest rule became a
-proposed deterministic gate — see [step 07](07-publish-and-act.md).)
+proposed deterministic gate — see [step 06](06-act.md).)
 
 **Scale without losing rigor.** Because state lives in files (not a database), the
 driver is **idempotent and resumable**, and one Plan session can brief *several*
@@ -107,10 +119,10 @@ project-specific parts are yours.
 | **Deterministic gates** | Your check commands, each tagged gating (blocks) or advisory (informs); baseline-diffed | [05](05-check.md) |
 | **Decorrelated reviewer** | An advisory second-opinion leaf that never sees the builder's notes (ideally a different model family) | [05](05-check.md) |
 | **The assembled SUMMARY** | brief + gates + review folded into one 10-section verdict, with a §6 NEEDS-HUMAN checklist | [05](05-check.md) |
-| **Sign-off + C6 guard** | Four dispositions; `--accept` is refused while any NEEDS-HUMAN item is open | [06](06-signoff.md) |
-| **Iterate carry-forward** | A rejection archives the attempt and folds the *reason* into the next build | [06](06-signoff.md) |
-| **Draft-PR publish** | Contribute the accepted fix as a *draft* — a human marks it ready (except non-final wave PRs under opt-in `wave_mode = "merge"`) | [07](07-publish-and-act.md) |
-| **Cross-cycle Act loop** | Periodic review that turns recurring misses into spec/gate/rule deltas | [07](07-publish-and-act.md) |
+| **Sign-off + C6 guard** | Four dispositions; `--accept` is refused while any NEEDS-HUMAN item is open | [05](05-check.md) |
+| **Iterate carry-forward** | A rejection archives the attempt and folds the *reason* into the next build | [05](05-check.md) |
+| **Draft-PR publish** | Contribute the accepted fix as a *draft* — a human marks it ready (except non-final wave PRs under opt-in `wave_mode = "merge"`) | [05](05-check.md) |
+| **Cross-cycle Act loop** | Periodic review that turns recurring misses into spec/gate/rule deltas | [06](06-act.md) |
 | **Console-script front door** | `pdca flow <id>` orchestrates the whole cycle; `pdca flow <ids…>` batches, bare `pdca` is status; `make` is bootstrap-only | [README](README.md) |
 
 ---
@@ -133,19 +145,32 @@ Five terms recur throughout. Learn them once:
 
 The states a bundle moves through:
 
-```
-UNPLANNED → PLANNED → BUILT → CHECKED → AWAITING_SIGNOFF → COMPLETE
-  (no brief) (brief)  (patch) (gates+    (SUMMARY ready,    (accepted,
-                               review)    driver STOPS)      frozen)
-                                              │
-                                 iterate-do → PLANNED  (rebuild, same brief)
-                               iterate-plan → UNPLANNED (re-spec)
-                                discontinue → DISCONTINUED (abandon)
+```mermaid
+stateDiagram-v2
+    [*] --> UNPLANNED
+    UNPLANNED --> PLANNED: brief authored (Plan)
+    PLANNED --> BUILT: patch.diff written (Do)
+    BUILT --> CHECKED: gates + review done (Check)
+    CHECKED --> AWAITING_SIGNOFF: SUMMARY assembled — driver STOPS
+    UNPLANNED --> RESOLVED: tracker settles it first — no cycle ever ran
+
+    AWAITING_SIGNOFF --> COMPLETE: accept
+    AWAITING_SIGNOFF --> PLANNED: iterate-do (rebuild, same brief)
+    AWAITING_SIGNOFF --> UNPLANNED: iterate-plan (re-spec)
+    AWAITING_SIGNOFF --> DISCONTINUED: discontinue
+
+    COMPLETE --> [*]
+    DISCONTINUED --> [*]
+    RESOLVED --> [*]
 ```
 
-The four **halted** states — `UNPLANNED`, `AWAITING_SIGNOFF`, `COMPLETE`,
-`DISCONTINUED` — are where the driver hands control back to a human or stops.
-Everything else it advances through on its own.
+The five **halted** states — `UNPLANNED`, `AWAITING_SIGNOFF`, `COMPLETE`,
+`DISCONTINUED`, `RESOLVED` — are where the driver hands control back to a human or
+stops. Everything else it advances through on its own. `RESOLVED` is the newest of
+the five: a briefless bundle whose tracker item was closed (duplicate, wontfix,
+fixed elsewhere) *before* anyone authored a brief — so it exits the pending set
+without ever entering a cycle, distinct from `DISCONTINUED` (a human explicitly
+abandoned a bundle that *did* run one).
 
 ---
 

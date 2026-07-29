@@ -44,13 +44,23 @@ status: active
 (doc [03](03-cycle-automation.md))
 
 - **Leaf / model leaf** — a point where a model is invoked. The leaves fill *artifacts*;
-  they never decide control flow. There are **six**, all steps within beats:
-  - **planner** — Plan (interactive): turns the human's documents into `brief.md`.
+  they never decide control flow. There are **eight**, all steps within beats:
+  - **planner** — Plan (interactive): turns the human's documents into `brief.md`; also
+    the one that runs `pdca split` on itself when a brief is really several slices
+    (issue #358; see splitter, below).
   - **builder** — Do (headless): writes `patch.diff` + the named test + `build-notes.md`.
   - **reviewer** — Check review step (headless, advisory): writes `check-review.md`.
   - **signoff** — Check sign-off step (interactive): records the human's decision token.
   - **publisher** — Check publish step (interactive): drafts the contribution artifacts.
   - **act** — Act (interactive): proposes process deltas.
+  - **sizer** — Plan-adjacent (headless): judges a brief's size — `{band,
+    independent_outcomes, proposed_seams, confidence}` — but never cuts a split itself.
+    Not invoked by the planner; called automatically by the pre-dispatch size guard
+    ([03](03-cycle-automation.md) §Pre-dispatch guards), once before Do (paid) and again
+    before Check (its stored verdict, read free).
+  - **splitter** — Plan-adjacent (interactive): drafts `split-proposal.md` from a brief
+    judged oversized, seeded by the sizer's `proposed_seams` where one exists. Invoked by
+    `pdca split <id>` — normally the planner itself, inline, mid-Plan-session (issue #358).
 - **Leaf mode** — `stub` (offline placeholder; the vertical-slice default) or `command`
   (a real model wired via `argv` in `pdca.toml`).
 - **Interactive vs headless** — interactive leaves hand the terminal to a seeded REPL
@@ -116,6 +126,10 @@ status: active
 - **ITERATE_PLAN** — §9 = iterate-to-Plan; driver archives the attempt (incl. brief) → UNPLANNED.
 - **DISCONTINUED** — §9 = discontinue; **terminal**, no transition and no archive: the bundle
   is deliberately abandoned and dropped from the active set (independent of §6 / the C6 guard).
+- **RESOLVED** — no `brief.md` ever authored, **and** the tracker item was already settled
+  (closed as duplicate / wontfix / fixed elsewhere) before Plan touched it; **terminal**, no
+  cycle ever ran (issue #302). Written by `pdca cleanup`'s tracker reconciliation, never by
+  Plan. Distinct from DISCONTINUED, which abandons a bundle that *did* run a cycle.
 - **iterate-to-Do** — the fix was wrong, the spec right: rebuild against the same brief.
 - **iterate-to-Plan** — the spec was wrong: re-author the brief (old attempt archived to `iteration-v<N>/`).
 
@@ -158,6 +172,13 @@ status: active
   evidence chain.
 - **C6 accept-guard** — accept is refused while §6 NEEDS-HUMAN has open items. Enforced by
   deterministic code, even when the decision is made in a model+human session.
+- **Pre-dispatch guards** (`[driver].dependency_guard`, `[driver].size_guard`) — plain-code
+  checks against the brief, evaluated inside `advance()` before Do dispatches and again
+  before Check dispatches ([03](03-cycle-automation.md) §Pre-dispatch guards, issues #321
+  / #333). The dependency guard **blocks** (default `hold`) on a brief-declared external
+  dependency with no matching `[[doctor.checks]]` row — moving an existing C6 refusal
+  earlier, not adding a new one. The size guard is **advisory only** (default `off`; even
+  `hold` is treated as `warn`), calibrated at 62% precision — not enough to gate on.
 - **Per-beat rule prefixes** — the guidelines are numbered by beat: **P-** (Plan), **D-**
   (Do), **C-** (Check), **A-** (Act) — e.g. P1, P8, C6, A1. A repo may add prefixed rules
   that *tighten* a generic one, never weaken it ([06](06-quality-cycle-guidelines.md)).
