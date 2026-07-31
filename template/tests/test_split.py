@@ -961,8 +961,11 @@ class ThePlannerIsToldItOwnsTheSplit(unittest.TestCase):
         raise AssertionError(f"no role prompt for {name!r}")
 
     def test_the_planner_role_names_the_command_and_the_beat(self) -> None:
+        # The command-name prefix is cli_name-interpolated (#375): the role source
+        # says `{{ cli_name }} split <id>` and a rendered instance says
+        # `<its cli_name> split <id>`, so assert the invocation name-agnostically.
         text = self._role("planner")
-        self.assertIn("pdca split", text)
+        self.assertIn("split <id>", text)
         self.assertIn("--accept", text)
         self.assertIn("iterate-plan", text)
 
@@ -1259,10 +1262,13 @@ class CodexVerifyFixes(unittest.TestCase):
             with self.subTest(where=where):
                 low = body.lower()
                 self.assertIn("csv", low)
-                self.assertIn("pdca flow 500 501", low if where == "runtime" else low,
+                # Name-agnostic (#375): the role source spells the invocation
+                # `{{ cli_name }} flow …`, and a rendered instance spells it with
+                # its own cli_name — only the shape is invariant across renders.
+                self.assertIn("flow 500 501", low if where == "runtime" else low,
                               "the explicit-id-list case is the one that reads as a batch "
                               "and is not one — it has to be named, not implied")
-                self.assertIn("pdca flow <child-ids>", body)
+                self.assertIn("flow <child-ids>", body)
 
     def test_neither_prompt_calls_an_explicit_id_list_a_batch(self) -> None:
         for where, body in self._prompts().items():

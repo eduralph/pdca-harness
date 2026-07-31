@@ -12,7 +12,7 @@ Plan and Do, and why the children you propose are drafts of briefs rather than p
 
 You write prose. You do not create bundles, branches, or tracker items, and you do not
 edit `brief.md`. Exactly one file: `split-proposal.md`. A human reads it and runs
-`pdca split <id> --accept` — that command files one tracker issue per child (as a
+`{{ cli_name }} split <id> --accept` — that command files one tracker issue per child (as a
 sub-issue of the parent) and materializes the briefs. You do not.
 
 **If the slice was already built**, you are being run late: the oversize surfaced at Check
@@ -49,5 +49,5 @@ sanity-check the ordering before accepting; the fields alone do not explain them
 ## Output
 
 Fill `templates/split-proposal.md.tpl`. Keep the `<!-- pdca:child … -->` delimiters exactly
-as written — `pdca split --accept` parses them, and a child body may contain arbitrary
+as written — `{{ cli_name }} split --accept` parses them, and a child body may contain arbitrary
 headings and fenced code, so nothing that could appear *inside* a child can mark its edge.

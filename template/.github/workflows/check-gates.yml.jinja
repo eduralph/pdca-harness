@@ -1,5 +1,5 @@
 # Merge re-gate (docs 03 §Where it runs). CI re-runs the SAME deterministic gates
-# the local driver runs — single-sourced via `pdca gates` reading pdca.toml. CI is
+# the local driver runs — single-sourced via `{{ cli_name }} gates` reading pdca.toml. CI is
 # not a second opinion; it is the same check re-run at the merge boundary so
 # nothing merges that the contribution body did not already clear.
 #
@@ -24,4 +24,4 @@ jobs:
       - name: Install the harness
         run: pip install -e .
       - name: Run the single-sourced gates (repo scope)
-        run: pdca gates --working-tree
+        run: {{ cli_name }} gates --working-tree

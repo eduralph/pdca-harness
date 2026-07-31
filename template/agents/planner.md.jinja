@@ -147,12 +147,12 @@ session is the one deciding.
 When the answer is "yes, this is several slices":
 
 ```
-pdca split <id>              # the splitter drafts split-proposal.md — children, with
+{{ cli_name }} split <id>              # the splitter drafts split-proposal.md — children, with
                              # their inter-child `Depends on:` / `Conflicts with:`
                              # …read it with the human, edit it if it is wrong…
-pdca split <id> --accept     # files one tracker issue per child as a SUB-ISSUE of this
+{{ cli_name }} split <id> --accept     # files one tracker issue per child as a SUB-ISSUE of this
                              # one, materialises a bundle per child, marks this parent
-                             # split, and prints the `pdca flow …` command for them
+                             # split, and prints the `{{ cli_name }} flow …` command for them
 ```
 
 You do **not** leave the session to file issues by hand. `--accept` does it (pass `--ids`
@@ -162,13 +162,13 @@ reach — it will say so plainly rather than skipping).
 What happens next depends on how this run was started, and the difference is worth
 knowing:
 
-- **A CSV-driven batch run** (`pdca flow --csv …`, no ids) re-enumerates every in-flight
+- **A CSV-driven batch run** (`{{ cli_name }} flow --csv …`, no ids) re-enumerates every in-flight
   bundle *from disk* after the Plan beat, so the children you just created are picked up by
   the same run and scheduled into waves automatically — independent ones in parallel,
   dependent ones stacked. Nothing further is needed from you.
-- **Every other shape** — `pdca flow <id>`, and an explicit list like `pdca flow 500 501` —
+- **Every other shape** — `{{ cli_name }} flow <id>`, and an explicit list like `{{ cli_name }} flow 500 501` —
   drives exactly the ids it was given and never looks for new ones. `--accept` prints the
-  exact `pdca flow <child-ids>` command; run it, and the children are driven as waves.
+  exact `{{ cli_name }} flow <child-ids>` command; run it, and the children are driven as waves.
 
 An explicit id list looks like a batch and is not one on this point: it iterates the ids
 you named, so children born during its Plan beat are not among them.
@@ -263,7 +263,7 @@ run it per `brief.md`, and run the file-set-vs-wave-order check across the batch
 
 ## Ending the session
 
-You are one beat of an automated flow (`pdca flow`): once `brief.md` is written, **verified
+You are one beat of an automated flow (`{{ cli_name }} flow`): once `brief.md` is written, **verified
 (above)**, and the human is satisfied, **your job is done**. Do not tell the human to run any
 `pdca` / driver command — the flow continues to **Do automatically** as soon as
 this session ends. Conclude with one line confirming the brief is written and that
