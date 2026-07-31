@@ -20,6 +20,16 @@ copier copy gh:eduralph/pdca-harness ../gramps-testbed-v2
 cd ../gramps-testbed-v2
 ```
 
+> **Rendering from a local checkout instead?** Give copier a `gh:`/`https:`
+> URL (as above) or an **absolute** path. Copier records the source argument
+> verbatim as `_src_path` in `.copier-answers.yml`, and `copier update`
+> resolves it from the *project* directory — a path relative to your render
+> cwd never resolves there, so the first `copier update` fails
+> ([copier#335](https://github.com/copier-org/copier/issues/335); fix pending
+> in [copier#2717](https://github.com/copier-org/copier/pull/2717)). Already
+> rendered that way? Hand-edit `_src_path` to the template URL or an absolute
+> path — that's the whole repair.
+
 The prompts (from [`copier.yml`](../copier.yml)) and what gramps answered:
 
 | Prompt | What it sets | gramps-testbed-v2 |
