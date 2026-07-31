@@ -5,6 +5,9 @@
 		},
 		{
 			"path": "../pdca.dev"
+		},
+		{
+			"path": "../pdca-pdca"
 		}
 	],
 	"settings": {}
