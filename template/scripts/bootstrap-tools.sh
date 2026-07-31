@@ -73,9 +73,9 @@ if [ "$CHECK_ONLY" = 0 ] && have gh; then
 fi
 
 # --- venv + console script ----------------------------------------------------
+echo
+echo "== console script (.venv) =="
 if [ "$CHECK_ONLY" = 0 ]; then
-  echo
-  echo "== console script (.venv) =="
   if [ ! -d "$ROOT/.venv" ]; then
     if "$PYTHON" -c "import ensurepip" >/dev/null 2>&1; then
       "$PYTHON" -m venv "$ROOT/.venv"
@@ -87,6 +87,81 @@ if [ "$CHECK_ONLY" = 0 ]; then
   fi
   "$ROOT/.venv/bin/pip" install -q -e "$ROOT"
   say INSTALLED "console script" "(.venv/bin — see pyproject [project.scripts])"
+fi
+
+# PATH link: expose the console script on PATH. Gate rows spawn the CLI by bare name
+# via /bin/sh (e.g. the T4 contribcheck row), so without this last hop a fresh render
+# + `make install` fails command-not-found. Idempotently symlink .venv/bin/<cli> →
+# ~/.local/bin/<cli> when ~/.local/bin exists AND is on $PATH; otherwise WARN with
+# the exact `ln -s` command — never mutate shell profiles. The name(s) come from
+# pyproject [project.scripts], the authoritative source (see the Makefile), parsed
+# with tomllib like pdca_config below. An existing ~/.local/bin/<cli> that is NOT a
+# symlink into THIS repo's .venv (another instance's default-name CLI, a foreign
+# binary) is never overwritten — WARN naming both paths. Under --check the step only
+# reports. Optional nicety: a missing link never sets req_missing.
+pyproject_scripts() {
+  [ -f "$ROOT/pyproject.toml" ] || return 0
+  "$PYTHON" - "$ROOT/pyproject.toml" <<'PY' 2>/dev/null || true
+import sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as f:
+        data = tomllib.load(f)
+except Exception:
+    sys.exit(0)
+project = data.get("project", {})
+scripts = project.get("scripts", {}) if isinstance(project, dict) else {}
+if isinstance(scripts, dict):
+    for name in scripts:
+        print(name)
+PY
+}
+
+CLIS=""
+if have "$PYTHON"; then CLIS="$(pyproject_scripts)"; fi
+if [ -z "$CLIS" ] || [ -z "${HOME:-}" ]; then
+  say WARN "PATH link" "skipped — needs python3 + pyproject [project.scripts] + \$HOME"
+else
+  LOCAL_BIN="$HOME/.local/bin"
+  on_path=0
+  case ":$PATH:" in *":$LOCAL_BIN:"*) on_path=1 ;; esac
+  for cli in $CLIS; do
+    venv_bin="$ROOT/.venv/bin/$cli"
+    link="$LOCAL_BIN/$cli"
+    hint="ln -s \"$venv_bin\" \"$link\""
+    if [ -L "$link" ]; then
+      dest="$(readlink "$link")"
+      if [ "$dest" = "$venv_bin" ]; then
+        say OK "$cli (PATH link)" "$link -> $venv_bin"
+        continue
+      fi
+      case "$dest" in
+        "$ROOT/.venv/"*)  # stale link into THIS venv — safe to refresh (ln -sfn)
+          if [ "$CHECK_ONLY" = 1 ]; then
+            say MISSING "$cli (PATH link)" "$hint   (stale: -> $dest)"; miss 0
+          else
+            ln -sfn "$venv_bin" "$link"
+            say INSTALLED "$cli (PATH link)" "$link -> $venv_bin"
+          fi
+          continue ;;
+      esac
+      say WARN "$cli (PATH link)" "$link -> $dest is not this venv's — left untouched ($venv_bin)"; miss 0
+      continue
+    fi
+    if [ -e "$link" ]; then
+      say WARN "$cli (PATH link)" "$link exists and is not this venv's — left untouched ($venv_bin)"; miss 0
+      continue
+    fi
+    if [ ! -d "$LOCAL_BIN" ] || [ "$on_path" = 0 ]; then
+      say WARN "$cli (PATH link)" "run: $hint   ($LOCAL_BIN missing or not on PATH)"; miss 0
+      continue
+    fi
+    if [ "$CHECK_ONLY" = 1 ]; then
+      say MISSING "$cli (PATH link)" "$hint"; miss 0
+    else
+      ln -s "$venv_bin" "$link"
+      say INSTALLED "$cli (PATH link)" "$link -> $venv_bin"
+    fi
+  done
 fi
 
 # --- tier 2: configured leaf backends ----------------------------------------
