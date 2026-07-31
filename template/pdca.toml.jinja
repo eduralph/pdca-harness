@@ -30,7 +30,7 @@ templates_dir = "templates"
 # In-driver lane concurrency (docs 09 §parallel lanes). `lanes` is the worker-pool
 # size for the UNATTENDED Do+Check band only — Plan, sign-off, publish, and Act stay
 # serial. 1 (the default) is the strictly-serial driver. Override for a single run
-# with `PDCA_LANES=N` or `--lanes N` on `pdca flow`.
+# with `PDCA_LANES=N` or `--lanes N` on `{{ cli_name }} flow`.
 #
 # A pool > 1 runs N bundles concurrently in ONE workspace. Each worker is pinned to a
 # fixed lane slot 0..N-1 and exposes it to every gate command as `$PDCA_LANE`. A gate
@@ -42,11 +42,11 @@ templates_dir = "templates"
 # ergonomics actually bite (then prefer this over N separate workspaces).
 [driver]
 lanes = 1
-# Sign-off pass budget for one `pdca flow` run (issue #260): how many build-all → sign-off
+# Sign-off pass budget for one `{{ cli_name }} flow` run (issue #260): how many build-all → sign-off
 # passes a wave gets (and how many iterations a single issue gets) before the driver stops
 # driving it. A hard bundle can legitimately need many sign-off iterations; when the budget
 # runs out with one still iterating, the run does NOT abandon it silently — it is named on
-# stderr with a `pdca flow <id>` resume hint, and its accepted siblings still publish. Raise
+# stderr with a `{{ cli_name }} flow <id>` resume hint, and its accepted siblings still publish. Raise
 # this rather than editing source. `PDCA_MAX_PASSES` overrides for one run; `--max-passes`
 # overrides both.
 max_passes = 20
@@ -105,7 +105,7 @@ overflow = 0
 #     runs never preflight; empty ⇒ only the doctor rows (or nothing). It only VERIFIES —
 #     provisioning stays the instance's job (e.g. `make worktrees LANES={lanes}`).
 # lane_preflight = "test -e ../repo-lane{lanes}/.git || { echo 'run: make worktrees LANES={lanes}'; exit 1; }"
-# Wave-based batch sequencing (#wave-model). When `pdca flow` is given several ids it runs
+# Wave-based batch sequencing (#wave-model). When `{{ cli_name }} flow` is given several ids it runs
 # them as an ordered sequence of dependency waves (computed from each brief's `Depends on`
 # / `Conflicts with`): a wave's bundles build in parallel, then its accepted work reaches
 # the NEXT wave's base one of two ways.
@@ -129,13 +129,13 @@ merge_method = "merge"
 # (needs your repo-scoped gates); in merge mode the PR's own CI is the merge-boundary check.
 regate_between_waves = false
 # Act cadence (issue #109). Act is a cross-cycle beat that yields a real delta only once
-# enough cycles have frozen to show a pattern, so `pdca flow` auto-runs it only when this
+# enough cycles have frozen to show a pattern, so `{{ cli_name }} flow` auto-runs it only when this
 # many cycles have frozen SINCE the last Act review — counted across flow invocations
 # (five one-bundle flows trip it on the fifth), not per-run. Below the threshold the flow
-# skips Act with a hint; `pdca act log` runs it on demand and `--no-act` always skips.
+# skips Act with a hint; `{{ cli_name }} act log` runs it on demand and `--no-act` always skips.
 # Set to 1 to run Act after every completed flow (the prior behaviour).
 act_cadence = 5
-# Footprint sweep (issue #297). What `pdca flow` does with the harness's sibling
+# Footprint sweep (issue #297). What `{{ cli_name }} flow` does with the harness's sibling
 # worktrees once a run's waves complete (the publish/freeze boundary). Left unbounded,
 # stale lane/integration/overflow trees and their build dirs (target/, node_modules, …)
 # have accumulated >200 GB and false-redded GATING gates with 'Disk quota exceeded'
@@ -144,8 +144,8 @@ act_cadence = 5
 #            `reset --hard`; the bulk of the footprint) but keep the checkouts warm;
 #            remove integration + overflow trees outright (folds rebuild from the base
 #            every call, so their reuse value is nil).
-#   "remove" — remove lane worktrees too (Do / `pdca try` recreate them on demand).
-#   "off"    — never sweep automatically; `pdca sweep` still reclaims on demand.
+#   "remove" — remove lane worktrees too (Do / `{{ cli_name }} try` recreate them on demand).
+#   "off"    — never sweep automatically; `{{ cli_name }} sweep` still reclaims on demand.
 sweep_worktrees = "clean"
 # Close-disposition fast path (issue #60). A bundle whose brief's `Disposition hint`
 # matches one of these close / no-fix classes skips the builder + reviewer model leaves
@@ -203,10 +203,10 @@ size_guard = "off"
 [install]
 extra_bootstrap = ""
 
-# Manual-test launch (`pdca try <id>`). Check's validation act and the visual / GUI /
+# Manual-test launch (`{{ cli_name }} try <id>`). Check's validation act and the visual / GUI /
 # manual-repro §6 NEEDS-HUMAN rows are a human call — for a GUI app that means running the
 # PATCHED build by hand. The deterministic gates can't, and the reviewer leaf is headless +
-# sandboxed, so `pdca try <id>` is the on-demand human path: it MATERIALIZES the patched
+# sandboxed, so `{{ cli_name }} try <id>` is the on-demand human path: it MATERIALIZES the patched
 # tree from the bundle's patch.diff (reconstructed off the base — needs [driver].worktree on)
 # and launches this command from it, inheriting your terminal with NO timeout (quit to return).
 # Because it rebuilds from patch.diff, it works for ANY parked bundle in a batch, not only the
@@ -216,7 +216,7 @@ extra_bootstrap = ""
 # a bare ./scripts/… (which would resolve against the worktree, not your project). It is
 # ADVISORY: it decides nothing (record what you saw in a Manual-verification note and sign
 # off in §9), and edits made while testing are reset on the next Do. Project-specific data,
-# like a gate command; "" ⇒ `pdca try` errors with a configure-me hint.
+# like a gate command; "" ⇒ `{{ cli_name }} try` errors with a configure-me hint.
 [manual_test]
 # cmd = "python -m gramps"   # e.g. launch the app; a "./scripts/run-app.sh" wrapper also works
 cmd = ""
@@ -228,10 +228,10 @@ issue_id_example = "{{ issue_id_example }}"
 # Trailer linking a commit/PR to the issue ({id} = the bug id). Trackers differ
 # (GitHub/Mantis "Fixes #{id}", Jira "Fixes PROJ-{id}"); "" enforces none. The
 # publish step's commit-msg ends with this; the T4 gate (if any) checks it.
-# No tracker id yet? Use `pdca publish --no-issue`: it omits the trailer, relaxes
+# No tracker id yet? Use `{{ cli_name }} publish --no-issue`: it omits the trailer, relaxes
 # T4 to a flag, and records the bundle `id_pending` (no magic "#0000" placeholder).
 issue_trailer = "Fixes #{id}"
-# Optional issue-URL template ({id} = the bug id). Set it and `pdca publish`
+# Optional issue-URL template ({id} = the bug id). Set it and `{{ cli_name }} publish`
 # DETERMINISTICALLY hyperlinks the ticket id in the PR body (a Markdown link on the id, not
 # a bare number) — it does not depend on the model complying. E.g. Mantis
 # "{{ tracker_url }}/view.php?id={id}", GitHub "{{ tracker_url }}/{id}". "" ⇒ no link (bare id).
@@ -274,7 +274,7 @@ issue_url_pattern = ""
 # type = "command"           # exactly today's notes_cmd, but one of several sources
 # cmd = "./engine/scripts/scrape-notes.sh {id}"
 
-# Publish mechanics — `pdca publish` and the flow's publish-on-accept (docs 03 §Check
+# Publish mechanics — `{{ cli_name }} publish` and the flow's publish-on-accept (docs 03 §Check
 # closing step). Branch patterns are `{id}` / `{slug}` format strings; the
 # repo→checkout map falls back to the sibling convention (`<project>/../<repo-last-
 # segment>`) when a repo_spec is unmapped, so most setups need no entries.
@@ -358,7 +358,7 @@ argv = []
 # `mode = "stub"` ships deliberately: taking a `copier update` must never switch on a model
 # call — and a per-Plan cost — an instance did not ask for. Switch to "command" to enable.
 # Its verdict can only ever RAISE the driver's band, never lower it (sizing.combine).
-# The SPLITTER (issue #322) — interactive, invoked by `pdca split <id>`.
+# The SPLITTER (issue #322) — interactive, invoked by `{{ cli_name }} split <id>`.
 #
 # Reads brief.md plus the driver's size estimate and writes exactly ONE file,
 # split-proposal.md: N child slices, each a full draft brief, each carrying `Depends on:` /
@@ -367,7 +367,7 @@ argv = []
 # run in one parallel wave, dependent ones stack.
 #
 # It proposes seams and never cuts them: no bundles, no branches, no tracker calls.
-# `pdca split <id> --accept` is the deterministic half: it files one tracker issue per child
+# `{{ cli_name }} split <id> --accept` is the deterministic half: it files one tracker issue per child
 # as a SUB-ISSUE of the parent, materializes a bundle each, and the run continues into waves
 # by itself (#358). Pass `--ids 640,641` instead when the issues already exist — or when the
 # tracker is not a GitHub one this can reach, in which case it says so rather than skipping.
@@ -434,7 +434,7 @@ argv = []
 #
 # The four leaves below (planner, sign-off, publisher, Act) hand the terminal to a REPL and
 # BLOCK there, so a rendered instance inherits a hard constraint that is easy to miss: the
-# human must be sitting at the terminal the flow runs in, for the whole batch. A `pdca flow`
+# human must be sitting at the terminal the flow runs in, for the whole batch. A `{{ cli_name }} flow`
 # over six bundles can park on one sign-off adjudication for hours because nobody is at that
 # machine.
 #
@@ -633,7 +633,7 @@ argv = []
 #      dependencies (bubblewrap, socat) missing it DISABLES itself, warns, and runs everything
 #      unconfined. So the harness seeds `enabled = true` AND `failIfUnavailable = true` (which
 #      only has effect when enabled is true), and the leaf REFUSES to start rather than run
-#      unconfined. `pdca doctor` checks those dependencies before a run (required rows) — run it.
+#      unconfined. `{{ cli_name }} doctor` checks those dependencies before a run (required rows) — run it.
 #   1. The harness seeds `allowUnsandboxedCommands = false` beside the list. Claude Code
 #      defaults it to TRUE, and while true the model may retry ANY sandbox-denied command with
 #      `dangerouslyDisableSandbox` and have it run unconfined.
@@ -701,7 +701,7 @@ argv = []
 # unsandboxed_commands = ["cargo xtask fdb-conformance", "cargo xtask etcd-conformance"]  # claude
 # network_access = true                                                                    # codex
 
-# Doctor rows (`pdca doctor`) — optional. The doctor derives its main checks from
+# Doctor rows (`{{ cli_name }} doctor`) — optional. The doctor derives its main checks from
 # this file (every command leaf's CLI + auth, gh, bundle root, notes_cmd); declare
 # INSTANCE-specific prerequisites here as data, the same pattern as [[gates.checks]].
 #
@@ -733,7 +733,7 @@ argv = []
 
 # Deterministic Check gates (docs 04). Each check runs a shell command; it PASSES
 # iff the command exits 0. `scope = "repo"` runs against the working tree (and is
-# what CI re-runs via `pdca gates --working-tree`); `scope = "bundle"` needs the
+# what CI re-runs via `{{ cli_name }} gates --working-tree`); `scope = "bundle"` needs the
 # bundle/patch context ($PDCA_BUNDLE is exported) and runs only locally. The
 # SAME commands run for the local driver and CI — single-sourced, no drift.
 # With worktree isolation on ([driver].worktree), $PDCA_WORKTREE is also exported —
@@ -759,7 +759,7 @@ argv = []
 #   frontend = { field = "surfaces", substring = "gui" }
 # then tag gates: core suite `target = "core"`, addon suite `target = "addon"`, GUI
 # smoke `target = "frontend"`, an addon-in-GUI E2E `target = ["addon", "frontend"]`.
-# `pdca gates --working-tree` (no bundle) is never filtered, so the CI re-gate is unaffected.
+# `{{ cli_name }} gates --working-tree` (no bundle) is never filtered, so the CI re-gate is unaffected.
 #
 # While `checks` is empty the driver uses built-in all-PASS stubs so the offline
 # slice runs. Fill these in as your gate tiers get written (gates are the long
@@ -807,7 +807,7 @@ argv = []
 # runtime, conformance (T1/T2/T4), and interface/E2E tiers all audit code the
 # *current* fix did not introduce, so gating them on pre-existing/legacy
 # non-conformance is wrong. Promote a tier to gating once its targeted artifacts
-# are clean — give a check `promote_after = N` and `pdca gates --promotions` lists the
+# are clean — give a check `promote_after = N` and `{{ cli_name }} gates --promotions` lists the
 # advisory checks that passed in their N most-recent frozen cycles (earned promotion; you
 # flip `gating`, nothing is auto-mutated). For interface/E2E, gate a SMOKE test ("does the
 # app start"), not the
@@ -835,10 +835,10 @@ checks = [
   # must open with a `**User impact:**` line (the user-visible effect, before Root cause) and
   # both commit-msg.txt + pr-description.md must carry the tracker id. `contribcheck` reads
   # $PDCA_BUNDLE and is default-open before the artifacts are drafted (so Check-time gates
-  # pass); `pdca publish` hard-gates T4 after drafting them (relaxed to a flag under
+  # pass); `{{ cli_name }} publish` hard-gates T4 after drafting them (relaxed to a flag under
   # --no-issue). Gating is right here — this audits THIS cycle's own contribution artifacts,
   # not pre-existing code, so the usual "T4 advisory" caveat (below) does not apply.
-  # `at_publish` (issue #339) — whether `pdca publish` re-runs this row before pushing.
+  # `at_publish` (issue #339) — whether `{{ cli_name }} publish` re-runs this row before pushing.
   # Defaults from `scope`: a BUNDLE-scoped T4 row is about the bundle's own contribution
   # artifacts, so it runs at publish (the row below); a REPO-scoped one cannot be, so it
   # does not. Set it explicitly to override in either direction.

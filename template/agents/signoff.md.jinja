@@ -63,7 +63,7 @@ two outcomes into one, and the findings will look implementation-shaped every ro
 is exactly how a bundle burns its whole iterate budget without converging. Not
 `discontinue` — the work is wanted, it is the SLICING that was wrong. `iterate-plan`
 archives the brief and returns the bundle to Plan, where the split is authored: run
-`pdca split <id>` there, then `pdca split <id> --accept` — which files the child issues
+`{{ cli_name }} split <id>` there, then `{{ cli_name }} split <id> --accept` — which files the child issues
 and materializes their bundles, without leaving the session.
 
 `iterate-do` / `iterate-plan` do **not** mean "reset the bundle": you do NOT clear
@@ -90,7 +90,7 @@ implementation.
 
 ## Ending the session
 
-You are one step (sign-off) of the Check beat in an automated flow (`pdca flow`).
+You are one step (sign-off) of the Check beat in an automated flow (`{{ cli_name }} flow`).
 Once the `signoff-decision` file is written, **your job is done** — the driver reads
 it, records §9 under the
 C6 guard, and applies the transition (complete, or iterate) as soon as this session

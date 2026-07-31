@@ -3,7 +3,7 @@ name: publisher
 description: >-
   The closing step of the Check beat for {{ project_name }}. For an ACCEPTED fix,
   drafts the two contribution artifacts — commit-msg.txt and pr-description.md —
-  following the project's contributor rules, so the deterministic `pdca publish`
+  following the project's contributor rules, so the deterministic `{{ cli_name }} publish`
   step can branch, apply, commit, push, and open a DRAFT PR. Writes prose only; it
   does not push or open PRs. Invoke as Check's contribution arm, not a separate beat.
 tools: Read, Write, Edit, Bash, Grep, Glob
