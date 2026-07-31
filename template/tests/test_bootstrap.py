@@ -2,7 +2,8 @@
 
 Deterministic subset: a REQUIRED leaf backend that isn't installed makes `--check` exit
 non-zero and flag that binary; a stubs-only render never references a backend it doesn't
-configure; the three tiers are reported. Plus the [install].extra_bootstrap config parse.
+configure; the three tiers are reported. Plus the [install].extra_bootstrap config parse
+and the ~/.local/bin PATH-link step (issue #376).
 Run from the project root:
     PYTHONPATH=src python -m unittest discover -s tests
 """
@@ -89,6 +90,137 @@ class BootstrapCheck(unittest.TestCase):
     def test_check_passing_hook_is_reported(self) -> None:
         r = _run_check(_TOML_STUBS, hook='echo ok; exit 0\n')
         self.assertIn("10-project.sh", r.stdout)
+
+
+# A synthetic pyproject whose [project.scripts] carries one console script — the
+# authoritative source the PATH-link step parses (issue #376). The name is unique so
+# stdout assertions are unambiguous.
+_PYPROJECT = (
+    '[project]\nname = "acme-pdca-harness"\nversion = "0.1.0"\n'
+    '[project.scripts]\nacmecli = "pdca_harness.cli:main"\n'
+)
+
+
+class PathLink(unittest.TestCase):
+    """The ~/.local/bin PATH-link step (issue #376): `make install` exposes the console
+    script on PATH via an idempotent symlink; `--check` reports without creating;
+    a foreign ~/.local/bin/<cli> is WARNed about, never clobbered.
+
+    Sandbox: temp root + synthetic pdca.toml/pyproject.toml, a pre-seeded fake .venv
+    (skips venv creation — bootstrap-tools.sh checks `[ ! -d .venv ]`), and HOME/PATH
+    injected via the subprocess env. git/gh/sudo are shadowed by stubs so install mode
+    never prompts (sudo) or touches the network (gh auth). Assertions are on stdout
+    rows and the filesystem, never the exit code (a host may lack unrelated tools).
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.root = self.tmp / "proj"
+        (self.root / "scripts").mkdir(parents=True)
+        shutil.copy2(SCRIPT, self.root / "scripts" / "bootstrap-tools.sh")
+        (self.root / "pdca.toml").write_text(_TOML_STUBS, encoding="utf-8")
+        (self.root / "pyproject.toml").write_text(_PYPROJECT, encoding="utf-8")
+        venv_bin = self.root / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        self._stub(venv_bin / "pip")      # `pip install -q -e .` becomes a no-op
+        self._stub(venv_bin / "acmecli")  # the console script the link targets
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+        self.stub_bin = self.tmp / "stub-bin"
+        self.stub_bin.mkdir()
+        for tool in ("git", "gh"):
+            self._stub(self.stub_bin / tool)
+        self._stub(self.stub_bin / "sudo", "exit 1\n")
+        self.local_bin = self.home / ".local" / "bin"
+        self.link = self.local_bin / "acmecli"
+        self.venv_cli = venv_bin / "acmecli"
+
+    def _stub(self, path: Path, body: str = "exit 0\n") -> None:
+        path.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+        path.chmod(0o755)
+
+    def _run(self, *args: str, local_bin_on_path: bool = True) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        path = f"{self.stub_bin}:{env.get('PATH', '/usr/bin:/bin')}"
+        if local_bin_on_path:
+            path = f"{self.local_bin}:{path}"
+        env["PATH"] = path
+        return subprocess.run(
+            ["bash", str(self.root / "scripts" / "bootstrap-tools.sh"), *args],
+            cwd=self.root, capture_output=True, text=True, env=env,
+            stdin=subprocess.DEVNULL)
+
+    def _row(self, r: subprocess.CompletedProcess) -> str:
+        rows = [ln for ln in r.stdout.splitlines() if "(PATH link)" in ln]
+        self.assertEqual(len(rows), 1, r.stdout + r.stderr)
+        return rows[0]
+
+    def test_install_creates_the_symlink(self) -> None:
+        # (a) ~/.local/bin exists and is on PATH → install creates the symlink + row.
+        self.local_bin.mkdir(parents=True)
+        r = self._run()
+        row = self._row(r)
+        self.assertIn("INSTALLED", row)
+        self.assertIn("acmecli", row)
+        self.assertTrue(self.link.is_symlink(), r.stdout)
+        self.assertEqual(os.readlink(self.link), str(self.venv_cli))
+
+    def test_check_reports_and_creates_nothing(self) -> None:
+        # (b) --check in the same setup reports the row but installs nothing.
+        self.local_bin.mkdir(parents=True)
+        r = self._run("--check")
+        row = self._row(r)
+        self.assertIn("MISSING", row)
+        self.assertIn(f'ln -s "{self.venv_cli}" "{self.link}"', row)
+        self.assertFalse(self.link.is_symlink())
+        self.assertFalse(self.link.exists())
+
+    def test_no_local_bin_warns_with_exact_command(self) -> None:
+        # (c) HOME without .local/bin → WARN with the literal ln -s command, no mkdir
+        # and no symlink behind the operator's back (never mutate shell profiles).
+        r = self._run()
+        row = self._row(r)
+        self.assertIn("WARN", row)
+        self.assertIn(f'ln -s "{self.venv_cli}" "{self.link}"', row)
+        self.assertFalse(self.local_bin.exists())
+
+    def test_local_bin_off_path_warns_and_creates_nothing(self) -> None:
+        # (c) variant: .local/bin exists but is NOT on the injected PATH → same WARN.
+        self.local_bin.mkdir(parents=True)
+        r = self._run(local_bin_on_path=False)
+        row = self._row(r)
+        self.assertIn("WARN", row)
+        self.assertIn(f'ln -s "{self.venv_cli}" "{self.link}"', row)
+        self.assertFalse(self.link.is_symlink())
+
+    def test_rerun_is_idempotent(self) -> None:
+        # (d) a second install run reports OK and touches nothing (same inode/mtime).
+        self.local_bin.mkdir(parents=True)
+        self._run()
+        before = os.lstat(self.link)
+        r = self._run()
+        self.assertIn("OK", self._row(r))
+        after = os.lstat(self.link)
+        self.assertEqual(os.readlink(self.link), str(self.venv_cli))
+        self.assertEqual((before.st_ino, before.st_mtime_ns),
+                         (after.st_ino, after.st_mtime_ns))
+
+    def test_foreign_link_never_clobbered(self) -> None:
+        # (e) an existing ~/.local/bin/<cli> pointing somewhere OTHER than this venv
+        # (another instance's default-name CLI) is left untouched and WARNed about.
+        self.local_bin.mkdir(parents=True)
+        foreign = self.tmp / "elsewhere" / "acmecli"
+        foreign.parent.mkdir()
+        self._stub(foreign)
+        self.link.symlink_to(foreign)
+        r = self._run()
+        row = self._row(r)
+        self.assertIn("WARN", row)
+        self.assertIn(str(foreign), row)         # names the existing target
+        self.assertIn(str(self.venv_cli), row)   # and this venv's path
+        self.assertEqual(os.readlink(self.link), str(foreign))
 
 
 class InstallConfig(unittest.TestCase):
