@@ -948,10 +948,17 @@ class PublisherGuard(unittest.TestCase):
         return captured["env"]
 
     def test_codex_publisher_gets_the_gh_shim(self) -> None:
-        self.assertEqual(self._env_passed_to_invoke("codex"), {"PATH": "SHIMMED"})
+        env = self._env_passed_to_invoke("codex")
+        self.assertEqual(env.get("PATH"), "SHIMMED")
+        # The #331 exit-contract session env rides the same dict.
+        self.assertEqual(env.get("PDCA_HANDOFF_ROLE"), "publisher")
 
     def test_claude_publisher_is_not_shimmed(self) -> None:
-        self.assertIsNone(self._env_passed_to_invoke("claude"))
+        env = self._env_passed_to_invoke("claude")
+        # No gh shim for claude (native PreToolUse guard) — but the #331 exit-contract
+        # session env is present for every command-mode interactive publisher.
+        self.assertNotIn("PATH", env or {})
+        self.assertEqual((env or {}).get("PDCA_HANDOFF_ROLE"), "publisher")
 
 
 if __name__ == "__main__":

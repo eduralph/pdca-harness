@@ -35,6 +35,15 @@ HALTED = {UNPLANNED, AWAITING_SIGNOFF, COMPLETE, DISCONTINUED, RESOLVED}
 # symmetric stand-in for patch.diff — so the state machine reads it as "past Do".
 CLOSE_MARKER = "close-disposition"
 
+# The sign-off session's live carry-forward (issue #331): the FULL multi-line rationale
+# the session wrote below its decision token, captured by the driver (flow) at the moment
+# the decision is consumed — §9's "Iteration delta" flattens it to one line and the
+# decision file itself is unlinked, so without this capture the only structured copy is
+# destroyed before the iterate transition reads it. Consumed (merged into the brief's
+# carry-forward block) by driver._carry_forward_into_brief, then archived with its
+# attempt via DOWNSTREAM_OF_BRIEF below.
+SESSION_CARRY = "session-carry-forward"
+
 # Everything Do and Check write, i.e. everything downstream of brief.md. Includes the
 # close marker (issue #60) so an iterate archives it too — reopening a close bundle to a
 # fix path then clears the marker and runs the real Do+Check band.
@@ -61,6 +70,10 @@ DOWNSTREAM_OF_BRIEF = [
     # the very numbers that justified rejecting it. Not in CYCLE_EVIDENCE_ONLY: unlike the
     # auto-iterate budget it does not accumulate, it is rewritten wholesale each Check.
     "size-signal.json",
+    # The captured sign-off-session carry-forward (#331): written by flow when the
+    # decision is consumed, merged into the brief by _carry_forward_into_brief, and
+    # archived here WITH the attempt it describes — never left to leak into the next one.
+    SESSION_CARRY,
 ]
 
 # Cycle artifacts matched by pattern rather than name. ONE definition, read by both
