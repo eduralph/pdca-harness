@@ -94,6 +94,25 @@ DEFAULT_WEIGHTS = {
     "is_plan_pointer": -2,   # ρ -0.24 — de-escalates
 }
 
+#: Weight of the sizer LEAF's verdict in the numeric score when :func:`combine` folds one
+#: in (``[driver.sizing].model_weight``, issue #359). The shipped default 0 is today's
+#: behaviour exactly: an above-``ok`` verdict escalates the BAND only and the score stays
+#: purely structural — the corpus that would justify a non-zero weight accumulates per
+#: instance, and weighting an unmeasured signal would be fitting folklore.
+#:
+#: A CONFIG VALUE, not a constant, so the review can actually move it: revisit at Act
+#: cadence, against the Act index's per-cycle `sizing:` estimate-vs-outcome column and a
+#: fresh ``scripts/size-calibrate`` run — once model escalations demonstrably track real
+#: churn in YOUR corpus, raise it there like any other ``[driver.sizing]`` weight.
+#:
+#: Neither surface can show that yet: the index's `sizing:` line joins the STRUCTURAL
+#: estimate only, and ``size-calibrate`` mines no model-verdict feature, so the
+#: escalation-vs-outcome correlation a non-zero weight would rest on is unobservable
+#: today. The retuning walk in pdca.toml's ``[driver.sizing]`` block names this blind
+#: spot so an Act-cadence review does not mistake "no visible correlation" for
+#: "no correlation" — or, worse, move the weight without evidence either way.
+DEFAULT_MODEL_WEIGHT = 0
+
 #: Brief-size cutoff, in KB, measured ABOVE the first carry-forward heading. 12 KB is the
 #: knee: below it recall barely improves, above it recall falls faster than precision
 #: rises. Measuring the file as-is instead would leak the outcome into the predictor — an
@@ -404,7 +423,7 @@ class AprioriBrief:
         return value
 
 
-def combine(structural: SizeEstimate, model: dict | None) -> SizeEstimate:
+def combine(structural: SizeEstimate, model: dict | None, cfg=None) -> SizeEstimate:
     """Fold the sizer leaf's verdict into the structural estimate — **escalate only**.
 
     The model reads meaning; structure counts fields. So the model may raise a band that
@@ -413,6 +432,13 @@ def combine(structural: SizeEstimate, model: dict | None) -> SizeEstimate:
     model that could downgrade would be a single point of failure over a signal that at
     least fails predictably, and "combined so the model can only escalate" is the property
     #320 is named for — asserted directly in the tests.
+
+    ``cfg`` reads ``[driver.sizing].model_weight`` (#359): an above-``ok`` verdict adds
+    that weight to the numeric score, the same shape as a structural feature firing. At
+    the default 0 (:data:`DEFAULT_MODEL_WEIGHT` — see its Act-cadence note) the score is
+    byte-identical to today's, so ``cfg=None`` callers and untouched configs lose nothing.
+    Escalate-only holds for the score too: the weight is added only on a verdict that
+    names watch/oversized, and never subtracted.
 
     **What is guaranteed:** a missing verdict, a non-dict verdict, or one whose ``band`` is
     absent or not one of ok/watch/oversized leaves the structural estimate exactly as it
@@ -432,6 +458,13 @@ def combine(structural: SizeEstimate, model: dict | None) -> SizeEstimate:
     if band not in _ORDER:
         return structural
     combined = higher(structural.band, band)
+    score = structural.score
+    if _ORDER[band] > _ORDER[OK]:
+        # The model flagged something — its configured weight joins the score exactly
+        # like a structural feature's would. 0 by default (current behaviour), clamped
+        # at 0: a negative weight would let the model LOWER a structural score, the
+        # single point of failure this whole function exists to forbid.
+        score += max(0, _cfg_int(cfg, "model_weight", DEFAULT_MODEL_WEIGHT))
     reasons = list(structural.reasons)
     outcomes = model.get("independent_outcomes")
     detail = f"sizer says {band}"
@@ -445,7 +478,7 @@ def combine(structural: SizeEstimate, model: dict | None) -> SizeEstimate:
     if confidence in ("low", "medium", "high"):
         detail += f" (confidence {confidence})"
     reasons.append(detail)
-    return SizeEstimate(structural.score, combined, reasons,
+    return SizeEstimate(score, combined, reasons,
                         churn_band=structural.churn_band,
                         patch_band=structural.patch_band,
                         model_band=band)

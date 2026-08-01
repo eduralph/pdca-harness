@@ -777,7 +777,7 @@ def _size(cfg: Config, issue_ids: list[str]) -> int:
         # read-only and must stay safe to run against a live queue. Without this the one
         # deliberate way to ask "how big is this?" showed only the structural bands and
         # never the decomposability answer the instance had already paid a model for.
-        est = sizing.combine(sizing.estimate(d / "brief.md", cfg), leaves.current_sizing(d, cfg))
+        est = sizing.combine(sizing.estimate(d / "brief.md", cfg), leaves.current_sizing(d, cfg), cfg)
         print(f"{est.band}\t{d.name}\tscore={est.score} "
               f"churn={est.churn_band} patch={est.patch_band}"
               + (f" sizer={est.model_band}" if est.model_band else ""))
@@ -817,7 +817,7 @@ def _status(cfg: Config, issue_id: str | None) -> int:
         # queue, which is where a human is actually looking.
         oversized = (d / "brief.md").exists() and sizing.combine(
             sizing.estimate(d / "brief.md", cfg),
-            leaves.current_sizing(d, cfg)).band == sizing.OVERSIZED
+            leaves.current_sizing(d, cfg), cfg).band == sizing.OVERSIZED
         if s == state.AWAITING_SIGNOFF:
             n = len(signoff.open_needs_human(d / "SUMMARY.md"))
             flag = "  [cheap: confirm]" if n == 0 else f"  [{n} NEEDS-HUMAN]"

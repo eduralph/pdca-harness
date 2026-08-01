@@ -151,6 +151,26 @@ accepted but silently treated as `"warn"` for exactly this reason (see step 03).
 Retune the weights and cutoffs per-instance under `[driver.sizing]` in
 `pdca.toml` if your own corpus disagrees with the defaults above.
 
+**The thresholds stay honest by review, not by faith.** A calibrated number that
+only moves when someone re-derives it by hand is wrong for a long time before
+anyone notices — so the loop is instrumented where cross-cycle patterns are
+already reviewed: `pdca act index` renders a `sizing:` line per frozen cycle,
+the a-priori estimate beside the measured outcome from the bundle's recorded
+size signal (a blank outcome means the bundle predates the signal — "not
+measured", never "measured small"). When the two visibly drift, re-run
+`scripts/size-calibrate` over the instance and walk its output back into
+`[driver.sizing]` — the step-by-step procedure lives in that table's comment
+block in `pdca.toml`. The model half of the estimate is covered by the same
+review: `model_weight` (how much a sizer-leaf escalation adds to the score,
+`0` = band-only, today's behaviour) is a `[driver.sizing]` config value
+revisited at Act cadence rather than a constant baked into the engine. That
+revisit has a named blind spot: the index's `sizing:` line shows the
+structural estimate only (the stored sizer verdict is not joined in) and
+`size-calibrate` mines no model-verdict feature, so whether sizer escalations
+track real churn is not yet observable from either artifact. Until one of them
+grows that column, the evidenced Act-cadence outcome for `model_weight` is
+"stays 0, gap recorded" — not a retune.
+
 ### The split
 
 `pdca split` is the deterministic decomposition path — two verbs, because the

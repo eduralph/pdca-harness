@@ -23,7 +23,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import revalidate, signoff, state
+from . import revalidate, signoff, size_signal, sizing, state
 from .config import Config
 
 # Cross-platform advisory file lock (#299 review): ``fcntl`` is Unix-only, and cli.py
@@ -76,6 +76,12 @@ class ActEntry:
     act_candidates: list[str] = field(default_factory=list)  # §10 hints
     reval_deltas: list[str] = field(default_factory=list)  # revalidation stamps (#11)
     fingerprint: str = ""  # SUMMARY.md hash AT EXTRACTION time (#299 review round 17)
+    # Sizing column (#359): the a-priori estimate joined to the measured outcome, so
+    # estimator drift is reviewed where cross-cycle patterns already are. Either side is
+    # "" when unavailable — a bundle predating the recorded size signal (#324) must read
+    # as "not measured", never as "measured small".
+    size_estimate: str = ""  # e.g. "watch (score 5)" — from the brief, pre-Do text only
+    size_outcome: str = ""   # e.g. "34 KB / 3 file(s) / 1 round(s)" — size-signal.json
 
 
 def frozen_bundles(cfg: Config) -> list[Path]:
@@ -533,7 +539,7 @@ def index(cfg: Config, since: str | None = None,
 
     ``bundles`` (#299) restricts the extraction to an explicit list (e.g. the
     unreviewed set); default is every frozen bundle."""
-    entries = [_extract(d / "SUMMARY.md", d)
+    entries = [_extract(d / "SUMMARY.md", d, cfg)
                for d in (frozen_bundles(cfg) if bundles is None else bundles)]
     if since:
         entries = [e for e in entries if e.date and e.date >= since]
@@ -567,6 +573,12 @@ def render_index(entries: list[ActEntry], pats: dict[str, list[str]],
             f"- §6 NEEDS-HUMAN ({len(e.needs_human)}): " + ("; ".join(e.needs_human) or "—"),
             f"- §7 unproven ({len(e.unproven)}): " + ("; ".join(e.unproven) or "—"),
             f"- §10 Act candidates ({len(e.act_candidates)}): " + ("; ".join(e.act_candidates) or "—"),
+            # Sizing column (#359): the a-priori estimate beside the measured outcome
+            # (#324's recorded signal), so the estimator is audited at the review that
+            # already looks across cycles — a number that only moves when someone
+            # re-derives it by hand is wrong long before anyone finds out (the 0.56
+            # 67%→62% episode). A blank side means "not measured", never "small".
+            f"- sizing: estimate {e.size_estimate or '—'} → outcome {e.size_outcome or '—'}",
         ]
         # Only when present — a frozen gate result the current engine now contradicts
         # (esp. a frozen FAIL now PASS = stale artifact, or a frozen PASS now FAIL =
@@ -710,9 +722,56 @@ def append_reviewed(cfg: Config, entries: list[ActEntry], render, *, date: str,
 
 
 # ----------------------------------------------------------------------------
-def _extract(summary: Path, bundle: Path) -> ActEntry:
+def _size_column(bundle: Path, cfg: Config) -> tuple[str, str]:
+    """The sizing column's two sides for one bundle (#359): ``(estimate, outcome)``.
+
+    The estimate is the brief-derived a-priori score (``sizing.estimate`` reads only the
+    text above the first carry-forward heading, so it is a priori even after an iterate).
+    Deliberately structural-only: the stored sizer verdict is read through
+    ``leaves.current_sizing``, and ``leaves`` imports this module — folding it in here
+    would close an import cycle for a decoration on an advisory column.
+
+    The outcome is the RECORDED size signal (#324), via ``size_signal.read`` — never
+    ``current``/``measure``: a bundle predating the signal file must render blank rather
+    than have an outcome fabricated at review time from whatever is on disk now.
+    Both sides are "" when unavailable; the renderer shows the blank.
+    """
+    estimate = ""
+    if (bundle / "brief.md").is_file():
+        est = sizing.estimate(bundle / "brief.md", cfg)
+        estimate = f"{est.band} (score {est.score})"
+    signal = size_signal.read(bundle)
+    if signal is None:
+        return estimate, ""
+
+    def _num(key: str) -> int:
+        # Same tolerance as size_signal._thresholds: a garbled value in a recorded file
+        # reads 0, because an unreadable number must not cost the whole index.
+        try:
+            return int(signal.get(key, 0))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    try:
+        # int / int divides through float, so a recorded value that PARSES as a Python
+        # int yet exceeds float range (~1.8e308) sails past _num's guard and raises
+        # OverflowError at the `/ 1024` — the same failure class size_signal._int
+        # documents for `1e309`, one representation over. One garbled size-signal.json
+        # must cost its own cell, never the whole index. Blank rather than clamped:
+        # a clamp prints a number that reads as a measurement nobody made, and this
+        # column's contract is that a blank outcome means "not measured".
+        return estimate, (f"{_num('patch_bytes') / 1024:.0f} KB / "
+                          f"{_num('patch_files')} file(s) / {_num('rounds')} round(s)")
+    except OverflowError:
+        return estimate, ""
+
+
+def _extract(summary: Path, bundle: Path, cfg: Config | None = None) -> ActEntry:
+    # ``cfg=None`` keeps direct callers (tests) working; the sizing column then stays
+    # blank, which is the honest reading for "not computed".
+    size_est, size_out = _size_column(bundle, cfg) if cfg is not None else ("", "")
     if not summary.exists():
-        return ActEntry(bundle=bundle)
+        return ActEntry(bundle=bundle, size_estimate=size_est, size_outcome=size_out)
     # The fingerprint is captured HERE, at extraction time (#299 review round 17):
     # the entry's hash must attest the content the review/scaffold actually read,
     # not whatever a concurrent redo leaves on disk by the time the frontier writes.
@@ -737,6 +796,8 @@ def _extract(summary: Path, bundle: Path) -> ActEntry:
         act_candidates=_candidates(s10),
         reval_deltas=revalidate.deltas(bundle),  # frozen-gate staleness surfaced (#11)
         fingerprint=fingerprint,
+        size_estimate=size_est,
+        size_outcome=size_out,
     )
 
 
