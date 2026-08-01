@@ -127,6 +127,18 @@ class Config:
     issue_url_pattern: str = ""
     repo_checkouts: dict[str, str] = field(default_factory=dict)  # repo_spec → local path
     gates_checks: list[dict] = field(default_factory=list)
+    # Host-only CI parity commands (issue #311): ``[gates] host_ci`` — CI jobs the host
+    # runs on EVERY PR but the delegated gate runner does not cover (a spell-checker like
+    # `typos`, a docs lint). The T4 slot runs before ``patch.diff`` is applied, so it
+    # structurally cannot see content that arrives in the patch — a bundle could pass
+    # Check green and open a PR that immediately fails a required status. Each declared
+    # command runs FROM a reconstructed base + ``patch.diff`` tree: at Check as a gate
+    # row (``gates._run_checks``, the lane worktree) and again in ``publish`` immediately
+    # before anything is pushed (``publish._host_ci_passes``, an ephemeral tree pinned to
+    # the exact base commit the push will build on). A bare string is shorthand for
+    # ``{cmd = "..."}``; rows are normalized by :func:`_normalize_host_ci` (always
+    # gating). Empty (the default) ⇒ byte-identical behaviour everywhere.
+    host_ci_checks: list[dict] = field(default_factory=list)
     # Reverse registry-consistency (issue #205): [gates.registry_consistency] naming an
     # instance's manifest files ({files=[...], pattern="<regex, group 1 = path>"}). The
     # `registry-check` subcommand (wired as a bundle-scoped gate) fails a patch that adds a
@@ -419,6 +431,7 @@ class Config:
         leaves = data.get("leaves", {})
         gates = data.get("gates", {})
         gates_checks = list(gates.get("checks", []))
+        host_ci_checks = _normalize_host_ci(gates.get("host_ci", []))
         gates_runner = gates.get("runner", "")
         registry_consistency = dict(gates.get("registry_consistency", {}))
         install_extra_bootstrap = data.get("install", {}).get("extra_bootstrap", "")
@@ -433,8 +446,11 @@ class Config:
         }
         # PDCA_GATES_MODE=stub empties the configured checks → the all-PASS stub
         # rows, so an offline "rehearse" runs the control flow without Docker.
+        # host_ci rows are emptied too (#311): same determinism reason — a rehearse
+        # must not run instance CI commands (or reconstruct worktrees) offline.
         if os.environ.get("PDCA_GATES_MODE") == "stub":
             gates_checks = []
+            host_ci_checks = []
 
         # PDCA_LEAVES_MODE forces every leaf's mode regardless of pdca.toml — so
         # CI and the offline self-test (`make`) stay deterministic (=stub, no
@@ -599,6 +615,7 @@ class Config:
             act=leaf("act"),
             author=data.get("project", {}).get("author", ""),
             gates_checks=gates_checks,
+            host_ci_checks=host_ci_checks,
             registry_consistency=registry_consistency,
             install_extra_bootstrap=install_extra_bootstrap,
             manual_test_cmd=manual_test_cmd,
@@ -636,6 +653,44 @@ class Config:
                       for k, v in data.get("families", {}).items()},
             doctor_checks=list(data.get("doctor", {}).get("checks", [])),
         )
+
+
+def _normalize_host_ci(entries: list) -> list[dict]:
+    """Normalize ``[gates] host_ci`` (issue #311) into gate-check-shaped rows.
+
+    A bare string is shorthand for ``{cmd = "<string>"}``. Defaults, chosen so a
+    declared row closes the blind spot without further configuration: ``tier = "T4"``
+    (the CI-parity slot the issue names — the contribution as the host's CI will see
+    it), ``scope = "bundle"`` (they need the patched tree), and an ``id``/``label``
+    derived from the command so a failure always names what ran. Explicit id / label /
+    tier keys on a table row win over those defaults — but ``gating`` is FORCED true,
+    a contract rather than a default: the host's CI will fail the PR on every declared
+    command regardless of what an advisory row believed, and the #311 criterion is
+    literal — a command that exits non-zero blocks publish. A declared
+    ``gating = false`` is therefore ignored, loudly (the sign-off round that reviewed
+    this feature did not bless a bypass carve-out).
+    """
+    out: list[dict] = []
+    for i, entry in enumerate(entries):
+        row = dict(entry) if isinstance(entry, dict) else {"cmd": str(entry)}
+        cmd = str(row.get("cmd", "") or row.get("subcmd", ""))
+        if not cmd.strip():
+            # The #338 lesson: `subprocess.run("")` exits 0, so a command-less row
+            # would pass VACUOUSLY at every seam it is meant to guard. Drop it loudly.
+            print(f"config: [gates] host_ci entry {i} has no cmd/subcmd — ignoring it",
+                  file=sys.stderr)
+            continue
+        if not row.pop("gating", True):
+            print(f"config: [gates] host_ci entry {i} declares gating = false — "
+                  "ignored: a declared host-CI command always blocks (the host's CI "
+                  "will fail the PR on it either way, #311)", file=sys.stderr)
+        row["gating"] = True
+        row.setdefault("id", f"host-ci-{i}")
+        row.setdefault("tier", "T4")
+        row.setdefault("scope", "bundle")
+        row.setdefault("label", f"host CI: {cmd}")
+        out.append(row)
+    return out
 
 
 def _find_root(start: Path) -> Path:

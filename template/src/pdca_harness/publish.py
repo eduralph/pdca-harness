@@ -31,7 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import brief, gates, leaves, progress, state
+from . import brief, gates, leaves, progress, state, worktree
 from .config import Config
 
 COMMIT_MSG = "commit-msg.txt"
@@ -40,6 +40,10 @@ PR_BODY = "pr-description.md"
 # Do worktree and stacked PR base off the prior waves' folded work (#wave-model); absent ⇒
 # build / open the PR off the target base.
 STACK_BASE_FILE = "stack-base"
+# The pre-push host-CI record (issue #311): the [gates] host_ci rows as run against the
+# pinned base + patch.diff tree, written when the gate REFUSES (so the refusal survives
+# for the human, naming the command and the base) and removed again once they pass.
+HOST_CI_JSON = "host-ci.json"
 
 
 def _ensure_texts(cfg: Config, d: Path) -> bool:
@@ -290,6 +294,11 @@ def publish(
             kind = "stacked draft PR" if own_repo else "stacked draft PR (fork: cumulative diff vs base)"
         print(f"publish --dry-run — {d.name} → {kind} on {repo_spec} ({branch} → {pr_base}):")
         print(f"  # stash the target working tree (Do/Check leave it dirty), restore it after")
+        if cfg.host_ci_checks:
+            print(f"  # host CI gate (#311): fetch, pin the exact {checkout_base} commit the "
+                  f"push will build on, and run {len(cfg.host_ci_checks)} declared command(s) "
+                  "against base + patch.diff in an ephemeral worktree — ANY non-zero exit "
+                  "blocks the push")
         for c in steps + ([pr_cmd] if open_pr else []):
             print("  " + " ".join(shlex.quote(x) for x in c))
         return 0
@@ -303,6 +312,22 @@ def publish(
         return rc
     if stack_branch:
         _warn_if_squash_only(repo_spec)  # a stacked PR must merge-commit, not squash (#123)
+
+    # Host-only CI parity gate ([gates] host_ci, issue #311): the declared commands must
+    # pass against the tree the push would publish, before anything is pushed. The T4
+    # gate above runs with cwd=cfg.root against the tree BEFORE patch.diff is applied,
+    # so it structurally cannot see content that arrives in the patch (the wyrd `typos`
+    # class: Check green, PR opens red on a required status). The gate fetches and PINS
+    # the exact base commit; the plan's `checkout -B` is then rebased onto that same
+    # commit so the certified tree IS the pushed tree even when the base advanced since
+    # Check (iteration-1 C5). Undeclared ⇒ ci_base stays "" and the steps run unchanged.
+    ci_ok, ci_base = _host_ci_passes(cfg, d, repo,
+                                     "origin" if stack_branch else base_remote,
+                                     checkout_base)
+    if not ci_ok:
+        return 1
+    if ci_base:
+        steps = _pin_checkout(steps, git, branch, ci_base)
 
     orig_ref = _current_ref(repo)
     stashed = _stash_worktree(repo)
@@ -340,6 +365,10 @@ def publish(
         "by": by or _signoff_by(d) or cfg.author or "unknown", "date": today,
         "id_pending": pending_id,
     }
+    if ci_base:
+        # The base commit the host-CI gate certified — and, via _pin_checkout, the exact
+        # parent the pushed branch was built on (#311): auditable certified == pushed.
+        record["host_ci_base"] = ci_base
     if stack_branch:
         record["stacks_on"] = brief.stacks_on(d / "brief.md")
     (d / "publish.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
@@ -399,6 +428,11 @@ def _publish_stacked(
         print(f"publish --dry-run — {d.name} → commit stacked onto {repo_spec} "
               f"PR branch {branch} (base {base_ref}):")
         print(f"  # stash the target working tree (Do/Check leave it dirty), restore it after")
+        if cfg.host_ci_checks:
+            print(f"  # host CI gate (#311): fetch, pin the exact {base_ref} commit the "
+                  f"push will build on, and run {len(cfg.host_ci_checks)} declared command(s) "
+                  "against base + patch.diff in an ephemeral worktree — ANY non-zero exit "
+                  "blocks the push")
         for c in steps:
             print("  " + " ".join(shlex.quote(x) for x in c))
         print("  " + " ".join(shlex.quote(x) for x in pr_list)
@@ -417,6 +451,15 @@ def _publish_stacked(
               "'Onto branch' brief field to use the default new-PR flow.", file=sys.stderr)
         return 1
 
+    # Host-only CI parity gate (#311) — this path pushes too, so it is gated the same
+    # way as the new-PR path: fetch, pin the exact PR-branch commit the push builds on,
+    # run the declared commands against pinned base + patch.diff, block on ANY non-zero.
+    ci_ok, ci_base = _host_ci_passes(cfg, d, repo, remote, base_ref)
+    if not ci_ok:
+        return 1
+    if ci_base:
+        steps = _pin_checkout(steps, git, branch, ci_base)
+
     # Stash the (Do/Check-dirtied) tree so checkout -B + apply run clean; restore after (#83).
     orig_ref = _current_ref(repo)
     stashed = _stash_worktree(repo)
@@ -433,12 +476,15 @@ def _publish_stacked(
     finally:
         _restore_worktree(repo, orig_ref, stashed)
 
-    (d / "publish.json").write_text(json.dumps({
+    rec = {
         "mode": "stacked",
         "branch": branch, "pr_url": pr_url, "base": base_ref, "repo": repo_spec,
         "by": by or _signoff_by(d) or cfg.author or "unknown", "date": today,
         "id_pending": pending_id,
-    }, indent=2) + "\n", encoding="utf-8")
+    }
+    if ci_base:
+        rec["host_ci_base"] = ci_base  # certified == pushed, auditable (#311)
+    (d / "publish.json").write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
 
     print(f"\nCommit stacked onto {repo_spec} PR branch {branch} ({pr_url}).")
     print(f"  watch CI:  gh pr checks {pr_url} --watch")
@@ -711,6 +757,107 @@ def _t4_passes(cfg: Config, d: Path) -> bool:
             print(output.strip(), file=sys.stderr)
             return False
     return True
+
+
+def _pinned_base(repo: Path, fetch_remote: str, base_ref: str) -> tuple[str, str]:
+    """``(sha, error)`` — fetch and resolve the exact base commit the push will build on.
+
+    Runs the SAME fetch the push plan's first step runs, then resolves ``base_ref`` to a
+    commit SHA. The SHA — not the moving ref — is what the host-CI gate certifies and
+    what :func:`_pin_checkout` rebases the push onto, so "certified tree == pushed tree"
+    holds by construction (iteration-1 C5: a warm, no-fetch reconstruction certified a
+    stale base while the push fetched afterward). A non-empty ``error`` means the base
+    cannot be pinned; the caller fails closed."""
+    r = subprocess.run(["git", "-C", str(repo), "fetch", fetch_remote],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        tail = (r.stderr or "").strip().splitlines()
+        return "", f"`git fetch {fetch_remote}` failed ({tail[-1] if tail else 'no output'})"
+    r = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet",
+                        base_ref + "^{commit}"], capture_output=True, text=True)
+    sha = (r.stdout or "").strip()
+    if r.returncode != 0 or not sha:
+        return "", f"base ref '{base_ref}' does not resolve after the fetch"
+    return sha, ""
+
+
+def _pin_checkout(steps: list[list[str]], git, branch: str, base_commit: str) -> list[list[str]]:
+    """Rebase the push plan's ``checkout -B`` step onto the exact commit host CI certified.
+
+    The plan was built against a moving ref (``<remote>/<base>``), which its own
+    ``fetch`` step would re-resolve at push time — re-opening the certified-vs-pushed
+    gap on a base that advances mid-publish (#311, iteration-1 C5). Matched on the
+    step's verbs, not a list index, so a plan reordering can't silently pin the wrong
+    step."""
+    return [git("checkout", "-B", branch, base_commit) if c[3:5] == ["checkout", "-B"]
+            else c for c in steps]
+
+
+def _host_ci_passes(cfg: Config, d: Path, repo: Path, fetch_remote: str,
+                    base_ref: str) -> tuple[bool, str]:
+    """Run the declared host-only CI commands (``[gates] host_ci``, issue #311) against
+    the exact tree the push would publish; ``(False, "")`` blocks the publish before
+    anything is pushed.
+
+    The pre-push counterpart of the Check-time host-CI rows (``gates._run_checks``) —
+    but NOT the lane reconstruction those trust: the lane is deliberately warm and
+    never fetches (``worktree.rebuild_for_gate`` — Check attests the base Do built
+    against), while the push builds on the freshly fetched base, so a lane-based run
+    can certify a stale base and still let publish push a tree the declared CI never
+    saw (iteration-1 C5). So this fetches (the same fetch the push plan runs), PINS
+    the resolved base commit, materializes an ephemeral ``base + patch.diff`` tree at
+    that commit (``worktree.for_publish``), runs the commands there, and returns the
+    pinned SHA so the push's ``checkout -B`` builds on it — certified tree == pushed
+    tree, by construction.
+
+    Nothing declared ⇒ ``(True, "")`` with no work at all — an instance that opts out
+    is byte-identical to today (criterion c). EVERY command that does not pass blocks
+    the push — including exit 77 (a Check gate's "cannot decide" channel) and any row
+    hand-marked non-gating: the #311 criterion is literal ("a command that exits
+    non-zero … blocks publish — no branch is pushed, no PR is opened"), the host's CI
+    will fail the PR on these commands regardless of a carve-out, and sign-off did not
+    bless one (iteration-1 C3). A refusal names the command on stderr and records
+    every row plus the pinned base in the bundle's ``host-ci.json`` (removed again
+    once they pass). Fail CLOSED when the base can't be pinned or no tree can be
+    materialized — pushing content the declared CI never saw is the exact blind spot
+    this closes."""
+    if not cfg.host_ci_checks:
+        return True, ""
+    record = d / HOST_CI_JSON
+
+    def _refuse(reason: str, rows: list[dict], base: str = "") -> tuple[bool, str]:
+        record.write_text(json.dumps({"overall": "fail", "reason": reason,
+                                      "base": base, "rows": rows},
+                                     indent=2) + "\n", encoding="utf-8")
+        print(f"publish: host CI gate — {reason} — nothing was pushed, no PR was "
+              f"opened; see {d.name}/{HOST_CI_JSON}.", file=sys.stderr)
+        return False, ""
+
+    sha, err = _pinned_base(repo, fetch_remote, base_ref)
+    if not sha:
+        return _refuse(f"cannot pin the base commit the push would build on — {err}", [])
+    try:
+        wt = worktree.for_publish(d, repo, sha)
+    except worktree.WorktreeError as exc:
+        return _refuse(f"no pushed-tree to run against ({exc})", [], base=sha)
+    rows: list[dict] = []
+    try:
+        for chk in cfg.host_ci_checks:
+            rows.append(gates._run_one(chk, cwd=wt, bundle=d,
+                                       runner=cfg.gates_runner, worktree_path=wt))
+    finally:
+        worktree.overflow_remove(repo, wt)
+    failed = [r for r in rows if r["result"] != "pass"]
+    if failed:
+        for r in failed:
+            print(f"publish: host CI '{r['rule_id']}' did NOT pass against the pinned "
+                  f"base + patch.diff ({r['result']}) — command: {r['oracle']}\n"
+                  f"    {r['path_line']}", file=sys.stderr)
+        return _refuse(f"{len(failed)} host CI command(s) did not pass against the "
+                       f"tree the push would publish (base {sha[:12]} + patch.diff) — "
+                       "fix the tree (or the command) and retry", rows, base=sha)
+    record.unlink(missing_ok=True)
+    return True, sha
 
 
 def _check_repo(repo: Path, repo_spec: str, required_remotes=("upstream", "origin")) -> int:
