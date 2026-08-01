@@ -1058,12 +1058,25 @@ def _contribcheck(cfg: Config, args: argparse.Namespace) -> int:
     patch = d / "patch.diff"
     if not patch.is_file() or not patch.read_text(encoding="utf-8").strip():
         return 0  # close / no-fix bundle: nothing contributed
-    pr_path = d / publish.PR_BODY
-    if not pr_path.is_file():
+    if not (d / publish.PR_BODY).is_file():
         return 0  # artifacts not drafted yet (Check-time gate, pre-publish) — nothing to lint
+    problems = contribution_problems(d, no_issue=args.no_issue)
+    for p in problems:
+        print(f"contribcheck: {p}", file=sys.stderr)
+    return 1 if problems else 0
+
+
+def contribution_problems(d: Path, *, no_issue: bool = False) -> list[str]:
+    """The T4 lint core, as a problem list — the single source of the contribution rules.
+
+    Extracted from :func:`_contribcheck` (issue #331) so the publisher's exit-contract
+    check (``handoff.check_publisher``) reuses the instance's own deterministic lint
+    rather than re-declaring it; the gate and the /handoff verdict cannot drift apart.
+    """
     issue_id = d.name.removeprefix("issue_")
+    pr_path = d / publish.PR_BODY
     commit_path = d / publish.COMMIT_MSG
-    pr_text = pr_path.read_text(encoding="utf-8")
+    pr_text = pr_path.read_text(encoding="utf-8") if pr_path.is_file() else ""
     problems: list[str] = []
     # 1) A non-empty `**User impact:**` opener that PRECEDES Root cause — the user-visible
     #    effect must lead (what a weak model tends to drop).
@@ -1077,16 +1090,14 @@ def _contribcheck(cfg: Config, args: argparse.Namespace) -> int:
             problems.append("`**User impact:**` must come BEFORE `## Root cause`")
     # 2) The tracker id in BOTH artifacts — only for a real numeric ticket; a slug /
     #    --no-issue (pending-id) bundle legitimately carries no trailer.
-    if issue_id.isdigit() and not args.no_issue:
+    if issue_id.isdigit() and not no_issue:
         needle = re.compile(r"#" + re.escape(issue_id) + r"\b")
         commit_text = commit_path.read_text(encoding="utf-8") if commit_path.is_file() else ""
         if not needle.search(pr_text):
             problems.append(f"{publish.PR_BODY} does not reference the tracker id #{issue_id}")
         if not needle.search(commit_text):
             problems.append(f"{publish.COMMIT_MSG} does not reference the tracker id #{issue_id}")
-    for p in problems:
-        print(f"contribcheck: {p}", file=sys.stderr)
-    return 1 if problems else 0
+    return problems
 
 
 def _revalidate(cfg: Config, args: argparse.Namespace) -> int:
