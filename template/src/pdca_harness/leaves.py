@@ -1068,7 +1068,7 @@ def _split_prompt(d: Path, cfg: Config) -> str:
     # `sizing.json` stays, and handing the splitter seams drawn from a replaced brief tells
     # it the old decomposition describes the current one.
     verdict = current_sizing(d, cfg) or {}
-    est = sizing.combine(sizing.estimate(d / "brief.md", cfg), verdict or None)
+    est = sizing.combine(sizing.estimate(d / "brief.md", cfg), verdict or None, cfg)
     # LIST or nothing. The verdict is model output and the contract tolerates an untidy
     # schema — but tolerant has to mean ignored, not iterated: `proposed_seams: 1` raised
     # TypeError here, and `do_split` has already unlinked the previous proposal by then.

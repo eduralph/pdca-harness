@@ -170,6 +170,48 @@ sweep_worktrees = "clean"
 size_guard = "off"
 
 
+# A-priori size-estimate weights + cutoffs (issues #320/#359). [driver.sizing] tunes the
+# structural estimator that scores each brief BEFORE Do runs; the shipped defaults are
+# calibrated against 86 settled bundles of a real instance, so this block is commented out
+# — uncomment only the keys you retune, anything omitted keeps the shipped default. A
+# sub-table: it must sit after every bare [driver] key (see the note above size_guard).
+#
+# RETUNING (#359) — walking a fresh `size-calibrate` run back into this table. The numbers
+# only stay honest against YOUR corpus, and drift is visible in the Act index's per-cycle
+# `sizing:` line (a-priori estimate vs measured outcome). At Act cadence:
+#   1. Mine the instance:  PYTHONPATH=src scripts/size-calibrate   (add `--csv out.csv`
+#      for the per-bundle table a threshold is actually argued from).
+#   2. "Rank correlation … vs rounds": set each feature weight proportional to |rho|
+#      against ROUNDS — churn is what the score predicts. A feature indistinguishable
+#      from noise keeps weight 0; weighting it would be fitting noise.
+#   3. "Median feature value, converged vs churned": put `brief_bytes_kb` at the knee
+#      between the two medians (shipped: 12).
+#   4. Set `watch` where the churn rate first clears your corpus base rate, `oversized`
+#      where precision peaks (shipped: 4 / 7 at a 19% base rate).
+#
+# `model_weight` (#359): how much a sizer-leaf escalation (a watch/oversized verdict from
+# [leaves.sizer]) adds to the numeric score. 0 — the default — is today's behaviour: the
+# model raises the BAND only, escalate-only, and the score stays purely structural. It is
+# config rather than a constant precisely so the Act-cadence review above can move it —
+# but know the loop's blind spot before you do: the Act index's `sizing:` line carries
+# the STRUCTURAL estimate only (the stored sizer verdict is not joined in), and
+# size-calibrate mines no model-verdict feature, so escalation-vs-outcome correlation is
+# not observable from either artifact yet. Until one of them grows that column — or you
+# mine the bundles' sizing.json by hand — a retuning pass has no evidence that can
+# justify moving model_weight off 0: leave it at 0 and record the gap in the Act notes
+# rather than tuning it on taste.
+# [driver.sizing]
+# conflicts_with = 3
+# difficulty_high = 3
+# ext_deps = 3
+# brief_bytes = 3
+# is_plan_pointer = -2
+# brief_bytes_kb = 12
+# watch = 4
+# oversized = 7
+# model_weight = 0
+
+
 # Empirical size backstop thresholds (issue #324). Measured at Check from the patch that
 # actually arrived, unlike [driver.sizing] which guesses from the brief before a line is
 # written — and much better at it: against "did this bundle churn >=3 rounds" over the same

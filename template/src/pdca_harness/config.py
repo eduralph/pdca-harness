@@ -331,6 +331,11 @@ class Config:
     # Structural size-estimate weights + cutoffs ([driver.sizing], issue #320). A raw
     # table so an instance can retune against its OWN corpus without patching the engine —
     # the whole point of #324's calibration loop. Empty => sizing.DEFAULT_* apply.
+    # Also carries `model_weight` (#359) — how much a sizer-leaf escalation adds to the
+    # numeric score (sizing.DEFAULT_MODEL_WEIGHT = 0, i.e. band-only, today's behaviour).
+    # Like every key here it is REVIEWED AT ACT CADENCE against the Act index's
+    # estimate-vs-outcome sizing column plus a fresh scripts/size-calibrate run — the
+    # retuning walk is documented in pdca.toml's [driver.sizing] comment block.
     sizing: dict = field(default_factory=dict)
     # Empirical Check-time backstop thresholds ([driver.size_signal], issue #324). Same
     # shape and same reason as `sizing` above: an instance retunes against its own corpus.
