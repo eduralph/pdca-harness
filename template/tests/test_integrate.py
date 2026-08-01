@@ -173,6 +173,17 @@ class FoldGit(unittest.TestCase):
         self.assertEqual((wt / "base.txt").read_text(encoding="utf-8"), "one\n")
         self.assertTrue(self._pushed("pdca-integration/main"))
 
+    def test_fold_commits_carry_a_dco_signoff(self) -> None:
+        # #405: the integration branch is rebuilt each fold, so a stacked PR cut from an
+        # earlier fold carries these commits outside the base's ancestry — where a
+        # DCO-gated host inspects them. Sign them like publish does (#81).
+        b = self._bundle("S1", self._modify_patch("one\n"))
+        _, wt = integrate.fold(self.cfg, [b])[("org/repo", "main")]
+        trailer = subprocess.run(
+            ["git", "-C", str(wt), "log", "-1", "--format=%(trailers:key=Signed-off-by,valueonly)"],
+            capture_output=True, text=True).stdout.strip()
+        self.assertEqual(trailer, "Tester <t@example.com>")
+
     def test_multi_disjoint_fold_carries_all(self) -> None:
         # A modify + an add (disjoint) both land on the branch — the multi-parent fold
         # the old _stack_base_branch parents[0] could not express.
