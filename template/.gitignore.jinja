@@ -24,6 +24,13 @@ results/issue_selftest/
 # `leaves._SEED_SPILL_PREFIX` (a test asserts they match).
 .pdca-prompt-*.md
 
+# Interactive-leaf exit-contract session state (handoff.session, issue #331) — the
+# driver's scratch channel (act-log baseline, /handoff pass record, abandon reason),
+# created in the project root and removed when the driver reaps the session; a killed
+# session can orphan one. Keep the pattern in step with `handoff.STATE_PREFIX`
+# (a test asserts they match).
+.pdca-handoff-*.json
+
 # Act frontier lock/temp sidecars (issue #299) — runtime-only serialization helpers;
 # the marker itself ({{ process_dir }}/.act-reviewed) stays tracked.
 .act-reviewed.lock

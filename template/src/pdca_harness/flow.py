@@ -189,6 +189,17 @@ def _apply_decision(
         # `_isolate` because the single-issue flow has no `_isolate` around this call, and a
         # traceback would abandon the run instead of reporting one bad bundle.
         return _repair_unsignable(d, action=action, today=today, why=str(exc))
+    # Driver-side capture of the session's carry-forward (issue #331). The rationale
+    # lines below the token are the LIVE channel — the sign-off session writes them as
+    # each decision is made — and the unlink below destroys the only full copy while §9
+    # keeps a single flattened line. Captured for the iterate paths, where
+    # driver._carry_forward_into_brief consumes and merges it (the registering and the
+    # consuming of this channel ship together); the file is OUTSIDE the reviewer's
+    # inputs and is archived with its attempt (state.DOWNSTREAM_OF_BRIEF).
+    if action in ("iterate-do", "iterate-plan"):
+        full = leaves.signoff_rationale(d)
+        if full:
+            (d / state.SESSION_CARRY).write_text(full + "\n", encoding="utf-8")
     (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
     # Apply now for single-issue flow; in the batch sweep apply an ``iterate-plan`` re-open
     # too — it only archives → UNPLANNED (no rebuild), so it can't interrupt the cheap-first

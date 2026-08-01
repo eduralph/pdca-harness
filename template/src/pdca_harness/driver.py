@@ -276,7 +276,12 @@ def _carry_forward_into_brief(d: Path, n: int) -> None:
 
     Captures whatever is available — the §9 sign-off rationale AND the failing gates
     (gating *and* advisory, since an iterate is often driven by an advisory red), so
-    an iterate with no recorded rationale still carries context. Best-effort: it must
+    an iterate with no recorded rationale still carries context. Since #331 it also
+    MERGES the session-captured carry-forward (``state.SESSION_CARRY`` — the FULL
+    multi-line rationale the sign-off session wrote below its decision token, captured
+    live by ``flow._apply_decision`` before the decision file is unlinked): §9's
+    "Iteration delta" is a single flattened line, so reading recorded artifacts only
+    lost every structure the session put into its rationale. Best-effort: it must
     never break the transition, so any failure is swallowed.
     """
     brief_path = d / "brief.md"
@@ -284,12 +289,22 @@ def _carry_forward_into_brief(d: Path, n: int) -> None:
         return
     try:
         delta = signoff.iteration_delta(d / "SUMMARY.md")
+        session_notes = _session_carry_forward(d)
         fails = _failing_gate_lines(d / "check-gates.json")
-        if not delta and not fails:
+        if not delta and not fails and not session_notes:
             return
         out = [f"\n## Iteration {n} — carry-forward (from the previous attempt)\n"]
         if delta:
             out.append(f"- Sign-off rationale: {delta}\n")
+        # The session capture is merged, not duplicated: a single-line rationale is
+        # byte-identical to the flattened §9 delta, so only a capture carrying MORE
+        # (extra lines / structure §9 flattened away) earns its own block.
+        if session_notes and ("\n" in session_notes
+                              or " ".join(session_notes.split()) != delta):
+            out.append("- Sign-off session carry-forward (captured live, before §9 "
+                       "flattened it):\n")
+            out += [f"  {ln}\n" if ln.strip() else "\n"
+                    for ln in session_notes.splitlines()]
         for f in fails:
             out.append(f"- Failing gate: {f}\n")
         out.append(f"- Full previous attempt preserved in `iteration-v{n}/` "
@@ -300,6 +315,19 @@ def _carry_forward_into_brief(d: Path, n: int) -> None:
             fh.write("".join(out))
     except Exception:  # noqa: BLE001 — carry-forward is advisory; never break the iterate
         pass
+
+
+def _session_carry_forward(d: Path) -> str:
+    """The session-captured sign-off carry-forward (``state.SESSION_CARRY``), or "".
+
+    The file is written by ``flow._apply_decision`` at the moment the sign-off session's
+    decision is consumed (issue #331 — the registering side of the channel; this is the
+    consuming side, shipped together). Best-effort like every carry-forward input."""
+    p = d / state.SESSION_CARRY
+    try:
+        return p.read_text(encoding="utf-8").strip() if p.exists() else ""
+    except OSError:
+        return ""
 
 
 def _failing_gate_lines(gates_json: Path) -> list[str]:

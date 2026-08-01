@@ -58,5 +58,17 @@
       "Bash(gh pr merge:*)",
       "Bash(gh release:*)"
     ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/handoff_guard.py\""
+          }
+        ]
+      }
+    ]
   }
 }

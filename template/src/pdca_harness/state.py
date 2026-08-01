@@ -41,6 +41,15 @@ CLOSE_MARKER = "close-disposition"
 # here, like CLOSE_MARKER, so `dependency_halt` and the archive list share one spelling.
 DEPENDENCY_ADJUDICATION = "dependency-adjudication.json"
 
+# The sign-off session's live carry-forward (issue #331): the FULL multi-line rationale
+# the session wrote below its decision token, captured by the driver (flow) at the moment
+# the decision is consumed — §9's "Iteration delta" flattens it to one line and the
+# decision file itself is unlinked, so without this capture the only structured copy is
+# destroyed before the iterate transition reads it. Consumed (merged into the brief's
+# carry-forward block) by driver._carry_forward_into_brief, then archived with its
+# attempt via DOWNSTREAM_OF_BRIEF below.
+SESSION_CARRY = "session-carry-forward"
+
 # Everything Do and Check write, i.e. everything downstream of brief.md. Includes the
 # close marker (issue #60) so an iterate archives it too — reopening a close bundle to a
 # fix path then clears the marker and runs the real Do+Check band.
@@ -72,6 +81,10 @@ DOWNSTREAM_OF_BRIEF = [
     # rebuild is adjudicated fresh — a stale record left behind would describe a
     # declaration the new build-notes.md may no longer make.
     DEPENDENCY_ADJUDICATION,
+    # The captured sign-off-session carry-forward (#331): written by flow when the
+    # decision is consumed, merged into the brief by _carry_forward_into_brief, and
+    # archived here WITH the attempt it describes — never left to leak into the next one.
+    SESSION_CARRY,
 ]
 
 # Cycle artifacts matched by pattern rather than name. ONE definition, read by both
