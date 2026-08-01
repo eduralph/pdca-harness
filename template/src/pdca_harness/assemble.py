@@ -200,6 +200,14 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
     if build_notes.exists():
         items += [NeedsHumanItem(t, HUMAN)
                   for t in _declared_external_deps(build_notes.read_text(encoding="utf-8"))]
+    # The Do-exit adjudication record (#341): a declaration the detect-cmd probe REFUTED
+    # proceeded to full Check, and the refutation must reach the human — and `pdca act
+    # index`, which reads §6 — rather than stay a bundle-local json only the driver saw.
+    # HUMAN, never IMPL: a rebuild cannot fix a mis-declaration. Local import, because
+    # dependency_halt delegates its marker parsing to `_declared_external_deps` above
+    # (one parser for "did the builder declare a dependency").
+    from . import dependency_halt
+    items += [NeedsHumanItem(t, HUMAN) for t in dependency_halt.refuted_items(d)]
     items += [NeedsHumanItem(t, HUMAN)
               for t in _unregistered_dependency_items(d / "brief.md", cfg)]
     # Plan-advisory findings (#301 + review): folded into §6 individually, exactly like

@@ -358,6 +358,17 @@ class Config:
     # adding one: the same condition already refuses `signoff --accept` through the C6
     # guard.
     dependency_guard: str = "hold"
+    # Do-exit halt on a BUILDER-declared unmet external dependency
+    # ([driver].dependency_halt, #341): when build-notes.md carries the builder-contract
+    # marker `NEEDS-HUMAN external dependency:` AND the claim is confirmed
+    # deterministically — the named [[doctor.checks]] row (registered, or parsed from
+    # the builder's proposed fenced TOML block) has a detect cmd that exits non-zero —
+    # the driver reroutes BUILT through the close fast path to sign-off instead of
+    # spending gates + reviewer + adversary adjudicating a patch already stated to be
+    # unverifiable. A refuted or unresolvable claim runs full Check unchanged (fail
+    # toward review). STRICT boolean, default False: opt-in for one release, and while
+    # off the beat is byte-identical to today.
+    dependency_halt: bool = False
     close_dispositions: list[str] = field(
         default_factory=lambda: list(DEFAULT_CLOSE_DISPOSITIONS))
     # Family-profile overrides ([families.<name>] in pdca.toml): per-vendor CLI
@@ -602,6 +613,16 @@ class Config:
         size_signal = dict(driver_cfg.get("size_signal", {}))
         size_guard = str(driver_cfg.get("size_guard", "off"))
         dependency_guard = str(driver_cfg.get("dependency_guard", "hold"))
+        # Do-exit dependency halt (#341) — STRICT boolean, like [leaves.sandbox]
+        # network_access (PR #292): this setting lets a confirmed claim skip the
+        # reviewer, so a non-boolean (`dependency_halt = "false"` is a truthy string)
+        # must fail CLOSED — feature off, full Check runs — and be reported, not guessed.
+        _halt = driver_cfg.get("dependency_halt", False)
+        if not isinstance(_halt, bool):
+            print(f"config: [driver].dependency_halt must be a boolean, got {_halt!r} — "
+                  "treating it as FALSE (full Check runs). Write "
+                  "`dependency_halt = true`, unquoted.", file=sys.stderr)
+        dependency_halt = _halt is True
 
         return cls(
             root=root,
@@ -668,6 +689,7 @@ class Config:
             size_signal=size_signal,
             size_guard=size_guard,
             dependency_guard=dependency_guard,
+            dependency_halt=dependency_halt,
             families={k.strip().lower(): dict(v)
                       for k, v in data.get("families", {}).items()},
             doctor_checks=list(data.get("doctor", {}).get("checks", [])),

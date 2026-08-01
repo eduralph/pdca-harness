@@ -35,6 +35,12 @@ HALTED = {UNPLANNED, AWAITING_SIGNOFF, COMPLETE, DISCONTINUED, RESOLVED}
 # symmetric stand-in for patch.diff — so the state machine reads it as "past Do".
 CLOSE_MARKER = "close-disposition"
 
+# Do-exit dependency adjudication record (issue #341): how the driver adjudicated a
+# builder-declared unmet external dependency at BUILT (confirmed ⇒ the beat rerouted to
+# the close fast path; refuted ⇒ full Check ran, the refutation lifted into §6). Named
+# here, like CLOSE_MARKER, so `dependency_halt` and the archive list share one spelling.
+DEPENDENCY_ADJUDICATION = "dependency-adjudication.json"
+
 # The sign-off session's live carry-forward (issue #331): the FULL multi-line rationale
 # the session wrote below its decision token, captured by the driver (flow) at the moment
 # the decision is consumed — §9's "Iteration delta" flattens it to one line and the
@@ -70,6 +76,11 @@ DOWNSTREAM_OF_BRIEF = [
     # the very numbers that justified rejecting it. Not in CYCLE_EVIDENCE_ONLY: unlike the
     # auto-iterate budget it does not accumulate, it is rewritten wholesale each Check.
     "size-signal.json",
+    # The Do-exit dependency adjudication (#341). A Do/Check-era verdict about THIS
+    # attempt's build-notes.md, so an iterate archives it with the attempt and the
+    # rebuild is adjudicated fresh — a stale record left behind would describe a
+    # declaration the new build-notes.md may no longer make.
+    DEPENDENCY_ADJUDICATION,
     # The captured sign-off-session carry-forward (#331): written by flow when the
     # decision is consumed, merged into the brief by _carry_forward_into_brief, and
     # archived here WITH the attempt it describes — never left to leak into the next one.

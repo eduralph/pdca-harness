@@ -303,6 +303,15 @@ def _expand_checks(specs: list[dict], lanes: int) -> list[dict]:
     return rows
 
 
+def probe(cmd: str, cfg) -> int:
+    """Run ONE detect ``cmd`` exactly the way :func:`run` runs a ``[[doctor.checks]]``
+    row — shell, project root, exit 0 ⇒ present. The single probe implementation every
+    consumer shares (:func:`run`, the Plan-exit guard's :func:`failing_dependencies`
+    (#340), the Do-exit adjudication in :mod:`~pdca_harness.dependency_halt` (#341)),
+    so "what it means to probe a row" cannot drift apart."""
+    return subprocess.run(cmd, shell=True, capture_output=True, cwd=cfg.root).returncode
+
+
 def registered_ids(cfg: Config) -> set[str]:
     """Lower-cased ids of ``[[doctor.checks]]`` rows that would actually **run** (issue #263).
 
@@ -392,7 +401,7 @@ def failing_dependencies(brief_path, cfg) -> list[str]:
         rid = str(row.get("id") or cmd).strip()
         if rid.lower() not in wanted:
             continue  # ONLY the rows the brief names run (#340's definition of done)
-        rc = subprocess.run(cmd, shell=True, capture_output=True, cwd=cfg.root).returncode
+        rc = probe(cmd, cfg)
         if rc != 0:
             hint = str(row.get("hint") or "").strip() or "the row has no hint — add one"
             failed.append(f"external dependency `{rid}` is registered but absent on this "
@@ -451,9 +460,9 @@ def run(cfg: Config, *, strict: bool = False) -> int:
         if not _have(binary):
             r.row(MISSING, label, f"install '{binary}' — [leaves.{role}] runs it")
             continue
-        probe = _auth_probe(leaf.family)
-        if probe:
-            r.row(probe[0], label, probe[1])
+        auth = _auth_probe(leaf.family)  # not `probe` — that name is the row-cmd runner
+        if auth:
+            r.row(auth[0], label, auth[1])
         else:
             r.row(OK, label)
 
@@ -536,8 +545,7 @@ def run(cfg: Config, *, strict: bool = False) -> int:
                 print()
                 print(f"== {group} ==")
                 last_group = group
-            rc = subprocess.run(row["cmd"], shell=True, capture_output=True,
-                                cwd=cfg.root).returncode
+            rc = probe(row["cmd"], cfg)
             fail_status = row.get("level", MISSING)  # WARN for optional rows
             r.row(OK if rc == 0 else fail_status, row["id"],
                   "" if rc == 0 else row.get("hint", ""),

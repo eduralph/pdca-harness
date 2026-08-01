@@ -16,7 +16,8 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import assemble, brief, gates, leaves, plan_policy, signoff, size_signal, state
+from . import (assemble, brief, dependency_halt, gates, leaves, plan_policy, signoff,
+               size_signal, state)
 from .config import Config
 
 
@@ -73,10 +74,32 @@ def advance(d: Path, cfg: Config) -> None:
             _say(f"→ {d.name}: Do — builder writing patch.diff + test{_headless_note(cfg.builder)}…")
             leaves.do_build(d, cfg)  # leaf 1 — Do
     elif s == state.BUILT:
+        # Do-exit adjudication (#341): a builder that honestly declared an unmet external
+        # dependency (`NEEDS-HUMAN external dependency:` in build-notes.md, the builder-
+        # contract marker) must not buy the full Check beat — gates, cross-vendor
+        # reviewer, adversary — for a patch it already STATED is unverifiable; and a
+        # dishonest claim must not skip review. `adjudicate` is None unless the opt-in
+        # `[driver].dependency_halt` is on AND the marker is present; only a claim its
+        # detect-cmd probe CONFIRMS (non-zero exit) reroutes the beat. The verdict is
+        # recorded on BOTH outcomes, so a refutation reaches §6 / `pdca act index` too.
+        verdicts = None if close else dependency_halt.adjudicate(d, cfg)
+        if verdicts is not None:
+            dependency_halt.record(d, verdicts)
         if close:
             _say(f"→ {d.name}: close disposition — recording N/A gates, skipping reviewer leaf…")
             gates.run_close_gates(d, cfg)  # deterministic N/A matrix, no gate subprocess
             _close_review_note(d, close)   # stand-in for leaf 2 — close-confirm → §6
+        elif dependency_halt.confirmed(verdicts):
+            # The existing close fast path, one beat later: N/A matrix + a review
+            # stand-in whose NEEDS-HUMAN bullets route to §6, then CHECKED → assemble →
+            # AWAITING_SIGNOFF. Never a terminal state — sign-off owns those — and the
+            # bundle is resumable: iterate-do archives this attempt (the adjudication
+            # record and this note are DOWNSTREAM_OF_BRIEF) and reruns the full band.
+            _say(f"→ {d.name}: builder-declared external dependency confirmed absent — "
+                 "recording N/A gates, skipping reviewer leaf (provide it, then "
+                 "iterate-do to resume)…")
+            gates.run_close_gates(d, cfg)  # deterministic N/A matrix, no gate subprocess
+            dependency_halt.blocked_review_note(d, verdicts)  # stand-in for leaf 2 → §6
         else:
             _say(f"→ {d.name}: Check — running gates…")
             gates.run_gates(d, cfg)  # deterministic gates
