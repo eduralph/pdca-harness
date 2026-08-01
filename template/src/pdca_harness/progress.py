@@ -11,8 +11,11 @@ yet, how long since the last write), not just that time passed.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -20,6 +23,13 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterable
 from pathlib import Path
+
+# The distinguishable timed-out outcome (issue #368): returned in the returncode slot
+# when a configured ``timeout`` expired and the child's process GROUP was terminated.
+# Outside the range a real child can produce (0..255 on exit, ``-signum`` on a signal
+# death), so a caller can route "the oracle did not answer" separately from any
+# pass/fail verdict the child itself could have expressed.
+TIMEOUT_RC = -1001
 
 
 def run_with_heartbeat(
@@ -34,6 +44,7 @@ def run_with_heartbeat(
     tee_stderr: bool = False,
     stream_format: str = "claude-stream-json",
     interval: int = 15,
+    timeout: int | None = None,
     label: str = "",
     status: Callable[[], str] | None = None,
 ) -> tuple[int, str, bool]:
@@ -51,6 +62,16 @@ def run_with_heartbeat(
     exit with ``produced is False`` is the transient-infra signal (the child died
     at/near invocation — usage/rate limit, 5xx, auth — before any real output).
     ``input_text``, if given, is written to stdin.
+
+    ``timeout``, if given, is the wall-clock bound in seconds (issue #368): on expiry
+    the child's whole process GROUP is terminated (SIGTERM, then SIGKILL after a
+    grace) and the returncode slot carries :data:`TIMEOUT_RC` — a distinguishable
+    "the oracle did not answer" outcome, never a verdict the child produced. The
+    child is started in its own session for this, because a ``shell=True`` gate's
+    real work is a *grandchild*: killing only the shell would orphan it, still
+    running. ``timeout=None`` (the default) is today's unbounded behaviour,
+    unchanged — the heartbeat keeps a hung child looking alive forever, which is
+    exactly the 19h-hung-gate failure this bound exists to end.
 
     ``status``, if given, is called on every tick to append a live snapshot of the
     child's work (e.g. which artifacts exist yet, time since the last write) — so the
@@ -85,6 +106,11 @@ def run_with_heartbeat(
     proc = subprocess.Popen(
         cmd, cwd=cwd, shell=shell, env=env, text=True,
         stdin=stdin, stdout=stdout, stderr=stderr,
+        # Only sessionize when a bound exists, so timeout=None stays byte-identical
+        # to today. A new session makes the child the leader of its own process
+        # group (pgid == proc.pid), which is what expiry must kill: under
+        # shell=True the real work is a grandchild of the shell (#368).
+        start_new_session=timeout is not None,
     )
 
     chunks: list[str] = []
@@ -128,9 +154,23 @@ def run_with_heartbeat(
 
     suffix = f" — {label}" if label else ""
     start = time.monotonic()
+    deadline = None if timeout is None else start + timeout
+    timed_out = False
     while True:
+        wait_for = interval
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # The bound expired: kill the whole group, then reap. The heartbeat
+                # would otherwise keep printing "… still working" forever — the very
+                # mechanism built so a slow gate would not look hung is what kept a
+                # genuinely hung gate from looking hung (#368).
+                timed_out = True
+                _terminate_group(proc)
+                break
+            wait_for = min(interval, remaining)
         try:
-            proc.wait(timeout=interval)
+            proc.wait(timeout=wait_for)
             break
         except subprocess.TimeoutExpired:
             mins, secs = divmod(int(time.monotonic() - start), 60)
@@ -153,7 +193,29 @@ def run_with_heartbeat(
         if stream is not None:
             stream.close()
     output = "".join(chunks) if capture else ("".join(err_tail) if tee_err else "")
-    return proc.returncode, output, produced["session"]
+    rc = TIMEOUT_RC if timed_out else proc.returncode
+    return rc, output, produced["session"]
+
+
+def _terminate_group(proc: subprocess.Popen, grace: float = 2.0) -> None:
+    """SIGTERM the child's process GROUP, escalating to SIGKILL after ``grace`` seconds.
+
+    Gates run under ``shell=True``, so ``proc`` is the shell and the real work is a
+    grandchild — terminating only ``proc`` would orphan it, still consuming the very
+    wall-clock the bound exists to cap. The child was started with
+    ``start_new_session=True`` (see :func:`run_with_heartbeat`), so its process-group
+    id is ``proc.pid`` and ``os.killpg`` reaches every member. Best-effort on the
+    signals (the group may already be gone); the final ``wait`` reaps the child so no
+    zombie survives the timeout path.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
 
 
 # ----------------------------------------------------------------------------

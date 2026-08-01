@@ -877,6 +877,17 @@ argv = []
 # characterization, not a pass/fail signal. Cite each tier's rules back to the
 # project's normative ruleset (docs/INTEGRATION.md §4) so the gate is auditable.
 #
+# TIMEOUTS (issue #368). A gate command with no bound can hang the Check beat
+# indefinitely — the heartbeat keeps printing "… still working", so a genuinely hung
+# gate never LOOKS hung (measured: an advisory row held a Check beat for 19h). Give a
+# row `timeout_secs = N` (wall-clock seconds), and/or set a `[gates]`-level fallback:
+#   [gates]
+#   default_timeout_secs = 3600  # one hour, for every row without its own bound
+# On expiry the command's whole process group is terminated and the row is recorded
+# UNVERIFIABLE ("gate exceeded its Ns timeout") → SUMMARY §6 NEEDS-HUMAN — the oracle
+# did not answer, which is not a pass/fail verdict. `timeout_secs = 0` on a row opts
+# that row out of the fallback; nothing configured ⇒ unbounded, exactly as before.
+#
 # DELEGATED GATES (issue #67). If your project already single-sources its gates in its
 # own runner, point `runner` at it and give each check a bare `subcmd` instead of a full
 # `cmd`; PDCA runs `<runner> <subcmd>` and treats the host runner as the source of truth
