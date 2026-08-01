@@ -532,6 +532,59 @@ def _overflow_create(d: Path, primary: Path, base_ref: str) -> Path | None:
         return None
 
 
+def for_publish(d: Path, primary: Path, base_commit: str) -> Path:
+    """Materialize an EPHEMERAL ``base_commit + patch.diff`` tree for the pre-push
+    host-CI gate (``[gates] host_ci``, issue #311); the caller MUST tear it down with
+    ``overflow_remove(primary, tree)`` once the commands have run.
+
+    Deliberately NOT the lane reconstruction (:func:`rebuild_for_gate`): the lane is
+    warm and never fetches — a Check gate must attest the base Do built against —
+    while publish's push step fetches and builds the branch on the CURRENT base, so a
+    lane-based pre-push run can certify a stale base and let publish push a tree the
+    declared CI never saw. Publish therefore fetches, resolves the exact commit its
+    push will build on, and hands that SHA here; this only materializes it. An
+    ephemeral sibling tree (the #226 overflow shape, uncapped — exactly one exists,
+    removed synchronously) also never disturbs a lane a concurrent Do or gate read may
+    own, so no lane lock is needed.
+
+    Fail CLOSED (#296 doctrine): every failure raises :class:`WorktreeError` with the
+    reason — the pre-push gate must refuse rather than run against the wrong tree or
+    let publish push content the declared CI never saw.
+    """
+    if not (primary / ".git").exists():
+        raise WorktreeError(
+            f"{d.name}: {primary} is not a git checkout — cannot materialize the "
+            "tree the push would publish for the host-CI gate")
+    ovf = _overflow_path(primary)
+    _git(primary, "worktree", "prune")  # drop admin entries for any vanished trees first
+    if _git(primary, "worktree", "add", "--force", "--detach", str(ovf), base_commit) != 0:
+        raise WorktreeError(
+            f"{d.name}: could not create a worktree at {base_commit[:12]} for the "
+            "host-CI gate — the pinned base commit must be materializable")
+    try:
+        patch = d / "patch.diff"
+        patch_text = patch.read_text(encoding="utf-8") if patch.is_file() else ""
+        if patch_text.strip():
+            if _GITLINK_RE.search(patch_text):
+                # Same gitlink fail-closed as rebuild_for_gate (#296 review round 2):
+                # plain `git apply` exits 0 while skipping the gitlink, so this tree
+                # would carry the wrong submodule revision under a green run.
+                raise WorktreeError(
+                    f"{d.name}: patch.diff changes a submodule gitlink (mode 160000), "
+                    "which this reconstruction cannot materialize — `git apply` would "
+                    "silently skip it and a green would certify the wrong submodule "
+                    "revision (#296)")
+            if _git(ovf, "apply", str(patch.resolve())) != 0:
+                raise WorktreeError(
+                    f"{d.name}: patch.diff does not apply onto the fetched base "
+                    f"{base_commit[:12]} — the base advanced past the fix; "
+                    "rebase/re-Check the bundle, then retry")
+    except WorktreeError:
+        overflow_remove(primary, ovf)
+        raise
+    return ovf
+
+
 def for_gate(d: Path, cfg: Config,
              hold: contextlib.ExitStack | None = None) -> tuple[Path | None, Path | None]:
     """Resolve the worktree a gate should read for bundle ``d`` (issues #226, #296).

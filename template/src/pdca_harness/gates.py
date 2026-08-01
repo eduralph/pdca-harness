@@ -277,8 +277,9 @@ def _applies(chk: dict, scopes: tuple[str, ...], labels: frozenset[str] | None) 
 def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[str, ...],
                 worktree_override: Path | None = None) -> list[dict]:
     # No configured gates → the offline stub: the full 5/5/1 with the mechanical
-    # gate elements stub-passed (so the offline slice runs green).
-    if not cfg.gates_checks:
+    # gate elements stub-passed (so the offline slice runs green). A declared
+    # [gates] host_ci row counts as real configuration too (#311).
+    if not cfg.gates_checks and not cfg.host_ci_checks:
         return _assemble_matrix([], stub=True)
 
     labels = _bundle_target(bundle, cfg.gate_target_match, cfg.gate_target_default, cfg.gate_target_flags)
@@ -324,6 +325,32 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
                 continue
             configured.append(_run_one(chk, cwd=cwd, bundle=bundle, runner=cfg.gates_runner,
                                        worktree_path=wt))
+        # Host-only CI parity rows ([gates] host_ci, issue #311): commands the host's CI
+        # runs on every PR but the delegated gate runner does not cover (a spell-checker,
+        # a docs lint). Unlike the rows above (cwd=cfg.root; each command must target
+        # $PDCA_WORKTREE itself), these run FROM the reconstructed base + patch.diff
+        # tree: the point of the feature is that the HARNESS guarantees the tree under
+        # test is the patched one — the T4 slot runs pre-apply, so it structurally cannot
+        # see content that arrives in the patch. No bundle (the CI working-tree /
+        # integration re-gate) ⇒ skipped: there the host's own CI runs these for real.
+        # No patched tree (isolation off / target not a git checkout) ⇒ an UNVERIFIABLE
+        # row (→ SUMMARY §6 NEEDS-HUMAN), never a run against the wrong tree — a green
+        # over unpatched content is the exact lie this feature closes (#296 doctrine).
+        if bundle is not None:
+            for chk in cfg.host_ci_checks:
+                if wt is None:
+                    configured.append(_row(
+                        f"{chk.get('tier', 'T4')} {chk.get('label', chk.get('id', ''))}",
+                        "unverifiable",
+                        oracle=chk.get("cmd", "") or chk.get("subcmd", ""),
+                        rule_id=chk.get("id", ""),
+                        path_line="host CI needs the patched tree — no worktree "
+                                  "([driver].worktree off or target not a git checkout)",
+                        gating=bool(chk.get("gating", True)),
+                        element=chk.get("tier", "T4")))
+                else:
+                    configured.append(_run_one(chk, cwd=wt, bundle=bundle,
+                                               runner=cfg.gates_runner, worktree_path=wt))
     finally:
         if ovf_primary is not None and wt is not None:
             worktree.overflow_remove(ovf_primary, wt)

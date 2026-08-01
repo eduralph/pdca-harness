@@ -851,6 +851,33 @@ checks = [
 ]
 {% endif %}
 
+# Host-only CI parity (issue #311). CI jobs the host runs on EVERY PR but the delegated
+# gate runner does not cover (a spell-checker like `typos`, a docs lint). The T4 slot runs
+# BEFORE patch.diff is applied, so it structurally cannot see prose that arrives in the
+# patch — a bundle can pass Check green and open a PR that immediately fails a required
+# status. Declare those commands here and the harness runs each one FROM a reconstructed
+# base + patch.diff tree, at two seams:
+#   * at Check, as gate rows (defaults: tier "T4", bundle scope) against the same lane
+#     worktree the bundle-scoped gates trust (#296) — a red lands in check-gates +
+#     SUMMARY §6 where sign-off sees it;
+#   * again in `{{ cli_name }} publish`, immediately before anything is pushed: the
+#     harness re-FETCHES, PINS the exact base commit the push will build on, materializes
+#     base + patch.diff in an ephemeral worktree at that commit, runs the commands there,
+#     and builds the pushed branch on that same commit — so a green certifies the very
+#     tree being pushed even when the base advanced since Check. ANY command that does
+#     not pass — any non-zero exit, exit 77 included — blocks the push (no branch, no
+#     PR) and is recorded in the bundle's host-ci.json naming the command and the base.
+# A bare string is shorthand for { cmd = "..." }; a table row may also set id / label /
+# tier. `gating` is forced true (the host's CI will fail the PR on these regardless, so
+# an advisory row would re-open the exact observed gap). The target must be a git
+# checkout; at Check without a patched worktree the rows read UNVERIFIABLE (→ §6), and
+# publish refuses rather than push content the declared CI never saw. Empty / absent
+# (the default) ⇒ byte-identical behaviour everywhere.
+# host_ci = [
+#   "typos",
+#   { id = "docs-lint", cmd = "make docs-lint" },
+# ]
+
 # Reverse registry-consistency (issue #205). The FORWARD direction (a source file a patch
 # adds must be registered in a manifest) is a project gate; this is the REVERSE, generic in
 # the harness: every line a patch ADDS to one of these manifest files must reference a path
