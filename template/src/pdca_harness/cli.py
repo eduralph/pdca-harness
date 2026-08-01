@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, leaves, manual_test,
                merged, publish, queue, registry, revalidate, revert, signoff, sizing, sources,
-               split, state, sweep, waves, worktree)
+               split, state, sweep, triage, waves, worktree)
 from .config import Config
 
 
@@ -312,6 +312,30 @@ def main(argv: list[str] | None = None) -> int:
     p_actres.add_argument("--location", default="", help="where the delta landed (path:line / rule)")
     p_actres.add_argument("--date", help="applied date (ISO; default today)")
 
+    # PR-review triage (issue #316): ingest a published PR's external review findings
+    # into the Act ledger — the outer loop's highest-value signal, otherwise invisible
+    # unless a human transcribes it.
+    p_triage = sub.add_parser(
+        "triage",
+        help="ingest a published PR's external review findings into the Act ledger (#316)",
+        description="Pull a published PR's reviews + review comments via `gh api`, "
+                    "classify each finding (BUG / CONVENTION / NOISE / TEST-GAP) by "
+                    "keyword heuristics (tunable from the instance rubric's class "
+                    "list), route by class — a BUG on a merged PR files a tracker "
+                    "issue whose body carries a carry-forward note; CONVENTION / "
+                    "NOISE / TEST-GAP append candidate gate-row, rubric-line and "
+                    "rubric-exclusion entries to process/act-log.md — and register "
+                    "every finding in the Act ledger under a class-keyed signal "
+                    "(codex-pr:<slug>), so `act` flags a class that recurs after its "
+                    "process delta was applied. Proposes only: it never edits "
+                    "pdca.toml or the rubric. Re-running the same PR ingests only "
+                    "findings that arrived since the last run.")
+    p_triage.add_argument("pr", help="the PR: a URL (https://github.com/OWNER/REPO/pull/N), "
+                                     "OWNER/REPO#N, or a bare number with --repo")
+    p_triage.add_argument("--repo", default="",
+                          help="the PR's repository (OWNER/REPO) when `pr` is a bare number")
+    p_triage.add_argument("--date", help="triage date (ISO; default today)")
+
     # Tracker reconciliation (issue #300): bundles and the issue tracker drift out of
     # sync; cleanup reports the discrepancies (dry-run default) and --apply acts.
     p_cleanup = sub.add_parser(
@@ -435,6 +459,9 @@ def main(argv: list[str] | None = None) -> int:
         return _drift(cfg, args)
     if args.cmd == "act":
         return _act(cfg, args)
+    if args.cmd == "triage":
+        return triage.run(cfg, args.pr, repo=args.repo,
+                          date=args.date or datetime.date.today().isoformat())
     if args.cmd == "signoff":
         return _signoff(cfg, args)
     if args.cmd == "publish":

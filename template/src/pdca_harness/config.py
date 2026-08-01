@@ -359,6 +359,13 @@ class Config:
     # `pdca doctor` runs each cmd (exit 0 = OK) after its config-derived checks, the
     # same declare-in-config pattern as [[gates.checks]].
     doctor_checks: list[dict] = field(default_factory=list)
+    # PR-review triage (#316): the optional single MODEL pass over the findings the
+    # keyword heuristics could not classify — a shell command fed the unclassified
+    # findings as a JSON list on stdin that must print a JSON list of class names.
+    # "" (the default) ⇒ keyword-only: the model pass never runs, and an instance
+    # taking a `copier update` gains no model call it did not ask for.
+    # ``[triage].model_cmd``.
+    triage_model_cmd: str = ""
 
     def profile(self, leaf: LeafConfig):
         """The resolved :class:`~pdca_harness.families.FamilyProfile` for ``leaf``."""
@@ -652,6 +659,7 @@ class Config:
             families={k.strip().lower(): dict(v)
                       for k, v in data.get("families", {}).items()},
             doctor_checks=list(data.get("doctor", {}).get("checks", [])),
+            triage_model_cmd=str(data.get("triage", {}).get("model_cmd", "") or ""),
         )
 
 
