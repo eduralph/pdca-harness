@@ -168,6 +168,20 @@ sweep_worktrees = "clean"
 # most edited in this table) lands as a git conflict marker in pdca.toml — after which
 # every `pdca` command dies at config load. Add new keys here, away from the contested ones.
 size_guard = "off"
+# Do-exit halt on a BUILDER-declared unmet external dependency (#341) — opt-in, default
+# off (byte-identical while off). The builder contract makes an honest builder declare a
+# dependency it could not build/verify against (`NEEDS-HUMAN external dependency: …` in
+# build-notes.md, plus a proposed [[doctor.checks]] row in a fenced ```toml block). With
+# this on, the driver ADJUDICATES that claim deterministically at BUILT: the named
+# dependency must resolve to a [[doctor.checks]] row (registered here, else the builder's
+# proposed row) AND that row's detect cmd must exit non-zero. Confirmed ⇒ the bundle takes
+# the close fast path to sign-off (N/A gates, no reviewer/adversary spent on a patch
+# already stated to be unverifiable) and stays RESUMABLE — install the dependency and
+# answer iterate-do; sign-off still owns every terminal state. Refuted (the cmd exits 0)
+# or unresolvable/malformed ⇒ full Check runs unchanged, with the refutation recorded
+# into §6 — a self-report can never skip review on its own say-so. STRICT boolean:
+# write `dependency_halt = true` unquoted, or it stays off.
+# dependency_halt = true
 
 
 # A-priori size-estimate weights + cutoffs (issues #320/#359). [driver.sizing] tunes the
