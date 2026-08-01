@@ -459,11 +459,11 @@ def _save_ledger(cfg: Config, entries: list[dict]) -> None:
     _ledger_path(cfg).write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
 
 
-def _recurring(entries: list[ActEntry]) -> dict[str, str]:
-    """Normalized-signal → a representative raw text, for each signal appearing in more
-    than one cycle (the §10 Act-candidate + §6 NEEDS-HUMAN pool). A miss is "the same"
-    across cycles by its normalized key, so a class showing once in §10 of one cycle and
-    once in §6 of another still counts as recurring."""
+def _recurring(entries: list[ActEntry], min_count: int = 2) -> dict[str, str]:
+    """Normalized-signal → a representative raw text, for each signal appearing at
+    least ``min_count`` times (the §10 Act-candidate + §6 NEEDS-HUMAN pool). A miss is
+    "the same" across cycles by its normalized key, so a class showing once in §10 of
+    one cycle and once in §6 of another still counts as recurring."""
     counts: Counter = Counter()
     raw_of: dict[str, str] = {}
     for e in entries:
@@ -473,16 +473,22 @@ def _recurring(entries: list[ActEntry]) -> dict[str, str]:
                 continue
             counts[n] += 1
             raw_of.setdefault(n, s)
-    return {n: raw_of[n] for n, c in counts.items() if c > 1}
+    return {n: raw_of[n] for n, c in counts.items() if c >= min_count}
 
 
-def register_signals(cfg: Config, entries: list[ActEntry], date: str) -> list[str]:
+def register_signals(cfg: Config, entries: list[ActEntry], date: str,
+                     min_count: int = 2) -> list[str]:
     """Track each recurring signal not already in the ledger as an ``open`` entry
-    (idempotent, deduped by normalized signal). Returns the raw texts newly registered."""
+    (idempotent, deduped by normalized signal). Returns the raw texts newly registered.
+
+    ``min_count`` is the registration threshold. The default 2 keeps the #149
+    contract — SUMMARY §6/§10 chatter earns a ledger row only by recurring; PR-review
+    triage (#316) registers external findings at 1, because each already cost a
+    shipped defect plus a review round: first sight IS the signal there."""
     ledger = load_ledger(cfg)
     known = {e.get("signal") for e in ledger}
     added: list[str] = []
-    for norm, raw in _recurring(entries).items():
+    for norm, raw in _recurring(entries, min_count).items():
         if norm not in known:
             ledger.append({"signal": norm, "raw": raw, "first_seen": date,
                            "status": "open", "applied_date": None, "location": ""})
