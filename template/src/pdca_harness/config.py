@@ -234,6 +234,11 @@ class Config:
     # / absent fields fall back to the default [leaves.builder] (default-open — a missing
     # difficulty tag never reduces capability). The escalation ladder overrides the variant.
     builder_variants: list[dict] = field(default_factory=list)
+    # Per-gate wall-clock bound fallback (issue #368): ``[gates] default_timeout_secs``.
+    # A ``[[gates.checks]]`` row's own ``timeout_secs`` wins over it; a row that times
+    # out is recorded ``unverifiable`` (→ SUMMARY §6 NEEDS-HUMAN), never pass/fail.
+    # ``None`` (unset / 0) ⇒ unbounded — today's behaviour, unchanged.
+    gates_default_timeout_secs: int | None = None
     # Delegated gates (issue #67): a host runner that single-sources its own gates
     # (e.g. "cargo xtask"). A check's bare ``subcmd`` is run as ``<runner> <subcmd>``, so
     # PDCA orchestrates the host runner instead of re-declaring the gates. "" ⇒ inline only.
@@ -452,6 +457,14 @@ class Config:
         gates_checks = list(gates.get("checks", []))
         host_ci_checks = _normalize_host_ci(gates.get("host_ci", []))
         gates_runner = gates.get("runner", "")
+        # Per-gate timeout fallback (issue #368): [gates] default_timeout_secs. Unset,
+        # 0 or a non-numeric value ⇒ None (unbounded — behaviour unchanged).
+        try:
+            gates_default_timeout_secs = int(gates.get("default_timeout_secs", 0)) or None
+        except (TypeError, ValueError):
+            gates_default_timeout_secs = None
+        if gates_default_timeout_secs is not None and gates_default_timeout_secs < 0:
+            gates_default_timeout_secs = None
         registry_consistency = dict(gates.get("registry_consistency", {}))
         install_extra_bootstrap = data.get("install", {}).get("extra_bootstrap", "")
         # `pdca try <id>` launch command (project-specific); "" ⇒ the command errors with a hint.
@@ -650,6 +663,7 @@ class Config:
             sizer_escalation=sizer_escalation,
             builder_variants=builder_variants,
             gates_runner=gates_runner,
+            gates_default_timeout_secs=gates_default_timeout_secs,
             lanes=lanes,
             max_passes=max_passes,
             auto_iterate=auto_iterate,

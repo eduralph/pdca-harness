@@ -324,7 +324,8 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
                           file=sys.stderr, flush=True)
                 continue
             configured.append(_run_one(chk, cwd=cwd, bundle=bundle, runner=cfg.gates_runner,
-                                       worktree_path=wt))
+                                       worktree_path=wt,
+                                       default_timeout=cfg.gates_default_timeout_secs))
         # Host-only CI parity rows ([gates] host_ci, issue #311): commands the host's CI
         # runs on every PR but the delegated gate runner does not cover (a spell-checker,
         # a docs lint). Unlike the rows above (cwd=cfg.root; each command must target
@@ -350,7 +351,8 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
                         element=chk.get("tier", "T4")))
                 else:
                     configured.append(_run_one(chk, cwd=wt, bundle=bundle,
-                                               runner=cfg.gates_runner, worktree_path=wt))
+                                               runner=cfg.gates_runner, worktree_path=wt,
+                                               default_timeout=cfg.gates_default_timeout_secs))
     finally:
         if ovf_primary is not None and wt is not None:
             worktree.overflow_remove(ovf_primary, wt)
@@ -378,8 +380,26 @@ def _delegated_cmd(chk: dict, runner: str) -> tuple[str, str]:
     return f"{runner} {subcmd}", ""
 
 
+def _gate_timeout(chk: dict, default: int | None) -> int | None:
+    """The wall-clock bound (seconds) for one ``[[gates.checks]]`` row (issue #368).
+
+    The row's own ``timeout_secs`` wins; else the ``[gates] default_timeout_secs``
+    fallback; else ``None`` (unbounded — today's behaviour, unchanged). ``0`` or a
+    negative value means "explicitly unbounded", so one long row can opt out of a
+    configured default. A non-numeric value is treated as unconfigured rather than
+    crashing the gate run.
+    """
+    raw = chk.get("timeout_secs", default)
+    try:
+        secs = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return secs if secs > 0 else None
+
+
 def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
-             worktree_path: Path | None = None) -> dict:
+             worktree_path: Path | None = None,
+             default_timeout: int | None = None) -> dict:
     cmd, cmd_error = _delegated_cmd(chk, runner)
     gating = bool(chk.get("gating", True))
     label = f"{chk.get('id', '')}: {chk.get('label', '')}".strip(": ")
@@ -429,15 +449,24 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
     if lane_id is not None:
         env = {**(env or {}), "PDCA_LANE": str(lane_id)}
     watch = bundle or cwd
+    bound = _gate_timeout(chk, default_timeout)
     print(f"  · gate {label} (a Docker-backed gate can take minutes)…", file=sys.stderr, flush=True)
     try:
         # Output is captured for the evidence line; the heartbeat ticks meanwhile so
         # a long, silent gate (e.g. a Docker-backed test suite) doesn't look hung.
+        # `bound` (issue #368) caps the wall-clock when configured: on expiry the
+        # process group is killed and TIMEOUT_RC comes back instead of an exit code.
         rc, output, _ = progress.run_with_heartbeat(
             cmd, cwd=cwd, shell=True, env=_merged_env(env), capture=True, label=label,
-            status=lambda: progress.bundle_activity(watch),
+            timeout=bound, status=lambda: progress.bundle_activity(watch),
         )
-        result, evidence = _classify(rc, output)
+        if rc == progress.TIMEOUT_RC:
+            # The oracle did not answer (#368): a timed-out gate is `unverifiable`
+            # (the #46 outcome — routed to SUMMARY §6 NEEDS-HUMAN, kept out of the
+            # gating verdict), never a pass/fail verdict the command did not reach.
+            result, evidence = "unverifiable", [f"gate exceeded its {bound}s timeout"]
+        else:
+            result, evidence = _classify(rc, output)
     except Exception as exc:  # command not found, etc. — a failing gate, surfaced
         result, evidence = "fail", [str(exc)]
     return _row(

@@ -19,7 +19,8 @@ import time
 import unittest
 from pathlib import Path
 
-from pdca_harness import progress
+from pdca_harness import gates, progress
+from pdca_harness.config import Config, LeafConfig
 
 
 class BundleActivity(unittest.TestCase):
@@ -180,6 +181,130 @@ class CodexStream(unittest.TestCase):
         # Back-compat: the claude parser is used when no format is passed.
         self.assertTrue(progress._is_session_event(json.dumps({"type": "assistant"})))
         self.assertFalse(progress._is_session_event(json.dumps({"type": "item.started"})))
+
+
+class HeartbeatTimeout(unittest.TestCase):
+    """The wall-clock bound on ``run_with_heartbeat`` (issue #368).
+
+    A gate command previously had no bound anywhere in the chain, so a hung gate
+    held the Check beat indefinitely while the heartbeat printed "… still working".
+    On expiry the child's whole process GROUP must die (gates run shell=True — killing
+    only the shell orphans the real work) and the distinguishable ``TIMEOUT_RC`` comes
+    back, never a verdict the child produced. ``timeout=None`` stays unbounded (every
+    other test in this file exercises that default path unchanged).
+    """
+
+    @staticmethod
+    def _dies(pid: int, within: float = 5.0) -> bool:
+        """True once ``pid`` no longer exists (polled — signal delivery is async)."""
+        end = time.monotonic() + within
+        while time.monotonic() < end:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_timeout_kills_a_plain_child_within_the_bound(self) -> None:
+        start = time.monotonic()
+        rc, _out, produced = progress.run_with_heartbeat(["sleep", "60"], timeout=1)
+        self.assertEqual(rc, progress.TIMEOUT_RC)  # distinguishable, not an exit code
+        self.assertLess(time.monotonic() - start, 10.0)  # ~1s + kill grace, never 60s
+        self.assertFalse(produced)
+
+    def test_shell_true_kills_the_whole_group_no_survivors(self) -> None:
+        # Gates run shell=True: the real work is a GRANDCHILD of the shell. The shell
+        # prints its own pid ($$ — the group id under start_new_session) and its
+        # background child's ($!) before blocking, so the test can verify EVERY group
+        # member is gone after expiry — killing only the shell would orphan the sleep.
+        cmd = "echo $$; sleep 60 & echo $!; wait"
+        start = time.monotonic()
+        rc, out, _ = progress.run_with_heartbeat(cmd, shell=True, capture=True, timeout=1)
+        self.assertEqual(rc, progress.TIMEOUT_RC)
+        self.assertLess(time.monotonic() - start, 10.0)
+        pids = [int(tok) for tok in out.split() if tok.isdigit()]
+        self.assertEqual(len(pids), 2, f"expected shell + child pids in output: {out!r}")
+        for pid in pids:
+            self.assertTrue(self._dies(pid), f"pid {pid} survived the group kill")
+
+    def test_unexpired_timeout_returns_the_real_exit_code(self) -> None:
+        rc, out, _ = progress.run_with_heartbeat(
+            [sys.executable, "-c", "print('ok')"], capture=True, timeout=30)
+        self.assertEqual(rc, 0)  # a bound that never expires changes nothing
+        self.assertIn("ok", out)
+
+
+# A real bundle-scoped gating gate row; only cmd/timeout keys vary per test (#368).
+_GATE = {"id": "C4", "tier": "C4", "label": "verify", "scope": "bundle", "gating": True}
+
+
+def _stub_config(root: Path) -> Config:
+    return Config(
+        root=root,
+        bundle_root=root / "results",
+        process_dir=root / "process",
+        templates_dir=root / "templates",
+        default_branch="main",
+        tracker_system="github",
+        tracker_url="",
+        issue_id_example="#1",
+        builder=LeafConfig(mode="stub", family="claude"),
+        reviewer=LeafConfig(mode="stub", family="codex"),
+    )
+
+
+class GateTimeoutRow(unittest.TestCase):
+    """``timeout_secs`` on a ``[[gates.checks]]`` row + the ``[gates]
+    default_timeout_secs`` fallback (issue #368): a row that times out is recorded
+    ``unverifiable`` — the oracle did not answer (#46) — with the bound named in the
+    evidence line, and it never fails ``overall`` (it routes to §6 instead)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _gated_bundle(self, iid: str, gate: dict) -> Path:
+        d = self.cfg.bundle(iid)
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** to\n", encoding="utf-8")
+        (d / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
+        self.cfg.gates_checks = [gate]
+        return d
+
+    def _c4_row(self, result: dict) -> dict:
+        return next(r for r in result["rows"] if r["element"] == "C4")
+
+    def test_timeout_secs_row_records_unverifiable_with_the_bound_named(self) -> None:
+        gate = {**_GATE, "cmd": "sleep 5", "timeout_secs": 1}
+        result = gates.run_gates(self._gated_bundle("TO", gate), self.cfg)
+        row = self._c4_row(result)
+        self.assertEqual(row["result"], "unverifiable")  # not `fail` — no verdict reached
+        self.assertIn("exceeded its 1s timeout", row["path_line"])  # the bound, named
+        self.assertEqual(result["overall"], "pass")  # kept out of the gating verdict
+
+    def test_default_timeout_secs_is_the_fallback(self) -> None:
+        self.cfg.gates_default_timeout_secs = 1
+        gate = {**_GATE, "cmd": "sleep 5"}  # no per-row bound → the [gates] fallback
+        row = self._c4_row(gates.run_gates(self._gated_bundle("DEF", gate), self.cfg))
+        self.assertEqual(row["result"], "unverifiable")
+        self.assertIn("exceeded its 1s timeout", row["path_line"])
+
+    def test_row_timeout_wins_over_the_default(self) -> None:
+        # timeout_secs = 0 opts a long row OUT of a configured default (unbounded).
+        self.cfg.gates_default_timeout_secs = 1
+        gate = {**_GATE, "cmd": "sleep 2 && echo done", "timeout_secs": 0}
+        row = self._c4_row(gates.run_gates(self._gated_bundle("OPT", gate), self.cfg))
+        self.assertEqual(row["result"], "pass")  # ran past the default, unbounded
+
+    def test_no_timeout_configured_leaves_the_gate_unchanged(self) -> None:
+        result = gates.run_gates(
+            self._gated_bundle("NONE", {**_GATE, "cmd": "echo done"}), self.cfg)
+        self.assertEqual(self._c4_row(result)["result"], "pass")
+        self.assertEqual(result["overall"], "pass")
 
 
 if __name__ == "__main__":
