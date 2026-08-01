@@ -58,8 +58,9 @@ from . import doctor, sizing
 OFF, WARN, HOLD = "off", "warn", "hold"
 
 #: Reason codes that STOP the beat. Deterministic verdicts only — a heuristic never earns
-#: a block (see :func:`size_reasons`).
-_BLOCKING = frozenset({"unregistered-dependency"})
+#: a block (see :func:`size_reasons`): set membership (#333) and a detect cmd's exit code
+#: (#340) qualify; the size estimate does not.
+_BLOCKING = frozenset({"unregistered-dependency", "failed-dependency"})
 
 
 class PolicyHold(Exception):
@@ -154,12 +155,23 @@ def size_reasons(d, cfg, *, before_do: bool = True) -> list[HoldReason]:
 
 
 def dependency_reasons(d, cfg) -> list[HoldReason]:
-    """Brief-declared external dependencies with no registered row (#333).
+    """Brief-declared external dependencies that are unregistered (#333) or absent (#340).
 
-    **This one blocks**, where the size advisory only warns, and the difference is not a
-    matter of taste: it is set membership, not a heuristic. There is no false-positive
-    class to trade against — a backticked token either names a registered row or it does
-    not — so the precision argument that keeps `size_guard` advisory does not apply.
+    Two verdicts share this guard and its ``[driver].dependency_guard`` mode, in order:
+
+    1. **Registration** (#333): every backticked token in the brief's
+       ``External dependencies`` must name a ``[[doctor.checks]]`` row with a detect
+       ``cmd``.
+    2. **Presence** (#340): the named rows' detect cmds are then *executed*. Registration
+       alone was dischargeable on a machine where the dependency is absent — no
+       subprocess ever ran — leaving the builder's own mid-cycle self-report as the sole
+       detector, from the actor most tempted to conceal a silent workaround.
+
+    **Both block**, where the size advisory only warns, and the difference is not a
+    matter of taste: neither is a heuristic. There is no false-positive class to trade
+    against — a token either names a registered row or it does not, and a detect cmd
+    either exits 0 or it does not — so the precision argument that keeps `size_guard`
+    advisory does not apply.
 
     It also does not add a new block, it moves an existing one earlier: the same condition
     already refuses `signoff --accept` through the C6 guard. Catching it at Plan spends a
@@ -168,8 +180,8 @@ def dependency_reasons(d, cfg) -> list[HoldReason]:
     dispatched.
 
     The escape hatch is unchanged: a dependency nothing can detect is written in prose or
-    annotated ``(no-check: …)`` and yields no token, so this can never become a reason to
-    stop declaring dependencies.
+    annotated ``(no-check: …)`` and yields no token, so it is neither reconciled nor
+    probed — this can never become a reason to stop declaring dependencies.
     """
     mode = str(getattr(cfg, "dependency_guard", HOLD) or HOLD).strip().lower()
     if mode not in (OFF, WARN, HOLD):
@@ -181,12 +193,23 @@ def dependency_reasons(d, cfg) -> list[HoldReason]:
         mode = HOLD
     if mode == OFF:
         return []
-    # Only `hold` blocks. `warn` reports the same item and lets Do proceed — the code
+    # Only `hold` blocks. `warn` reports the same items and lets Do proceed — the code
     # carries the mode, because `blocking()` decides on the code alone and a shared code
     # would make the documented warn option silently behave as hold.
     code = "unregistered-dependency" if mode == HOLD else "unregistered-dependency-warn"
-    return [HoldReason(code, item)
-            for item in doctor.unregistered_dependencies(d / "brief.md", cfg)]
+    reasons = [HoldReason(code, item)
+               for item in doctor.unregistered_dependencies(d / "brief.md", cfg)]
+    # The probe (#340), AFTER the registration check and listed after its reasons: an
+    # unregistered token has no row to run, so it holds as `unregistered-dependency`
+    # above and never reaches a subprocess. `failing_dependencies` executes the detect
+    # cmd of exactly the registered rows the brief's tokens name — reading pdca.toml
+    # from disk like `registered_ids` does, so a row registered during the Plan beat is
+    # probed in the same pass — and an exit code is as deterministic as set membership,
+    # so it earns a blocking code of its own in `hold` mode.
+    probe = "failed-dependency" if mode == HOLD else "failed-dependency-warn"
+    reasons += [HoldReason(probe, item)
+                for item in doctor.failing_dependencies(d / "brief.md", cfg)]
+    return reasons
 
 
 def blocking(reasons) -> list[HoldReason]:
@@ -203,8 +226,9 @@ def evaluate(d, cfg, *, before_do: bool = True) -> list[HoldReason]:
     block) slots in beside it without another mechanism.
     """
     # Deterministic checks FIRST. The size advisory may invoke a paid model leaf, and
-    # there is no sense buying an advisory for a bundle that is about to be held on set
-    # membership — the human would pay for it again on the retry after registering the row.
+    # there is no sense buying an advisory for a bundle that is about to be held on a
+    # deterministic dependency verdict (set membership, or a detect cmd's exit code) —
+    # the human would pay for it again on the retry after registering or fixing the row.
     deps = list(dependency_reasons(d, cfg))
     if blocking(deps):
         return deps

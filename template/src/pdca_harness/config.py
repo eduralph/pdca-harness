@@ -330,12 +330,16 @@ class Config:
     # #342's update test asserts. An instance opts in.
     size_guard: str = "off"
     # Plan-exit reconciliation of brief-declared external dependencies
-    # ([driver].dependency_guard, #333): "hold" (default) | "warn" | "off".
+    # ([driver].dependency_guard, #333): "hold" (default) | "warn" | "off". Since #340
+    # the same guard also EXECUTES the detect cmd of exactly the registered rows the
+    # brief's tokens name — registration alone was dischargeable on a host where the
+    # dependency is absent, because nothing ever ran the row.
     #
-    # Defaults to HOLD, unlike size_guard, because the verdict is set membership rather
-    # than a heuristic — there is no false-positive class to trade against — and because
-    # it moves an EXISTING block earlier rather than adding one: the same condition
-    # already refuses `signoff --accept` through the C6 guard.
+    # Defaults to HOLD, unlike size_guard, because the verdict is deterministic rather
+    # than a heuristic — set membership plus an exit code, with no false-positive class
+    # to trade against — and because it moves an EXISTING block earlier rather than
+    # adding one: the same condition already refuses `signoff --accept` through the C6
+    # guard.
     dependency_guard: str = "hold"
     close_dispositions: list[str] = field(
         default_factory=lambda: list(DEFAULT_CLOSE_DISPOSITIONS))
@@ -345,7 +349,10 @@ class Config:
     families: dict[str, dict] = field(default_factory=dict)
     # Instance-declared doctor rows ([[doctor.checks]]): {id, cmd, hint, required}.
     # `pdca doctor` runs each cmd (exit 0 = OK) after its config-derived checks, the
-    # same declare-in-config pattern as [[gates.checks]].
+    # same declare-in-config pattern as [[gates.checks]]. A row a brief's `External
+    # dependencies` token names is also executed by the pre-dispatch dependency guard
+    # (#340), every beat the policy is consulted — detect cmds must stay cheap and
+    # side-effect-free.
     doctor_checks: list[dict] = field(default_factory=list)
 
     def profile(self, leaf: LeafConfig):

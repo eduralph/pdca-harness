@@ -26,7 +26,10 @@ from pdca_harness import assemble, doctor, driver, plan_policy, state
 from pdca_harness.config import Config, LeafConfig
 
 _DECLARED = "- **Slug:** needs-protoc\n- **External dependencies:** `protoc`\n"
-_ROW = {"id": "protoc", "cmd": "protoc --version", "hint": "apt install protobuf-compiler"}
+# The detect cmd is a stub that PASSES (`true`): since #340 the guard executes the
+# registered row's cmd, and these tests are about registration semantics — the probe
+# has its own class below, with `false` as the failing detect.
+_ROW = {"id": "protoc", "cmd": "true", "hint": "apt install protobuf-compiler"}
 
 
 def _cfg(root: Path, rows: list[dict] | None = None, guard: str = "hold") -> Config:
@@ -63,7 +66,7 @@ class DependencyGuard(unittest.TestCase):
         (self.tmp / "pdca.toml").write_text(
             "[paths]\nbundle_root = \"results\"\n\n"
             "[[doctor.checks]]\nid = \"protoc\"\n"
-            "cmd = \"protoc --version\"\nhint = \"apt install protobuf-compiler\"\n",
+            "cmd = \"true\"\nhint = \"apt install protobuf-compiler\"\n",
             encoding="utf-8")
 
     # -- the check ---------------------------------------------------------------------
@@ -246,7 +249,7 @@ class HoldReachesTheCaller(unittest.TestCase):
         (self.tmp / "pdca.toml").write_text(
             '[paths]\nbundle_root = "results"\n\n'
             '[[doctor.checks]]\nid = "protoc"\n'
-            'cmd = "protoc --version"\nhint = "apt install protobuf-compiler"\n',
+            'cmd = "true"\nhint = "apt install protobuf-compiler"\n',
             encoding="utf-8")
         from pdca_harness import cli
         from pdca_harness.config import Config
@@ -275,6 +278,141 @@ class HoldReachesTheCaller(unittest.TestCase):
                                no_publish=True)
         self.assertEqual(cli._signoff(cfg, args), 1,
                          "a held rebuild reported the sign-off as carried out")
+
+
+class DependencyProbe(unittest.TestCase):
+    """#340: the guard RUNS the registered detect cmd — registration alone no longer
+    discharges a dependency the host does not have.
+
+    #333 forces every checkable token to name a `[[doctor.checks]]` row, but
+    `registered_ids` only requires a non-empty `cmd` — nothing executed it. A planner
+    could discharge every check on a machine where the dependency is absent, and Do then
+    dispatched into the silently-worked-around case whose only detector was the builder's
+    own self-report. The probe is scoped to exactly the rows the brief's tokens name, so
+    an instance's wider doctor inventory is never a tax on every bundle.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "results").mkdir(parents=True)
+        self._write_toml()
+        self.d = self.tmp / "results" / "issue_1"
+        self.d.mkdir(parents=True)
+        (self.d / "brief.md").write_text(_DECLARED, encoding="utf-8")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_toml(self, *rows: dict) -> None:
+        body = '[paths]\nbundle_root = "results"\n'
+        for row in rows:
+            body += "\n[[doctor.checks]]\n" + "".join(
+                f'{k} = "{v}"\n' for k, v in row.items())
+        (self.tmp / "pdca.toml").write_text(body, encoding="utf-8")
+
+    # -- the probe ---------------------------------------------------------------------
+
+    def test_a_failing_detect_cmd_holds_before_do(self) -> None:
+        """A registered row whose detect cmd exits non-zero holds the bundle before Do
+        spends a builder, quoting that row's own hint — at the default `lanes = 1`, the
+        path that had zero preflight of any kind."""
+        self._write_toml({"id": "protoc", "cmd": "false",
+                          "hint": "apt install protobuf-compiler"})
+        cfg = _cfg(self.tmp)
+        self.assertEqual(cfg.lanes, 1, "the probe must not depend on lane preflight")
+        reasons = plan_policy.evaluate(self.d, cfg)
+        self.assertEqual([r.code for r in reasons], ["failed-dependency"])
+        self.assertTrue(plan_policy.blocking(reasons),
+                        "an exit code is deterministic — it blocks, like set membership")
+        self.assertIn("apt install protobuf-compiler", reasons[0].detail,
+                      "the hold must quote the row's own hint")
+        with self.assertRaises(plan_policy.PolicyHold):
+            driver.advance(self.d, cfg)
+        self.assertFalse((self.d / "patch.diff").exists(), "Do ran despite a failing probe")
+        self.assertEqual(state.state(self.d), state.PLANNED, "the bundle stays in-flight")
+
+    def test_a_passing_detect_cmd_changes_nothing(self) -> None:
+        """Exit 0 ⇒ behaviour unchanged: no reasons, and Do dispatches."""
+        self._write_toml({"id": "protoc", "cmd": "true", "hint": "h"})
+        cfg = _cfg(self.tmp)
+        self.assertEqual(plan_policy.evaluate(self.d, cfg), [])
+        driver.advance(self.d, cfg)
+        self.assertTrue((self.d / "patch.diff").exists())
+
+    def test_only_the_rows_the_brief_names_are_executed(self) -> None:
+        """A registered row the brief does NOT name is never run (#340's definition of
+        done) — probing is scoped to the bundle's declared dependencies, not the
+        instance's doctor inventory. The unnamed row both fails and leaves a marker, so
+        execution is observable either way: no hold AND no marker ⇒ never spawned."""
+        marker = self.tmp / "unnamed-row-ran"
+        self._write_toml({"id": "protoc", "cmd": "true"},
+                         {"id": "docker", "cmd": f"touch {marker}; exit 1",
+                          "hint": "install docker"})
+        self.assertEqual(plan_policy.evaluate(self.d, _cfg(self.tmp)), [])
+        self.assertFalse(marker.exists(), "a row the brief does not name was executed")
+
+    def test_the_probe_runs_after_the_registration_check(self) -> None:
+        """An unregistered token holds as `unregistered-dependency` first — the probe
+        only ever executes registered rows, and its reasons list after #333's."""
+        (self.d / "brief.md").write_text(
+            "- **Slug:** s\n- **External dependencies:** `missing`, `protoc`\n",
+            encoding="utf-8")
+        self._write_toml({"id": "protoc", "cmd": "false", "hint": "h"})
+        reasons = plan_policy.evaluate(self.d, _cfg(self.tmp))
+        self.assertEqual([r.code for r in reasons],
+                         ["unregistered-dependency", "failed-dependency"])
+        self.assertIn("missing", reasons[0].detail)
+
+    def test_exempt_and_prose_dependencies_are_not_probed(self) -> None:
+        """`(no-check: …)` and plain prose yield no token, so a matching registered row
+        is not run for them — the escape hatch stays free of side effects too."""
+        marker = self.tmp / "exempt-row-ran"
+        self._write_toml({"id": "fdb", "cmd": f"touch {marker}; exit 1", "hint": "h"})
+        for body in ("- **Slug:** s\n- **External dependencies:** `fdb` (no-check: topology)\n",
+                     "- **Slug:** s\n- **External dependencies:** an fdb cluster\n"):
+            with self.subTest(body=body.splitlines()[-1]):
+                (self.d / "brief.md").write_text(body, encoding="utf-8")
+                self.assertEqual(plan_policy.evaluate(self.d, _cfg(self.tmp)), [])
+                self.assertFalse(marker.exists(), "an exempt dependency was probed")
+
+    def test_rows_are_read_from_disk_not_the_snapshot(self) -> None:
+        """The probe reads `Config.current_doctor_checks` — pdca.toml as it stands NOW —
+        so a row added or edited during the Plan beat counts in the same pass. The stale
+        snapshot row here would PASS; only the disk row fails."""
+        self._write_toml({"id": "protoc", "cmd": "false", "hint": "h"})
+        cfg = _cfg(self.tmp, [{"id": "protoc", "cmd": "true", "hint": "h"}])
+        self.assertEqual([r.code for r in plan_policy.evaluate(self.d, cfg)],
+                         ["failed-dependency"])
+
+    def test_installing_the_dependency_clears_the_hold_without_replanning(self) -> None:
+        """Recomputed per beat, never cached (the module docstring's own rule): fix the
+        row — or install the tool — and the next beat proceeds."""
+        self._write_toml({"id": "protoc", "cmd": "false", "hint": "h"})
+        with self.assertRaises(plan_policy.PolicyHold):
+            driver.advance(self.d, _cfg(self.tmp))
+        self._write_toml({"id": "protoc", "cmd": "true", "hint": "h"})
+        driver.advance(self.d, _cfg(self.tmp))
+        self.assertTrue((self.d / "patch.diff").exists(), "the hold survived the fix")
+
+    # -- modes -------------------------------------------------------------------------
+
+    def test_off_is_byte_identical_no_probe_runs(self) -> None:
+        """`off` disables the guard entirely — the detect cmd is not even spawned."""
+        marker = self.tmp / "probed-under-off"
+        self._write_toml({"id": "protoc", "cmd": f"touch {marker}; exit 1", "hint": "h"})
+        self.assertEqual(plan_policy.evaluate(self.d, _cfg(self.tmp, guard="off")), [])
+        self.assertFalse(marker.exists(), "off must not execute detect cmds")
+
+    def test_warn_reports_the_failure_without_holding(self) -> None:
+        """`warn` prints the same item under a non-blocking code and Do proceeds."""
+        self._write_toml({"id": "protoc", "cmd": "false",
+                          "hint": "apt install protobuf-compiler"})
+        cfg = _cfg(self.tmp, guard="warn")
+        reasons = plan_policy.evaluate(self.d, cfg)
+        self.assertEqual([r.code for r in reasons], ["failed-dependency-warn"])
+        self.assertEqual(plan_policy.blocking(reasons), [])
+        driver.advance(self.d, cfg)
+        self.assertTrue((self.d / "patch.diff").exists(), "warn blocked Do")
 
 
 if __name__ == "__main__":

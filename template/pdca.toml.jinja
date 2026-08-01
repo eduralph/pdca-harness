@@ -710,7 +710,13 @@ argv = []
 # an arbitrary failing test name, misattributed to the patch). 0 disables the row.
 # [doctor]
 # min_free_gb = 10.0
-# Each cmd runs from the project root; exit 0 = OK. Fields:
+# Each cmd runs from the project root; exit 0 = OK. A row a brief's `External
+# dependencies` token names is ALSO executed by the pre-dispatch dependency guard
+# ([driver].dependency_guard, default "hold"): a non-zero exit holds that bundle before
+# Do dispatches, quoting the row's hint. Those detect cmds run on every beat the policy
+# is consulted — not just on `{{ cli_name }} doctor` — so keep them cheap and
+# side-effect-free: a probe is a read, never a provisioning step
+# ([install].extra_bootstrap owns provisioning). Fields:
 #   group     optional section header the row prints under (e.g. "engine")
 #   level     status when the cmd FAILS — "WARN" for optional, default "MISSING"
 #   required  a failing required row makes the doctor exit non-zero
