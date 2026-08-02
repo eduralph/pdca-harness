@@ -1492,6 +1492,19 @@ def run_review(d: Path, cfg: Config) -> None:
     _stub_review(d, cfg)
 
 
+def review_never_ran(d: Path) -> bool:
+    """True iff the reviewer leaf NEVER RAN for this Check round (#369).
+
+    The error log is the engine's failed-leaf discriminator (#138): a reviewer that ran
+    and FAILED wrote ``state.REVIEW_ERROR_LOG`` (and a §6 placeholder review); a
+    successful run removed any stale log. So *both* artifacts absent means the beat
+    died in the window between the gate write and the reviewer leaf — "not yet run",
+    never "ran and failed" — and the leaf is safe (and necessary) to run now.
+    """
+    return (not (d / "check-review.md").exists()
+            and not (d / state.REVIEW_ERROR_LOG).exists())
+
+
 def _seed_sandbox_agents(cfg: Config, sandbox: Path) -> None:
     """Copy the project's ``.claude/agents`` into the sandbox so a leaf running there can
     resolve ``--agent <name>`` (issue #161).
@@ -1840,7 +1853,7 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
         # The confinement flag rides on `seeded` (a file that is not there must not cost
         # the leaf its ambient sandbox, #290); the codex network grant does not (#291).
         extra_argv += _sandbox_argv(cfg, profile, seeded=seeded)
-        error_log = d / "check-review.error.log"
+        error_log = d / state.REVIEW_ERROR_LOG
         # A transient (no-output) reviewer failure is retried with backoff before it
         # degrades to a §6 placeholder; the failed attempts' stderr lands in error_log.
         err = _invoke_leaf_resilient(
@@ -1998,6 +2011,13 @@ def advisory_artifact(d: Path, leaf_id: str) -> Path:
     return d / f"check-advisory-{leaf_id}.md"
 
 
+def advisory_error_log(d: Path, leaf_id: str) -> Path:
+    """The captured-error tail an advisory leaf leaves when it ran and FAILED (#138) —
+    named beside :func:`advisory_artifact` so the writer and the CHECKED-resume
+    discriminator (#369, ``only_missing`` below) share one spelling."""
+    return d / f"check-advisory-{leaf_id}.error.log"
+
+
 def _advisory_applies(spec: dict, d: Path) -> bool:
     """True iff this advisory leaf should run for bundle ``d``. Its ``when`` ({field,
     substring}) matches a brief field case-insensitively; absent ⇒ always run. Delegates to
@@ -2090,14 +2110,26 @@ def _select_advisory(specs: list[dict], d: Path, cfg: Config) -> list[dict]:
     return [chosen]
 
 
-def run_advisory_leaves(d: Path, cfg: Config) -> None:
+def run_advisory_leaves(d: Path, cfg: Config, *, only_missing: bool = False) -> None:
     """Run each configured advisory reviewer that applies (issue #64), after the
     advisory-selection policy narrows the list (issue #200). Each writes
     check-advisory-<id>.md; failures degrade to a §6 NEEDS-HUMAN placeholder, never crash
-    the cycle (advisory, like the main reviewer)."""
+    the cycle (advisory, like the main reviewer).
+
+    ``only_missing`` (#369) is the CHECKED-resume mode: a leaf whose artifact OR error
+    log already exists is skipped, so only a leaf the interrupted BUILT beat never
+    reached is run (a leaf that ran and FAILED left its error log + placeholder, #138,
+    and is not re-run). The selection policy is re-applied FIRST — under
+    ``vendor-complement`` (#200) only one of the pool runs, so an unselected leaf's
+    absent artifact is legitimate, never "missing"; filtering the pool by absence
+    before selecting would instead promote an excluded leaf. On an uninterrupted
+    bundle every selected leaf's artifact exists, so this mode is a no-op."""
     applicable = [spec for spec in cfg.advisory_leaves if _advisory_applies(spec, d)]
     for spec in _select_advisory(applicable, d, cfg):
         leaf_id = spec.get("id") or "advisory"
+        if only_missing and (advisory_artifact(d, leaf_id).exists()
+                             or advisory_error_log(d, leaf_id).exists()):
+            continue
         leaf = LeafConfig(mode=spec.get("mode", "stub"), family=spec.get("family", ""),
                           argv=list(spec.get("argv", [])), agent=spec.get("agent", ""),
                           model=spec.get("model", ""), effort=spec.get("effort", ""))
@@ -2129,7 +2161,7 @@ def _run_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict, 
                  if target and profile.grounding_flag else [])
         extra += _sandbox_argv(cfg, profile, seeded=seeded)   # see _run_review_sandboxed
         out = sandbox / f"check-advisory-{leaf_id}.md"
-        error_log = d / f"check-advisory-{leaf_id}.error.log"
+        error_log = advisory_error_log(d, leaf_id)
         err = _invoke_leaf_resilient(
             leaf, sandbox,
             _advisory_prompt(spec, leaf_id, rubric_mod.for_reviewer(d, cfg)),

@@ -114,6 +114,18 @@ def advance(d: Path, cfg: Config) -> None:
                 _say(f"→ {d.name}: Check — advisory reviewers ({len(cfg.advisory_leaves)})…")
                 leaves.run_advisory_leaves(d, cfg)
     elif s == state.CHECKED:
+        # Trap-door recovery (#369): `check-gates.json` IS the CHECKED marker
+        # (state.state), but the BUILT branch above runs gates → reviewer → advisory
+        # leaves as ONE indivisible step. A death in the window between the gate write
+        # and a model leaf (Ctrl-C, OOM, a killed session) landed the bundle HERE with
+        # that leaf never run — and nothing ever ran it again: assemble filled the
+        # missing-review placeholder and the only escape was hand-deleting
+        # check-gates.json, re-paying the entire gate run. Recover the never-ran leaf
+        # (artifact AND error log both absent — the #138 failed-leaf discriminator)
+        # before assembly, preserving the paid gate record; a leaf that ran and FAILED
+        # left its error log and is NOT re-run. An uninterrupted cycle has every
+        # artifact in place, so this is a no-op there.
+        _resume_interrupted_check(d, cfg, close)
         _say(f"→ {d.name}: assembling SUMMARY…")
         assemble.assemble_summary(d, cfg)  # pure code → SUMMARY.md §1–8
     elif s == state.ITERATE_DO:
@@ -127,6 +139,40 @@ def advance(d: Path, cfg: Config) -> None:
         _carry_forward_into_brief(d, n)  # appended to the brief, archived with it
         _archive_iteration(d, n, include_brief=True)  # brief archived too → UNPLANNED
     # UNPLANNED / AWAITING_SIGNOFF / COMPLETE / DISCONTINUED: nothing for the driver to do.
+
+
+def _resume_interrupted_check(d: Path, cfg: Config, close: str) -> None:
+    """Recover a Check leaf the interrupted BUILT beat never ran (#369) — see the
+    CHECKED dispatch in :func:`advance`.
+
+    Three shapes, matching the three BUILT branches. A close-class or
+    dependency-halted bundle never runs model leaves — its reviewer stand-in note is
+    deterministic (``_close_review_note`` / ``dependency_halt.blocked_review_note``),
+    so a note the death window swallowed is simply rewritten. A normal bundle gets the
+    reviewer leaf back iff it NEVER RAN (``leaves.review_never_ran`` — no artifact,
+    no error log) and each configured advisory leaf back under the same discriminator
+    (``only_missing``); a leaf that ran and failed left its error log (#138) and is
+    left alone — today's behaviour for a failed leaf is unchanged.
+    """
+    if close:
+        if not (d / "check-review.md").exists():
+            _say(f"→ {d.name}: close-disposition review note missing (beat was "
+                 "interrupted before it was written) — rewriting it…")
+            _close_review_note(d, close)
+        return
+    rec = dependency_halt.load(d)
+    if rec is not None and rec.get("halted") is True:
+        if not (d / "check-review.md").exists():
+            _say(f"→ {d.name}: dependency-halt review note missing (beat was "
+                 "interrupted before it was written) — rewriting it…")
+            dependency_halt.blocked_review_note(d, dependency_halt.recorded_verdicts(d))
+        return
+    if leaves.review_never_ran(d):
+        _say(f"→ {d.name}: Check — reviewer never ran (beat was interrupted after the "
+             f"gate write); recovering it{_headless_note(cfg.reviewer)}…")
+        leaves.run_review(d, cfg)
+    if cfg.advisory_leaves:
+        leaves.run_advisory_leaves(d, cfg, only_missing=True)
 
 
 def run_issue(d: Path, cfg: Config) -> str:

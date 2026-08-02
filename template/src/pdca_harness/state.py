@@ -58,6 +58,14 @@ DEPENDENCY_ADJUDICATION = "dependency-adjudication.json"
 # attempt via DOWNSTREAM_OF_BRIEF below.
 SESSION_CARRY = "session-carry-forward"
 
+# The reviewer leaf's captured-error tail (#138): written when the reviewer RAN AND
+# FAILED (retries exhausted), removed at the start of a successful run — which makes it
+# the discriminator (#369) between a reviewer that ran-and-failed and one that NEVER ran
+# (an interrupted beat), since neither leaves a check-review.md. Named here (like
+# CLOSE_MARKER) so the writer (``leaves``), the CHECKED-resume check (``driver``) and
+# the §6 wording split (``assemble``) share one spelling.
+REVIEW_ERROR_LOG = "check-review.error.log"
+
 # The per-rule gate evidence logs (issue #370): ``gate-logs/<rule_id>.log`` — the full
 # combined output behind each ``check-gates.json`` row, written by a bundle-scoped
 # ``gates.run_gates``. Named here (like CLOSE_MARKER / SESSION_CARRY) so ``gates`` (the
