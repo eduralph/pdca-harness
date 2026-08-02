@@ -73,6 +73,19 @@ def run_with_heartbeat(
     unchanged — the heartbeat keeps a hung child looking alive forever, which is
     exactly the 19h-hung-gate failure this bound exists to end.
 
+    On POSIX, every child whose stdio the harness owns (``capture`` /
+    ``stream_json``) or whose wall-clock is bounded runs in its own session, and
+    whatever it leaves running in its process group when it exits — by any path:
+    normal return, timeout, Ctrl-C — is swept (SIGTERM, short grace, SIGKILL),
+    with one stderr note naming the command (issue #372). ``proc.wait`` returning
+    only proves the *direct* child exited; under ``shell=True`` (every gate) that
+    child is just the shell, so surviving work is the rule, not the edge case —
+    measured: a leaked test process burned ~100% of a core for 21 hours, and a
+    straggler still holds ports, locks and fixtures when the next cycle's gates
+    run in the same lane worktree. A child that exits leaving no survivors sees
+    no sweep and no note. The interactive leaves (no capture, no stream, no
+    bound) are never sessionized: they keep the terminal exactly as today.
+
     ``status``, if given, is called on every tick to append a live snapshot of the
     child's work (e.g. which artifacts exist yet, time since the last write) — so the
     heartbeat shows *what* is happening, not just that time passed (Tier 1+2). It is
@@ -103,14 +116,18 @@ def run_with_heartbeat(
         stdout, stderr = None, subprocess.PIPE  # stdout stays live; tee stderr only
     else:
         stdout, stderr = None, None
+    # Sessionize (POSIX only) every child whose stdio the harness owns — capture or
+    # stream_json — as well as any bounded child (#368's condition, widened by #372).
+    # A new session makes the child the leader of its own process group
+    # (pgid == proc.pid), the only handle that still reaches what a shell=True
+    # child spawned after the shell itself exits. The interactive leaves (no
+    # capture, no stream, no bound) are NOT sessionized, so they keep the
+    # terminal's foreground process group exactly as today.
+    sessionize = os.name == "posix" and (capture or stream_json or timeout is not None)
     proc = subprocess.Popen(
         cmd, cwd=cwd, shell=shell, env=env, text=True,
         stdin=stdin, stdout=stdout, stderr=stderr,
-        # Only sessionize when a bound exists, so timeout=None stays byte-identical
-        # to today. A new session makes the child the leader of its own process
-        # group (pgid == proc.pid), which is what expiry must kill: under
-        # shell=True the real work is a grandchild of the shell (#368).
-        start_new_session=timeout is not None,
+        start_new_session=sessionize,
     )
 
     chunks: list[str] = []
@@ -156,37 +173,55 @@ def run_with_heartbeat(
     start = time.monotonic()
     deadline = None if timeout is None else start + timeout
     timed_out = False
-    while True:
-        wait_for = interval
-        if deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                # The bound expired: kill the whole group, then reap. The heartbeat
-                # would otherwise keep printing "… still working" forever — the very
-                # mechanism built so a slow gate would not look hung is what kept a
-                # genuinely hung gate from looking hung (#368).
-                timed_out = True
-                _terminate_group(proc)
+    try:
+        while True:
+            wait_for = interval
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    # The bound expired: kill the whole group, then reap. The heartbeat
+                    # would otherwise keep printing "… still working" forever — the very
+                    # mechanism built so a slow gate would not look hung is what kept a
+                    # genuinely hung gate from looking hung (#368).
+                    timed_out = True
+                    _terminate_group(proc)
+                    break
+                wait_for = min(interval, remaining)
+            try:
+                proc.wait(timeout=wait_for)
                 break
-            wait_for = min(interval, remaining)
-        try:
-            proc.wait(timeout=wait_for)
-            break
-        except subprocess.TimeoutExpired:
-            mins, secs = divmod(int(time.monotonic() - start), 60)
-            bits: list[str] = []
-            if stream_json and latest_tool["label"]:
-                bits.append(f"▸ {latest_tool['label']}")
-            if status is not None:
-                try:
-                    snap = status()
-                    if snap:
-                        bits.append(snap)
-                except Exception:  # a status probe must never break the run
-                    pass
-            extra = (" · " + " · ".join(bits)) if bits else ""
-            print(f"   … still working ({mins}m{secs:02d}s elapsed){suffix}{extra}",
-                  file=sys.stderr, flush=True)
+            except subprocess.TimeoutExpired:
+                mins, secs = divmod(int(time.monotonic() - start), 60)
+                bits: list[str] = []
+                if stream_json and latest_tool["label"]:
+                    bits.append(f"▸ {latest_tool['label']}")
+                if status is not None:
+                    try:
+                        snap = status()
+                        if snap:
+                            bits.append(snap)
+                    except Exception:  # a status probe must never break the run
+                        pass
+                extra = (" · " + " · ".join(bits)) if bits else ""
+                print(f"   … still working ({mins}m{secs:02d}s elapsed){suffix}{extra}",
+                      file=sys.stderr, flush=True)
+    except BaseException:
+        # Ctrl-C / abort mid-wait: the same no-survivors contract as expiry. The
+        # sweep condition is "sessionized", not "bounded" (#372 widens #368's
+        # timeout-only kill): any group this invocation owns must not outlive
+        # it, however the wait ends.
+        if sessionize:
+            _terminate_group(proc)
+        raise
+    if sessionize and not timed_out:
+        # Normal exit — the overwhelmingly common path — sweeps too (#372), and it
+        # runs BEFORE the drain-join/close below, mirroring the timeout path's
+        # kill-then-close order: a straggler that inherited the capture pipe keeps
+        # the drain thread blocked mid-read, and closing the stream then waits on
+        # that blocked reader (measured: two ~5-minute hangs before the reorder).
+        # Killed first, the last writer dies, the drain sees EOF, and neither the
+        # join nor the close can block.
+        _sweep_stragglers(proc.pid, cmd)
     for reader in readers:
         reader.join(timeout=5)
     for stream in (proc.stdout, proc.stderr):
@@ -216,6 +251,76 @@ def _terminate_group(proc: subprocess.Popen, grace: float = 2.0) -> None:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
+
+
+def _sweep_stragglers(pgid: int, cmd, grace: float = 2.0) -> None:
+    """Kill whatever an exited child left running in its process group (#372).
+
+    ``proc.wait`` returning only proves the *direct* child exited; under
+    ``shell=True`` that child is just the shell, and work it backgrounded
+    survives the call — measured: one leaked test process burned a core for 21
+    hours, and a straggler holding ports/locks/fixtures into the next cycle's
+    gates is the class of one-off never-reproducible gate red. The child was
+    sessionized (``pgid == proc.pid``), so the group id still reaches every
+    survivor after the leader is gone. SIGTERM → ``grace`` seconds → SIGKILL,
+    with ONE stderr note naming the command: a straggler is a signal worth
+    surfacing, not just a mess to mop. No survivors ⇒ no signal, no note —
+    the common clean exit stays byte-identical.
+
+    Known limitation (deferred to the subreaper design, #383): the swept
+    grandchild is not this process's child, so it cannot be reaped here — under
+    a non-reaping init (e.g. a minimal container) the group kill leaves a
+    zombie table entry. A naive ``waitpid(-1)`` reaper thread would be strictly
+    worse: it can steal exit statuses from concurrent lane ``Popen.wait()``s
+    and corrupt a gate verdict, so no global reaper is added in this change.
+    """
+    if not _group_alive(pgid):
+        return
+    shown = cmd if isinstance(cmd, str) else " ".join(str(c) for c in cmd)
+    print(f"   ⚠ swept surviving processes of: {shown[:200]}",
+          file=sys.stderr, flush=True)
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGTERM)
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if not _group_alive(pgid):
+            return
+        time.sleep(0.05)
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGKILL)
+
+
+def _group_alive(pgid: int) -> bool:
+    """Is any LIVE (non-zombie) member left in process group ``pgid``?
+
+    Prefers ``/proc`` (Linux) because it is zombie-aware: ``killpg(pgid, 0)``
+    counts an unreaped zombie as a member, and under a non-reaping PID 1 (a
+    container where the runner is init) that would make a fully-dead group look
+    alive forever — a phantom sweep note on every clean exit. Where ``/proc``
+    is absent (other POSIX), falls back to the ``killpg`` probe.
+    """
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (entry / "stat").read_text(encoding="ascii", errors="replace")
+            except OSError:
+                continue  # the process raced away between listing and reading
+            # /proc/<pid>/stat is `pid (comm) state ppid pgrp …`; comm may hold
+            # spaces/parens, so split AFTER the last `)`.
+            fields = stat.rpartition(")")[2].split()
+            if len(fields) >= 3 and fields[0] != "Z" and fields[2] == str(pgid):
+                return True
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # the group exists but is not ours to signal — still alive
+    return True
 
 
 # ----------------------------------------------------------------------------
