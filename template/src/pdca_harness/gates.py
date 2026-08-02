@@ -26,6 +26,17 @@ not a verdict the gate declared (#428). When
 ``[[gates.checks]]`` is empty the driver falls back to all-PASS stub rows, so the
 offline vertical slice still runs.
 
+The row's **evidence line** follows the same declaration rule (issue #402): a gate states
+its verdict summary by printing a line that STARTS with :data:`EVIDENCE_MARKER`
+(``PDCA-EVIDENCE: <summary>``), and that summary — the LAST such line, a gate's final word
+— becomes the row's ``path_line`` whatever the command relays afterwards. Without a
+declaration the evidence falls back to the command's last output line, which is only ever
+the gate's verdict by luck: the capture is one merged stdout+stderr stream, so a wrapper
+that shells out to a suite files whatever that suite's children happened to flush last
+(a scratch ``/tmp`` path from a since-deleted sandbox is not a reconstructable basis). The
+marker declares evidence only — it never changes a verdict; the exit code alone decides
+pass/fail, and ``PDCA-UNVERIFIABLE`` stays the one marker that can change a ``result``.
+
 A row: {check, result, oracle, rule_id, path_line, gating}. A row produced by a
 bundle-scoped :func:`run_gates` additionally carries ``log`` (the bundle-relative path of
 its full-output evidence log, ``gate-logs/<rule_id>.log``) and ``duration_secs`` (issue
@@ -59,6 +70,11 @@ from .config import Config
 # a gate may exit 0 and still defer to the human. Neither is a failure (see _finalize).
 UNVERIFIABLE_RC = 77
 UNVERIFIABLE_MARKER = "PDCA-UNVERIFIABLE:"
+
+# A gate states the summary that goes into the row's `path_line` the same way it declares
+# `unverifiable`: a line that STARTS with this marker (issue #402). Anything else in the
+# capture is output the gate RELAYED from what it ran, and must not be filed as its verdict.
+EVIDENCE_MARKER = "PDCA-EVIDENCE:"
 
 # The bundle directory holding one full-output evidence log per gate rule (issue #370).
 # Defined in `state` (next to the archive list that moves it per round) — re-exported
@@ -596,22 +612,44 @@ def _write_gate_log(log_dir: Path, chk: dict, *, cmd: str, cwd: Path,
     return f"{GATE_LOGS_DIR}/{name}", None
 
 
+def _declarations(output: str, marker: str) -> list[str]:
+    """Every line of ``output`` the gate **declared** with ``marker``, in order — the text
+    after the marker (possibly empty).
+
+    A **declaration** is a line whose first text is the marker (leading whitespace ignored)
+    — how every documented emitter writes it: the shipped advisory check
+    (``scripts/checks/test_exercises_production.py``) prints ``f"{UNVERIFIABLE} {reason}"``,
+    and the gate wrappers ``echo`` the marker at the start of the line.
+
+    A mid-line occurrence is NOT a declaration: it is text the gate merely **relayed** from
+    something it ran (#428) — see :func:`_classify`. One notion of "the gate said this",
+    shared by both markers (#402)."""
+    out: list[str] = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(marker):
+            out.append(stripped[len(marker):].strip())
+    return out
+
+
 def _declared_unverifiable(output: str) -> str | None:
     """The gate's OWN ``unverifiable`` declaration in ``output`` — its reason — or ``None``.
 
-    A **declaration** is a line whose first text is :data:`UNVERIFIABLE_MARKER` (leading
-    whitespace ignored) — how every documented emitter writes it: the shipped advisory check
-    (``scripts/checks/test_exercises_production.py``) prints ``f"{UNVERIFIABLE} {reason}"``,
-    and the gate wrappers ``echo`` the marker at the start of the line. The reason is the
-    text after the marker, possibly empty.
+    The FIRST declaration wins: the reason a gate gives for deferring is the one it gave
+    when it stopped being able to verify, and later output cannot retract it."""
+    declared = _declarations(output, UNVERIFIABLE_MARKER)
+    return declared[0] if declared else None
 
-    A mid-line occurrence is NOT a declaration: it is text the gate merely **relayed** from
-    something it ran (#428) — see :func:`_classify`."""
-    for line in output.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(UNVERIFIABLE_MARKER):
-            return stripped[len(UNVERIFIABLE_MARKER):].strip()
-    return None
+
+def _declared_evidence(output: str) -> str | None:
+    """The gate's OWN verdict summary in ``output`` — the row's evidence line — or ``None``.
+
+    The LAST non-empty declaration wins (issue #402): a wrapper with several legs declares
+    per leg, and its final word is the summary of the run as a whole — where the last
+    *output* line is merely whatever flushed last, usually a child's. A bare
+    ``PDCA-EVIDENCE:`` with no text is no summary and falls back with the undeclared case."""
+    declared = [text for text in _declarations(output, EVIDENCE_MARKER) if text]
+    return declared[-1] if declared else None
 
 
 def _classify(rc: int, output: str) -> tuple[str, list[str]]:
@@ -619,7 +657,22 @@ def _classify(rc: int, output: str) -> tuple[str, list[str]]:
 
     ``unverifiable`` (issue #46) lets a gate that did NOT fail defer to the human: it may
     exit 0 and still declare the marker. The text after the marker is the reason; otherwise
-    the evidence is the command's last output line (as for pass/fail).
+    the evidence is the gate's declared summary, and failing that the command's last output
+    line (as for pass/fail).
+
+    The evidence line obeys the same declaration rule as the verdict (#402): the row records
+    what the gate declared with :data:`EVIDENCE_MARKER`, and only where it declared nothing
+    does it fall back to ``output``'s last line. That fallback is what made a GREEN gate's
+    frozen record read like a failure path: the capture is one merged stdout+stderr stream
+    (``progress.run_with_heartbeat``), so a wrapper that shells out to a test suite files
+    whatever that suite's children flushed last — a ``/tmp`` scratch path from a sandbox
+    that no longer exists was recorded as a passing C4's whole evidence, which is neither
+    the *basis* of the verdict nor *reconstructable* (the invariant :func:`_write_gate_log`
+    exists to keep, #370). Declaring is the only way a gate can be sure what gets filed, so
+    the marker is the convention gate authors write to (docs 04 §Gate result vocabulary);
+    the undeclared fallback stays defined, and the full basis stays in ``row["log"]``.
+    The evidence marker never changes the verdict — a declaring gate that exits non-zero
+    still FAILS, with its declaration as the evidence.
 
     The marker is honoured only for an exit code that is not a failure — 0, or the dedicated
     ``UNVERIFIABLE_RC``. A gate that exits non-zero FAILED, whatever its output happens to
@@ -646,10 +699,12 @@ def _classify(rc: int, output: str) -> tuple[str, list[str]]:
         reason = _declared_unverifiable(output)
         if reason is not None:
             return "unverifiable", [reason or "gate declared itself unverifiable"]
-    last = output.strip().splitlines()[-1:] or [""]
+    evidence = _declared_evidence(output)
+    if evidence is None:
+        evidence = (output.strip().splitlines()[-1:] or [""])[0]
     if rc == UNVERIFIABLE_RC:
-        return "unverifiable", [last[0] or f"gate exited unverifiable (rc {UNVERIFIABLE_RC})"]
-    return ("pass" if rc == 0 else "fail"), last
+        return "unverifiable", [evidence or f"gate exited unverifiable (rc {UNVERIFIABLE_RC})"]
+    return ("pass" if rc == 0 else "fail"), [evidence]
 
 
 def _merged_env(extra: dict | None) -> dict | None:
