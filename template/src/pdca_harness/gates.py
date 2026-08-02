@@ -23,7 +23,12 @@ any other exit code, because a gate that failed has failed whatever it printed (
 ``[[gates.checks]]`` is empty the driver falls back to all-PASS stub rows, so the
 offline vertical slice still runs.
 
-A row: {check, result, oracle, rule_id, path_line, gating}. ``result`` ∈
+A row: {check, result, oracle, rule_id, path_line, gating}. A row produced by a
+bundle-scoped :func:`run_gates` additionally carries ``log`` (the bundle-relative path of
+its full-output evidence log, ``gate-logs/<rule_id>.log``) and ``duration_secs`` (issue
+#370) — additive keys, existing consumers unchanged. When that evidence log could NOT be
+written, the row instead carries ``log_error`` (the reason) so a persistence failure is
+never silent — the verdict itself is unaffected either way. ``result`` ∈
 ``pass`` / ``fail`` / ``unverifiable`` / ``none``. A ``none`` row is a judgment cell
 decided by the reviewer + human (docs 04 §judgment cell); it is listed for matrix
 alignment and never gates. An ``unverifiable`` row does **not** count toward
@@ -39,6 +44,8 @@ import re
 import shlex
 import shutil
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import brief, lane, progress, state, worktree
@@ -49,6 +56,11 @@ from .config import Config
 # a gate may exit 0 and still defer to the human. Neither is a failure (see _finalize).
 UNVERIFIABLE_RC = 77
 UNVERIFIABLE_MARKER = "PDCA-UNVERIFIABLE:"
+
+# The bundle directory holding one full-output evidence log per gate rule (issue #370).
+# Defined in `state` (next to the archive list that moves it per round) — re-exported
+# here because gates is the writer.
+GATE_LOGS_DIR = state.GATE_LOGS_DIR
 
 
 # ----------------------------------------------------------------------------
@@ -134,8 +146,15 @@ def promotion_candidates(cfg: Config) -> list[dict]:
 
 
 def run_gates(d: Path, cfg: Config) -> dict:
-    """Run every gate for bundle ``d`` (both repo- and bundle-scoped); write JSON."""
-    rows = _run_checks(cfg, cwd=cfg.root, bundle=d, scopes=("repo", "bundle"))
+    """Run every gate for bundle ``d`` (both repo- and bundle-scoped); write JSON.
+
+    The FULL output of each check is persisted to ``<d>/gate-logs/<rule_id>.log``
+    (issue #370): the 120-char ``path_line`` is the right *summary*, but it must not be
+    the entire *record* — a gating red that parks the bundle needs its whole basis
+    reconstructable from bundle files alone (the state-is-files doctrine). One file per
+    rule id, overwritten per Check run."""
+    rows = _run_checks(cfg, cwd=cfg.root, bundle=d, scopes=("repo", "bundle"),
+                       log_dir=d / GATE_LOGS_DIR)
     return _finalize(rows, name=d.name, write_to=d)
 
 
@@ -208,7 +227,9 @@ def run_gates_dry(d: Path, cfg: Config) -> dict:
     frozen ``check-gates.json`` — the gate runner behind ``pdca revalidate`` (issue #11).
 
     Same single-sourced ``_run_checks`` as :func:`run_gates`, but ``write_to=None`` so a
-    re-gate of an already-COMPLETE bundle never mutates its frozen record."""
+    re-gate of an already-COMPLETE bundle never mutates its frozen record. For the same
+    reason no ``log_dir`` is passed (issue #370): ``gate-logs/`` is the frozen evidence
+    behind the frozen verdict, and a later dry re-gate must not overwrite it either."""
     rows = _run_checks(cfg, cwd=cfg.root, bundle=d, scopes=("repo", "bundle"))
     return _finalize(rows, name=d.name, write_to=None)
 
@@ -275,7 +296,8 @@ def _applies(chk: dict, scopes: tuple[str, ...], labels: frozenset[str] | None) 
 
 
 def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[str, ...],
-                worktree_override: Path | None = None) -> list[dict]:
+                worktree_override: Path | None = None,
+                log_dir: Path | None = None) -> list[dict]:
     # No configured gates → the offline stub: the full 5/5/1 with the mechanical
     # gate elements stub-passed (so the offline slice runs green). A declared
     # [gates] host_ci row counts as real configuration too (#311).
@@ -314,6 +336,13 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
                 gating=True, element="C4")], stub=False)
     else:
         wt, ovf_primary = None, None
+    if log_dir is not None:
+        # One evidence set per Check run (issue #370): clear the previous run's logs, so
+        # gate-logs/ holds exactly THIS run's files — a check since removed from the
+        # config leaves no stale log masquerading as current evidence. A non-directory
+        # squatting on the path survives this (ignore_errors) and is surfaced per row as
+        # ``log_error`` by _write_gate_log — visibly, never silently (#370 iteration 2).
+        shutil.rmtree(log_dir, ignore_errors=True)
     configured: list[dict] = []
     try:
         for chk in cfg.gates_checks:
@@ -325,7 +354,8 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
                 continue
             configured.append(_run_one(chk, cwd=cwd, bundle=bundle, runner=cfg.gates_runner,
                                        worktree_path=wt,
-                                       default_timeout=cfg.gates_default_timeout_secs))
+                                       default_timeout=cfg.gates_default_timeout_secs,
+                                       log_dir=log_dir))
         # Host-only CI parity rows ([gates] host_ci, issue #311): commands the host's CI
         # runs on every PR but the delegated gate runner does not cover (a spell-checker,
         # a docs lint). Unlike the rows above (cwd=cfg.root; each command must target
@@ -352,7 +382,8 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
                 else:
                     configured.append(_run_one(chk, cwd=wt, bundle=bundle,
                                                runner=cfg.gates_runner, worktree_path=wt,
-                                               default_timeout=cfg.gates_default_timeout_secs))
+                                               default_timeout=cfg.gates_default_timeout_secs,
+                                               log_dir=log_dir))
     finally:
         if ovf_primary is not None and wt is not None:
             worktree.overflow_remove(ovf_primary, wt)
@@ -399,7 +430,8 @@ def _gate_timeout(chk: dict, default: int | None) -> int | None:
 
 def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
              worktree_path: Path | None = None,
-             default_timeout: int | None = None) -> dict:
+             default_timeout: int | None = None,
+             log_dir: Path | None = None) -> dict:
     cmd, cmd_error = _delegated_cmd(chk, runner)
     gating = bool(chk.get("gating", True))
     label = f"{chk.get('id', '')}: {chk.get('label', '')}".strip(": ")
@@ -451,6 +483,10 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
     watch = bundle or cwd
     bound = _gate_timeout(chk, default_timeout)
     print(f"  · gate {label} (a Docker-backed gate can take minutes)…", file=sys.stderr, flush=True)
+    started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    t0 = time.monotonic()
+    rc: int | None = None
+    output = ""
     try:
         # Output is captured for the evidence line; the heartbeat ticks meanwhile so
         # a long, silent gate (e.g. a Docker-backed test suite) doesn't look hung.
@@ -469,11 +505,73 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
             result, evidence = _classify(rc, output)
     except Exception as exc:  # command not found, etc. — a failing gate, surfaced
         result, evidence = "fail", [str(exc)]
-    return _row(
+        output = f"{exc}\n"  # the exception IS the run's whole output — log it (#370)
+    duration = round(time.monotonic() - t0, 2)
+    row = _row(
         f"{chk.get('tier', '?')} {chk.get('label', chk.get('id', ''))}",
         result, oracle=cmd, rule_id=chk.get("id", ""),
         path_line=evidence[0][:120], gating=gating, element=chk.get("tier", ""),
     )
+    if log_dir is not None:
+        # Persist the FULL evidence (issue #370): the truncated path_line above stays the
+        # summary, but the verdict's whole basis — including the partial capture of a
+        # timed-out gate — must be reconstructable from bundle files alone.
+        rel, log_error = _write_gate_log(log_dir, chk, cmd=cmd, cwd=cwd,
+                                         worktree_path=worktree_path, started=started,
+                                         duration=duration, rc=rc, result=result,
+                                         timeout=bound, output=output)
+        row["duration_secs"] = duration  # additive keys — existing consumers unchanged
+        if log_error is None:
+            row["log"] = rel             # bundle-relative
+        else:
+            # A persistence failure must never break the gate run or alter the verdict —
+            # but it must NOT be silent either (#370 iteration 2): the feature's promise
+            # is "full basis reconstructable from bundle files alone", so a run where
+            # that silently did not happen re-creates the original defect. Record the
+            # reason in the row (additive) and say so on stderr.
+            row["log_error"] = log_error
+            print(f"  ! gate {label}: evidence log {GATE_LOGS_DIR}/ not written — "
+                  f"{log_error}", file=sys.stderr, flush=True)
+    return row
+
+
+def _write_gate_log(log_dir: Path, chk: dict, *, cmd: str, cwd: Path,
+                    worktree_path: Path | None, started: str, duration: float,
+                    rc: int | None, result: str, timeout: int | None,
+                    output: str) -> tuple[str | None, str | None]:
+    """Write ``gate-logs/<rule_id>.log`` — a small header, then the combined
+    stdout+stderr VERBATIM (issue #370). Returns ``(bundle_relative_path, None)`` on
+    success, or ``(None, reason)`` on a write failure: evidence persistence is
+    best-effort and must never break the gate run (the verdict itself is already in the
+    row) — but the failure is returned, not swallowed, so the caller surfaces it as the
+    row's ``log_error`` (#370 iteration 2)."""
+    name = f"{re.sub(r'[^A-Za-z0-9._-]', '_', chk.get('id', '')) or 'gate'}.log"
+    if rc == progress.TIMEOUT_RC:
+        # (#368 × #370) the bound expired: attach what the gate DID say before the kill,
+        # so a hung gate's log shows where it hung instead of nothing.
+        exit_line = f"timeout — killed after its {timeout}s bound (partial output below)"
+    elif rc is None:
+        exit_line = "exception — the command could not be run"
+    else:
+        exit_line = str(rc)
+    header = "\n".join([
+        f"# gate: {chk.get('id', '')} — {chk.get('label', '')}",
+        f"# cmd: {cmd}",
+        f"# cwd: {cwd}",
+        f"# PDCA_WORKTREE: {worktree_path if worktree_path is not None else '(none)'}",
+        f"# start: {started}",
+        f"# duration_secs: {duration}",
+        f"# exit: {exit_line}",
+        f"# outcome: {result}",
+        "# ---- combined stdout+stderr (verbatim) ----",
+        "",
+    ])
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / name).write_text(header + output, encoding="utf-8")
+    except OSError as exc:
+        return None, f"could not write {GATE_LOGS_DIR}/{name}: {exc}"
+    return f"{GATE_LOGS_DIR}/{name}", None
 
 
 def _classify(rc: int, output: str) -> tuple[str, list[str]]:

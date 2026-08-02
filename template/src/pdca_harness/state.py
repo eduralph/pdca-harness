@@ -50,6 +50,12 @@ DEPENDENCY_ADJUDICATION = "dependency-adjudication.json"
 # attempt via DOWNSTREAM_OF_BRIEF below.
 SESSION_CARRY = "session-carry-forward"
 
+# The per-rule gate evidence logs (issue #370): ``gate-logs/<rule_id>.log`` — the full
+# combined output behind each ``check-gates.json`` row, written by a bundle-scoped
+# ``gates.run_gates``. Named here (like CLOSE_MARKER / SESSION_CARRY) so ``gates`` (the
+# writer) and the archive list below share one spelling.
+GATE_LOGS_DIR = "gate-logs"
+
 # Everything Do and Check write, i.e. everything downstream of brief.md. Includes the
 # close marker (issue #60) so an iterate archives it too — reopening a close bundle to a
 # fix path then clears the marker and runs the real Do+Check band.
@@ -85,6 +91,10 @@ DOWNSTREAM_OF_BRIEF = [
     # decision is consumed, merged into the brief by _carry_forward_into_brief, and
     # archived here WITH the attempt it describes — never left to leak into the next one.
     SESSION_CARRY,
+    # The gate evidence logs (#370): a directory, one <rule_id>.log per configured check.
+    # Archived per round WITH the verdict they explain, so each iteration-v<N>/ keeps the
+    # full basis of its own gate run — the state-is-files doctrine applied to evidence.
+    GATE_LOGS_DIR,
 ]
 
 # Cycle artifacts matched by pattern rather than name. ONE definition, read by both

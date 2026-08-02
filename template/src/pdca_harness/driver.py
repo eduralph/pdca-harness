@@ -389,6 +389,8 @@ def _archive_iteration(d: Path, n: int, *, include_brief: bool) -> None:
                 names.append(str(tf))
     for name in names:
         src = d / name
-        if src.is_file():
+        # A directory entry (state.GATE_LOGS_DIR, #370 — the round's gate evidence logs)
+        # is moved whole: each iteration-v<N>/ keeps the full basis of its own verdict.
+        if src.is_file() or src.is_dir():
             arch.mkdir(parents=True, exist_ok=True)
             src.rename(arch / Path(name).name)
