@@ -215,7 +215,11 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                         f"{d.name}'s patch does not apply onto {branch} — an undeclared "
                         f"cross-wave overlap; declare the conflict / re-order, then re-run")
                 _git(wt, "add", "--all")
-                if _git(wt, "commit", "-m", f"pdca-integrate: {d.name}") != 0:
+                # `-s` adds the Signed-off-by trailer (DCO) — same as publish (#81): the
+                # branch is rebuilt each fold, so a stacked PR cut from an EARLIER fold
+                # carries these commits outside the base's ancestry, where a DCO-gated
+                # host inspects them (#405).
+                if _git(wt, "commit", "-s", "-m", f"pdca-integrate: {d.name}") != 0:
                     raise IntegrationError(f"could not commit {d.name} onto {branch}")
             # A harness-owned, rebuilt-each-run branch: a plain force is correct (every fold
             # rewrites it off the base), and it isn't a human PR branch needing lease safety.
