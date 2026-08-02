@@ -178,7 +178,8 @@ class Accepting(unittest.TestCase):
         rewrite were wrong, `compute_waves` would see dangling references and this is where
         it shows.
         """
-        leaves.do_split(self.parent, self.cfg)          # stub writes a 2-child proposal
+        with redirect_stdout(io.StringIO()):            # the leaf prints the proposal path
+            leaves.do_split(self.parent, self.cfg)      # stub writes a 2-child proposal
         created = split.accept(self.parent, ["601", "602"], self.cfg)
         self.assertEqual(len(waves.compute_waves(self.cfg, created)), 2,
                          "a declared dependency did not stack the children")
@@ -213,12 +214,16 @@ class SplitterLeaf(unittest.TestCase):
         """Asserted on the directory listing, not just the file's presence: "propose seams,
         never cut them" means no bundles, no branches, no edits to brief.md."""
         before = {p.name for p in self.d.iterdir()}
-        self.assertEqual(leaves.do_split(self.d, self.cfg), 0)
+        with redirect_stdout(io.StringIO()):            # the leaf prints the proposal path
+            rc = leaves.do_split(self.d, self.cfg)
+        self.assertEqual(rc, 0)
         self.assertEqual({p.name for p in self.d.iterdir()} - before, {split.PROPOSAL})
 
     def test_a_bundle_with_no_brief_is_refused(self) -> None:
         (self.d / "brief.md").unlink()
-        self.assertEqual(leaves.do_split(self.d, self.cfg), 1)
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            rc = leaves.do_split(self.d, self.cfg)
+        self.assertEqual(rc, 1)
 
     def test_the_shipped_template_parses(self) -> None:
         """The template teaches the format, so it must BE the format — a template whose own
@@ -308,7 +313,9 @@ class ReviewFixes(unittest.TestCase):
         (self.parent / "SUMMARY.md").write_text(
             "## 9. Sign-off\n\nOutcome: accepted\n", encoding="utf-8")
         if state.state(self.parent) == state.COMPLETE:
-            self.assertEqual(leaves.do_split(self.parent, self.cfg), 1)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                rc = leaves.do_split(self.parent, self.cfg)
+            self.assertEqual(rc, 1)
 
     def test_split_is_not_a_close_disposition_token(self) -> None:
         """`close_class` SUBSTRING-matches, so a generic "split" token would send
@@ -583,9 +590,11 @@ class AcceptIsSafe(unittest.TestCase):
             default_branch="main", tracker_system="github", tracker_url="",
             issue_id_example="#1",
             builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
-        leaves.do_split(self.parent, cfg)
-        rc = cli._split(cfg, SimpleNamespace(issue_id="500", accept=True,
-                                             ids="issue_601, #602"))
+        # Both print — the leaf its proposal path, the CLI the child ids (cli.py:786-787).
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            leaves.do_split(self.parent, cfg)
+            rc = cli._split(cfg, SimpleNamespace(issue_id="500", accept=True,
+                                                 ids="issue_601, #602"))
         self.assertEqual(rc, 0)
         self.assertTrue(cfg.bundle("601").is_dir())
         self.assertTrue(cfg.bundle("602").is_dir())

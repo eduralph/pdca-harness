@@ -17,6 +17,14 @@ a verdict's full basis is reconstructable from bundle files alone, per round):
   and (iteration 2) a log-write FAILURE is never silent: the row carries `log_error`
   with the reason and a stderr line names it — while the verdict stays unchanged.
 
+And (issue #402) the other half of the same invariant: the one line the row DOES keep must
+be the gate's own verdict, not a line it relayed. The capture is one merged stdout+stderr
+stream, so "the last line" is whatever a child process flushed last — a green C4 wrapper
+was recorded with a scratch `/tmp` path from a since-deleted sandbox as its whole evidence,
+which is neither the verdict's *basis* nor *reconstructable* from bundle files. A gate now
+declares its summary with `PDCA-EVIDENCE:` (the #428 declaration form — first text on the
+line) and that is what the row files, whatever follows it.
+
 Deterministic real gate commands — no Claude / Docker. Run from the project root:
 PYTHONPATH=src python -m unittest discover -s tests
 """
@@ -94,6 +102,8 @@ class GateEvidenceLogs(unittest.TestCase):
         # The body: the combined output VERBATIM — every line, in order, not just the
         # last one the 120-char evidence summary keeps.
         self.assertIn("first-line\nmiddle-line\nlast-line\n", text)
+        # `_MULTI` declares nothing, so the documented FALLBACK applies (#402): the last
+        # output line. The declared case is pinned in GateEvidenceIsTheGatesOwnVerdict.
         self.assertEqual(self._gate_row(result)["path_line"], "last-line")
 
     # -- (b) the row keys, additive ---------------------------------------------------
@@ -140,7 +150,7 @@ class GateEvidenceLogs(unittest.TestCase):
         # The verdict is untouched — persistence failure never alters a gate result …
         self.assertEqual(row["result"], "pass")
         self.assertEqual(result["overall"], "pass")
-        self.assertEqual(row["path_line"], "last-line")
+        self.assertEqual(row["path_line"], "last-line")  # undeclared ⇒ fallback (#402)
         # … but the failure is recorded IN the row (additive), with the reason …
         self.assertNotIn("log", row)
         self.assertIn("gate-logs/C4-log.log", row["log_error"])
@@ -205,6 +215,93 @@ class GateEvidenceLogs(unittest.TestCase):
         self.assertEqual(moved.read_text(encoding="utf-8"), "round-one evidence\n")
         self.assertFalse((d / state.GATE_LOGS_DIR).exists(),
                          "the next round would inherit the previous round's evidence")
+
+
+class GateEvidenceIsTheGatesOwnVerdict(unittest.TestCase):
+    """(issue #402) The recorded evidence is what the GATE declared — never a line it
+    merely relayed from a child process.
+
+    Reproduced verbatim from the shipped defect: `run-verify.sh` ends with
+    `echo "C4 PASS: red without the fix, green with it"`, exits 0, and the merged
+    stdout+stderr capture then carries block-buffered stdout the offline suite leaked from
+    the code it drove. `_classify` took the last line, so a GREEN gate was frozen with
+    `/tmp/…/results/issue_500/split-proposal.md` — a path in a sandbox that no longer
+    exists — as its whole evidence, and readers escalated it to §6 NEEDS-HUMAN.
+    """
+
+    # The gate's own summary, then trailing child stdout — the shipped shape.
+    _SUMMARY = "C4 PASS: red without the fix, green with it"
+    _RELAYED = "/tmp/tmpy_ulekwf/results/issue_500/split-proposal.md"
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+        self.n = 0
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _row(self, cmd: str) -> dict:
+        """Run one real gate command through the production path and return its row."""
+        self.n += 1
+        d = self.cfg.bundle(f"EV{self.n}")
+        d.mkdir(parents=True)
+        (d / "brief.md").write_text("- **Slug:** ev\n", encoding="utf-8")
+        (d / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
+        self.cfg.gates_checks = [{**_GATE, "cmd": cmd}]
+        self.result = gates.run_gates(d, self.cfg)
+        self.bundle = d
+        return next(r for r in self.result["rows"] if r["rule_id"] == "C4-log")
+
+    def test_declared_summary_survives_trailing_child_output(self) -> None:
+        row = self._row(f"echo '{gates.EVIDENCE_MARKER} {self._SUMMARY}'; "
+                        f"echo {self._RELAYED}")
+        self.assertEqual(row["result"], "pass")
+        self.assertEqual(row["path_line"], self._SUMMARY,
+                         "the row filed a line the gate relayed instead of its own verdict")
+        self.assertNotIn("/tmp/", row["path_line"])
+        # The full basis is untouched — the relayed line is still in the evidence log.
+        log = (self.bundle / row["log"]).read_text(encoding="utf-8")
+        self.assertIn(self._RELAYED, log)
+
+    def test_the_last_declaration_wins(self) -> None:
+        """A wrapper declares per leg; its final word summarises the run."""
+        row = self._row(f"echo '{gates.EVIDENCE_MARKER} leg 1 of 2 green'; "
+                        f"echo relayed-noise; "
+                        f"echo '{gates.EVIDENCE_MARKER} both legs green'; "
+                        f"echo {self._RELAYED}")
+        self.assertEqual(row["path_line"], "both legs green")
+
+    def test_a_declaring_gate_that_exits_non_zero_still_fails(self) -> None:
+        """The evidence marker declares EVIDENCE, never a verdict — the #329 hazard
+        (a marker laundering a red into something that does not gate) must not reappear."""
+        row = self._row(f"echo '{gates.EVIDENCE_MARKER} C4 FAIL: green without the fix'; "
+                        f"echo {self._RELAYED}; exit 1")
+        self.assertEqual(row["result"], "fail")
+        self.assertEqual(row["path_line"], "C4 FAIL: green without the fix")
+        self.assertEqual(self.result["overall"], "fail")  # a gating red still gates
+
+    def test_a_mid_line_marker_is_relayed_text_not_a_declaration(self) -> None:
+        """Same rule as #428: a gate that quotes the marker (a child's log, this test file
+        read back) has not declared anything — the undeclared fallback applies."""
+        row = self._row(f"echo 'suite log: write \"{gates.EVIDENCE_MARKER} x\" to declare'; "
+                        f"echo real-last-line")
+        self.assertEqual(row["path_line"], "real-last-line")
+
+    def test_an_undeclared_gate_keeps_the_documented_fallback(self) -> None:
+        row = self._row("echo first; echo second-and-last")
+        self.assertEqual(row["path_line"], "second-and-last")
+        # … and a bare marker with no summary is no declaration, so it falls back too.
+        row = self._row(f"echo {gates.EVIDENCE_MARKER}; echo second-and-last")
+        self.assertEqual(row["path_line"], "second-and-last")
+
+    def test_unverifiable_declaration_still_wins_the_result(self) -> None:
+        """#428's marker decides the RESULT and its own reason; #402's decides the evidence
+        of a pass/fail row. One notion of "the gate said this", two channels."""
+        row = self._row(f"echo '{gates.UNVERIFIABLE_MARKER} test-only patch'; "
+                        f"echo '{gates.EVIDENCE_MARKER} summary'; echo {self._RELAYED}")
+        self.assertEqual(row["result"], "unverifiable")
+        self.assertEqual(row["path_line"], "test-only patch")
 
 
 if __name__ == "__main__":
