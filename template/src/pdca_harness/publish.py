@@ -528,35 +528,20 @@ def _existing_pr(pr_list_cmd: list[str], branch: str, owner: str) -> str:
 
 
 # ----------------------------------------------------------------------------
-def _clean_ref(raw: str) -> str:
-    """Isolate a git ref / repo spec from a brief field side, tolerating markdown
-    backticks and trailing prose. A ref / ``owner/repo`` has no spaces, so a
-    fully-backtick-quoted ref (``\\`main\\``` / ``\\`owner/repo\\```) wins, else the first
-    whitespace token; strip stray backticks and trailing sentence punctuation.
-
-    The backtick span is honored only when it is the START of the field (``re.match``),
-    NOT anywhere in it (#235): a base written ``main (feature branch \\`feat/x\\`)`` names
-    the base ``main`` — the backticked span is a parenthetical aside about a *different*
-    branch, and taking it silently resolves the wrong base (whose ref doesn't exist →
-    worktree isolation was falling back to mutating the operator's checkout in place)."""
-    raw = raw.strip()
-    m = re.match(r"`([^`]+)`", raw)               # a fully-backtick-quoted ref at the start wins
-    token = m.group(1) if m else (raw.split()[0] if raw.split() else "")
-    return token.strip("`").rstrip(",.;:")
-
-
 def _resolve_target(d: Path) -> tuple[str, str, str]:
     """``(repo_spec, base_branch, slug)`` from the brief, e.g.
     ``("example-org/example-repo", "main", "fix-the-thing")``.
 
-    The target field is commonly written with markdown backticks and/or trailing
-    prose after the branch; ``_clean_ref`` isolates the ref on each side of ``@`` so
-    that style doesn't corrupt the resolved checkout/base (see #25)."""
+    The target field is commonly written with markdown backticks and/or trailing prose
+    after the branch; ``brief.repo_target`` isolates the ref on each side of ``@`` so that
+    style doesn't corrupt the resolved checkout/base (see #25). That parse lives in
+    ``brief`` — with the other per-field accessors — rather than here (issue #387): the
+    same value has to reach a bundle-scoped gate command as ``$PDCA_BRIEF_BASE``, and a
+    second implementation of it is exactly what #235 and #262 were."""
     bp = d / "brief.md"
-    target = brief.field(bp, "repo + branch target", "repo + branch", "target")
-    repo_spec, _, base = target.partition("@")
+    repo_spec, base = brief.repo_target(bp)
     slug = brief.field(bp, "slug") or d.name.removeprefix("issue_")
-    return _clean_ref(repo_spec), _clean_ref(base), _slugify(slug)
+    return repo_spec, base, _slugify(slug)
 
 
 def _slugify(s: str) -> str:
@@ -852,7 +837,7 @@ def _host_ci_passes(cfg: Config, d: Path, repo: Path, fetch_remote: str,
     rows: list[dict] = []
     try:
         for chk in cfg.host_ci_checks:
-            rows.append(gates._run_one(chk, cwd=wt, bundle=d,
+            rows.append(gates._run_one(chk, cfg=cfg, cwd=wt, bundle=d,
                                        runner=cfg.gates_runner, worktree_path=wt))
     finally:
         worktree.overflow_remove(repo, wt)

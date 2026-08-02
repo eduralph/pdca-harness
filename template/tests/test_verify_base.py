@@ -1,4 +1,5 @@
-"""A wave>0 bundle-scoped gate is told the folded base via $PDCA_VERIFY_BASE (#273).
+"""A bundle-scoped gate is told exactly one base — $PDCA_BASE / $PDCA_VERIFY_BASE /
+$PDCA_BRIEF_BASE (#273, #387).
 
 Under the wave model, a dependent bundle's Do worktree is cut off the run-scoped integration
 branch (prior waves' folded patches). A per-fix verifier that resets to a base must reset to
@@ -7,6 +8,11 @@ apply" or measures red→green against a tree lacking its prereq. The driver exp
 base as `PDCA_VERIFY_BASE=origin/<integration-branch>` to bundle-scoped gate commands, read
 from the per-bundle `stack-base` marker the wave driver stamped before Check. A wave-0 bundle
 has no marker, so the var is absent and behaviour is unchanged.
+
+The ordinary wave-0 bundle then gets the LAST rung of the published ladder (#387):
+`PDCA_BRIEF_BASE=<base_remote>/<brief base branch>`, resolved by the driver with the same
+anchored parser publish uses — so a gate script never parses `brief.md` itself and the two
+implementations of that parse (#235, #262) cannot disagree.
 
 Real gate commands, no model/network. Run from the project root:
     PYTHONPATH=src python -m unittest discover -s tests
@@ -22,14 +28,18 @@ from pathlib import Path
 from pdca_harness import gates, publish
 from pdca_harness.config import Config, LeafConfig
 
-# A bundle-scoped gate whose cmd records BOTH exported bases into the bundle dir, so the test
-# reads back exactly what the driver set (`UNSET` when a var is absent). Both, because the
-# load-bearing property is that at most ONE of them is ever set (PR #282 review).
+# A bundle-scoped gate whose cmd records ALL THREE exported bases into the bundle dir, so the
+# test reads back exactly what the driver set (`UNSET` when a var is absent). All three,
+# because the load-bearing property is that exactly ONE of them is ever set (PR #282 review).
 _ECHO_BASES = {
     "id": "C4", "tier": "C4", "label": "record bases", "scope": "bundle", "gating": True,
-    "cmd": ('printf "%s\\n%s\\n" "${PDCA_BASE-UNSET}" "${PDCA_VERIFY_BASE-UNSET}" '
-            '> "$PDCA_BUNDLE/bases.txt"'),
+    "cmd": ('printf "%s\\n%s\\n%s\\n" "${PDCA_BASE-UNSET}" "${PDCA_VERIFY_BASE-UNSET}" '
+            '"${PDCA_BRIEF_BASE-UNSET}" > "$PDCA_BUNDLE/bases.txt"'),
 }
+
+# The C4 skeleton every rendered instance fills in: it publishes the ladder gate scripts
+# follow, so it is where an instance learns whether to read the export or parse the brief.
+_SKELETON = Path(__file__).resolve().parents[1] / "engine" / "scripts" / "run-verify.sh"
 
 
 def _stub_config(root: Path) -> Config:
@@ -65,10 +75,12 @@ class VerifyBaseExport(unittest.TestCase):
         return d
 
     def _recorded_bases(self, d: Path) -> dict[str, str]:
-        """Both bases as the gate command actually saw them."""
+        """All three bases as the gate command actually saw them."""
         gates.run_gates(d, self.cfg)
-        base, verify_base = (d / "bases.txt").read_text(encoding="utf-8").splitlines()[:2]
-        return {"PDCA_BASE": base, "PDCA_VERIFY_BASE": verify_base}
+        base, verify_base, brief_base = (
+            d / "bases.txt").read_text(encoding="utf-8").splitlines()[:3]
+        return {"PDCA_BASE": base, "PDCA_VERIFY_BASE": verify_base,
+                "PDCA_BRIEF_BASE": brief_base}
 
     def _recorded_base(self, d: Path) -> str:
         return self._recorded_bases(d)["PDCA_VERIFY_BASE"]
@@ -152,6 +164,119 @@ class VerifyBaseExport(unittest.TestCase):
         self.assertEqual(publish.read_stack_base(d), "")
         publish.write_stack_base(d, "pdca-integration/main")
         self.assertEqual(publish.read_stack_base(d), "pdca-integration/main")
+
+    # ------------------------------------------------------------------ issue #387
+    # The ladder's LAST rung: the brief's own base, resolved by the driver and exported
+    # as $PDCA_BRIEF_BASE, so no gate script ever parses `brief.md` for it.
+
+    def _brief(self, d: Path, *lines: str) -> None:
+        (d / "brief.md").write_text("\n".join(("- **Slug:** v", *lines)) + "\n",
+                                    encoding="utf-8")
+
+    def test_brief_base_is_exported_for_an_ordinary_bundle(self) -> None:
+        # No Onto, no wave marker — the case the driver used to leave with NO base at all,
+        # forcing the gate script to parse the brief itself.
+        d = self._bundle("BB")
+        self._brief(d, "- **Repo + branch target:** owner/repo @ main")
+        bases = self._recorded_bases(d)
+        self.assertEqual(bases["PDCA_BRIEF_BASE"], "origin/main")
+        self.assertEqual(bases["PDCA_BASE"], "UNSET")
+        self.assertEqual(bases["PDCA_VERIFY_BASE"], "UNSET")
+
+    def test_brief_base_ignores_a_parenthetical_backticked_aside(self) -> None:
+        """The anchored rule (#235/#262): a backtick span counts only when it STARTS the
+        field, so this brief's base is `main` — the aside names a DIFFERENT branch. The
+        pre-#235 unanchored rule (which every bash re-derivation carries) yields
+        `feat/x-slice`, and publish would then open the PR against a base the gate never
+        tested."""
+        d = self._bundle("PAREN")
+        self._brief(d, "- **Repo + branch target:** getwyrd/wyrd @ main "
+                       "(feature branch `feat/x-slice`)")
+        self.assertEqual(self._recorded_bases(d)["PDCA_BRIEF_BASE"], "origin/main")
+
+    def test_brief_base_takes_a_fully_backticked_ref(self) -> None:
+        d = self._bundle("TICK")
+        self._brief(d, "- **Repo + branch target:** owner/repo @ `feat/x`")
+        self.assertEqual(self._recorded_bases(d)["PDCA_BRIEF_BASE"], "origin/feat/x")
+
+    def test_brief_without_a_target_field_falls_back_to_the_default_branch(self) -> None:
+        d = self._bundle("NOTGT")                 # brief.md carries only a Slug
+        self.cfg.default_branch = "trunk"         # …so the project default decides
+        self.assertEqual(self._recorded_bases(d)["PDCA_BRIEF_BASE"], "origin/trunk")
+
+    def test_brief_base_is_a_remote_tracking_ref_on_the_configured_remote(self) -> None:
+        """Same shape as the other two rungs, on the remote publish checks out from (the
+        fork model, `[publisher] base_remote = "upstream"`). Fully qualified is the point:
+        a script composing `origin/$PDCA_BRIEF_BASE` over a bare branch is how the doubled
+        `origin/origin/main` in the report arose."""
+        d = self._bundle("FORK")
+        self.cfg.base_remote = "upstream"
+        self._brief(d, "- **Repo + branch target:** owner/repo @ main")
+        exported = self._recorded_bases(d)["PDCA_BRIEF_BASE"]
+        self.assertEqual(exported, "upstream/main")
+        self.assertEqual(exported.count("/"), 1)
+
+    def test_brief_base_agrees_with_the_base_publish_resolves(self) -> None:
+        """The invariant, stated directly: ONE parse. Whatever the field's style, the base
+        the gate is told and the base publish commits to are the same string — they come
+        from the same accessor, not from two implementations that drifted (#235 → #262)."""
+        for name, target in (("A", "getwyrd/wyrd @ main (feature branch `feat/x-slice`)"),
+                             ("B", "owner/repo @ `feat/x`"),
+                             ("C", "owner/repo @ release/2.1 — the maintenance line"),
+                             ("D", "owner/repo @ main.")):
+            with self.subTest(target=target):
+                d = self._bundle(f"AGREE{name}")
+                self._brief(d, f"- **Repo + branch target:** {target}")
+                _repo, base, _slug = publish._resolve_target(d)   # what publish will use
+                self.assertEqual(self._recorded_bases(d)["PDCA_BRIEF_BASE"],
+                                 f"{self.cfg.base_remote}/{base}")
+
+    def test_an_onto_branch_suppresses_the_brief_base(self) -> None:
+        # Rung 1 wins over rung 3: publish commits to the Onto branch, so that is the base
+        # the gate must test against — exporting the brief's base too would diverge them.
+        d = self._bundle("ONTOBB")
+        self._brief(d, "- **Onto branch:** origin/feature/x",
+                    "- **Repo + branch target:** owner/repo @ main")
+        bases = self._recorded_bases(d)
+        self.assertEqual(bases["PDCA_BASE"], "origin/feature/x")
+        self.assertEqual(bases["PDCA_BRIEF_BASE"], "UNSET")
+
+    def test_the_wave_base_suppresses_the_brief_base(self) -> None:
+        # Rung 2 wins over rung 3: a wave>0 dependent verifies against the folded branch.
+        d = self._bundle("WAVEBB")
+        self._brief(d, "- **Repo + branch target:** owner/repo @ main")
+        publish.write_stack_base(d, "pdca-integration/main")
+        bases = self._recorded_bases(d)
+        self.assertEqual(bases["PDCA_VERIFY_BASE"], "origin/pdca-integration/main")
+        self.assertEqual(bases["PDCA_BRIEF_BASE"], "UNSET")
+
+    def test_exactly_one_base_is_exported_for_every_bundle(self) -> None:
+        """The ladder is total AND mutually exclusive: every bundle-scoped gate invocation
+        gets one base — never two (the test base would diverge from the deploy base) and
+        never none (the gate would have to parse `brief.md` to find one)."""
+        for name, onto, marker in (("A", True, True), ("B", True, False),
+                                   ("C", False, True), ("D", False, False)):
+            with self.subTest(onto=onto, marker=marker):
+                d = self._bundle(f"ONE{name}")
+                lines = ["- **Repo + branch target:** owner/repo @ main"]
+                if onto:
+                    lines.insert(0, "- **Onto branch:** origin/feature/x")
+                self._brief(d, *lines)
+                if marker:
+                    publish.write_stack_base(d, "pdca-integration/main")
+                bases = self._recorded_bases(d)
+                set_bases = {k: v for k, v in bases.items() if v != "UNSET"}
+                self.assertEqual(len(set_bases), 1, f"not exactly one base: {bases}")
+
+    def test_the_c4_skeleton_names_the_export_as_the_last_rung(self) -> None:
+        """The guidance every rendered instance fills in must terminate the ladder in the
+        export, not in "parse the brief yourself" — that instruction is what made each
+        instance re-derive the anchored parse in bash."""
+        text = _SKELETON.read_text(encoding="utf-8")
+        self.assertIn("$PDCA_BRIEF_BASE", text)
+        self.assertIn("Resolve as: $PDCA_BASE > $PDCA_VERIFY_BASE > your own override "
+                      "> $PDCA_BRIEF_BASE", text)
+        self.assertNotIn("origin/<default>", text)   # the old, un-supplied last rungs
 
 
 if __name__ == "__main__":

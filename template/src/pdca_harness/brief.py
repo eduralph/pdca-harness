@@ -296,6 +296,54 @@ def onto_branch(brief_path: Path) -> tuple[str, str] | None:
     return (remote or "origin", branch)
 
 
+def _clean_ref(raw: str) -> str:
+    """Isolate a git ref / repo spec from a brief field side, tolerating markdown
+    backticks and trailing prose. A ref / ``owner/repo`` has no spaces, so a
+    fully-backtick-quoted ref (``\\`main\\``` / ``\\`owner/repo\\```) wins, else the first
+    whitespace token; strip stray backticks and trailing sentence punctuation.
+
+    The backtick span is honored only when it is the START of the field (``re.match``),
+    NOT anywhere in it (#235): a base written ``main (feature branch \\`feat/x\\`)`` names
+    the base ``main`` — the backticked span is a parenthetical aside about a *different*
+    branch, and taking it silently resolves the wrong base (whose ref doesn't exist →
+    worktree isolation was falling back to mutating the operator's checkout in place).
+
+    **THE one parse of the target field** (issue #387). It lived in ``publish`` while the
+    base-resolution ladder the harness publishes to gate scripts
+    (``engine/scripts/run-verify.sh``) ends in "the brief's ``Repo + branch target``" — a
+    rung reachable only from Python, so every instance re-derived this rule in bash and
+    inherited the pre-#235 unanchored version. It sits here, with the other per-field
+    accessors, so ``publish`` and ``gates`` (which exports the resolved value as
+    ``$PDCA_BRIEF_BASE``) share one implementation and no consumer re-derives it."""
+    raw = raw.strip()
+    m = re.match(r"`([^`]+)`", raw)               # a fully-backtick-quoted ref at the start wins
+    token = m.group(1) if m else (raw.split()[0] if raw.split() else "")
+    return token.strip("`").rstrip(",.;:")
+
+
+def repo_target(brief_path: Path) -> tuple[str, str]:
+    """``(repo_spec, base_branch)`` of the brief's ``- **Repo + branch target:**`` field,
+    e.g. ``("example-org/example-repo", "main")``; ``("", "")`` when the field is absent.
+
+    The field is commonly written with markdown backticks and/or trailing prose after the
+    branch (``owner/repo @ main (feature branch \\`feat/x\\`)``); the two sides are split on
+    ``@`` and each isolated by :func:`_clean_ref`, so that style cannot corrupt the resolved
+    checkout/base (see #25, #235, #262)."""
+    target = field(brief_path, "repo + branch target", "repo + branch", "target")
+    repo_spec, _, base = target.partition("@")
+    return _clean_ref(repo_spec), _clean_ref(base)
+
+
+def base_branch(brief_path: Path, default: str = "") -> str:
+    """The brief's OWN base branch — the ``@`` side of ``Repo + branch target`` — or
+    ``default`` (the project's default branch) when the brief names none (issue #387).
+
+    The value publish will commit against, so a bundle-scoped verify gate that must
+    establish red→green on the deploy base can be *told* it (``$PDCA_BRIEF_BASE``,
+    ``gates._run_one``) instead of parsing ``brief.md`` itself."""
+    return repo_target(brief_path)[1] or default
+
+
 def _id_list(raw: str) -> list[str]:
     """Issue ids out of the **leading id-list** of a field value, normalised to bare ids.
 

@@ -12,9 +12,11 @@
 # The driver exports $PDCA_BUNDLE = the bundle dir (results/issue_<id>/), which
 # holds patch.diff and the brief that names the test. It also exports, when set:
 #   - $PDCA_WORKTREE   — the tree Do edited (worktree isolation, #94); run/reset here.
-#   - $PDCA_BASE / $PDCA_VERIFY_BASE — the base to reset to before applying patch.diff.
-#       The driver sets AT MOST ONE of these: the test base must never diverge from the base
-#       publish will commit to. Prefer whichever is set.
+#   - $PDCA_BASE / $PDCA_VERIFY_BASE / $PDCA_BRIEF_BASE — the base to reset to before
+#       applying patch.diff. The driver sets EXACTLY ONE of these for every bundle-scoped
+#       gate: the test base must never diverge from the base publish will commit to. Each is
+#       already a fully-qualified remote-tracking ref (`<remote>/<branch>`) — use it as-is,
+#       never `origin/$VAR` (that doubles the remote).
 #         * $PDCA_BASE (issue #54) — the brief's `Onto branch`. Publish appends the fix as a
 #           commit to that existing PR head, so the gate must prove red->green on IT.
 #         * $PDCA_VERIFY_BASE (issue #273) — the wave's folded integration branch
@@ -22,9 +24,14 @@
 #           dependent verifies against base+prereqs. Resetting to the brief's origin base
 #           instead would false-fail "patch does not apply — stale" for a dependent that
 #           shares a file with its prereq, or measure red->green against a tree LACKING it.
-#       Resolve as: $PDCA_BASE > $PDCA_VERIFY_BASE > your own override > the brief's
-#       `Repo + branch target` > origin/<default>. Neither is set for an ordinary wave-0
-#       single bundle, where the brief's base is the correct one.
+#         * $PDCA_BRIEF_BASE (issue #387) — the ordinary case: the brief's own
+#           `Repo + branch target` base (or the project default branch when it names none),
+#           resolved by the driver with the SAME parser publish uses. Do NOT re-derive it by
+#           parsing brief.md in shell: that parse is subtle (a backticked ref counts only at
+#           the START of the field, so `main (feature branch \`feat/x\`)` means `main`) and
+#           a re-derivation drifts from the base publish commits to — the divergence #235
+#           and #262 fixed in Python and this export removes from shell.
+#       Resolve as: $PDCA_BASE > $PDCA_VERIFY_BASE > your own override > $PDCA_BRIEF_BASE.
 # The contract this script must enforce, exiting 0 iff BOTH hold:
 #   - WITHOUT the fix applied, the bundle's test FAILS (red) — proves the repro.
 #   - WITH the fix (patch.diff) applied, the bundle's test PASSES (green).
