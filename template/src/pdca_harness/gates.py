@@ -16,10 +16,13 @@ label set (subset = AND). The bundle is classified from its brief: a primary axi
 (``[gates.target_flags]``); unset ⇒ no filtering. A check passes iff its ``cmd``
 exits 0, fails on any other exit, and may instead declare itself **unverifiable**
 when it genuinely cannot run its mechanical check (issue #46): exit
-:data:`UNVERIFIABLE_RC` (77, the automake SKIP convention) **or** print a line
-containing :data:`UNVERIFIABLE_MARKER` (``PDCA-UNVERIFIABLE: <reason>``) **while exiting
-0 or 77** — the marker lets a gate that did NOT fail defer to the human, and is ignored on
-any other exit code, because a gate that failed has failed whatever it printed (#329). When
+:data:`UNVERIFIABLE_RC` (77, the automake SKIP convention) **or** *declare* it by printing
+a line that STARTS with :data:`UNVERIFIABLE_MARKER` (``PDCA-UNVERIFIABLE: <reason>``;
+leading whitespace ignored) **while exiting 0 or 77** — the marker lets a gate that did NOT
+fail defer to the human. It counts only on a non-failing exit, because a gate that failed
+has failed whatever it printed (#329), and only at the start of a line, because a mid-line
+occurrence is text the gate merely RELAYED (a child's log line, a quoted source comment),
+not a verdict the gate declared (#428). When
 ``[[gates.checks]]`` is empty the driver falls back to all-PASS stub rows, so the
 offline vertical slice still runs.
 
@@ -593,12 +596,30 @@ def _write_gate_log(log_dir: Path, chk: dict, *, cmd: str, cwd: Path,
     return f"{GATE_LOGS_DIR}/{name}", None
 
 
+def _declared_unverifiable(output: str) -> str | None:
+    """The gate's OWN ``unverifiable`` declaration in ``output`` — its reason — or ``None``.
+
+    A **declaration** is a line whose first text is :data:`UNVERIFIABLE_MARKER` (leading
+    whitespace ignored) — how every documented emitter writes it: the shipped advisory check
+    (``scripts/checks/test_exercises_production.py``) prints ``f"{UNVERIFIABLE} {reason}"``,
+    and the gate wrappers ``echo`` the marker at the start of the line. The reason is the
+    text after the marker, possibly empty.
+
+    A mid-line occurrence is NOT a declaration: it is text the gate merely **relayed** from
+    something it ran (#428) — see :func:`_classify`."""
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(UNVERIFIABLE_MARKER):
+            return stripped[len(UNVERIFIABLE_MARKER):].strip()
+    return None
+
+
 def _classify(rc: int, output: str) -> tuple[str, list[str]]:
     """Map a gate command's exit code + output to (result, evidence-lines).
 
     ``unverifiable`` (issue #46) lets a gate that did NOT fail defer to the human: it may
-    exit 0 and still print the marker. The text after the marker is the reason; otherwise the
-    evidence is the command's last output line (as for pass/fail).
+    exit 0 and still declare the marker. The text after the marker is the reason; otherwise
+    the evidence is the command's last output line (as for pass/fail).
 
     The marker is honoured only for an exit code that is not a failure — 0, or the dedicated
     ``UNVERIFIABLE_RC``. A gate that exits non-zero FAILED, whatever its output happens to
@@ -610,12 +631,21 @@ def _classify(rc: int, output: str) -> tuple[str, list[str]]:
     §6 in the path: the between-waves integration re-gate (``flow``) would not stop and later
     waves would build on a red tip, ``revalidate`` would not count it as a PASS→FAIL
     regression, and ``cli`` would exit 0. A gate with no possible verdict has its own channel;
-    it must use it rather than piggy-backing on a failure."""
+    it must use it rather than piggy-backing on a failure.
+
+    The same reason narrows *whose* marker counts (#428, the exit-0 half of #329). The
+    verdict is the GATE's to declare, so only a line the gate started with the marker is one
+    (:func:`_declared_unverifiable`); an occurrence anywhere else on a line is text the gate
+    **relayed** from what it ran — a child's log, an assertion diff, a source comment a test
+    read back — and it used to convert the gate's real verdict. It is structural for any project
+    whose tests exercise this machinery: a green C4 whose captured output quoted the
+    documented contract line (``... Emit `PDCA-UNVERIFIABLE: <reason>` and exit 77 ...``) was
+    recorded ``unverifiable``, so a real green stopped counting toward ``overall`` and a real
+    red would equally have been laundered into "defer to the human"."""
     if rc in (0, UNVERIFIABLE_RC):
-        for line in output.splitlines():
-            if UNVERIFIABLE_MARKER in line:
-                reason = line.split(UNVERIFIABLE_MARKER, 1)[1].strip()
-                return "unverifiable", [reason or "gate declared itself unverifiable"]
+        reason = _declared_unverifiable(output)
+        if reason is not None:
+            return "unverifiable", [reason or "gate declared itself unverifiable"]
     last = output.strip().splitlines()[-1:] or [""]
     if rc == UNVERIFIABLE_RC:
         return "unverifiable", [last[0] or f"gate exited unverifiable (rc {UNVERIFIABLE_RC})"]
