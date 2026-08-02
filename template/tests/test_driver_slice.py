@@ -412,6 +412,124 @@ class AdvisoryReviewResilience(unittest.TestCase):
         self.assertIn("NOT COMPLETED",
                       (self.d / "check-review.md").read_text(encoding="utf-8"))
 
+    # -- #403: the round's frozen gate evidence must resolve from the sandbox ----------
+
+    _EVIDENCE_GATE = {"id": "T3-log", "tier": "T3", "label": "runtime", "scope": "bundle",
+                      "gating": True,
+                      "cmd": "echo evidence-first-line; echo evidence-last-line"}
+
+    def _sandbox_probe(self, seen: dict, out_name: str = "check-review.md"):
+        """A fake leaf command that records what the sandbox cwd actually holds."""
+        def capture(leaf, workdir, prompt, **k):
+            wd = Path(workdir)
+            rows = json.loads((wd / "check-gates.json").read_text(encoding="utf-8"))["rows"]
+            seen["logged_rows"] = [r for r in rows if r.get("log")]
+            seen["resolved"] = {r["log"]: (wd / r["log"]).is_file() for r in seen["logged_rows"]}
+            seen["texts"] = {r["log"]: (wd / r["log"]).read_text(encoding="utf-8")
+                             for r in seen["logged_rows"] if (wd / r["log"]).is_file()}
+            seen["build_notes"] = (wd / "build-notes.md").exists()
+            (wd / out_name).write_text("ok\n", encoding="utf-8")
+        return capture
+
+    def _real_gate_round(self) -> None:
+        """Run a REAL bundle-scoped gate so check-gates.json + gate-logs/ are the
+        production artifacts (gates.run_gates → gates.py:157/544), not hand-written."""
+        (self.d / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
+        self.cfg.gates_checks = [self._EVIDENCE_GATE]
+        gates.run_gates(self.d, self.cfg)
+        (self.d / "build-notes.md").write_text("builder framing — must not leak\n",
+                                               encoding="utf-8")
+        self.assertTrue((self.d / state.GATE_LOGS_DIR / "T3-log.log").exists())
+
+    def test_sandbox_seeds_gate_logs_so_every_row_log_resolves(self) -> None:
+        # #403: each check-gates.json row carries `log: gate-logs/<rule_id>.log` (the full
+        # captured output, gates.py:544) — the one artifact that lets the reviewer
+        # adjudicate a row whose oracle it cannot re-run. Seeding copied file NAMES only,
+        # so the row referenced a path that did not resolve in the leaf's cwd.
+        self._real_gate_round()
+        seen: dict = {}
+        orig = leaves._invoke
+        leaves._invoke = self._sandbox_probe(seen)
+        try:
+            leaves._run_review_sandboxed(self.d, self.cfg)
+        finally:
+            leaves._invoke = orig
+        self.assertTrue(seen.get("logged_rows"), "no row carried a `log` key to resolve")
+        # EVERY path a frozen row references resolves inside the leaf's cwd…
+        self.assertTrue(all(seen["resolved"].values()), seen.get("resolved"))
+        # …and it is the real evidence: header + verbatim output, not an empty stand-in.
+        text = seen["texts"]["gate-logs/T3-log.log"]
+        self.assertIn("# cmd: ", text)
+        self.assertIn("evidence-first-line\nevidence-last-line\n", text)
+        # …while independence still holds: the builder's rationale stays out.
+        self.assertFalse(seen.get("build_notes"))
+
+    def test_advisory_sandbox_seeds_gate_logs_too(self) -> None:
+        # Both seeding call sites stay in step (leaves.py:1890/2205): the advisory leaves
+        # share the reviewer's sandbox contract, so they get the same evidence.
+        self._real_gate_round()
+        seen: dict = {}
+        orig = leaves._invoke
+        leaves._invoke = self._sandbox_probe(seen, out_name="check-advisory-lens.md")
+        try:
+            leaves._run_advisory_sandboxed(
+                self.d, self.cfg, LeafConfig(mode="command", family="codex"),
+                {"id": "lens"}, "lens")
+        finally:
+            leaves._invoke = orig
+        self.assertTrue(seen.get("logged_rows"))
+        self.assertTrue(all(seen["resolved"].values()), seen.get("resolved"))
+        self.assertFalse(seen.get("build_notes"))
+
+    def test_gate_log_seed_failure_does_not_abort_check(self) -> None:
+        # Best-effort, exactly like the agents seed (#161): an unreadable/failing copy
+        # degrades to a no-op + the §6 placeholder — an OSError must never abort Check.
+        self._real_gate_round()
+        orig = leaves._invoke
+        leaves._invoke = lambda *a, **k: None  # returns, writes nothing → placeholder
+        try:
+            with mock.patch.object(leaves.shutil, "copytree",
+                                   side_effect=OSError("unreadable gate log")):
+                with redirect_stderr(io.StringIO()):
+                    leaves._run_review_sandboxed(self.d, self.cfg)  # must NOT raise
+        finally:
+            leaves._invoke = orig
+        self.assertIn("NOT COMPLETED",
+                      (self.d / "check-review.md").read_text(encoding="utf-8"))
+
+    def test_sandbox_without_gate_logs_is_a_no_op(self) -> None:
+        # An older bundle / a stub gate round has no gate-logs/: the seed is a no-op and
+        # the leaf runs exactly as before (no crash, no empty directory invented).
+        (self.d / "patch.diff").write_text("x\n", encoding="utf-8")
+        (self.d / "check-gates.json").write_text('{"rows": []}\n', encoding="utf-8")
+        seen: dict = {}
+        orig = leaves._invoke
+        leaves._invoke = self._sandbox_probe(seen)
+        try:
+            leaves._run_review_sandboxed(self.d, self.cfg)
+        finally:
+            leaves._invoke = orig
+        self.assertEqual(seen.get("logged_rows"), [])
+        self.assertIn("ok", (self.d / "check-review.md").read_text(encoding="utf-8"))
+
+    def test_reviewer_contract_routes_unrepeatable_gate_to_its_log(self) -> None:
+        # The contract text must stop being false about the sandbox contents, and must
+        # send a row it cannot re-run to gate-logs/ instead of an automatic escalation —
+        # the driver-side prompt and the vendored role body saying the same thing.
+        prompt = leaves._REVIEW_PROMPT
+        self.assertIn("gate-logs/", prompt)
+        self.assertNotIn("You have ONLY patch.diff, brief.md and check-gates.json", prompt)
+        self.assertIn("gate-logs/", leaves._advisory_prompt({}, "lens"))
+        agents = Path(__file__).resolve().parents[1] / "agents"
+        # The role body ships as `.md.jinja` in the template repo and as the rendered
+        # `.md` in an instance — assert on whichever this checkout carries.
+        role_path = next((p for p in (agents / "reviewer.md.jinja", agents / "reviewer.md")
+                          if p.exists()), None)
+        self.assertIsNotNone(role_path, f"no reviewer role body under {agents}")
+        role = role_path.read_text(encoding="utf-8")
+        self.assertIn("gate-logs/", role)
+        self.assertIn("$PDCA_WORKTREE`-scoped by design", role)
+
     def _exempt(self, *commands: str) -> None:
         """Grant a leaf sandbox exemption, on a family that can actually be BOUNDED.
 
