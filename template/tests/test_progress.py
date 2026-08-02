@@ -10,9 +10,12 @@ with its own runner probe. Run from the project root:
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
+import signal
 import sys
 import tempfile
 import time
@@ -233,6 +236,129 @@ class HeartbeatTimeout(unittest.TestCase):
             [sys.executable, "-c", "print('ok')"], capture=True, timeout=30)
         self.assertEqual(rc, 0)  # a bound that never expires changes nothing
         self.assertIn("ok", out)
+
+
+@unittest.skipUnless(os.name == "posix", "sessionization and the sweep are POSIX-only")
+class StragglerSweep(unittest.TestCase):
+    """Normal-exit straggler sweep + sessionization breadth (issue #372).
+
+    ``proc.wait`` returning only proves the DIRECT child exited; under shell=True
+    (every gate) that child is just a shell, so work it backgrounded used to
+    survive the call — measured: one leaked test process burned a core for 21h
+    and a straggler still holds ports/locks/fixtures when the next cycle's gates
+    run in the same lane worktree. Every child whose stdio the harness owns
+    (capture / stream_json) or that is bounded is sessionized, and after a normal
+    exit surviving group members are swept — BEFORE the capture streams close (a
+    straggler holding the pipe otherwise keeps the drain thread blocked, and the
+    close waits on that reader). No survivors ⇒ no sweep, no note; an
+    interactive-shaped call (no capture, no stream, no bound) is untouched.
+    """
+
+    @staticmethod
+    def _alive(pid: int) -> bool:
+        """Liveness, ZOMBIE-AWARE: reads the state field of /proc/<pid>/stat and
+        counts ``Z`` (unreaped under a non-reaping PID 1, e.g. a container where
+        the test runner is init) as gone — a bare ``kill(pid, 0)`` would read
+        that zombie as alive forever. Falls back to the signal-0 probe only
+        where /proc does not exist (non-Linux POSIX)."""
+        if Path("/proc").is_dir():
+            try:
+                stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii",
+                                                           errors="replace")
+            except OSError:
+                return False  # no /proc entry → gone
+            # `pid (comm) state …` — comm may hold spaces, split after the `)`.
+            return stat.rpartition(")")[2].split()[0] not in ("Z", "X")
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def _gone(self, pid: int, within: float = 8.0) -> bool:
+        """True once ``pid`` is dead/zombie (polled — signal delivery is async)."""
+        end = time.monotonic() + within
+        while time.monotonic() < end:
+            if not self._alive(pid):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _straggler_pid(self, out: str) -> int:
+        """The backgrounded child's pid the shell echoed ($!), mopped on exit so
+        a red run cannot leak the very straggler this test is about."""
+        pids = [int(tok) for tok in out.split() if tok.isdigit()]
+        self.assertEqual(len(pids), 1, f"expected the straggler pid in output: {out!r}")
+
+        def mop() -> None:
+            with contextlib.suppress(OSError):
+                os.kill(pids[0], signal.SIGKILL)
+        self.addCleanup(mop)
+        return pids[0]
+
+    def test_captured_shell_straggler_is_swept_after_normal_exit(self) -> None:
+        # The defect: the shell exits normally, its backgrounded child survives.
+        # The straggler's stdio is detached to /dev/null so a RED run (no sweep)
+        # fails in this test's own bounded poll instead of hanging on the pipe.
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            rc, out, _ = progress.run_with_heartbeat(
+                "sleep 300 >/dev/null 2>&1 & echo $!", shell=True, capture=True)
+        pid = self._straggler_pid(out)
+        self.assertEqual(rc, 0)  # the direct child exited normally
+        self.assertTrue(self._gone(pid), f"straggler {pid} survived the normal exit")
+        notes = [ln for ln in buf.getvalue().splitlines() if "swept" in ln]
+        self.assertEqual(len(notes), 1, f"expected ONE sweep note: {buf.getvalue()!r}")
+        self.assertIn("sleep 300", notes[0])  # the note names the swept command
+
+    def test_sweep_precedes_the_capture_close_no_drain_hang(self) -> None:
+        # Kill-then-close order: this straggler INHERITS the capture pipe, so
+        # unswept it keeps the drain thread blocked mid-read (the write end lives
+        # on) and the reader join + stream close wait on it — the measured
+        # ~5-minute hangs. Swept before the close, the last writer dies, the
+        # drain sees EOF, and the call returns promptly.
+        buf = io.StringIO()
+        start = time.monotonic()
+        with contextlib.redirect_stderr(buf):
+            rc, out, _ = progress.run_with_heartbeat(
+                "sleep 10 & echo $!", shell=True, capture=True)
+        elapsed = time.monotonic() - start
+        pid = self._straggler_pid(out)
+        self.assertEqual(rc, 0)
+        # Unswept, the return cannot beat the 5s reader join (then the close blocks
+        # until the sleep expires); swept first, it is back well under the bound.
+        self.assertLess(elapsed, 4.0, "call blocked on the straggler-held pipe")
+        self.assertTrue(self._gone(pid), f"straggler {pid} survived the normal exit")
+
+    def test_no_survivors_no_sweep_no_note(self) -> None:
+        # A child that exits leaving nothing behind: no sweep, no note — the
+        # clean common case stays byte-identical on stderr.
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            rc, out, _ = progress.run_with_heartbeat("echo done", shell=True,
+                                                     capture=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("done", out)
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_captured_and_streamed_children_are_sessionized(self) -> None:
+        # A child whose stdio the harness owns is its own session leader
+        # (pgid == pid) — the group id is the only handle that still reaches a
+        # shell's spawn after the shell itself exits.
+        prog = "import os, sys; sys.exit(0 if os.getpid() == os.getpgrp() else 1)"
+        rc, _, _ = progress.run_with_heartbeat([sys.executable, "-c", prog],
+                                               capture=True)
+        self.assertEqual(rc, 0, "capture=True must sessionize the child")
+        rc, _, _ = progress.run_with_heartbeat([sys.executable, "-c", prog],
+                                               stream_json=True)
+        self.assertEqual(rc, 0, "stream_json=True must sessionize the child")
+
+    def test_interactive_shaped_call_is_not_sessionized(self) -> None:
+        # No capture, no stream, no bound — the interactive leaves keep the
+        # terminal's process group exactly as today.
+        prog = "import os, sys; sys.exit(0 if os.getpid() != os.getpgrp() else 1)"
+        rc, _, _ = progress.run_with_heartbeat([sys.executable, "-c", prog])
+        self.assertEqual(rc, 0, "an interactive-shaped call must NOT be sessionized")
 
 
 # A real bundle-scoped gating gate row; only cmd/timeout keys vary per test (#368).
