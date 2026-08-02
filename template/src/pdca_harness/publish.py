@@ -32,6 +32,9 @@ import sys
 from pathlib import Path
 
 from . import brief, gates, leaves, progress, state, worktree
+# Aliased: `publish()` builds a local `record = {...}` (its publish.json payload,
+# below) that would shadow the module name at the #317 call-in.
+from . import record as record_mod
 from .config import Config
 
 COMMIT_MSG = "commit-msg.txt"
@@ -386,6 +389,9 @@ def publish(
         print("  ⚠ id_pending: contributed without a tracker id — add the trailer "
               "(Fixes #N) and re-run T4 before marking the PR ready.")
     print("  STOP: review CI, then mark it ready / merge yourself — the human's step.")
+    # Recording call-in (#317): strictly AFTER the publish.json write above — never
+    # mid-publish — and best-effort ([records] mode "off", the default, is a no-op).
+    record_mod.after_publish(cfg)
     return 0
 
 
@@ -492,6 +498,9 @@ def _publish_stacked(
         print("  ⚠ id_pending: contributed without a tracker id — add the trailer "
               "(Fixes #N) and re-run T4 before marking the PR ready.")
     print("  STOP: review CI, then mark it ready / merge yourself — the human's step.")
+    # Recording call-in (#317): same contract as the new-PR path — strictly after
+    # this path's publish.json write, best-effort, no-op under mode "off".
+    record_mod.after_publish(cfg)
     return 0
 
 

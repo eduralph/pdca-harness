@@ -30,6 +30,14 @@ RESOLVED = "RESOLVED"  # briefless tracker bundle; notes.json records a terminal
 # States where the driver does nothing (human work, or done).
 HALTED = {UNPLANNED, AWAITING_SIGNOFF, COMPLETE, DISCONTINUED, RESOLVED}
 
+# Terminal-FINISHED states (issue #317): the cycle is over and the bundle's files are
+# final — accepted (COMPLETE), deliberately abandoned (DISCONTINUED), or settled in the
+# tracker outside a cycle (RESOLVED). Deliberately NOT the whole HALTED set: UNPLANNED
+# and AWAITING_SIGNOFF are halted FOR a human — work is pending and the files still
+# change. Defined here, in the one module that owns the state names, so a consumer
+# (`record` selects on this) never re-enumerates states and drifts.
+TERMINAL = frozenset({COMPLETE, DISCONTINUED, RESOLVED})
+
 # Close-disposition fast path (issue #60): a bundle whose Plan concluded a close /
 # no-fix outcome never builds a patch. Its close marker is the Do artifact — the
 # symmetric stand-in for patch.diff — so the state machine reads it as "past Do".

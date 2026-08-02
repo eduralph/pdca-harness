@@ -345,6 +345,20 @@ base_remote = "{{ 'upstream' if contribution_model == 'fork' else 'origin' }}"
 [publisher.checkouts]
 # "<org/repo>" = "../<checkout-dir>"   # only the exceptions to the sibling default
 
+# Result-bundle recording (issue #317) — `{{ cli_name }} record [<ids>…]` commits the
+# bundles whose cycle is OVER (state COMPLETE / DISCONTINUED / RESOLVED; never a bundle
+# in motion or one halted for a human) to THIS instance repo as one batch commit, so a
+# bundle's provenance stops living on one machine only. Publish also triggers it,
+# strictly after its publish.json write. Off by default — enable it only if this
+# instance versions its bundle_root (results/).
+# [records]
+# mode = "commit"            # off (default) | commit | pr
+# branch = "records/{date}"                                # pr mode: the pushed branch
+# subject = "chore(records): record {n} result bundle(s)"  # {n}, {ids}, {date}
+# issue = "ask"              # pr mode: the tracker issue the batch PR references —
+#                            # "ask" prompts when interactive (a headless run records
+#                            # the commit only, and says so), or a literal number
+
 # The six model leaves (docs 03 §Implementation substrate). mode = "stub" runs
 # the offline placeholders (no model/TTY) so the driver works without a model;
 # mode = "command" runs `argv` as a subprocess with the leaf's prompt. `interactive
