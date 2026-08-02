@@ -1211,12 +1211,61 @@ def select_builder(d: Path, cfg: Config, n: int) -> LeafConfig:
     return builder
 
 
-def _record_loop_attempt(d: Path, n: int, builder: LeafConfig) -> None:
+def _argv_pinned(argv: list[str], token: str) -> str | None:
+    """The value ``token`` is pinned to in ``argv``, or ``None`` when ``token`` is absent.
+
+    Both spellings a CLI accepts: the separate pair (``["--model", "opus"]``) and the
+    ``=``-joined form (``"--model=opus"``, ``"model_reasoning_effort=low"``). The match
+    on ``token`` is EXACT — equality, or the ``token=`` prefix — never a substring: a
+    family whose model flag is ``-m`` (codex, families.py:103) must not read its model
+    out of an unrelated ``--model-info``-style argument. ``_mapped_argv``'s own dedup
+    probe is deliberately looser (``probe in a``, :161); being strict here only ever
+    costs a fallback to the leaf's key, which is the safe direction to be wrong in."""
+    for i, a in enumerate(argv):
+        if a == token:
+            return argv[i + 1] if i + 1 < len(argv) else ""
+        if a.startswith(token + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
+def _effective_tier(leaf: LeafConfig, profile: families.FamilyProfile) -> tuple[str, str]:
+    """The (model, effort) that will ACTUALLY run ``leaf`` — for telemetry (issue #356).
+
+    Same precedence as :func:`_mapped_argv`, which is what decides what actually reaches
+    the CLI: "explicit argv is the escape hatch and always wins", so a flag already in
+    ``argv`` pins the value and the leaf's ``model`` / ``effort`` key is never added.
+    Reading those keys instead would name the tier that was *requested* — a leaf with
+    opus/high whose argv pins sonnet/low **runs** sonnet/low, and the sidecar exists to
+    calibrate what ran. Neither set ⇒ ``""``: the CLI picks its own default and the
+    harness must not guess it."""
+    model = _argv_pinned(leaf.argv, profile.model_flag) if profile.model_flag else None
+    effort = None
+    if profile.effort_argv:
+        rendered = [a.format(effort=leaf.effort) for a in profile.effort_argv]
+        # The probe _mapped_argv derives (:161), so the two agree on which flag the
+        # family's effort mapping owns: a "--effort"-style flag, or the key of a
+        # "-c key=value" pair. Independent of the effort VALUE, so it resolves an
+        # argv-pinned effort even when the leaf sets no `effort` key at all.
+        probe = rendered[0] if rendered[0].startswith("--") else rendered[-1].split("=", 1)[0]
+        effort = _argv_pinned(leaf.argv, probe)
+    return (leaf.model if model is None else model,
+            leaf.effort if effort is None else effort)
+
+
+def _record_loop_attempt(d: Path, n: int, builder: LeafConfig, cfg: Config) -> None:
     """Append this Do attempt to ``loop-telemetry.json`` (issue #135) so iterations-to-pass
     and which backend ran each pass are visible. Loop cost ≈ plan + iterations×review (an
     iterate re-runs builder *and* the frontier reviewer), so the attempt count is the
     go/no-go metric for adopting a cheaper local executor. The file persists across
-    iterations (it is not archived), so it accumulates. Best-effort: never break Do."""
+    iterations (it is not archived), so it accumulates. Best-effort: never break Do.
+
+    ``builder`` / ``family`` alone cannot answer that question for a ladder that climbs
+    within ONE vendor (sonnet/high → opus/xhigh → opus/max — the shape the shipped
+    ``[[leaves.builder_escalation]]`` example suggests): every tier writes the identical
+    ``claude``/``claude`` pair. So the attempt also records the EFFECTIVE model and effort
+    — what will run, after argv precedence, not what was configured (:_effective_tier).
+    ``n`` / ``builder`` / ``family`` keep their shape and meaning (#200 reads ``family``)."""
     path = d / "loop-telemetry.json"
     data: dict = {"attempts": []}
     if path.exists():
@@ -1230,7 +1279,12 @@ def _record_loop_attempt(d: Path, n: int, builder: LeafConfig) -> None:
         if isinstance(loaded, dict) and isinstance(loaded.get("attempts"), list):
             data = loaded
     label = builder.argv[0] if builder.argv else builder.mode
-    data["attempts"].append({"n": n, "builder": label, "family": builder.family})
+    try:
+        model, effort = _effective_tier(builder, cfg.profile(builder))
+    except Exception:  # noqa: BLE001 — e.g. a [families.*] effort_argv carrying an
+        model, effort = "", ""  # unknown placeholder: record nothing, never break Do
+    data["attempts"].append({"n": n, "builder": label, "family": builder.family,
+                             "model": model, "effort": effort})
     data["iterations_to_pass"] = len(data["attempts"])
     try:
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -1283,7 +1337,7 @@ def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None
     Every failure here — setup or invocation — is captured to `build.error.log` by the
     caller and re-raised, so `flow._isolate` still contains it and drops just this bundle.
     """
-    _record_loop_attempt(d, n, builder)
+    _record_loop_attempt(d, n, builder, cfg)
     # Isolate Do in a per-cycle worktree off the base (issue #94) so the host's
     # primary checkout is never mutated. Best-effort for the cases isolation can't apply
     # (None ⇒ edit in place); a real checkout whose base ref won't resolve RAISES (#235).
