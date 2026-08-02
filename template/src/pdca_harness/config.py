@@ -394,6 +394,22 @@ class Config:
     # taking a `copier update` gains no model call it did not ask for.
     # ``[triage].model_cmd``.
     triage_model_cmd: str = ""
+    # Result-bundle recording ([records], issue #317): `pdca record` commits the bundles
+    # whose state is terminal-finished (state.TERMINAL — the cycle is over) to the
+    # instance repo as ONE batch commit; mode = "pr" additionally branches, pushes and
+    # opens ONE draft PR for the batch. "off" (the default) disables the whole feature —
+    # no new behaviour anywhere, including the post-publish call-in and instances that
+    # do not version results/ at all.
+    records_mode: str = "off"
+    # The records branch (pr mode) — a `.format(date=)` pattern, like the publisher's
+    # branch patterns.
+    records_branch: str = "records/{date}"
+    # The batch commit's conventional subject — `.format(n=, ids=, date=)`.
+    records_subject: str = "chore(records): record {n} result bundle(s)"
+    # The tracker issue a records PR references (one-issue-per-PR instance rules):
+    # "" = none, "ask" = prompt when interactive (a headless run falls back to
+    # commit-only and reports), or a literal issue number.
+    records_issue: str = ""
 
     def profile(self, leaf: LeafConfig):
         """The resolved :class:`~pdca_harness.families.FamilyProfile` for ``leaf``."""
@@ -637,6 +653,17 @@ class Config:
                   "`dependency_halt = true`, unquoted.", file=sys.stderr)
         dependency_halt = _halt is True
 
+        # Result-bundle recording ([records], issue #317). An unknown mode fails CLOSED
+        # to "off", loudly — the fail-safe direction here is "invent no git commits",
+        # the opposite call from sweep_worktrees' "still sweeps" (#297): recording
+        # writes repo history, sweeping reclaims scratch.
+        records_cfg = data.get("records", {})
+        records_mode = str(records_cfg.get("mode", "off")).strip().lower()
+        if records_mode not in ("off", "commit", "pr"):
+            print(f"config: unknown [records] mode '{records_mode}' — expected "
+                  "off | commit | pr; using 'off' (recording disabled)", file=sys.stderr)
+            records_mode = "off"
+
         return cls(
             root=root,
             bundle_root=bundle_root,
@@ -708,6 +735,11 @@ class Config:
                       for k, v in data.get("families", {}).items()},
             doctor_checks=list(data.get("doctor", {}).get("checks", [])),
             triage_model_cmd=str(data.get("triage", {}).get("model_cmd", "") or ""),
+            records_mode=records_mode,
+            records_branch=str(records_cfg.get("branch", "records/{date}")),
+            records_subject=str(records_cfg.get(
+                "subject", "chore(records): record {n} result bundle(s)")),
+            records_issue=str(records_cfg.get("issue", "") or ""),
         )
 
 

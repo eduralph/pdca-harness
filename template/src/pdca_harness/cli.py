@@ -20,8 +20,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, leaves, manual_test,
-               merged, publish, queue, registry, revalidate, revert, signoff, sizing, sources,
-               split, state, sweep, triage, waves, worktree)
+               merged, publish, queue, record, registry, revalidate, revert, signoff, sizing,
+               sources, split, state, sweep, triage, waves, worktree)
 from .config import Config
 
 
@@ -389,6 +389,21 @@ def main(argv: list[str] | None = None) -> int:
                            help="no tracker id yet: relax T4 to a flag, record id_pending (vs a magic #0000)")
     p_publish.add_argument("--by", default="", help="who published (recorded in publish.json)")
 
+    # Result-bundle recording (issue #317): commit terminal-finished bundles to the
+    # instance repo (batch-by-default: one commit / one PR per invocation). Selection
+    # is state.state ∈ state.TERMINAL — never a bundle in motion or one halted for a
+    # human. Gated on [records] mode ("off" default: the verb refuses with a hint).
+    p_record = sub.add_parser(
+        "record",
+        help="commit terminal-finished result bundles (COMPLETE / DISCONTINUED / "
+             "RESOLVED) to the instance repo as one batch commit; [records] "
+             'mode = "pr" also opens one PR for the batch (#317)')
+    p_record.add_argument("issue_ids", nargs="*",
+                          help="bundle ids to record (default: every terminal-finished "
+                               "bundle; a non-terminal id is excluded, loudly)")
+    p_record.add_argument("--dry-run", action="store_true",
+                          help="print the git/gh commands without running them")
+
     p_doctor = sub.add_parser("doctor",
                               help="report every prerequisite (OK/MISSING/UNAUTH/WARN + fix hint); changes nothing")
     p_doctor.add_argument("--strict", action="store_true",
@@ -467,6 +482,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "publish":
         return publish.publish(cfg, args.issue_id, dry_run=args.dry_run,
                                open_pr=not args.no_pr, by=args.by, pending_id=args.no_issue)
+    if args.cmd == "record":
+        return record.record(cfg, args.issue_ids, dry_run=args.dry_run)
     if args.cmd == "cleanup":
         return cleanup.run(cfg, args.issue_ids, apply=args.apply, repo=args.repo, by=args.by)
     if args.cmd == "doctor":
