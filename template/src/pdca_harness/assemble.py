@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import NamedTuple
 
-from . import brief, doctor, size_signal
+from . import brief, doctor, size_signal, state
 from .config import Config
 from .gates import canonical_elements
 
@@ -182,7 +182,7 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
     gates_json = json.loads((d / "check-gates.json").read_text(encoding="utf-8"))
     review_path = d / "check-review.md"
     review_text = (review_path.read_text(encoding="utf-8")
-                   if review_path.exists() else _missing_review_text())
+                   if review_path.exists() else _missing_review_text(d))
     advisory_texts = [p.read_text(encoding="utf-8")
                       for p in sorted(d.glob("check-advisory-*.md"))]
 
@@ -258,7 +258,7 @@ def assemble_summary(d: Path, cfg: Config) -> None:
     review_text = (
         review_path.read_text(encoding="utf-8")
         if review_path.exists()
-        else _missing_review_text()
+        else _missing_review_text(d)
     )
     # Optional advisory reviewers (issue #64): each check-advisory-<id>.md is folded into
     # §5 and its NEEDS-HUMAN findings into §6, exactly like the main reviewer.
@@ -391,13 +391,32 @@ def _failed_gating_items(gates: dict) -> list[NeedsHumanItem]:
     ]
 
 
-def _missing_review_text() -> str:
+def _missing_review_text(d: Path) -> str:
     """Placeholder when ``check-review.md`` is absent — flags a §6 NEEDS-HUMAN so the
-    bundle assembles and reaches sign-off but cannot be accepted without a review."""
+    bundle assembles and reaches sign-off but cannot be accepted without a review.
+
+    Two wordings (#369), split on the error log — the engine's failed-leaf
+    discriminator (#138: a reviewer that ran and FAILED wrote
+    ``state.REVIEW_ERROR_LOG``; a successful run removed any stale one). Without the
+    split, a reviewer that NEVER RAN (the beat died between the gate write and the
+    leaf) read exactly like one that ran and failed, and the record could not
+    distinguish "not yet run" from "ran and yielded nothing".
+    """
+    if (d / state.REVIEW_ERROR_LOG).exists():
+        return (
+            "# Advisory review MISSING — the reviewer RAN AND FAILED\n\n"
+            "- NEEDS-HUMAN — no check-review.md was produced: the reviewer leaf ran "
+            f"and FAILED (see `{state.REVIEW_ERROR_LOG}` in this bundle for the "
+            "captured error). Fix the cause, then re-run the Check reviewer before "
+            "accepting.\n"
+        )
     return (
-        "# Advisory review MISSING\n\n"
-        "- NEEDS-HUMAN — no check-review.md was produced (the reviewer leaf failed or "
-        "its model connection dropped). Re-run the Check reviewer before accepting.\n"
+        "# Advisory review MISSING — the reviewer NEVER RAN\n\n"
+        "- NEEDS-HUMAN — no check-review.md was produced and no "
+        f"`{state.REVIEW_ERROR_LOG}` exists: the reviewer leaf NEVER RAN (the Check "
+        "beat was interrupted before it), it did not run-and-fail. The driver "
+        "recovers a never-ran reviewer on the next `advance` (#369); if this text "
+        "persists, re-run the Check reviewer before accepting.\n"
     )
 
 

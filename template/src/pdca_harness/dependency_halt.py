@@ -214,6 +214,17 @@ def load(d: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def recorded_verdicts(d: Path) -> list[Verdict]:
+    """The recorded verdicts, reconstructed to the :class:`Verdict` shape — for a
+    consumer that needs them again after the beat that produced them (#369: the
+    CHECKED-resume rewrites :func:`blocked_review_note` when a death between the N/A
+    gate write and the note left a halted bundle with no review artifact). Tolerant
+    like :func:`load`: a malformed row is skipped, never a crash."""
+    rec = load(d)
+    return [Verdict(**{f: v.get(f) for f in Verdict._fields})
+            for v in (rec or {}).get("verdicts", []) if isinstance(v, dict)]
+
+
 def refuted_items(d: Path) -> list[str]:
     """§6 texts for every REFUTED declaration — how the refutation reaches the human and
     ``pdca act index`` (both read SUMMARY §6, not a bundle-local json). The caller tags
