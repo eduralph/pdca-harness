@@ -352,7 +352,8 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
                           f"(target={chk.get('target')}, bundle labels {set(labels)})",
                           file=sys.stderr, flush=True)
                 continue
-            configured.append(_run_one(chk, cwd=cwd, bundle=bundle, runner=cfg.gates_runner,
+            configured.append(_run_one(chk, cfg=cfg, cwd=cwd, bundle=bundle,
+                                       runner=cfg.gates_runner,
                                        worktree_path=wt,
                                        default_timeout=cfg.gates_default_timeout_secs,
                                        log_dir=log_dir))
@@ -380,7 +381,7 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
                         gating=bool(chk.get("gating", True)),
                         element=chk.get("tier", "T4")))
                 else:
-                    configured.append(_run_one(chk, cwd=wt, bundle=bundle,
+                    configured.append(_run_one(chk, cfg=cfg, cwd=wt, bundle=bundle,
                                                runner=cfg.gates_runner, worktree_path=wt,
                                                default_timeout=cfg.gates_default_timeout_secs,
                                                log_dir=log_dir))
@@ -428,10 +429,13 @@ def _gate_timeout(chk: dict, default: int | None) -> int | None:
     return secs if secs > 0 else None
 
 
-def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
+def _run_one(chk: dict, *, cfg: Config, cwd: Path, bundle: Path | None, runner: str = "",
              worktree_path: Path | None = None,
              default_timeout: int | None = None,
              log_dir: Path | None = None) -> dict:
+    # ``cfg`` is required (issue #387): the bundle-scoped base export resolves the brief's
+    # own base as `<cfg.base_remote>/<branch or cfg.default_branch>` — the same ref publish
+    # commits against — so it cannot be derived from the check row alone.
     cmd, cmd_error = _delegated_cmd(chk, runner)
     gating = bool(chk.get("gating", True))
     label = f"{chk.get('id', '')}: {chk.get('label', '')}".strip(": ")
@@ -449,7 +453,7 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
         env = {**(env or {}), "PDCA_WORKTREE": str(worktree_path)}
     # The base a per-fix verifier must reset to before applying patch.diff. The governing
     # invariant (issue #54): the TEST base and the DEPLOY base must not diverge — the gate has
-    # to establish red→green on the very branch publish will commit to. So these two exports
+    # to establish red→green on the very branch publish will commit to. So these three exports
     # are MUTUALLY EXCLUSIVE, resolved in the same order publish resolves its own base:
     #
     #   1. `Onto branch` (#54) → PDCA_BASE. The brief names an existing PR's head; publish
@@ -461,10 +465,22 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
     #      verifier that instead reset to the brief's origin base would, for a dependent
     #      sharing a file with its prereq, either false-fail "patch does not apply — stale" or
     #      measure red→green against a tree LACKING the prereq.
+    #   3. else the brief's own `Repo + branch target` base (#387) → PDCA_BRIEF_BASE, as
+    #      `<base_remote>/<branch>` — the very ref publish checks the fix out against
+    #      (`publish.publish`'s `checkout_base`: `f"{base_remote}/{base}"`), or
+    #      `<base_remote>/<default>`
+    #      when the brief names no target. This is the last rung of the ladder
+    #      `engine/scripts/run-verify.sh` publishes to every instance, and it used to be the
+    #      one the driver never supplied: a shell gate had to re-derive the ANCHORED parse
+    #      (`brief._clean_ref`, got wrong and fixed twice in Python — #235, #262) from a
+    #      comment, and the two implementations then disagreed on the very briefs that need
+    #      the base most. Exported unconditionally at this rung so the gate reads a resolved
+    #      ref rather than `brief.md`; a script composing `origin/$VAR` over it would double
+    #      the remote, so the value is always fully qualified, like the other two.
     #
-    # Exporting both would tell the gate to verify against the integration branch while
-    # publish commits to the Onto branch — exactly the divergence #54 exists to prevent
-    # (PR #282 review). Neither applies (wave 0, no Onto) ⇒ no export, unchanged behaviour.
+    # Exporting more than one would tell the gate to verify against the integration branch
+    # while publish commits to the Onto branch — exactly the divergence #54 exists to prevent
+    # (PR #282 review). Exactly one is set for every bundle-scoped gate invocation.
     if bundle is not None:
         onto = brief.onto_branch(bundle / "brief.md")
         if onto is not None:
@@ -474,6 +490,9 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
             stack_base = publish.read_stack_base(bundle)
             if stack_base:
                 env = {**(env or {}), "PDCA_VERIFY_BASE": f"origin/{stack_base}"}
+            else:
+                base = brief.base_branch(bundle / "brief.md", cfg.default_branch)
+                env = {**(env or {}), "PDCA_BRIEF_BASE": f"{cfg.base_remote}/{base}"}
     # Under in-driver lane concurrency, expose the worker-slot id so a gate command can
     # scope its checkout / container name / port / scratch per lane (docs 09). Absent
     # (serial driver) → no PDCA_LANE, so gates run exactly as before.
