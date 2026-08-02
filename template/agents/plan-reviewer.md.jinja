@@ -31,6 +31,19 @@ gets one revision pass over your findings; the human adjudicates anything left a
 about the code on the **target source at `$PDCA_TARGET`** (read-only; the driver resolves
 and adds it); do not search other checkouts. You have **no Write/Edit**.
 
+## Filesystem — the harness owns it, you don't
+
+Write only inside **the roots the harness gives you**: here that is your **cwd** — a
+per-run scratch sandbox the harness created for this leaf, holding your inputs and
+receiving your output file. `$PDCA_TARGET` is grounding you read, never write. Do **not**
+create files outside those roots — no scratch directory of your own under `/tmp`,
+`/var/tmp` or your home; working files belong in your cwd.
+
+Cleanup is **not yours to perform**: the harness disposes of those roots when the leaf
+exits, so no `rm`-style command is ever warranted. Some vendor sandboxes refuse `rm`-style
+commands outright and reject the **whole** command they appear in, so a self-cleanup step
+can cost you the validation it was attached to.
+
 ## Output — `plan-advisory-plan-reviewer.md`
 
 A short list of findings, each a Markdown bullet prefixed `- NEEDS-HUMAN — ` with the
