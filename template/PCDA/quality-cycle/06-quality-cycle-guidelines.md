@@ -227,6 +227,12 @@ When a *gating* gate genuinely cannot run its mechanical check (e.g. a C4 red→
 
 *Rationale.* The standing rule "a green mechanical check is not a correctness verification" cuts both ways: a gate with nothing to verify must not paint itself green, and the cycle must not force a green into existence. `unverifiable` is the honest third outcome — escalate to the human via the seam (§6) the design already has, instead of inventing scaffolding to satisfy a mechanic that does not apply.
 
+### C5b. A gate whose subject does not exist YET MUST declare `deferred`, not pass — and only where a later gate re-runs it
+
+When a gate *runs* and finds its subject **absent by design** — the artifacts it audits are drafted later in the cycle, as the T4 contribution check's `commit-msg.txt` / `pr-description.md` are drafted at publish — it MUST declare **`deferred`**: a line it *starts* with `PDCA-DEFERRED: <reason>` while exiting 0 ([04 - Validation Tooling](04-validation-tooling.md) §Gate result vocabulary). NOT `pass`, which asserts a verdict the gate never reached, and NOT `unverifiable`, which routes to §6 for a human who has nothing to decide. A row MAY record `deferred` **only** if it is genuinely re-run later (the publish re-gate); a row nothing re-gates has no later verdict to defer to and MUST keep its `pass`/`fail`.
+
+*Rationale.* Same invariant as C5a — a gate row records only a verdict the gate actually reached — with the opposite routing, because the two conditions differ in *who owes the answer*. C5a's answer is owed to the human, so §6 is right. A deferral's answer is owed to a later gate that cannot be skipped, so §6 is wrong: the item fires on 100% of cycles, is cleared unread every time, and trains the human to tick §6 boxes — degrading C6, the guard that makes §6 mean anything. The "only where a later gate re-runs it" clause is what keeps `deferred` from becoming a way to opt out of scrutiny.
+
 ### C6. §6 NEEDS-HUMAN MUST be empty before sign-off can accept
 
 Check sign-off (§9) MUST NOT record an *accept* outcome while §6 contains unresolved items. Each NEEDS-HUMAN item is cleared by the human or routed to iterate-to-Plan / iterate-to-Do before accept is available.

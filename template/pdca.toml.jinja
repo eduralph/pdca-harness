@@ -922,9 +922,11 @@ checks = [
   # T4 Contribution — lint the publisher's two artifacts before they are pushed: the PR body
   # must open with a `**User impact:**` line (the user-visible effect, before Root cause) and
   # both commit-msg.txt + pr-description.md must carry the tracker id. `contribcheck` reads
-  # $PDCA_BUNDLE and is default-open before the artifacts are drafted (so Check-time gates
-  # pass); `{{ cli_name }} publish` hard-gates T4 after drafting them (relaxed to a flag under
-  # --no-issue). Gating is right here — this audits THIS cycle's own contribution artifacts,
+  # $PDCA_BUNDLE; before the artifacts are drafted it has nothing to lint, so it DECLARES the
+  # deferral (`PDCA-DEFERRED:`, exit 0) and the Check row records `deferred — re-gated at
+  # publish` rather than a green nobody can reproduce (issue #401; docs 04 §Gate result
+  # vocabulary). `{{ cli_name }} publish` then hard-gates T4 after drafting them — the
+  # substantive verdict, unchanged (relaxed to a flag under --no-issue). Gating is right here — this audits THIS cycle's own contribution artifacts,
   # not pre-existing code, so the usual "T4 advisory" caveat (below) does not apply.
   # `at_publish` (issue #339) — whether `{{ cli_name }} publish` re-runs this row before pushing.
   # Defaults from `scope`: a BUNDLE-scoped T4 row is about the bundle's own contribution

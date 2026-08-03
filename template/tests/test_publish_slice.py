@@ -912,8 +912,19 @@ class ContribCheck(unittest.TestCase):
 
     def test_default_open_before_artifacts_are_drafted(self) -> None:
         # Run as a Check-time bundle gate before publish: no PR body yet ⇒ nothing to lint.
+        # Exit code unchanged (0 — nothing failed), but the gate now DECLARES the deferral
+        # instead of exiting mute, so the Check matrix records `deferred` rather than a
+        # vacuous green (issue #401; the row's classification is pinned in
+        # tests/test_gate_deferred.py). Marker composed from the production constant so this
+        # module never emits it at a declaring position in its own captured output (#428).
         _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)
-        self.assertEqual(self._run("266"), (0, ""))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(self._run("266"), (0, ""))  # no problems on stderr
+        declared = [ln for ln in out.getvalue().splitlines()
+                    if ln.startswith(gates.DEFERRED_MARKER)]
+        self.assertEqual(len(declared), 1, out.getvalue())
+        self.assertIn("publish", declared[0])
 
     def test_close_disposition_bundle_passes(self) -> None:
         d = _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)

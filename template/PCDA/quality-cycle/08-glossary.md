@@ -154,6 +154,13 @@ status: active
   whatever it printed, and a marker quoted mid-line is text the gate relayed, not a declaration).
   Not a pass, not a fail: routed to §6 NEEDS-HUMAN so C6 makes the human clear it
   (docs 04 §Gate result vocabulary, 06 §C5a).
+- **Deferred** — a gate result for a check that *ran* and found its subject **absent by
+  design**, its substantive verdict owed to a later gate (a line the gate *starts* with
+  `PDCA-DEFERRED:` while exiting 0 — the Check-time T4 contribution row, whose artifacts
+  `publish` drafts afterwards). Not a pass, not a fail, and — the one difference from
+  *unverifiable* — **not** routed to §6: nothing is owed to the human, so no checkbox.
+  Permitted only for a row the publish re-gate actually re-runs, so a deferral is a
+  hand-off, never a waiver (docs 04 §Gate result vocabulary, 06 §C5b).
 - **Advisory** — a non-blocking signal (the reviewer, and anything `gating = false`); it
   annotates, never gates.
 - **Judgment cell** — C5, T5, and Validation — the three cells no gate can decide; they

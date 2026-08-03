@@ -394,7 +394,12 @@ can also come back **`unverifiable`** — it genuinely couldn't run its check
 (a missing fixture, a skipped environment) rather than having run and failed —
 which is neither pass nor fail; it routes to §6 like a judgment cell would,
 because "we don't know" and "we checked and it's wrong" need different
-responses from you.
+responses from you. And it can come back **`deferred`** — it ran, but the thing
+it audits doesn't exist yet (the contribution check lints the PR body and commit
+message, which get drafted at publish, after Check). That one is *not* routed to
+§6: its real verdict is owed to the gate that re-runs the row before anything is
+pushed, not to you, so it shows in the matrix and §5 with its reason and nothing
+lands on your checklist.
 
 The three mechanisms — gates, reviewer, assembly — run in that order, next.
 
