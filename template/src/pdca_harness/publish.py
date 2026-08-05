@@ -255,6 +255,21 @@ def publish(
     # branch either way.
     own_repo = base_remote == "origin"
     pr_base = stack_branch if (stack_branch and own_repo) else base
+    # Merge-mode base guard (#411) — fail-closed, BEFORE any branch/push/PR work. Under
+    # `[driver].wave_mode = "merge"` the driver merges each accepted bundle's PR "into its
+    # base" (merge.py:32-33), unattended, mid-flow — whatever base that PR happens to carry.
+    # So a PR opened against a branch THIS run produced silently lands the fix in another
+    # bundle's branch instead of the shared target, and the wave still reports success.
+    # Refuse here rather than at merge time: the publisher is an interactive step with a
+    # human present, and a PR never opened against a run-produced branch leaves the merge
+    # nothing wrong to merge. Same shape as the `Stacks on` refusal above (stderr, return 1,
+    # nothing pushed). Stack mode — the default — is untouched: chaining onto a predecessor
+    # is correct there, because nothing is ever merged for you.
+    if cfg.wave_mode == "merge":
+        refusal = _merge_base_refusal(cfg, d, repo_spec, pr_base, base)
+        if refusal:
+            print(refusal, file=sys.stderr)
+            return 1
     steps = [
         git("fetch", "origin" if stack_branch else base_remote),
         git("checkout", "-B", branch, checkout_base),
@@ -628,6 +643,57 @@ def _stack_base_branch(cfg: Config, d: Path) -> str | None:
         return None
     rec = _publish_record(cfg.bundle(parents[0]))
     return rec.get("branch") if rec else None
+
+
+def _merge_base_refusal(cfg: Config, d: Path, repo_spec: str, pr_base: str, base: str) -> str:
+    """Why ``pr_base`` is not a base that exists independently of this run — or "" if it is.
+
+    Only consulted under ``[driver].wave_mode = "merge"`` (#411), where the driver merges
+    the PR into whatever base it carries. Two routes put another bundle's branch there,
+    and the message names BOTH branches in either:
+
+    1. ``pr_base`` differs from the bundle's own resolved target ``base`` — it came from
+       the auto-stacked chain (:func:`_stack_base_branch`: a recorded integration branch,
+       or the legacy ``Stacks on:`` parent's fix branch). Merge mode records no integration
+       branch at all (``flow`` only fills it on the stack path), so in merge mode that
+       wiring has no business choosing a base: wave order carries the dependency.
+    2. ``pr_base`` IS the bundle's resolved target base, but that base is a branch another
+       bundle in this batch produced — a brief whose ``Repo + branch target`` names a
+       predecessor's fix branch (the documented stack-mode practice). The two strings match,
+       so route 1's comparison sees nothing; the batch's ``publish.json`` records
+       (:func:`_publish_record`) are what expose it, offline.
+
+    The bundle's own base is never re-parsed here — it is passed in from
+    :func:`_resolve_target`, the one parse (#235/#262/#387).
+    """
+    fix = ('`[driver].wave_mode = "merge"` merges this PR into whatever it targets, '
+           "unattended — so it may only target a base that exists independently of this "
+           "run. Point the brief's `Repo + branch target` at the shared base, or use the "
+           'default wave_mode = "stack", where chaining onto a predecessor is correct.')
+    if pr_base != base:
+        return (f"publish: {d.name} would open its PR against `{pr_base}`, not its target "
+                f"base `{base}` — that branch is one this run produced (a `Stacks on:` "
+                f"prereq's fix branch / a recorded integration branch). {fix}")
+    producer = _batch_branch_producer(cfg, d, repo_spec, pr_base)
+    if producer:
+        return (f"publish: {d.name} would open its PR against `{pr_base}` — its own target "
+                f"base `{base}`, but that base is the branch {producer} produced in this "
+                f"batch, not a shared base. {fix}")
+    return ""
+
+
+def _batch_branch_producer(cfg: Config, d: Path, repo_spec: str, branch: str) -> str:
+    """The name of another bundle in this batch whose published branch is ``branch``
+    (in the same repo), or "". Reads the siblings' ``publish.json`` records — no network."""
+    for sub in sorted(cfg.bundle_root.glob("issue_*")):
+        if sub.resolve() == d.resolve():
+            continue
+        rec = _publish_record(sub)
+        # A record written before the `repo` field existed (or by a stub) is assumed to be
+        # this repo's — fail-closed: the refusal is recoverable, a silent wrong merge is not.
+        if rec and rec.get("branch") == branch and rec.get("repo", repo_spec) == repo_spec:
+            return sub.name
+    return ""
 
 
 def _warn_if_squash_only(repo_spec: str) -> None:
