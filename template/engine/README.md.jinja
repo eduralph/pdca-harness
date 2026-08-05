@@ -41,6 +41,31 @@ driver) and in CI (`{{ cli_name }} gates --working-tree`) — single-sourced, no
     bundle (bug already fixed upstream; the patch ships only the regression test + its
     required manifest entry) gets a **false C4 fail**. Keep the non-production set as a
     config list of path globs in your run-verify classification.
+  - **Judge each leg by two facts, not one — the exit code AND how many tests actually
+    ran.** A test runner exits non-zero both when the test ran and failed (the red leg's
+    proof) and when no test ran at all: it failed to compile/import/collect, or the runner
+    itself died. A leg that reads only the exit code cannot tell those apart, so it records
+    **PASS for a bundle whose test never executed** — the gate turning "no evidence" into
+    proof. That is an everyday shape, not a corner case: reverting the fix also removes any
+    symbol the fix introduced, so a test calling one fails to build on exactly that leg.
+    Parse a **count of executed tests** out of the runner's own report (TAP, JUnit XML,
+    `--format json`, `unittest -v`) and decide from both:
+
+    | runner exit | tests ran | verdict |
+    |---|---|---|
+    | 0 | 0 | `UNVERIFIABLE` (77) — nothing ran; no evidence either way |
+    | 0 | >0 | the test passed — green leg OK, red leg a **C4 fail** |
+    | non-zero | >0 | the test failed — the red leg's proof, green leg a **C4 fail** |
+    | non-zero | 0 | `UNVERIFIABLE` (77) — nothing ran; **never PASS**, it proves nothing |
+
+    A red leg that comes back green (exit 0, tests ran) is the honest C4 fail: the test
+    does not capture the defect. What must never happen is the last row read as a red.
+    Keep the two "nothing ran" reasons distinct in what you print (`runner exited 0:
+    nothing was selected` vs `runner exited <rc>: the test did not build/import`) — they
+    have different causes and the human reading §6 needs different things from each. The
+    rule generalises to **every** verification step, not just C4's red leg: a step in which
+    no test ran is `UNVERIFIABLE` (exit 77 → §6 NEEDS-HUMAN, non-gating), not a pass and
+    not a fail. A gate never turns "no evidence" into a verdict.
 - **Everything else is advisory by default** — `gating = false`. Runtime
   (whole-suite T3), conformance (T1/T2/T4), and interface/E2E tiers all audit code
   the *current* fix did not introduce, so gating them on pre-existing/legacy

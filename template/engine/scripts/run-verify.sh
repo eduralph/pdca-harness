@@ -39,9 +39,40 @@
 #
 # Typical shape (pseudocode — replace with your project's apply/run/revert):
 #   1. read the test path from $PDCA_BUNDLE/brief.md
-#   2. revert the production change, run the test  -> expect FAIL (red)
+#   2. revert the production change, run the test  -> expect a REAL red: a test that RAN
+#      and failed (judge it by the two facts below, never by the exit code alone)
 #   3. apply $PDCA_BUNDLE/patch.diff, run the test -> expect PASS (green)
 #   4. exit 0 on red-then-green, non-zero otherwise
+#
+# JUDGE EVERY LEG BY TWO FACTS: the runner's exit code AND how many tests actually ran.
+# A test runner exits non-zero for two unrelated reasons — the test RAN and failed (the red
+# leg's proof), or NO test ran at all (it failed to compile/import/collect, the runner could
+# not find it, the runner itself died). An exit code cannot tell those apart, so a leg judged
+# on the exit code alone reports PASS for a bundle whose test never executed. That is an
+# everyday shape, not a corner case: reverting the fix also removes any symbol the fix
+# introduced, so a test that calls one cannot even build on the red leg.
+# Capture BOTH per run: the exit code, and a COUNT of executed tests parsed from the runner's
+# own machine-readable report (TAP, JUnit XML, `--format json`, `python -m unittest -v`, …).
+# Never infer that count from the exit code.
+#
+#   exit code | tests ran | what it means -> what to report
+#   ----------+-----------+---------------------------------------------------------------
+#    0        |  0        | nothing ran -> PDCA-UNVERIFIABLE (77): no evidence either way
+#    0        | >0        | test PASSED -> green leg: OK; red leg: C4 FAIL (green without
+#             |           |                the fix — the test does not capture the defect)
+#    non-zero | >0        | test FAILED -> red leg: the red you want; green leg: C4 FAIL
+#    non-zero |  0        | nothing ran -> PDCA-UNVERIFIABLE (77), NEVER PASS: the runner
+#             |           |                died before/while collecting, so its non-zero
+#             |           |                exit proves nothing about the defect
+#
+# Keep the two "nothing ran" cases distinguishable in the reason you print — the human
+# reading §6 needs different things from each: `no test executed (runner exited 0: nothing
+# was selected — wrong test path or filter?)` vs `no test executed (runner exited <rc>: the
+# test did not build/import — e.g. it calls a symbol the reverted fix added)`.
+# THE RULE, for every leg you add here and for every other verification step: a step in
+# which no test ran is UNVERIFIABLE — exit 77 / `PDCA-UNVERIFIABLE: <reason>` (-> SUMMARY §6
+# NEEDS-HUMAN, non-gating) — never a pass and never a fail. A gate never turns "no evidence"
+# into a verdict.
 #
 # CLASSIFY THE PATCH FIRST (issue #165). If the patch's only non-test change is a
 # NON-BEHAVIORAL file a project must update but that can't move the test — a translation
