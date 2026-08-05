@@ -1064,7 +1064,17 @@ def _contribcheck(cfg: Config, args: argparse.Namespace) -> int:
     ticket — the tracker id is absent from either ``commit-msg.txt`` or ``pr-description.md``
     (the two are linted INDEPENDENTLY, so a ticketed fix needs the id in BOTH). The bundle is
     the ``issue_id`` arg or ``$PDCA_BUNDLE`` (set by the gate runner). No patch (close/no-fix)
-    ⇒ pass (default-open, like an unconfigured gate)."""
+    ⇒ pass (default-open, like an unconfigured gate).
+
+    **Artifacts not drafted yet ⇒ a declared deferral, not a bare pass** (issue #401). This
+    row is registered for Check *and* re-run by ``publish`` (``publish.publish_gates``), and
+    at Check time the two artifacts it lints do not exist — publish drafts them later. The
+    exit code stays 0 (nothing failed), but the gate now DECLARES that its substantive audit
+    has no subject yet (``gates.DEFERRED_MARKER``), so the matrix records ``deferred`` with
+    the reason instead of a green the reviewer cannot reproduce — the artifacts the row names
+    are not among its inputs, which is why every cycle escalated this by-design condition to
+    SUMMARY §6 NEEDS-HUMAN. The substantive verdict is unchanged and still hard-gates the
+    push (``publish._t4_passes``)."""
     if args.issue_id:
         d = cfg.bundle(args.issue_id)
     elif os.environ.get("PDCA_BUNDLE"):
@@ -1076,7 +1086,12 @@ def _contribcheck(cfg: Config, args: argparse.Namespace) -> int:
     if not patch.is_file() or not patch.read_text(encoding="utf-8").strip():
         return 0  # close / no-fix bundle: nothing contributed
     if not (d / publish.PR_BODY).is_file():
-        return 0  # artifacts not drafted yet (Check-time gate, pre-publish) — nothing to lint
+        # Artifacts not drafted yet (Check-time gate, pre-publish): the gate ran and found
+        # its subject absent BY DESIGN. Declare the deferral (#401) rather than exit 0 mute,
+        # so the row records `deferred — re-gated at publish` instead of a vacuous green.
+        print(f"{gates.DEFERRED_MARKER} {publish.PR_BODY} not drafted yet — the substantive "
+              "T4 audit of the contribution artifacts runs at publish")
+        return 0
     problems = contribution_problems(d, no_issue=args.no_issue)
     for p in problems:
         print(f"contribcheck: {p}", file=sys.stderr)

@@ -65,6 +65,14 @@ can cost you the validation it was attached to.
   missing CLI, a sandbox without the toolchain — the log's header and output usually say
   which) is a *host caveat*, not the patch's fault: flag it for the human, don't propagate
   it as a defect (issue #236).
+- **A `deferred` row is not a green to reproduce, and not a finding.** That result means
+  the gate *ran* and found its subject **absent by design** — the artifacts it audits
+  (`commit-msg.txt` / `pr-description.md`) are drafted after Check, so they are not among
+  your inputs — and its substantive verdict is owed to the gate that **re-runs the row at
+  publish**, which cannot be skipped; the row's evidence line says so. Record it **`N/A`**
+  with that reason. Do **not** escalate it to `NEEDS-HUMAN`: there is nothing for the human
+  to clear, and a §6 item that fires on every cycle is what trains a reader to tick §6
+  boxes unread (issue #401).
 - Emit per item `PASS / FAIL / NEEDS-HUMAN` + one-line rationale + path:line.
 
 ## Always emit the complete 5/5/1 verdict table

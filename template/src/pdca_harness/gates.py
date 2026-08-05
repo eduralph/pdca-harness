@@ -26,17 +26,41 @@ not a verdict the gate declared (#428). When
 ``[[gates.checks]]`` is empty the driver falls back to all-PASS stub rows, so the
 offline vertical slice still runs.
 
+The row's **evidence line** follows the same declaration rule (issue #402): a gate states
+its verdict summary by printing a line that STARTS with :data:`EVIDENCE_MARKER`
+(``PDCA-EVIDENCE: <summary>``), and that summary — the LAST such line, a gate's final word
+— becomes the row's ``path_line`` whatever the command relays afterwards. Without a
+declaration the evidence falls back to the command's last output line, which is only ever
+the gate's verdict by luck: the capture is one merged stdout+stderr stream, so a wrapper
+that shells out to a suite files whatever that suite's children happened to flush last
+(a scratch ``/tmp`` path from a since-deleted sandbox is not a reconstructable basis). The
+marker declares evidence only — it never changes a verdict; the exit code alone decides
+pass/fail, and ``PDCA-UNVERIFIABLE`` stays the one marker that can change a ``result``.
+
 A row: {check, result, oracle, rule_id, path_line, gating}. A row produced by a
 bundle-scoped :func:`run_gates` additionally carries ``log`` (the bundle-relative path of
 its full-output evidence log, ``gate-logs/<rule_id>.log``) and ``duration_secs`` (issue
 #370) — additive keys, existing consumers unchanged. When that evidence log could NOT be
 written, the row instead carries ``log_error`` (the reason) so a persistence failure is
 never silent — the verdict itself is unaffected either way. ``result`` ∈
-``pass`` / ``fail`` / ``unverifiable`` / ``none``. A ``none`` row is a judgment cell
-decided by the reviewer + human (docs 04 §judgment cell); it is listed for matrix
-alignment and never gates. An ``unverifiable`` row does **not** count toward
+``pass`` / ``fail`` / ``unverifiable`` / ``deferred`` / ``none``. A ``none`` row is a
+judgment cell decided by the reviewer + human (docs 04 §judgment cell); it is listed for
+matrix alignment and never gates. An ``unverifiable`` row does **not** count toward
 ``overall`` (it is not a failure); the driver routes it into SUMMARY §6 NEEDS-HUMAN,
 where the C6 accept-guard forces the human to clear it before sign-off.
+
+A **``deferred``** row (issue #401) is the fourth member: the gate RAN and found its
+subject **absent by design**, because the artifacts it audits are drafted later — the
+Check-time run of a bundle-scoped T4 contribution row, whose ``commit-msg.txt`` /
+``pr-description.md`` do not exist until publish. It is declared the same way
+``unverifiable`` is — a line the gate STARTS with :data:`DEFERRED_MARKER`
+(``PDCA-DEFERRED: <reason>``) while exiting 0 — and, like ``unverifiable``, it does not
+count toward ``overall``. Unlike ``unverifiable`` it is **not** lifted into SUMMARY §6:
+the condition is by-design and its substantive verdict is owed to a later gate, so a §6
+checkbox on every cycle trains the human to tick §6 unread — the guard C6 depends on.
+The deferral is honoured only for a row that is genuinely **re-gated later**
+(:func:`_deferrable` → ``publish.publish_gates``); a row nothing re-runs has no later
+verdict to defer to and keeps its pass/fail.
 """
 
 from __future__ import annotations
@@ -59,6 +83,19 @@ from .config import Config
 # a gate may exit 0 and still defer to the human. Neither is a failure (see _finalize).
 UNVERIFIABLE_RC = 77
 UNVERIFIABLE_MARKER = "PDCA-UNVERIFIABLE:"
+
+# A gate states the summary that goes into the row's `path_line` the same way it declares
+# `unverifiable`: a line that STARTS with this marker (issue #402). Anything else in the
+# capture is output the gate RELAYED from what it ran, and must not be filed as its verdict.
+EVIDENCE_MARKER = "PDCA-EVIDENCE:"
+
+# A gate that ran and found its subject ABSENT BY DESIGN — the audit it performs has no
+# subject yet, because the artifacts it lints are drafted later — declares the deferral
+# with this marker while exiting 0 (issue #401). Same declaration rule as the two above:
+# only at the start of a line, never a mid-line quotation the gate relayed (#428). Neither
+# a pass nor a failure (see _finalize), and NOT routed to §6 (see assemble): the verdict is
+# owed to the later gate that re-runs the row (see _deferrable).
+DEFERRED_MARKER = "PDCA-DEFERRED:"
 
 # The bundle directory holding one full-output evidence log per gate rule (issue #370).
 # Defined in `state` (next to the archive list that moves it per round) — re-exported
@@ -504,6 +541,10 @@ def _run_one(chk: dict, *, cfg: Config, cwd: Path, bundle: Path | None, runner: 
         env = {**(env or {}), "PDCA_LANE": str(lane_id)}
     watch = bundle or cwd
     bound = _gate_timeout(chk, default_timeout)
+    # May this row declare itself `deferred` (issue #401)? Only if a later gate re-runs it,
+    # so the deferred verdict is genuinely owed rather than waived — resolved here, where
+    # both the row and the config are in hand (`_classify` sees neither).
+    deferrable = _deferrable(chk, cfg)
     print(f"  · gate {label} (a Docker-backed gate can take minutes)…", file=sys.stderr, flush=True)
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
     t0 = time.monotonic()
@@ -524,7 +565,7 @@ def _run_one(chk: dict, *, cfg: Config, cwd: Path, bundle: Path | None, runner: 
             # gating verdict), never a pass/fail verdict the command did not reach.
             result, evidence = "unverifiable", [f"gate exceeded its {bound}s timeout"]
         else:
-            result, evidence = _classify(rc, output)
+            result, evidence = _classify(rc, output, deferrable=deferrable)
     except Exception as exc:  # command not found, etc. — a failing gate, surfaced
         result, evidence = "fail", [str(exc)]
         output = f"{exc}\n"  # the exception IS the run's whole output — log it (#370)
@@ -596,30 +637,93 @@ def _write_gate_log(log_dir: Path, chk: dict, *, cmd: str, cwd: Path,
     return f"{GATE_LOGS_DIR}/{name}", None
 
 
+def _declarations(output: str, marker: str) -> list[str]:
+    """Every line of ``output`` the gate **declared** with ``marker``, in order — the text
+    after the marker (possibly empty).
+
+    A **declaration** is a line whose first text is the marker (leading whitespace ignored)
+    — how every documented emitter writes it: the shipped advisory check
+    (``scripts/checks/test_exercises_production.py``) prints ``f"{UNVERIFIABLE} {reason}"``,
+    and the gate wrappers ``echo`` the marker at the start of the line.
+
+    A mid-line occurrence is NOT a declaration: it is text the gate merely **relayed** from
+    something it ran (#428) — see :func:`_classify`. One notion of "the gate said this",
+    shared by both markers (#402)."""
+    out: list[str] = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(marker):
+            out.append(stripped[len(marker):].strip())
+    return out
+
+
 def _declared_unverifiable(output: str) -> str | None:
     """The gate's OWN ``unverifiable`` declaration in ``output`` — its reason — or ``None``.
 
-    A **declaration** is a line whose first text is :data:`UNVERIFIABLE_MARKER` (leading
-    whitespace ignored) — how every documented emitter writes it: the shipped advisory check
-    (``scripts/checks/test_exercises_production.py``) prints ``f"{UNVERIFIABLE} {reason}"``,
-    and the gate wrappers ``echo`` the marker at the start of the line. The reason is the
-    text after the marker, possibly empty.
-
-    A mid-line occurrence is NOT a declaration: it is text the gate merely **relayed** from
-    something it ran (#428) — see :func:`_classify`."""
-    for line in output.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(UNVERIFIABLE_MARKER):
-            return stripped[len(UNVERIFIABLE_MARKER):].strip()
-    return None
+    The FIRST declaration wins: the reason a gate gives for deferring is the one it gave
+    when it stopped being able to verify, and later output cannot retract it."""
+    declared = _declarations(output, UNVERIFIABLE_MARKER)
+    return declared[0] if declared else None
 
 
-def _classify(rc: int, output: str) -> tuple[str, list[str]]:
+def _declared_evidence(output: str) -> str | None:
+    """The gate's OWN verdict summary in ``output`` — the row's evidence line — or ``None``.
+
+    The LAST non-empty declaration wins (issue #402): a wrapper with several legs declares
+    per leg, and its final word is the summary of the run as a whole — where the last
+    *output* line is merely whatever flushed last, usually a child's. A bare
+    ``PDCA-EVIDENCE:`` with no text is no summary and falls back with the undeclared case."""
+    declared = [text for text in _declarations(output, EVIDENCE_MARKER) if text]
+    return declared[-1] if declared else None
+
+
+def _declared_deferred(output: str) -> str | None:
+    """The gate's OWN ``deferred`` declaration in ``output`` — the reason its substantive
+    audit is owed later — or ``None`` (issue #401).
+
+    The FIRST declaration wins, as for :func:`_declared_unverifiable`: the reason a gate
+    gives when it finds its subject absent is the one it gave at that moment."""
+    declared = _declarations(output, DEFERRED_MARKER)
+    return declared[0] if declared else None
+
+
+def _deferrable(chk: dict, cfg: Config) -> bool:
+    """True iff ``chk`` is **re-gated later**, so a ``deferred`` row has a later verdict to
+    defer to (issue #401).
+
+    Deferral is legitimate only where the substantive audit actually happens afterwards:
+    the row must be one ``publish`` re-runs before it pushes anything
+    (:func:`publish.publish_gates` — a bundle-scoped T4 row, or an explicit
+    ``at_publish = true``). A row nothing re-gates owes its verdict to nobody, so its
+    declaration is ignored and it keeps today's ``pass``/``fail``. This is the guard that
+    keeps ``PDCA-DEFERRED:`` from becoming a way for any gate to opt out of scrutiny: a
+    deferral is a *hand-off* to a named later gate, not a waiver.
+    """
+    from . import publish  # lazy: publish imports leaves→gates; avoid an import cycle
+    return any(c is chk or c == chk for c in publish.publish_gates(cfg))
+
+
+def _classify(rc: int, output: str, *, deferrable: bool = False) -> tuple[str, list[str]]:
     """Map a gate command's exit code + output to (result, evidence-lines).
 
     ``unverifiable`` (issue #46) lets a gate that did NOT fail defer to the human: it may
     exit 0 and still declare the marker. The text after the marker is the reason; otherwise
-    the evidence is the command's last output line (as for pass/fail).
+    the evidence is the gate's declared summary, and failing that the command's last output
+    line (as for pass/fail).
+
+    The evidence line obeys the same declaration rule as the verdict (#402): the row records
+    what the gate declared with :data:`EVIDENCE_MARKER`, and only where it declared nothing
+    does it fall back to ``output``'s last line. That fallback is what made a GREEN gate's
+    frozen record read like a failure path: the capture is one merged stdout+stderr stream
+    (``progress.run_with_heartbeat``), so a wrapper that shells out to a test suite files
+    whatever that suite's children flushed last — a ``/tmp`` scratch path from a sandbox
+    that no longer exists was recorded as a passing C4's whole evidence, which is neither
+    the *basis* of the verdict nor *reconstructable* (the invariant :func:`_write_gate_log`
+    exists to keep, #370). Declaring is the only way a gate can be sure what gets filed, so
+    the marker is the convention gate authors write to (docs 04 §Gate result vocabulary);
+    the undeclared fallback stays defined, and the full basis stays in ``row["log"]``.
+    The evidence marker never changes the verdict — a declaring gate that exits non-zero
+    still FAILS, with its declaration as the evidence.
 
     The marker is honoured only for an exit code that is not a failure — 0, or the dedicated
     ``UNVERIFIABLE_RC``. A gate that exits non-zero FAILED, whatever its output happens to
@@ -641,15 +745,33 @@ def _classify(rc: int, output: str) -> tuple[str, list[str]]:
     whose tests exercise this machinery: a green C4 whose captured output quoted the
     documented contract line (``... Emit `PDCA-UNVERIFIABLE: <reason>` and exit 77 ...``) was
     recorded ``unverifiable``, so a real green stopped counting toward ``overall`` and a real
-    red would equally have been laundered into "defer to the human"."""
+    red would equally have been laundered into "defer to the human".
+
+    ``deferred`` (issue #401) is the same family with a different addressee: the gate RAN,
+    found its subject absent BY DESIGN, and owes its substantive verdict to a later gate —
+    a bundle-scoped T4 contribution row at Check time, whose ``pr-description.md`` publish
+    has not drafted yet. Recording that non-event as ``pass`` asserted a green no reviewer
+    could reproduce (the artifacts the row names are not among its inputs), so every cycle
+    escalated the by-design condition to §6 NEEDS-HUMAN; recording it ``unverifiable``
+    would route it to §6 too. It is honoured only on exit **0** — 77 is the ``unverifiable``
+    channel and a non-zero exit is a failure whatever the gate printed (#329) —
+    ``unverifiable`` wins when both are declared (the safer channel: it stops for a human),
+    and only when ``deferrable`` says a later gate actually re-runs this row
+    (:func:`_deferrable`)."""
     if rc in (0, UNVERIFIABLE_RC):
         reason = _declared_unverifiable(output)
         if reason is not None:
             return "unverifiable", [reason or "gate declared itself unverifiable"]
-    last = output.strip().splitlines()[-1:] or [""]
+        if rc == 0 and deferrable:
+            owed = _declared_deferred(output)
+            if owed is not None:
+                return "deferred", [owed or "substantive audit runs at publish"]
+    evidence = _declared_evidence(output)
+    if evidence is None:
+        evidence = (output.strip().splitlines()[-1:] or [""])[0]
     if rc == UNVERIFIABLE_RC:
-        return "unverifiable", [last[0] or f"gate exited unverifiable (rc {UNVERIFIABLE_RC})"]
-    return ("pass" if rc == 0 else "fail"), last
+        return "unverifiable", [evidence or f"gate exited unverifiable (rc {UNVERIFIABLE_RC})"]
+    return ("pass" if rc == 0 else "fail"), [evidence]
 
 
 def _merged_env(extra: dict | None) -> dict | None:
@@ -661,6 +783,9 @@ def _merged_env(extra: dict | None) -> dict | None:
 
 # ----------------------------------------------------------------------------
 def _finalize(rows: list[dict], *, name: str, write_to: Path | None) -> dict:
+    # Only a hard `fail` gates. `unverifiable` (#46) and `deferred` (#401) are verdicts the
+    # gate did NOT reach — neither a green nor a gating red — so neither counts toward
+    # `overall`; each has its own downstream route (§6 NEEDS-HUMAN / the later re-gate).
     gating_fail = any(r["gating"] and r["result"] == "fail" for r in rows)
     result = {"issue_dir": name, "overall": "fail" if gating_fail else "pass", "rows": rows}
     if write_to is not None:

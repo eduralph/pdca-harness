@@ -360,7 +360,19 @@ def _gate_lines(gates: dict, *, prefix: str) -> str:
 
 def _unverifiable_items(gates: dict) -> list[str]:
     """Gate rows the mechanic couldn't run (``result == "unverifiable"``) → §6 items, so
-    the C6 accept-guard forces the human to clear them before accept (issue #46)."""
+    the C6 accept-guard forces the human to clear them before accept (issue #46).
+
+    ``unverifiable`` ONLY — a ``deferred`` row (issue #401) is deliberately NOT lifted, the
+    single difference between the two gate-declared, non-gating results. ``unverifiable``
+    means "nobody has an answer, so a human must decide"; ``deferred`` means "this row's
+    substantive audit runs later, at a gate that cannot be skipped"
+    (``gates._deferrable`` → ``publish.publish_gates``) — there is nothing for the human to
+    clear. Lifting it anyway is the defect this closes: the Check-time T4 contribution row is
+    default-open by design (its artifacts are drafted at publish), and its vacuous green fired
+    a §6 NEEDS-HUMAN on 9 of 9 frozen bundles, cleared unread every time — which trains the
+    human to tick §6 boxes, the very guard C6 depends on. The row stays visible in §5
+    evidence (:func:`_gate_lines`) with its reason, so what is owed at publish is still read.
+    """
     return [
         f"{r['check']} unverifiable — {r['path_line'] or r['oracle'] or 'no reason given'}"
         for r in gates["rows"]
