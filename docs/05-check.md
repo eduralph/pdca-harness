@@ -418,7 +418,9 @@ scope creep. Its output, `check-review.md`, is **advisory** — it annotates, it
 never gates. The blocking path contains no LLM at all.
 
 The reviewer runs in an isolation sandbox (only `{patch.diff, brief.md,
-check-gates.json}` are present), so the driver hands it a read-only grounding
+check-gates.json}` plus the round's `gate-logs/` are present — the frozen gate
+evidence, so a row it cannot re-run is adjudicated from the log its `log` key
+names rather than escalated, issue #403), so the driver hands it a read-only grounding
 target as **`$PDCA_TARGET`** (for a `claude` reviewer also via `--add-dir`).
 That target is the **per-cycle worktree** ([step 04](04-do.md)) — pinned to the
 *same* base the gates ran against and carrying the patch — so a stale or

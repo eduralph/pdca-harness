@@ -61,6 +61,8 @@ from . import worktree
 from .config import Config, LeafConfig
 
 # build-notes.md is DELIBERATELY ABSENT from this list (independence contract).
+# File names only — the round's `gate-logs/` directory is seeded alongside these by
+# `_seed_sandbox_gate_logs` (#403), so a check-gates.json row's `log` path resolves.
 REVIEWER_INPUTS = ["patch.diff", "brief.md", "check-gates.json"]
 
 # The interactive sign-off leaf writes its decision here; the flow reads it and
@@ -1471,8 +1473,17 @@ def reviewer_input_paths(d: Path) -> list[Path]:
 
 _REVIEW_PROMPT = (
     "You are the Check reviewer — advisory, artifact-only, decorrelated from the "
-    "builder. You have ONLY patch.diff, brief.md and check-gates.json in this "
-    "directory (build-notes.md is deliberately withheld). Write check-review.md: open it "
+    "builder. You have ONLY patch.diff, brief.md, check-gates.json and the round's "
+    "frozen gate evidence in gate-logs/ in this directory (build-notes.md is "
+    "deliberately withheld). A check-gates.json row's `log` key names its "
+    "gate-logs/<rule_id>.log — the gate's FULL captured output plus a header giving the "
+    "exact cmd, cwd and PDCA_WORKTREE it ran under. When you cannot re-run a gate "
+    "yourself — the wrappers named in `oracle` are instance-root/$PDCA_WORKTREE-scoped "
+    "and are NOT runnable from $PDCA_TARGET — READ THAT LOG and adjudicate the row from "
+    "it; the oracle being absent from the target checkout is expected and is not by "
+    "itself a finding. Reserve the 'gate not reproducible / oracle missing' NEEDS-HUMAN "
+    "for a row that has NO log (no `log` key, a `log_error`, or a file that is not "
+    "there). Write check-review.md: open it "
     "with a one-line outline of the task under review (the bug to fix / functionality to "
     "implement), then a complete verdict table — one row for EVERY element of the "
     "5/5/1 matrix, in order:\n"
@@ -1585,6 +1596,40 @@ def _seed_sandbox_agents(cfg: Config, sandbox: Path) -> None:
     except (shutil.Error, OSError) as exc:
         print(f"leaves: could not seed sandbox agents from {src} ({exc}); "
               "`--agent` may not resolve", file=sys.stderr)
+
+
+def _seed_sandbox_gate_logs(d: Path, sandbox: Path) -> None:
+    """Copy the round's ``gate-logs/`` into the sandbox so every path a frozen
+    ``check-gates.json`` row references resolves from the leaf's cwd (issue #403).
+
+    Since #370/#415 each gate row carries ``row["log"] = "gate-logs/<rule_id>.log"``
+    (``gates.py:544``) — the full captured output plus a header naming ``cmd``, ``cwd``
+    and ``PDCA_WORKTREE`` (``gates.py:576-593``) — and #370's promise is that "the
+    verdict's whole basis … must be reconstructable from bundle files alone"
+    (``gates.py:535-537``). The reviewer/advisory leaves run in a temp sandbox cwd
+    seeded from :data:`REVIEWER_INPUTS`, a list of **file names**, so the directory was
+    left behind and the one artifact that lets a leaf adjudicate a row it cannot re-run
+    (the wrappers are instance-root/``$PDCA_WORKTREE``-scoped, not runnable from
+    ``$PDCA_TARGET``) was referenced by a path that did not resolve.
+
+    Independence is untouched: a gate log is the *gate's* own output, never the
+    builder's rationale — ``build-notes.md`` stays out of the sandbox.
+
+    **Best-effort**, mirroring :func:`_seed_sandbox_agents`: no ``gate-logs/`` (a stub
+    gate run, an older bundle) or a copy error degrades to a no-op with a stderr note —
+    the leaf then behaves exactly as it did before this seed existed. An OSError must
+    never abort Check.
+    """
+    src = d / state.GATE_LOGS_DIR
+    if not src.is_dir():
+        return
+    try:
+        shutil.copytree(src, sandbox / state.GATE_LOGS_DIR,
+                        dirs_exist_ok=True, ignore_dangling_symlinks=True)
+    except (shutil.Error, OSError) as exc:
+        print(f"leaves: could not seed sandbox gate evidence from {src} ({exc}); "
+              f"`{state.GATE_LOGS_DIR}/` paths in check-gates.json will not resolve",
+              file=sys.stderr)
 
 
 # The ONLY `sandbox.network` keys the driver will carry into a leaf's temp cwd, each with the
@@ -1888,6 +1933,10 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
             src = d / name
             if src.exists():
                 shutil.copy2(src, sandbox / name)
+        # …and the round's frozen gate evidence, which check-gates.json rows reference by
+        # a bundle-relative `gate-logs/<rule_id>.log` path (#403): without it the leaf is
+        # asked to adjudicate rows whose whole basis is one `cd` away and unreachable.
+        _seed_sandbox_gate_logs(d, sandbox)
         profile = cfg.profile(cfg.reviewer)
         # Seed unconditionally: flag families need it to resolve `--agent` (#161);
         # for inline families it is harmless (role prompts only, never build-notes).
@@ -2085,7 +2134,10 @@ def _advisory_prompt(spec: dict, leaf_id: str, rubric: str = "") -> str:
         "simplification / efficiency cleanups"
     return (
         f"You are an ADVISORY code reviewer — lens: {role}. You have ONLY patch.diff, "
-        "brief.md and check-gates.json here (build-notes.md is withheld); ground every "
+        "brief.md, check-gates.json and the round's frozen gate evidence in gate-logs/ "
+        "here (build-notes.md is withheld) — a row's `log` key names its "
+        "gate-logs/<rule_id>.log, the gate's full output, which is how you adjudicate a "
+        "gate you cannot re-run (#403); ground every "
         "cited path:line on the target source at $PDCA_TARGET, never other checkouts. "
         f"Write check-advisory-{leaf_id}.md: a short list of findings, each a Markdown "
         "bullet with a path:line. For any finding a human must adjudicate, prefix the "
@@ -2201,6 +2253,7 @@ def _run_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict, 
         for name in REVIEWER_INPUTS:
             if (d / name).exists():
                 shutil.copy2(d / name, sandbox / name)
+        _seed_sandbox_gate_logs(d, sandbox)   # see _run_review_sandboxed (#403)
         profile = cfg.profile(leaf)
         # Seed unconditionally: flag families need it to resolve `--agent` (#161);
         # for inline families it is harmless (role prompts only, never build-notes).
