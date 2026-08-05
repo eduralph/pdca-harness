@@ -58,7 +58,7 @@ from . import progress
 from . import sources
 from . import state
 from . import worktree
-from .config import Config, LeafConfig
+from .config import Config, LeafConfig, memory_max_value
 
 # build-notes.md is DELIBERATELY ABSENT from this list (independence contract).
 # File names only — the round's `gate-logs/` directory is seeded alongside these by
@@ -215,6 +215,114 @@ def _seed_positional(prompt: str, workdir: Path) -> tuple[str, Path | None]:
     return seed, spill
 
 
+# ----------------------------------------------------------------------------
+# Leaf memory bound (issue #420)
+#
+# The harness already bounds the other two resources a leaf can exhaust — wall clock
+# (`progress.run_with_heartbeat(timeout=…)`, #368) and disk (`[driver].sweep_worktrees`,
+# #297). Memory was the one left unbounded, and unbounded means UNATTRIBUTABLE: two
+# concurrent reviewer leaves wrote ~69 GB of cold build trees, systemd-oomd killed the
+# whole terminal cgroup for memory pressure, and the run's entire Check band vanished
+# with nothing in any gate log to say why — oomd kills the *cgroup*, not the offending
+# process, so the driver simply disappears. A bound puts each leaf in its own cgroup, so
+# the kernel reaps the offender INSIDE that scope: the leaf exits non-zero, `_invoke`
+# raises LeafError, and `_invoke_leaf_resilient` records it as that leaf's failure (#138).
+#
+# The facility is a systemd transient SCOPE: `--scope` execs the leaf as a direct child in
+# the caller's session, so it keeps the parent terminal (the interactive leaves are REPLs
+# the human types into) and its stdio, exit status and process group behave exactly as an
+# unwrapped spawn — unlike a `--pty`/service unit, which would take the tty away.
+_MEMORY_CAP_ARGV = ("systemd-run", "--user", "--scope", "--quiet", "--collect")
+
+# Property sets, richest first; the probe below picks the first this host accepts, so an
+# older systemd (or one without swap accounting) still gets a hard cap instead of nothing.
+#   MemoryMax      — the hard limit: the kernel OOM-kills inside the scope at this point.
+#   MemorySwapMax=0 — swapping does not relieve the pressure that killed the run, it just
+#                    converts an attributable kill into machine-wide thrash.
+#   ManagedOOMMemoryPressure=kill — give systemd-oomd a scope-sized target, so the leaf's
+#                    own cgroup is what dies under pressure rather than the session's.
+_MEMORY_CAP_PROPERTY_TIERS = (
+    ("MemoryMax={bound}", "MemorySwapMax=0", "ManagedOOMMemoryPressure=kill"),
+    ("MemoryMax={bound}", "MemorySwapMax=0"),
+    ("MemoryMax={bound}",),
+)
+
+#: Seconds allowed for the availability probe (a `systemd-run … true`). Bounded for the
+#: same reason the leaf is: a probe that hangs would hang the whole beat.
+_MEMORY_CAP_PROBE_TIMEOUT = 15
+
+#: The facility decision, resolved ONCE per bound per process: ``bound → wrapper argv``
+#: (``[]`` = this host cannot enforce it). Probing per spawn instead would pay a
+#: subprocess for every leaf and — worse — let a transient systemd hiccup unbound ONE
+#: leaf of a run while its siblings stayed capped, which is precisely the unattributable
+#: state this issue exists to remove: a run is either bounded or it is not, and it says
+#: which exactly once. A process is one `pdca` run, so this is per-run.
+_MEMORY_CAP_DECISION: dict[str, list[str]] = {}
+
+
+def _leaf_memory_bound(leaf: LeafConfig, cfg: Config | None) -> str:
+    """The configured bound for this leaf, or ``""`` for "unbounded" (#420).
+
+    ``[leaves.*].memory_max`` wins over ``[driver].leaf_memory_max`` (the per-leaf
+    escape hatch, mirroring "explicit argv always wins"), and an explicit ``"off"``
+    at either level means unbounded. Unset at both — the default — is ``""``: no
+    wrapping, no new process, byte-identical argv. ``cfg`` may be ``None``.
+    """
+    bound = (getattr(leaf, "memory_max", "") or "").strip()
+    if not bound:
+        bound = (getattr(cfg, "leaf_memory_max", "") or "").strip() if cfg else ""
+    return "" if bound.lower() == "off" else bound
+
+
+def _memory_cap_supported(argv: list[str]) -> bool:
+    """Does this host actually accept this wrapper? Probed by running it over ``true``.
+
+    A configured-but-unenforceable bound must be a documented NO-OP, never a hard
+    failure (the #213 treatment of a declared-but-missing host resource): the harness
+    also runs where there is no systemd/user manager at all, and a wrapper that fails
+    to exec would take down every leaf in the system rather than bound it. Probing the
+    exact argv — launcher plus properties — is the only honest availability answer:
+    `which systemd-run` says nothing about whether the user manager is reachable or the
+    properties are understood. Any failure, timeout or missing binary ⇒ unsupported.
+    """
+    try:
+        return subprocess.run([*argv, "true"], capture_output=True,
+                              timeout=_MEMORY_CAP_PROBE_TIMEOUT).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _memory_cap_prefix(leaf: LeafConfig, cfg: Config | None) -> list[str]:
+    """The wrapper argv that confines this leaf's spawn, or ``[]`` (#420).
+
+    ``[]`` — meaning "spawn exactly as today" — for both no-op cases: no bound
+    configured, and a bound this host cannot enforce. The host probe runs once per
+    bound per process (``_MEMORY_CAP_DECISION``), so the answer — and the note when it
+    is "cannot" — is the run's, not each spawn's.
+    """
+    bound = _leaf_memory_bound(leaf, cfg)
+    if not bound:
+        return []
+    if bound not in _MEMORY_CAP_DECISION:
+        _MEMORY_CAP_DECISION[bound] = _resolve_memory_cap(bound)
+    return list(_MEMORY_CAP_DECISION[bound])
+
+
+def _resolve_memory_cap(bound: str) -> list[str]:
+    """Probe this host for a wrapper that enforces ``bound``; ``[]`` if none does (#420)."""
+    for properties in _MEMORY_CAP_PROPERTY_TIERS:
+        argv = [*_MEMORY_CAP_ARGV]
+        for prop in properties:
+            argv += ["--property", prop.format(bound=bound)]
+        argv.append("--")
+        if _memory_cap_supported(argv):
+            return argv
+    print(f"leaves: memory bound {bound!r} is configured but this host cannot enforce it "
+          "(no usable `systemd-run --user --scope`) — running every leaf unbounded",
+          file=sys.stderr)
+    return []
+
+
 def _invoke(
     leaf: LeafConfig,
     workdir: Path,
@@ -242,12 +350,24 @@ def _invoke(
     families without a stream format ignore it. ``cfg`` enables the profile-driven
     extras (role injection, model/effort mapping, ``[families.*]`` overrides);
     ``None`` falls back to the built-in profile for the leaf's family.
+
+    Both branches spawn inside the leaf's configured memory bound when there is one
+    (``[driver].leaf_memory_max`` / ``[leaves.*].memory_max``, issue #420) — see
+    :func:`_memory_cap_prefix`. Unset (the default) or unenforceable on this host ⇒
+    the argv spawned here is byte-identical to what it was before that knob existed.
     """
     profile = families.resolve(leaf.family, cfg.families if cfg else None)
     role_argv, prompt_prefix = _role_injection(cfg, leaf, profile)
     argv = list(leaf.argv) + role_argv
     argv += _mapped_argv(leaf, profile, argv)
     argv += list(extra_argv or [])
+    # Confine the spawn to its configured memory bound (#420). One decision for BOTH
+    # branches below — a bound that covered only the headless leaves would be a lie for
+    # half of them. `[]` (unset, or a host that cannot enforce it) leaves argv untouched,
+    # so the default spawn is byte-identical to before. Prepended here, ahead of the
+    # per-branch tails (the stream flags, the interactive seed): everything after the
+    # wrapper's `--` is the leaf's own command line, in its original order.
+    argv = _memory_cap_prefix(leaf, cfg) + argv
     prompt = prompt_prefix + prompt
     run_env = {**os.environ, **env} if env else None
     if leaf.interactive:
@@ -765,6 +885,14 @@ def _leaf_from_spec(spec: dict, default: LeafConfig) -> LeafConfig:
         # is inherited from the default leaf only; a variant sets its model via argv.
         model=default.model,
         effort=spec.get("effort", default.effort),
+        # Memory bound (#420): the spec's own `memory_max` wins, else INHERIT the base
+        # leaf's — a variant/escalation of the builder is the same appetite as the
+        # builder, so it must not silently lose its base leaf's cap OR its "off"
+        # opt-out. An unparseable spec value is "" (noted on stderr) and therefore
+        # inherits too, never a guessed number.
+        memory_max=(memory_max_value(spec.get("memory_max", ""),
+                                     "a [[leaves.*]] variant/escalation memory_max")
+                    or default.memory_max),
     )
 
 
@@ -2125,6 +2253,25 @@ def advisory_error_log(d: Path, leaf_id: str) -> Path:
     return d / f"check-advisory-{leaf_id}.error.log"
 
 
+def _advisory_leaf(spec: dict, table: str, leaf_id: str) -> LeafConfig:
+    """The :class:`LeafConfig` for one ARRAY-form advisory spec — ``[[leaves.advisory]]``
+    (#64) and ``[[leaves.plan_advisory]]`` (#301) alike.
+
+    One constructor for both, because these tables are built from raw spec dicts here
+    rather than by ``Config.leaf()``: a per-leaf key added there reaches only the NAMED
+    ``[leaves.*]`` tables and is silently dropped for the array-form ones. ``memory_max``
+    (#420) is the case in point — a documented per-leaf bound that did nothing for the
+    advisory leaves, which are exactly the ones a run fans out CONCURRENTLY and therefore
+    the hungriest pool to bound."""
+    return LeafConfig(
+        mode=spec.get("mode", "stub"), family=spec.get("family", ""),
+        argv=list(spec.get("argv", [])), agent=spec.get("agent", ""),
+        model=spec.get("model", ""), effort=spec.get("effort", ""),
+        memory_max=memory_max_value(spec.get("memory_max", ""),
+                                    f"[[leaves.{table}]] '{leaf_id}'.memory_max"),
+    )
+
+
 def _advisory_applies(spec: dict, d: Path) -> bool:
     """True iff this advisory leaf should run for bundle ``d``. Its ``when`` ({field,
     substring}) matches a brief field case-insensitively; absent ⇒ always run. Delegates to
@@ -2240,9 +2387,7 @@ def run_advisory_leaves(d: Path, cfg: Config, *, only_missing: bool = False) -> 
         if only_missing and (advisory_artifact(d, leaf_id).exists()
                              or advisory_error_log(d, leaf_id).exists()):
             continue
-        leaf = LeafConfig(mode=spec.get("mode", "stub"), family=spec.get("family", ""),
-                          argv=list(spec.get("argv", [])), agent=spec.get("agent", ""),
-                          model=spec.get("model", ""), effort=spec.get("effort", ""))
+        leaf = _advisory_leaf(spec, "advisory", leaf_id)
         if leaf.mode == "command":
             _run_advisory_sandboxed(d, cfg, leaf, spec, leaf_id)
         else:
@@ -2429,9 +2574,7 @@ def _run_plan_advisory_leaves(d: Path, cfg: Config) -> list[str]:
     ran: list[str] = []
     for spec in _select_plan_advisory(applicable, d, cfg):
         leaf_id = spec.get("id") or "plan-advisory"
-        leaf = LeafConfig(mode=spec.get("mode", "stub"), family=spec.get("family", ""),
-                          argv=list(spec.get("argv", [])), agent=spec.get("agent", ""),
-                          model=spec.get("model", ""), effort=spec.get("effort", ""))
+        leaf = _advisory_leaf(spec, "plan_advisory", leaf_id)
         if leaf.mode == "command":
             _run_plan_advisory_sandboxed(d, cfg, leaf, spec, leaf_id)
         else:
