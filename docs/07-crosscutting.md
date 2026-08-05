@@ -350,6 +350,17 @@ wave builds on, via `[driver].wave_mode`:
   batch; fails closed if a PR turns out non-mergeable. `[driver].merge_method`
   picks the merge strategy (`"merge"` / `"squash"` / `"rebase"`).
 
+In merge mode the merge is unattended, so **publish refuses to open a PR against
+any branch this run produced** — the work must land on a base that exists
+independently of the run, or the run stops and says so. Two shapes get refused,
+both naming the branch the PR would have targeted *and* the target base it should
+have used: a base that came from the auto-stacked chain (a `Stacks on:` prereq's
+fix branch or a recorded integration branch), and a brief whose `Repo + branch
+target` itself names a branch another bundle in the batch produced — the
+chained-brief practice that is right under `"stack"` and wrong here, where wave
+order already carries the dependency. Fix the brief's target (or go back to
+`"stack"`) and re-publish; the harness never retargets a PR for you.
+
 `[driver].regate_between_waves` (default `false`) optionally re-runs your
 repo-scoped gates over each folded integration tip before the next wave builds
 on it — catching a combination that's red even though every fix in it was green
