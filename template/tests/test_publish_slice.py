@@ -972,5 +972,103 @@ class PublisherGuard(unittest.TestCase):
         self.assertEqual((env or {}).get("PDCA_HANDOFF_ROLE"), "publisher")
 
 
+class MergeModeBaseGuard(unittest.TestCase):
+    """#411 — under `[driver].wave_mode = "merge"` the driver merges each accepted bundle's
+    PR "into its base" (merge.py), unattended and mid-flow, whatever base that PR carries.
+    So publish must REFUSE, fail-closed, to open a PR against a branch THIS run produced —
+    naming both the branch the PR would have targeted and the target base — by either route
+    that puts one there. The default `"stack"` mode is untouched: nothing merges for you
+    there, and chaining onto a predecessor is the point.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.cfg = _cfg(self.tmp)
+        self.cfg.base_remote = "origin"        # own-repo — the only mode `merge` supports
+
+    def _publish(self, issue_id: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = publish.publish(self.cfg, issue_id, dry_run=True, by="T", today="2026-06-05")
+        return rc, out.getvalue(), err.getvalue()
+
+    def _published(self, issue_id: str, branch: str, **extra) -> Path:
+        """A sibling bundle that already published `branch` in this batch."""
+        p = self.cfg.bundle(issue_id)
+        p.mkdir(parents=True)
+        (p / "publish.json").write_text(json.dumps({"branch": branch, **extra}),
+                                        encoding="utf-8")
+        return p
+
+    def _assert_nothing_published(self, out: str, d: Path) -> None:
+        self.assertNotIn("gh pr create", out)                  # no PR
+        self.assertNotIn("push", out)                          # nothing pushed
+        self.assertFalse((d / "publish.json").exists())        # no recorded contribution
+
+    def test_merge_mode_refuses_a_pr_based_on_a_stacked_prereq_branch(self) -> None:
+        # Route 1: `Stacks on:` falls back to the prereq's own fix branch (_stack_base_branch),
+        # and merge mode never records an integration branch — so that fallback is what picks
+        # the base, and the merge would land the fix in the prereq's branch.
+        self._published("PARENT", "fix/PARENT-my-fix")
+        d = _bundle(self.cfg, "DEP", brief_body=_FIX_BRIEF + "- **Stacks on:** PARENT\n",
+                    accepted=True)
+        self.cfg.wave_mode = "merge"
+        rc, out, err = self._publish("DEP")
+        self.assertEqual(rc, 1)
+        self.assertIn("fix/PARENT-my-fix", err)     # the branch the PR would have targeted
+        self.assertIn("`main`", err)                # the target base it should have used
+        self._assert_nothing_published(out, d)
+
+    def test_merge_mode_refuses_a_target_base_another_bundle_produced(self) -> None:
+        # Route 2: the brief's own `Repo + branch target` names a predecessor's branch (the
+        # documented chained-brief practice for stack mode). pr_base then EQUALS the resolved
+        # target base, so comparing the two sees nothing wrong — the batch's publish.json
+        # records are what expose it, offline.
+        self._published("PRED", "fix/PRED-groundwork", mode="new-pr", base="main",
+                        repo="example-org/example-repo")
+        d = _bundle(self.cfg, "CHAIN", brief_body=(
+            "- **Slug:** my-fix\n"
+            "- **Repo + branch target:** example-org/example-repo @ fix/PRED-groundwork\n"),
+            accepted=True)
+        self.cfg.wave_mode = "merge"
+        rc, out, err = self._publish("CHAIN")
+        self.assertEqual(rc, 1)
+        self.assertIn("fix/PRED-groundwork", err)   # target == the branch PRED produced
+        self.assertIn("issue_PRED", err)            # …and which bundle produced it
+        self._assert_nothing_published(out, d)
+
+    def test_merge_mode_publishes_an_ordinary_bundle_against_the_shared_base(self) -> None:
+        # The guard is not a blanket stop: a bundle whose base is the shared target still
+        # publishes in merge mode, even with other bundles' branches recorded in the batch.
+        self._published("SIB", "fix/SIB-other", repo="example-org/example-repo")
+        _bundle(self.cfg, "OK", brief_body=_FIX_BRIEF, accepted=True)
+        self.cfg.wave_mode = "merge"
+        rc, out, err = self._publish("OK")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("--base main", out)
+
+    def test_stack_mode_still_chains_and_still_accepts_a_branch_target(self) -> None:
+        # The default mode is untouched by the guard, in both of the shapes it refuses above:
+        # the stacked PR chains onto the parent branch (#123/#185), and a brief targeting a
+        # predecessor's branch publishes against it.
+        self._published("PARENT", "fix/PARENT-my-fix")
+        _bundle(self.cfg, "DEP", brief_body=_FIX_BRIEF + "- **Stacks on:** PARENT\n",
+                accepted=True)
+        self.assertEqual(self.cfg.wave_mode, "stack")           # the default
+        rc, out, err = self._publish("DEP")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("--base fix/PARENT-my-fix", out)
+
+        self._published("PRED", "fix/PRED-groundwork", repo="example-org/example-repo")
+        _bundle(self.cfg, "CHAIN", brief_body=(
+            "- **Slug:** my-fix\n"
+            "- **Repo + branch target:** example-org/example-repo @ fix/PRED-groundwork\n"),
+            accepted=True)
+        rc, out, err = self._publish("CHAIN")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("--base fix/PRED-groundwork", out)
+
+
 if __name__ == "__main__":
     unittest.main()
