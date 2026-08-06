@@ -86,8 +86,9 @@ def draft_texts(cfg: Config, d: Path, *, run_t4: bool = True, draft: bool = True
     legitimately nothing to draft (not COMPLETE, a close/no-fix empty patch, no usable
     target): :func:`publish`'s own guards re-decide and report those with their richer
     messages. False = drafting or T4 failed: do not enter the mechanics loop. (The
-    ``--no-issue``/pending-id T4 relaxation stays exclusive to :func:`publish` — the
-    flow never publishes pending-id.)
+    ``--no-issue``/pending-id narrow T4 mode stays exclusive to :func:`publish` — the
+    flow never publishes pending-id, so this pre-pass always gates in the default
+    id-known mode.)
     """
     if state.state(d) != state.COMPLETE:
         return True
@@ -132,10 +133,13 @@ def publish(
 
     ``pending_id`` (``--no-issue``): the first-class "no tracker id yet" path. A
     project may need to contribute before a tracker number is assigned; rather than a
-    magic ``Fixes #0000`` placeholder, declare it here. The T4 contribution gate is
-    then **relaxed to a flag** instead of a hard block, and the bundle is recorded
-    ``id_pending`` so the human adds the real id and re-gates T4 before marking the PR
-    ready. The publisher leaf omits the trailer (no invented id) in this case.
+    magic ``Fixes #0000`` placeholder, declare it here. The T4 contribution gate then
+    runs in the **narrow pending-id mode** (#384): ``$PDCA_PENDING_ID`` is exported so
+    the registered checker drops exactly the tracker-id requirement (``contribcheck
+    --no-issue``) — every other contribution rule still hard-blocks the push. The
+    bundle is recorded ``id_pending`` so the human adds the real id and re-gates T4
+    before marking the PR ready. The publisher leaf omits the trailer (no invented
+    id) in this case.
 
     ``texts_prevalidated`` (set by the flow, #295 review): the caller already ran
     :func:`draft_texts` — drafting AND the T4 gate — over this bundle, so this call is
@@ -191,21 +195,19 @@ def publish(
         if not _ensure_texts(cfg, d):
             return 1
 
-        # T4 contribution gate — the artifacts MUST pass before anything is pushed,
-        # UNLESS pending_id (--no-issue): then a T4 failure is relaxed to a flag, since
-        # the one thing legitimately missing is the not-yet-assigned tracker id. The
-        # bundle is recorded id_pending so the human adds the id and re-gates T4 before
-        # ready.
-        if not _t4_passes(cfg, d):
-            if pending_id:
-                print(f"publish: T4 contribution gate not satisfied on {COMMIT_MSG} / "
-                      f"{PR_BODY} — proceeding in --no-issue (pending-id) mode; the "
-                      "contribution is FLAGGED. Add the tracker id and re-run T4 before "
-                      "marking the PR ready.", file=sys.stderr)
-            else:
-                print(f"publish: T4 contribution gate FAILED on {COMMIT_MSG} / {PR_BODY} — "
-                      "fix them and retry", file=sys.stderr)
-                return 1
+        # T4 contribution gate — the artifacts MUST pass before anything is pushed, in
+        # BOTH modes. Under pending_id (--no-issue) the gate itself runs in the narrow
+        # pending-id mode (#384): the one thing legitimately missing is the
+        # not-yet-assigned tracker id, so exactly that requirement is dropped — by the
+        # checker (`contribcheck --no-issue` via $PDCA_PENDING_ID), not by waving the
+        # whole failed gate through as a printed flag, which also amnestied a broken PR
+        # body / commit message. Whatever still fails here is a real defect that blocks
+        # the push. The bundle is still recorded id_pending so the human adds the id
+        # and re-gates T4 before ready.
+        if not _t4_passes(cfg, d, pending_id=pending_id):
+            print(f"publish: T4 contribution gate FAILED on {COMMIT_MSG} / {PR_BODY} — "
+                  "fix them and retry", file=sys.stderr)
+            return 1
     elif not ((d / COMMIT_MSG).is_file() and (d / PR_BODY).is_file()):
         # Defensive: prevalidated promises the texts exist; a vanished artifact means
         # the promise no longer holds — refuse rather than push without a commit message.
@@ -776,13 +778,27 @@ def publish_gates(cfg: Config) -> list[dict]:
             and c.get("at_publish", c.get("scope", "repo") == "bundle")]
 
 
-def _t4_passes(cfg: Config, d: Path) -> bool:
+def _t4_passes(cfg: Config, d: Path, *, pending_id: bool = False) -> bool:
     """Run every configured T4-tier gate over the bundle. No T4 gate → nothing to
-    enforce (True). Keeps publish decoupled from any one project's checker."""
+    enforce (True). Keeps publish decoupled from any one project's checker.
+
+    ``pending_id`` (``--no-issue``, #384): the gate must be told which mode it runs
+    in, or the amnesty for the not-yet-assigned tracker id covers the WHOLE checker.
+    The mode is exported as ``$PDCA_PENDING_ID``, derived from THIS run's flag —
+    mirroring how the Check runner derives each gate's env from the driver's own
+    state (``gates._run_one``: ``PDCA_BRIEF_BASE`` / ``PDCA_LANE``), never inherited:
+    an ambient value is scrubbed, so a stray export from an earlier ``--no-issue``
+    run cannot relax the tracker-id rule for a ticketed publish. The shipped checker
+    honours it as ``contribcheck --no-issue`` (via the env, not an edit to the
+    registered row line — that breaks ``copier update`` for instances that appended
+    a row beside it)."""
     t4 = publish_gates(cfg)
     if not t4:
         return True
     env = {**os.environ, "PDCA_BUNDLE": str(d)}
+    env.pop("PDCA_PENDING_ID", None)          # derived per run — never inherited (#384)
+    if pending_id:
+        env["PDCA_PENDING_ID"] = "1"
     for chk in t4:
         # Resolve `subcmd` through the SAME helper Check uses (#338). Reading the raw
         # `cmd` ran the empty string for a delegated row — and `subprocess.run("")` exits
@@ -805,10 +821,18 @@ def _t4_passes(cfg: Config, d: Path) -> bool:
         # T4 gate reads patch.diff and writes its report once, at the end, so the newest
         # write is whatever Check left hours earlier and every tick would render
         # "no writes 180m" — a stall warning on the very run proving it is not stalled.
+        #
+        # Announce BEFORE the heartbeat (#384, regression from the #338 rework; the
+        # #181 "reads as a hang" finding): the first tick is a full interval away, and
+        # on a bundle whose texts already exist this is publish's first action after
+        # its guards. Same shape as the peer gate runner (gates._run_one). The
+        # heartbeat label stays unprefixed — the announce already says "T4 gate".
+        print(f"  · {f'T4 gate {label}'.rstrip()} (this can take minutes)…",
+              file=sys.stderr, flush=True)
         try:
             rc, output, _ = progress.run_with_heartbeat(
                 cmd, cwd=cfg.root, shell=True, env=env, capture=True,
-                label=f"T4 {label}" if label else "T4 gate",
+                label=label or "T4 gate",
             )
         except Exception as exc:  # command not found, etc. — a failing gate, surfaced
             print(f"publish: T4 gate '{label}' could not run — {exc}", file=sys.stderr)
