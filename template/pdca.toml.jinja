@@ -303,8 +303,9 @@ issue_id_example = "{{ issue_id_example }}"
 # Trailer linking a commit/PR to the issue ({id} = the bug id). Trackers differ
 # (GitHub/Mantis "Fixes #{id}", Jira "Fixes PROJ-{id}"); "" enforces none. The
 # publish step's commit-msg ends with this; the T4 gate (if any) checks it.
-# No tracker id yet? Use `{{ cli_name }} publish --no-issue`: it omits the trailer, relaxes
-# T4 to a flag, and records the bundle `id_pending` (no magic "#0000" placeholder).
+# No tracker id yet? Use `{{ cli_name }} publish --no-issue`: it omits the trailer, runs T4
+# in the narrow pending-id mode (only the tracker-id requirement is dropped — everything
+# else still blocks), and records the bundle `id_pending` (no magic "#0000" placeholder).
 issue_trailer = "Fixes #{id}"
 # Optional issue-URL template ({id} = the bug id). Set it and `{{ cli_name }} publish`
 # DETERMINISTICALLY hyperlinks the ticket id in the PR body (a Markdown link on the id, not
@@ -957,7 +958,14 @@ checks = [
   # deferral (`PDCA-DEFERRED:`, exit 0) and the Check row records `deferred — re-gated at
   # publish` rather than a green nobody can reproduce (issue #401; docs 04 §Gate result
   # vocabulary). `{{ cli_name }} publish` then hard-gates T4 after drafting them — the
-  # substantive verdict, unchanged (relaxed to a flag under --no-issue). Gating is right here — this audits THIS cycle's own contribution artifacts,
+  # substantive verdict, in BOTH modes: under `publish --no-issue` the runner exports
+  # $PDCA_PENDING_ID (derived from the flag on each run, never inherited) and `contribcheck`
+  # honours it as `--no-issue`, so the checker drops exactly the not-yet-assigned tracker-id
+  # requirement and everything else still blocks the push (issue #384; the mode travels via
+  # the environment, not an edit to the row below — rewriting that registered line in place
+  # would conflict on `copier update` for any instance that appended a row beside it,
+  # tests/test_update_compat.py).
+  # Gating is right here — this audits THIS cycle's own contribution artifacts,
   # not pre-existing code, so the usual "T4 advisory" caveat (below) does not apply.
   # `at_publish` (issue #339) — whether `{{ cli_name }} publish` re-runs this row before pushing.
   # Defaults from `scope`: a BUNDLE-scoped T4 row is about the bundle's own contribution

@@ -20,8 +20,9 @@ not push, branch, or open a PR yourself.**
      trailer to stand alone as a blank-separated last line. Do **not** append a
      `Co-Authored-By:` (or any other) trailer after it. **If no tracker id is
      assigned yet** (the bundle id is not a real tracker number), OMIT the trailer rather
-     than invent a placeholder like `#0000` — `{{ cli_name }} publish --no-issue` relaxes T4 to a
-     flag and records the contribution `id_pending` for the human to fill the id in.
+     than invent a placeholder like `#0000` — `{{ cli_name }} publish --no-issue` runs T4 without
+     the tracker-id requirement (every other rule still blocks the push) and records the
+     contribution `id_pending` for the human to fill the id in.
 
 2. **`pr-description.md`** — the PR body (see `templates/pr-description.md.tpl`).
    Write for the PR's **actual audience** — a maintainer triaging, a reviewer of the
