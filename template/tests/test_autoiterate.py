@@ -722,6 +722,17 @@ class Classification(unittest.TestCase):
 class ConfigPlumbing(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
+        # Hermetic against the ambient environment (#419): Config.load honors PDCA_*
+        # env overrides (PDCA_AUTO_ITERATE, config.py), and a project's T3 suite gate
+        # runs this suite with the DRIVER's inherited env (gates._merged_env) — an
+        # auto-iterate flow can carry PDCA_AUTO_ITERATE=1 there, flipping the
+        # default-behavior assertions below to read the operator's shell instead of
+        # the toml under test.
+        env_guard = mock.patch.dict(os.environ)
+        env_guard.start()
+        self.addCleanup(env_guard.stop)
+        for key in [k for k in os.environ if k.startswith("PDCA_")]:
+            del os.environ[key]
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
