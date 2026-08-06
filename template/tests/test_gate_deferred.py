@@ -278,5 +278,32 @@ class ContribcheckDeclaresTheDeferral(_GateCase):
                          ["T4-contribution"])
 
 
+class ModuleDocNamesEveryResultChangingMarker(unittest.TestCase):
+    """The module doc's evidence-marker paragraph is normative (issue #442): #401 made
+    `deferred` a second result-changing declaration, so the paragraph's exclusivity claim
+    for ``PDCA-UNVERIFIABLE`` ("the one marker that can change a ``result``") became false
+    the moment :data:`gates.DEFERRED_MARKER` landed twenty lines below it."""
+
+    # The docstring hard-wraps its sentences; collapse whitespace so the assertions span
+    # the wrap points instead of pinning the current line layout.
+    _DOC = " ".join((gates.__doc__ or "").split())
+    # Marker NAMES as the prose cites them (no trailing colon), composed from the
+    # production constants like `_D` above — never a second spelling that can drift.
+    _CLAIM = (f"only the ``{_U.removesuffix(':')}``/``{_D.removesuffix(':')}`` "
+              "declarations can change a ``result``")
+
+    def test_the_exclusivity_claim_is_gone(self) -> None:
+        self.assertNotIn(
+            "the one marker", self._DOC,
+            "gates.__doc__ still claims a SINGLE result-changing marker — false since "
+            "#401 added the deferred declaration")
+
+    def test_the_result_changing_claim_names_both_declarations(self) -> None:
+        self.assertIn(
+            self._CLAIM, self._DOC,
+            "gates.__doc__ must name BOTH result-changing declarations in the "
+            "evidence-marker paragraph's claim")
+
+
 if __name__ == "__main__":
     unittest.main()
