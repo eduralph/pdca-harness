@@ -50,6 +50,45 @@ def _sections(text: str) -> list[tuple[str, str]]:
     return out
 
 
+def _example_argvs(text: str) -> list[list[str]]:
+    """Every COMMENTED `argv = [...]` example in the doc text, as quoted-token lists.
+
+    An example may wrap across comment lines (the RC one does), so the comment lines
+    are joined — leading `#` stripped — before each bracket pair is read. Active
+    (uncommented) argv lines are deliberately not examples: an instance's own argv is
+    protected by the driver's seed separator, while the example is what gets copied."""
+    commented = "\n".join(ln.lstrip()[1:] for ln in text.splitlines()
+                          if ln.lstrip().startswith("#"))
+    out = []
+    for m in re.finditer(r"argv\s*=\s*\[(.*?)\]", commented, flags=re.S):
+        tokens = re.findall(r'"([^"]*)"', m.group(1))
+        if tokens:
+            out.append(tokens)
+    return out
+
+
+def _rc_comment_blocks(text: str) -> list[str]:
+    """Each maximal run of consecutive `#` lines that mentions `--remote-control`.
+
+    The placement-rationale assertion is anchored to THESE blocks — not the whole
+    file, where common words would match vacuously — and matches ingredient words
+    case-insensitively rather than one exact phrase, so rewording the comment
+    (or another change landing in the same file) cannot turn the suite red while
+    the rule itself still stands."""
+    blocks: list[str] = []
+    cur: list[str] = []
+    for ln in text.splitlines():
+        if ln.lstrip().startswith("#"):
+            cur.append(ln)
+        else:
+            if cur:
+                blocks.append("\n".join(cur))
+            cur = []
+    if cur:
+        blocks.append("\n".join(cur))
+    return [b for b in blocks if "--remote-control" in b]
+
+
 def remote_control_offenders(text: str) -> list[str]:
     """Active (uncommented) `--remote-control` lines that are NOT in an interactive leaf.
 
@@ -108,6 +147,31 @@ class RemoteControlDocs(unittest.TestCase):
                 self.assertLessEqual(len(active), 1,
                                      f"[leaves.{name}] declares argv {len(active)} times")
 
+    def test_the_example_never_shows_the_flag_last(self) -> None:
+        """The driver seeds an interactive leaf by APPENDING the prompt as one
+        positional after the configured argv, and `--remote-control` takes an
+        optional [name] value — as the argv-final token it swallows the whole seed
+        as the RC session name: RC fails to start and the REPL opens unseeded
+        (issue #396). The shipped example is what instances copy verbatim, so it
+        must show the flag NON-last, and the doc must say why."""
+        rc_examples = [ex for ex in _example_argvs(self.text)
+                       if "--remote-control" in ex]
+        self.assertTrue(rc_examples, "the doc block lost its worked example")
+        for ex in rc_examples:
+            with self.subTest(example=ex):
+                self.assertNotEqual(
+                    ex[-1], "--remote-control",
+                    "the example ends in an optional-value flag — following it "
+                    "verbatim makes the flag eat the seed prompt (issue #396)")
+        stated = "\n".join(_rc_comment_blocks(self.text))
+        self.assertTrue(stated, "the flag's doc comment block is gone")
+        for needle in ("last", "seed", "optional"):
+            self.assertRegex(
+                stated, re.compile(needle, re.I),
+                "the placement rule must be STATED, not just modelled: the doc "
+                "comment must say the seed is appended after the argv and that "
+                f"an optional-value flag must not sit last (missing {needle!r})")
+
     def test_it_is_scoped_to_interactive_claude_leaves(self) -> None:
         """The flag starts an INTERACTIVE session, so the headless builder/reviewer must
         not carry it — they have no human to reach."""
@@ -157,10 +221,12 @@ _DOC_BLOCK = """\
 # REMOTE CONTROL — answer an interactive leaf from another device (issue #337).
 #
 # To enable, APPEND the flag to the argv line below — do not add a second `argv = [...]`,
-# which would be a duplicate key the moment you uncomment it:
+# which would be a duplicate key the moment you uncomment it. Put it anywhere but LAST —
+# the driver appends the seed prompt as a positional after this argv, and a trailing
+# optional-value flag would swallow it (issue #396):
 #
-#   argv = ["claude", "--agent", "planner", "--permission-mode", "acceptEdits",
-#           "--remote-control"]
+#   argv = ["claude", "--remote-control", "--agent", "planner",
+#           "--permission-mode", "acceptEdits"]
 #
 # CLAUDE-ONLY, and interactive-only. The headless builder/reviewer must NOT carry it: it
 # starts an *interactive* session and they have no human to reach.

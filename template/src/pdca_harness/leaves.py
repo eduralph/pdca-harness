@@ -375,8 +375,15 @@ def _invoke(
         # limit (#313). `finally` so a non-zero exit or a raising spawn still cleans up;
         # a SIGKILLed session can still orphan one, which is why the name is gitignored.
         seed, spill = _seed_positional(prompt, workdir)
+        # End-of-options separator between the instance's argv and the seed (#396):
+        # bare, a trailing optional-value flag (claude's `--remote-control [name]`)
+        # eats the whole seed as its value — RC then fails to start and the REPL
+        # opens unseeded. The separator makes the #313 seed contract argv-independent
+        # (POSIX guideline 10: after `--` everything is positional). Families without
+        # a verified separator keep the bare-positional spawn, byte-identical.
+        sep = [profile.seed_separator] if profile.seed_separator else []
         try:
-            subprocess.run(argv + [seed], cwd=workdir, env=run_env)
+            subprocess.run(argv + sep + [seed], cwd=workdir, env=run_env)
         finally:
             if spill is not None:
                 spill.unlink(missing_ok=True)
