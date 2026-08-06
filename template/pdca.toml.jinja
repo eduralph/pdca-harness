@@ -547,10 +547,16 @@ argv = []
 # leaving to be discovered.
 #
 # To enable, APPEND the flag to the argv line below — do not add a second `argv = [...]`,
-# which would be a duplicate key the moment you uncomment it:
+# which would be a duplicate key the moment you uncomment it. Put it anywhere but LAST:
+# the driver seeds every interactive leaf by appending the prompt as one positional after
+# this argv, and `--remote-control` takes an optional [name] value — as the final token it
+# swallows the whole seed as the RC session name (RC fails with "check the debug log" and
+# the REPL opens unseeded, issue #396). The same holds for ANY flag with an optional
+# value, so none may sit last. The claude spawn inserts `--` before the seed as a
+# backstop; non-last placement is the posture every family supports.
 #
-#   argv = ["claude", "--agent", "planner", "--permission-mode", "acceptEdits",
-#           "--remote-control"]
+#   argv = ["claude", "--remote-control", "--agent", "planner",
+#           "--permission-mode", "acceptEdits"]
 #
 # The device must be enrolled first (`/login`). Left off by default because a flag that
 # makes a leaf refuse to start would block the flow on the one path that cannot be retried

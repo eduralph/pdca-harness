@@ -76,6 +76,13 @@ class FamilyProfile:
     # `excludedCommands` can, which is why it rides on its own opt-in (#291). Empty ⇒ the family
     # has no such flag (claude scopes network by DOMAIN instead — `allowedDomains`, #277).
     network_argv: tuple[str, ...] = ()
+    # The CLI's end-of-options separator, inserted between the configured argv and the
+    # interactive seed positional (`argv + [sep, seed]` in leaves._invoke, #396). POSIX
+    # Utility Syntax Guideline 10's `--`: everything after it is positional, so no
+    # trailing optional-value flag in an instance's argv (claude's `--remote-control
+    # [name]` is the one that bit) can swallow the seed as its value. "" ⇒ unverified
+    # for this family: the spawn keeps the bare seed positional it always had.
+    seed_separator: str = ""
 
 
 BUILTIN: dict[str, FamilyProfile] = {
@@ -93,6 +100,10 @@ BUILTIN: dict[str, FamilyProfile] = {
         # Load ONLY the settings the harness seeds into the leaf's cwd (plus managed
         # policy, which the CLI force-adds) — never the operator's ~/.claude/settings.json.
         settings_scope_argv=("--setting-sources", "project"),
+        # `claude -- "<prompt>"` parses the prompt as the positional (verified on
+        # claude 2.1.222 at Plan, #396); left "" for the other families until a
+        # vendor's CLI is verified to accept it.
+        seed_separator="--",
     ),
     "codex": FamilyProfile(
         name="codex",

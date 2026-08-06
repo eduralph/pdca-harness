@@ -153,10 +153,14 @@ flow runs in, for the whole batch: a `{{ cli_name }} flow` over several bundles 
 sign-off adjudication for hours because nobody is at that machine.
 
 {% if interactive_family == "claude" -%}
-Claude Code's `--remote-control` flag removes the constraint. Append it to an interactive
-leaf's `argv` in `pdca.toml` and that leaf becomes answerable from another enrolled device;
-nothing else changes — `signoff-decision`, the §6 ticks and the C6 accept-guard all run the
-same code path, and only the human's location differs.
+Claude Code's `--remote-control` flag removes the constraint. Add it to an interactive
+leaf's `argv` in `pdca.toml` — anywhere but last: the driver appends the seed prompt as a
+positional after the argv, and `--remote-control` takes an optional `[name]` value, so as
+the final token it would swallow the whole seed as the RC session name (issue #396; the
+claude-family spawn also inserts `--` before the seed as a backstop, but no flag with an
+optional value should ever sit last). With the flag in place that leaf becomes answerable
+from another enrolled device; nothing else changes — `signoff-decision`, the §6 ticks and
+the C6 accept-guard all run the same code path, and only the human's location differs.
 
 Enabling Remote Control in your own shell does **not** reach the leaves: each is a separate
 `claude` subprocess whose argv comes from `pdca.toml`. That is the whole reason this needs
@@ -167,5 +171,9 @@ session, and they have no human to reach.
 {%- else -%}
 This instance runs its interactive leaves on `{{ interactive_family }}`. Claude Code offers
 `--remote-control` for exactly this; check whether your interactive family has an
-equivalent, and if so append the flag to the leaf's `argv` in `pdca.toml`.
+equivalent, and if so add the flag to the leaf's `argv` in `pdca.toml` — never as the
+final token: the driver appends the seed prompt as one positional after the argv, and a
+flag with an optional value sitting last would swallow it (issue #396). Families without a
+declared end-of-options separator (`seed_separator` in the family profile) have no `--`
+backstop between argv and seed, so placement is the only protection.
 {%- endif %}

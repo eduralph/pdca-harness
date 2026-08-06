@@ -22,8 +22,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from pdca_harness import leaves
+from pdca_harness import families, leaves
 from pdca_harness.config import LeafConfig
 
 REPO = Path(__file__).resolve().parents[1]
@@ -177,6 +178,62 @@ class SeedSpill(unittest.TestCase):
         leaves._invoke(leaf, self.tmp, "B" * 200_000)
         self.assertEqual(out.read_text(encoding="utf-8"), "B" * 200_000)
         self.assertEqual(list(self.tmp.glob(".pdca-prompt-*")), [])
+
+
+# --- the seed survives a trailing optional-value flag (issue #396) ---------------------
+# The seed above is APPENDED to whatever argv the instance configured — and the template
+# sanctions argvs that END in a flag (`--remote-control`, whose optional [name] value made
+# the flag eat the entire seed as an RC session name: RC failed to start and the REPL
+# opened unseeded). The fix is a family-declared end-of-options separator between argv and
+# seed (`claude -- "<seed>"`, POSIX guideline 10), so the guarantee is argv-independent.
+
+
+class SeedSeparator(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _spawn_argv(self, family: str, argv: list[str], prompt: str = "the seed") -> list[str]:
+        """The argv `_invoke` actually spawns for an interactive leaf, recorded not run.
+
+        Patches the one spawn site (`leaves.subprocess.run`) — the production `_invoke`
+        path up to it (profile resolution, seed handling, argv assembly) runs for real."""
+        seen: list[list[str]] = []
+
+        def record(cmd, **kwargs):
+            seen.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with mock.patch.object(leaves.subprocess, "run", record):
+            leaf = LeafConfig(mode="command", family=family, interactive=True, argv=argv)
+            leaves._invoke(leaf, self.tmp, prompt)
+        self.assertEqual(len(seen), 1, "expected exactly one interactive spawn")
+        return seen[0]
+
+    def test_claude_family_separates_seed_from_argv(self) -> None:
+        """The exact defect argv: the doc-sanctioned RC flag as the LAST token. The
+        spawn must carry `--` between the configured argv and the seed, so the flag
+        has nothing to swallow."""
+        argv = ["claude", "--agent", "planner", "--permission-mode", "acceptEdits",
+                "--remote-control"]
+        spawned = self._spawn_argv("claude", argv, "plan issue 19")
+        self.assertEqual(spawned, argv + ["--", "plan issue 19"],
+                         "no end-of-options separator: a trailing optional-value flag "
+                         "eats the seed as its value (issue #396)")
+
+    def test_family_without_the_bit_keeps_the_bare_positional(self) -> None:
+        """No verified separator ⇒ the spawn is byte-identical to before: argv + [seed]."""
+        argv = ["some-cli", "--flag"]
+        spawned = self._spawn_argv("generic", argv)
+        self.assertEqual(spawned, argv + ["the seed"])
+
+    def test_the_separator_is_a_families_profile_bit(self) -> None:
+        """Declared as DATA on the profile — claude (verified `claude -- "<prompt>"` on
+        2.1.222) carries `--`; the others stay unset until their CLI is verified."""
+        self.assertEqual(families.resolve("claude").seed_separator, "--")
+        for fam in ("codex", "gemini", "generic"):
+            with self.subTest(family=fam):
+                self.assertEqual(families.resolve(fam).seed_separator, "")
 
 
 if __name__ == "__main__":
