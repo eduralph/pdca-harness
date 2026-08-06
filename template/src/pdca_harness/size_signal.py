@@ -132,6 +132,14 @@ def iteration_rounds(d: Path) -> tuple[int, int]:
     its new spec already over the threshold, so its very first Check raises "2 rounds
     already spent" and recommends the re-plan that has only just happened.
 
+    The same doctrine has a second boundary (issue #436): a round whose archived evidence
+    shows an environment fault was the SOLE recorded driver of the iterate — a gating red
+    the gate itself recorded ``unverifiable`` (a stale host CLI, an absent oracle), or a
+    flaky ``fail→pass`` confirm-once record — is churn evidence about the HOST, not the
+    slice, and is not charged to it either. See :func:`_environment_attributed` for the
+    exact conditions; anything ambiguous, missing, or unreadable COUNTS the round, so
+    the failure mode is over-counting (the backstop stays), never silent shrinkage.
+
     Shared with ``scripts/size-calibrate``, which defined it first: the thresholds were
     calibrated on THIS definition, so a runtime counting anything else is measuring a
     different quantity from the one the numbers describe.
@@ -143,7 +151,110 @@ def iteration_rounds(d: Path) -> tuple[int, int]:
             archives.append((int(m.group(1)), a))
     replans = [n for n, a in archives if (a / "brief.md").is_file()]
     boundary = max(replans, default=0)
-    return sum(1 for n, _ in archives if n > boundary), len(replans)
+    counted = [a for n, a in archives if n > boundary]
+    return sum(1 for a in counted if not _environment_attributed(a)), len(replans)
+
+
+def _environment_attributed(archive: Path) -> bool:
+    """True iff the archive's own evidence shows an environment fault was the SOLE
+    recorded driver of that round (issue #436).
+
+    Presence of an environmental result alone is NOT attribution: a round can carry an
+    ``unverifiable`` gating row AND an independent implementation finding, and that round
+    is still slice churn. So all three must hold, each read from the files an iterate
+    archives with the attempt (``state.DOWNSTREAM_OF_BRIEF`` moves ``check-gates.json``
+    and ``check-review.md`` into every ``iteration-v<N>/``):
+
+      (a) the gating rows contain NO plain gating ``fail`` — an un-flagged red IS a
+          verdict on the patch, whatever else the round recorded;
+      (b) at least one gating row is recorded ``unverifiable`` (the oracle could not
+          answer — issue #46's channel) or bears a truthy ``flaky`` key (a fail→pass
+          confirm-once record: the #371 contract, implemented here consumer-side and
+          defensively — the recorder has not landed, so the key activates the day it
+          does). A ``fail`` row flagged flaky is by construction not a verdict on the
+          patch, so it neither trips (a) nor fails (b);
+      (c) the archived review record drove nothing of its own
+          (:func:`_review_drove_the_iterate`) — otherwise the environmental row merely
+          accompanied a real finding.
+
+    All-green gates fail (b): that iterate was reviewer-driven, which is slice churn.
+    Fail-safe throughout: missing, unreadable, or malformed evidence returns False and
+    the round counts — over-counting keeps the backstop, and silent shrinkage is the
+    same failure mode :func:`current` refuses for the recorded signal.
+    """
+    rows = _archived_gating_rows(archive)
+    if rows is None:
+        return False
+    if any(r.get("result") == "fail" and not r.get("flaky") for r in rows):
+        return False
+    if not any(r.get("result") == "unverifiable" or r.get("flaky") for r in rows):
+        return False
+    return not _review_drove_the_iterate(archive)
+
+
+def _archived_gating_rows(archive: Path) -> list[dict] | None:
+    """The GATING rows of the archive's own ``check-gates.json``, or ``None`` when the
+    record is missing, unreadable, or not the shape ``gates._finalize`` writes.
+
+    ``None`` (not ``[]``) so the caller can tell "no evidence" from "no gating rows":
+    the former must count the round (fail-safe), and conflating them would let a bundle
+    with garbled archives silently shrink the signal."""
+    try:
+        record = json.loads((archive / "check-gates.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    rows = record.get("rows") if isinstance(record, dict) else None
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        return None
+    return [r for r in rows if r.get("gating")]
+
+
+def _review_drove_the_iterate(archive: Path) -> bool:
+    """Whether the archived review record shows a failing / implementation-shaped finding
+    of its own driving the iterate — or is too ambiguous to say (both count the round).
+
+    False only for a REAL review artifact whose findings are at most the standing
+    Validation row — the one row the reviewer's prompt emits NEEDS-HUMAN on every cycle,
+    which therefore carries no signal (the #293 doctrine). Everything else is True:
+
+      * any other NEEDS-HUMAN finding, whatever its kind — a real objection the iterate
+        may have been answering;
+      * a FAIL verdict cell in a review table — a failing finding by name;
+      * a leaf-status placeholder (``assemble.leaf_status``) — nothing reviewed the
+        attempt, so the record cannot attest the review drove nothing;
+      * a missing or unreadable file — no evidence, fail-safe.
+
+    The findings are read through ``assemble._items_from_artifact`` — the same parser
+    that feeds §6 and the auto-iterate decision — deliberately, rather than re-derived
+    here: two parsers for the same artifact is what let a real objection wear the
+    template's clothes once already (PR #294 review).
+    """
+    # Imported HERE, not at module scope, for the cycle `measure` documents: `assemble`
+    # imports this module at its own top level.
+    from . import assemble
+
+    try:
+        text = (archive / "check-review.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return True
+    if assemble.leaf_status(text):
+        return True
+    if any(it.kind != assemble.STANDING
+           for it in assemble._items_from_artifact(text, allow_standing=True)):
+        return True
+    return _has_fail_verdict_cell(text)
+
+
+def _has_fail_verdict_cell(text: str) -> bool:
+    """A table cell reading exactly ``FAIL`` — the reviewer's failing verdict
+    (``leaves``' mandated vocabulary: PASS / FAIL / NEEDS-HUMAN). Whole-cell match, so a
+    Basis cell that merely *mentions* a failure does not trip it."""
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("|") and any(c.strip().casefold() == "fail"
+                                     for c in s.strip("|").split("|")):
+            return True
+    return False
 
 
 def measure(d: Path) -> dict:
@@ -174,7 +285,8 @@ def measure(d: Path) -> dict:
     return {
         "patch_bytes": patch_bytes,
         "patch_files": patch_files,
-        # Rounds spent ON THE BRIEF THAT IS THERE NOW — see `iteration_rounds`.
+        # Rounds spent ON THE BRIEF THAT IS THERE NOW, and attributable to the SLICE
+        # rather than to a recorded environment fault — see `iteration_rounds`.
         "rounds": rounds,
         # Recorded but unweighted: a re-plan is a fact about the bundle's history that #359
         # will want, and it is the boundary `rounds` is measured from.

@@ -33,6 +33,7 @@ Run from the project root:
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -248,6 +249,23 @@ class IterationRounds(unittest.TestCase):
 
     def test_no_archives_is_zero(self):
         self.assertEqual(sc.iteration_rounds(_bundle(self.root, "issue_3", patch="")), (0, 0))
+
+    def test_the_miner_inherits_environment_attribution(self):
+        """Issue #436: `iteration_rounds` is ONE definition, imported from the runtime
+        backstop — so the miner excludes a round whose archived evidence shows an
+        environment fault (a gating red recorded `unverifiable`, clean review) was its
+        sole recorded driver, with no second implementation to drift. The bare archives
+        in the tests above stay counted (missing evidence must not shrink the signal)."""
+        d = _bundle(self.root, "issue_4", patch="", rounds=2)
+        (d / "iteration-v1" / "check-gates.json").write_text(json.dumps({"rows": [
+            {"check": "C4", "result": "unverifiable", "gating": True},
+        ]}), encoding="utf-8")
+        (d / "iteration-v1" / "check-review.md").write_text(
+            "# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+            "| C1 Spec | PASS | brief.md |\n"
+            "| Validation — fitness-to-purpose | NEEDS-HUMAN | human at sign-off |\n",
+            encoding="utf-8")
+        self.assertEqual(sc.iteration_rounds(d), (1, 0))
 
 
 class Extract(unittest.TestCase):

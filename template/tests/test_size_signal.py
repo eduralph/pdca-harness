@@ -537,5 +537,170 @@ class RoundsAreAttributedToTheCURRENTBrief(unittest.TestCase):
         self.assertEqual(size_signal.iteration_rounds(d), (0, 0))
 
 
+class RoundsAreAttributedToTheSliceNotTheEnvironment(unittest.TestCase):
+    """A round lost to an environment fault — a gating red the gate itself recorded
+    `unverifiable` (a stale host CLI, an absent oracle), or a flaky fail→pass
+    confirm-once record — is churn evidence about the HOST, not the slice (issue #436).
+
+    Exclusion is deliberately narrow: presence of an environmental result alone is NOT
+    attribution, because a round can carry an `unverifiable` gating row AND an independent
+    implementation finding, and that round is still slice churn. Ambiguous, missing, or
+    unreadable archive evidence COUNTS the round — over-counting keeps the backstop;
+    silent shrinkage is the failure mode `size_signal.current` already refuses.
+    """
+
+    # The shape `leaves._REVIEW_PROMPT` mandates: the 5/5/1 verdict table (abridged to
+    # the two canonical Item cells `assemble._verdict_table_lines` needs to recognise
+    # it) closing with the standing Validation row the prompt hard-codes NEEDS-HUMAN on
+    # every cycle — the one finding that must NOT count as a driver of the iterate.
+    CLEAN_REVIEW = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                    "| C1 Spec | PASS | brief.md |\n"
+                    "| C4 Verification (red→green) | PASS | suite green |\n"
+                    "| Validation — fitness-to-purpose | NEEDS-HUMAN | human at sign-off |\n")
+
+    @staticmethod
+    def _gates(rows: list[dict]) -> str:
+        return json.dumps({"issue_dir": "x", "overall": "pass", "rows": rows})
+
+    @staticmethod
+    def _row(result: str, *, gating: bool = True, **extra) -> dict:
+        return {"check": "C4 Verification (red→green)", "result": result,
+                "oracle": "suite", "rule_id": "C4-verify", "path_line": "",
+                "gating": gating, "element": "C4", **extra}
+
+    def _archive(self, d: Path, n: int, *, gates_text: str | None,
+                 review: str | None) -> Path:
+        arch = d / f"iteration-v{n}"
+        arch.mkdir()
+        if gates_text is not None:
+            (arch / "check-gates.json").write_text(gates_text, encoding="utf-8")
+        if review is not None:
+            (arch / "check-review.md").write_text(review, encoding="utf-8")
+        return arch
+
+    def _two_round_bundle(self, v1_rows: list[dict],
+                          v1_review: str | None = CLEAN_REVIEW) -> Path:
+        """v1 as specified, v2 an ordinary plain-fail round — the brief's repro shape."""
+        d = _bundle(patch="x")
+        self._archive(d, 1, gates_text=self._gates(v1_rows), review=v1_review)
+        self._archive(d, 2, gates_text=self._gates([self._row("fail")]),
+                      review=self.CLEAN_REVIEW)
+        return d
+
+    def test_a_solely_unverifiable_round_is_not_charged_to_the_slice(self) -> None:
+        """The brief's repro: v1's only gating red is `unverifiable`, its review clean.
+        On the un-attributed counter this bundle read (2, 0) and fired the rounds rule."""
+        d = self._two_round_bundle([self._row("unverifiable"), self._row("pass")])
+        self.assertEqual(size_signal.iteration_rounds(d), (1, 0))
+
+    def test_the_excluded_round_keeps_the_rounds_rule_from_firing(self) -> None:
+        """The success criterion end to end: 2 archives, one solely environment-attributed
+        → `measure` reports 1 round and `oversize_reasons` stays quiet at the default
+        threshold of 2."""
+        d = self._two_round_bundle([self._row("unverifiable"), self._row("pass")])
+        sig = size_signal.measure(d)
+        self.assertEqual(sig["rounds"], 1)
+        self.assertEqual(size_signal.oversize_reasons(sig, _CFG), [],
+                         "a round demonstrably lost to the environment fired the "
+                         "backstop against the slice")
+
+    def test_a_flaky_flagged_fail_is_environment_attributed(self) -> None:
+        """The #371 contract, consumer side: a gating `fail` bearing a truthy `flaky` key
+        is a fail→pass confirm-once record — by construction not a verdict on the patch.
+        The recorder is not landed yet, so this activates the day it ships."""
+        d = self._two_round_bundle([self._row("fail", flaky=True), self._row("pass")])
+        self.assertEqual(size_signal.iteration_rounds(d), (1, 0))
+
+    def test_a_flaky_flagged_pass_is_environment_attributed(self) -> None:
+        """The other — and likelier — shape #371's recorder will write: a confirm-once
+        re-run that ends fail→PASS records the FINAL result `pass` with the flaky marker.
+        The round it burned is still host churn, so the consumer side must attribute on
+        the marker, not on the result the re-run happened to settle on."""
+        d = self._two_round_bundle([self._row("pass", flaky=True), self._row("pass")])
+        self.assertEqual(size_signal.iteration_rounds(d), (1, 0))
+
+    def test_a_plain_gating_fail_always_counts(self) -> None:
+        """An un-flagged gating red IS a verdict on the patch — even alongside an
+        unverifiable row, the round is slice churn."""
+        d = self._two_round_bundle([self._row("unverifiable"), self._row("fail")])
+        self.assertEqual(size_signal.iteration_rounds(d), (2, 0))
+
+    def test_an_all_green_reviewer_driven_round_always_counts(self) -> None:
+        """No gating red at all means the iterate was reviewer-driven — slice churn, not
+        an environment fault, whatever the review said."""
+        d = self._two_round_bundle([self._row("pass"), self._row("pass")])
+        self.assertEqual(size_signal.iteration_rounds(d), (2, 0))
+
+    def test_the_mixed_cause_round_still_counts(self) -> None:
+        """The decisive case: an unverifiable gating row AND an independent
+        implementation finding in the archived review. Presence of an environmental
+        result alone is not attribution — this round is still slice churn."""
+        review = (self.CLEAN_REVIEW
+                  + "| C4 Verification (red→green) | NEEDS-HUMAN | "
+                    "the shipped test asserts the wrong path |\n")
+        d = self._two_round_bundle([self._row("unverifiable"), self._row("pass")],
+                                   v1_review=review)
+        self.assertEqual(size_signal.iteration_rounds(d), (2, 0))
+
+    def test_the_mixed_cause_round_still_fires_the_rounds_rule(self) -> None:
+        """The success criterion's second half, end to end: the mixed-cause bundle sits
+        at 2 attributable rounds, so `measure` reports 2 and `oversize_reasons` still
+        raises the rounds rule at the default threshold — the exclusion must not eat
+        genuine slice churn that merely has an environmental row alongside it."""
+        review = (self.CLEAN_REVIEW
+                  + "| C4 Verification (red→green) | NEEDS-HUMAN | "
+                    "the shipped test asserts the wrong path |\n")
+        d = self._two_round_bundle([self._row("unverifiable"), self._row("pass")],
+                                   v1_review=review)
+        sig = size_signal.measure(d)
+        self.assertEqual(sig["rounds"], 2)
+        self.assertTrue(any("round" in r for r in size_signal.oversize_reasons(sig, _CFG)),
+                        "a mixed-cause round was excluded — the backstop lost genuine "
+                        "slice churn")
+
+    def test_a_fail_verdict_in_the_review_counts_the_round(self) -> None:
+        """A FAIL cell is a failing finding by name, even though it is not a
+        NEEDS-HUMAN row."""
+        review = (self.CLEAN_REVIEW
+                  + "| C5 Causal adequacy | FAIL | patches the symptom |\n")
+        d = self._two_round_bundle([self._row("unverifiable")], v1_review=review)
+        self.assertEqual(size_signal.iteration_rounds(d), (2, 0))
+
+    def test_a_non_gating_unverifiable_row_is_not_attribution(self) -> None:
+        """Only a GATING row can have driven the iterate mechanically; an advisory
+        oracle that could not answer blocks nothing."""
+        d = self._two_round_bundle([self._row("unverifiable", gating=False),
+                                    self._row("pass")])
+        self.assertEqual(size_signal.iteration_rounds(d), (2, 0))
+
+    def test_missing_or_garbled_archive_evidence_counts_the_round(self) -> None:
+        """The fail-safe direction, pinned for every evidence defect: no gate record, a
+        garbled one, a non-object one, and a clean gate record with no review."""
+        cases = {
+            "no gate record": (None, self.CLEAN_REVIEW),
+            "garbled gate record": ("{not json", self.CLEAN_REVIEW),
+            "non-object gate record": ('["a list"]', self.CLEAN_REVIEW),
+            "rows not a list": (json.dumps({"rows": "nope"}), self.CLEAN_REVIEW),
+            "no review record": (self._gates([self._row("unverifiable")]), None),
+        }
+        for label, (gates_text, review) in cases.items():
+            with self.subTest(case=label):
+                d = _bundle(patch="x")
+                self._archive(d, 1, gates_text=gates_text, review=review)
+                self.assertEqual(size_signal.iteration_rounds(d), (1, 0),
+                                 "ambiguous evidence must charge the round to the slice")
+
+    def test_a_replan_boundary_still_wins_over_attribution(self) -> None:
+        """Attribution refines the count INSIDE the current brief's rounds; it must not
+        resurrect rounds the re-plan boundary already excluded."""
+        d = _bundle(patch="x")
+        arch = self._archive(d, 1, gates_text=self._gates([self._row("fail")]),
+                             review=self.CLEAN_REVIEW)
+        (arch / "brief.md").write_text("- **Slug:** old\n", encoding="utf-8")
+        self._archive(d, 2, gates_text=self._gates([self._row("unverifiable")]),
+                      review=self.CLEAN_REVIEW)
+        self.assertEqual(size_signal.iteration_rounds(d), (0, 1))
+
+
 if __name__ == "__main__":
     unittest.main()
