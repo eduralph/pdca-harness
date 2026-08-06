@@ -35,7 +35,8 @@ the gate's verdict by luck: the capture is one merged stdout+stderr stream, so a
 that shells out to a suite files whatever that suite's children happened to flush last
 (a scratch ``/tmp`` path from a since-deleted sandbox is not a reconstructable basis). The
 marker declares evidence only — it never changes a verdict; the exit code alone decides
-pass/fail, and ``PDCA-UNVERIFIABLE`` stays the one marker that can change a ``result``.
+pass/fail, and only the ``PDCA-UNVERIFIABLE``/``PDCA-DEFERRED`` declarations can change
+a ``result``.
 
 A row: {check, result, oracle, rule_id, path_line, gating}. A row produced by a
 bundle-scoped :func:`run_gates` additionally carries ``log`` (the bundle-relative path of
