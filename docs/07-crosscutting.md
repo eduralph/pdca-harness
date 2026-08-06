@@ -330,6 +330,53 @@ expressible as a doctor row. Either way, a missing lane aborts the whole run
 runs `lanes = 6`, backed by `make worktrees LANES=6` provisioning the sibling
 checkouts those doctor rows check for.
 
+### Bounding what a leaf may use
+
+A leaf is a model subprocess doing real work in a real checkout, and lanes run
+several of them at once. `[driver].leaf_memory_max` (unset by default) caps how
+much memory each one may use: every leaf the driver spawns — planner, builder,
+reviewer, advisory, sign-off, publish, Act, headless and interactive alike —
+runs inside its own transient systemd scope bounded by that value, so a leaf
+that overruns is killed **as itself**. It exits non-zero, the bundle records
+*that leaf's* failure through the normal path, and the run survives to report
+it.
+
+Unbounded, it does not fail that way. Two concurrent reviewer leaves doing the
+independent red→green re-verification the reviewer contract asks for wrote ~69 GB
+of cold build trees in thirteen minutes; `systemd-oomd` killed the whole terminal
+cgroup for memory pressure, taking the driver, both lanes and every bundle with
+it. Nothing in any gate log said why — oomd kills the *cgroup*, not the offending
+process, so the failure surfaced as the driver simply vanishing. This is the
+third resource the driver bounds, alongside a gate's wall clock
+(`[gates].default_timeout_secs`) and the workspace's disk footprint
+(`[driver].sweep_worktrees` below).
+
+Two things it deliberately does **not** do:
+
+- **Unset means unset.** With no bound configured the spawn is byte-identical to
+  what it was before the knob existed — no wrapper, no extra process. There is no
+  portable number to default to, and a cap set too low is its own way to kill a
+  run, so size it against your leaves' real peak (a reviewer building a cold tree
+  is the hungriest) rather than optimistically.
+- **A host that can't enforce it degrades, it doesn't fail.** Where there is no
+  usable `systemd-run --user --scope` — no systemd, no user manager, some
+  containers, macOS — the bound is a documented no-op: one note on stderr and the
+  leaf runs exactly as it does today. The harness probes the facility before it
+  wraps anything, so a configured bound can never be the reason a leaf won't
+  start. It probes **once per run**, not per spawn, so a run is either bounded or
+  it is not — never half of each, which is the unattributable state the bound
+  exists to remove.
+
+Any `[leaves.*]` table takes `memory_max` to override the driver-level bound for
+one leaf, or `memory_max = "off"` to opt that leaf out entirely — the interactive
+leaves, which a human may sit in for an hour, are the usual candidates. That
+covers the array-form tables too: `[[leaves.advisory]]` and
+`[[leaves.plan_advisory]]` take their own `memory_max` (they are the pool a run
+fans out concurrently, so they are the usual place to spend a smaller cap), and
+`[[leaves.builder_variant]]` / `[[leaves.builder_escalation]]` /
+`[[leaves.sizer_escalation]]` **inherit** the leaf they are a variant of unless
+they set their own.
+
 ### Waves in execution
 
 [Step 03](03-plan.md#ordering-and-routing-the-batch) covers *declaring* the

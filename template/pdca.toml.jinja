@@ -182,6 +182,25 @@ size_guard = "off"
 # into §6 — a self-report can never skip review on its own say-so. STRICT boolean:
 # write `dependency_halt = true` unquoted, or it stays off.
 # dependency_halt = true
+# Per-leaf memory bound (issue #420) — opt-in, unset by default. Every leaf subprocess the
+# driver spawns (planner, builder, reviewer, advisory, sign-off, publisher, Act — headless
+# and interactive alike) runs inside its own transient systemd scope capped at this value,
+# so a leaf that overruns is killed AS ITSELF: it exits non-zero, the bundle records that
+# leaf's failure, and the run survives to report it. Unbounded, it doesn't work that way —
+# two concurrent reviewer leaves building cold trees pushed the session past the oomd
+# pressure threshold and systemd-oomd killed the whole terminal CGROUP: driver, every lane,
+# every bundle, with nothing in any gate log to say why (oomd kills the cgroup, not the
+# offending process, so the driver just vanishes).
+#   * a systemd byte value — "8G", "12G" — or a percentage of RAM ("50%");
+#   * unset (the default) ⇒ NO wrapping and byte-identical argv, i.e. exactly today's
+#     spawn. There is no portable number to default to, and a cap set too low is itself a
+#     way to kill a run — size it against your leaves' real peak, not optimistically;
+#   * a host with no usable `systemd-run --user --scope` (no systemd, no user manager, a
+#     container, macOS) degrades to that same no-op with one note on stderr — never a hard
+#     failure, and never a silent one;
+#   * per-leaf override: `memory_max` under any [leaves.*] table (below) wins for that leaf;
+#     `memory_max = "off"` there opts one leaf out of the driver-level bound entirely.
+# leaf_memory_max = "8G"
 
 
 # A-priori size-estimate weights + cutoffs (issues #320/#359). [driver.sizing] tunes the
@@ -365,6 +384,18 @@ base_remote = "{{ 'upstream' if contribution_model == 'fork' else 'origin' }}"
 # = true` hands the terminal to the human (a seeded `claude "<prompt>"` REPL, no
 # -p); a headless leaf runs autonomously (`claude -p …`) and writes its artifact.
 # Set PDCA_LEAVES_MODE=stub to force stubs everywhere (CI / `make` determinism).
+#
+# Any leaf table below also takes `memory_max = "8G"` (issue #420) — this leaf's own
+# memory bound, overriding [driver].leaf_memory_max for it alone; `memory_max = "off"`
+# opts it out of a driver-level bound. Omit it (the default) to inherit that bound. A
+# reviewer that re-verifies red→green on a cold tree is the leaf that needs the most
+# headroom; an interactive REPL the human works in for an hour is the one most likely
+# to want "off". "Any" includes the ARRAY-form tables: [[leaves.advisory]] and
+# [[leaves.plan_advisory]] each take their own (that pool is what a run fans out
+# CONCURRENTLY, so it is the usual place to spend a smaller cap), while
+# [[leaves.builder_variant]] / [[leaves.builder_escalation]] / [[leaves.sizer_escalation]]
+# INHERIT the leaf they vary unless they set their own — a variant is the same appetite
+# as its base leaf, and must not silently lose its cap or its "off".
 #
 # Headless leaves ----------------------------------------------------------------
 # Do builder — writes patch.diff + test + build-notes.md:

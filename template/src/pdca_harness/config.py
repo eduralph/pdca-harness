@@ -8,6 +8,7 @@ stdlib ``tomllib`` so the harness has no runtime dependencies.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -35,6 +36,30 @@ DEFAULT_CLOSE_DISPOSITIONS = [
     # `driver._close_class` honours outright — no hint token is needed for it (#323 review).
 ]
 
+# A leaf memory bound (issue #420) as systemd's resource-control grammar writes it: a
+# byte value with an optional K/M/G/T/P/E suffix, a percentage of physical RAM, the
+# literal `infinity`, or `off` (an explicit "no bound here", the per-leaf opt-out).
+_MEMORY_MAX_RE = re.compile(r"(?i)\A(off|infinity|\d+(\.\d+)?%|\d+(\.\d+)?[KMGTPE]?)\Z")
+
+
+def memory_max_value(raw, where: str) -> str:
+    """Validate one configured leaf memory bound; nonsense ⇒ ``""`` plus a note (#420).
+
+    Fail-safe like ``sweep_worktrees``' unknown-mode fallback — but in the OTHER
+    direction: an unparseable bound degrades to *unbounded* (today's behaviour), never
+    to a guessed number, because a wrong cap kills a run exactly as dead as no cap. The
+    note is what keeps the degradation from being silent. ``""``/absent ⇒ ``""``.
+    """
+    val = str(raw or "").strip()
+    if not val:
+        return ""
+    if not _MEMORY_MAX_RE.match(val):
+        print(f"config: {where} must be a systemd byte value such as \"8G\", a "
+              f"percentage (\"50%\"), or \"off\" — got {val!r}; ignoring it, so leaf "
+              "spawns stay unbounded (today's behaviour)", file=sys.stderr)
+        return ""
+    return val
+
 
 # ----------------------------------------------------------------------------
 #
@@ -56,6 +81,13 @@ class LeafConfig:
     prepended to the task prompt. ``model`` / ``effort`` (optional) are mapped
     through the profile's ``model_flag`` / ``effort_argv``; flags already present
     in ``argv`` remain the explicit escape hatch and always win.
+
+    ``memory_max`` (optional, issue #420) is this leaf's memory bound — a systemd
+    byte value (``"8G"``, ``"50%"``) that overrides ``[driver].leaf_memory_max``
+    for this leaf alone, or the literal ``"off"`` to opt this leaf OUT of a
+    driver-level bound (the same "explicit setting always wins" escape hatch as
+    ``argv``). ``""`` (the default) inherits the driver-level bound, which is
+    itself unset by default ⇒ today's unbounded spawn, unchanged.
     """
 
     mode: str = "stub"
@@ -65,6 +97,7 @@ class LeafConfig:
     agent: str = ""
     model: str = ""
     effort: str = ""
+    memory_max: str = ""
 
 
 # ----------------------------------------------------------------------------
@@ -318,6 +351,18 @@ class Config:
     # footprint (dominated by per-lane build dirs) has exhausted disk quotas and
     # false-redded gating gates mid-run. ``[driver].sweep_worktrees``.
     sweep_worktrees: str = "clean"
+    # Per-leaf memory bound (issue #420): a systemd byte value ("8G", "50%") every leaf
+    # subprocess the driver spawns is confined to, so a leaf that overruns dies as ITSELF
+    # and the flow survives to record that leaf's failure. Left unbounded, one leaf's
+    # build footprint takes down the run: two concurrent reviewer leaves wrote ~69 GB of
+    # cold build trees and systemd-oomd killed the whole terminal cgroup — driver, every
+    # lane, every bundle — with nothing in any gate log to say why, because oomd kills the
+    # CGROUP, not the offending process. "" (the default) ⇒ no wrapping and byte-identical
+    # argv, i.e. today's behaviour: there is no portable numeric default, and a wrong cap
+    # is itself a way to kill a run. A host with no usable containment facility degrades to
+    # the same no-op (leaves.py's probe), never to a hard failure. Per-leaf override:
+    # ``[leaves.*].memory_max``. ``[driver].leaf_memory_max``.
+    leaf_memory_max: str = ""
     # Free-space preflight threshold in GiB for `pdca doctor`'s workspace row (issue
     # #297): WARN when the filesystem under the project root has less free space, so
     # quota exhaustion is a preflight warning instead of a mid-gate `os error 122`.
@@ -526,6 +571,10 @@ class Config:
                 agent=d.get("agent", ""),
                 model=d.get("model", ""),
                 effort=d.get("effort", ""),
+                # Per-leaf memory bound (#420): overrides [driver].leaf_memory_max for
+                # this leaf; "off" opts it out entirely, "" inherits the driver bound.
+                memory_max=memory_max_value(
+                    d.get("memory_max", ""), f"[leaves.{name}].memory_max"),
             )
 
         # Advisory reviewer leaves (issue #64) — an open list under [[leaves.advisory]].
@@ -629,6 +678,10 @@ class Config:
             print(f"config: unknown [driver].sweep_worktrees '{sweep_worktrees}' — "
                   "expected clean | remove | off; using 'clean'", file=sys.stderr)
             sweep_worktrees = "clean"
+        # Per-leaf memory bound (issue #420). Unset ⇒ "" ⇒ no wrapping at all; an
+        # unparseable value degrades to the same unbounded default, with a note.
+        leaf_memory_max = memory_max_value(
+            driver_cfg.get("leaf_memory_max", ""), "[driver].leaf_memory_max")
         try:  # free-space WARN threshold (issue #297); 0 disables the doctor row
             doctor_min_free_gb = max(0.0, float(data.get("doctor", {}).get("min_free_gb", 10.0)))
         except (TypeError, ValueError):
@@ -724,6 +777,7 @@ class Config:
             regate_between_waves=regate_between_waves,
             act_cadence=act_cadence,
             sweep_worktrees=sweep_worktrees,
+            leaf_memory_max=leaf_memory_max,
             doctor_min_free_gb=doctor_min_free_gb,
             close_dispositions=close_dispositions,
             sizing=sizing,
