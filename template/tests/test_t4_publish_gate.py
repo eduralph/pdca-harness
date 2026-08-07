@@ -19,9 +19,12 @@ registered passed *vacuously* at publish while working correctly at Check.
 
 from __future__ import annotations
 
+import io
+import os
 import shutil
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
@@ -120,6 +123,40 @@ class T4PublishGate(unittest.TestCase):
         cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4", "scope": "bundle",
                                "cmd": 'test "$PDCA_BUNDLE" = "' + str(self.bundle) + '"'}])
         self.assertTrue(publish._t4_passes(cfg, self.bundle))
+
+    def test_announce_precedes_the_heartbeat_with_an_unprefixed_label(self) -> None:
+        """#384 (announce dropped in the #338 rework — the #181 'reads as a hang'
+        finding): something must reach the terminal BEFORE the heartbeat's first tick,
+        which is a full interval away. And the heartbeat label stays unprefixed — the
+        announce already says 'T4 gate'."""
+        cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4", "scope": "bundle",
+                               "label": "contribution lint", "cmd": "true"}])
+        err = io.StringIO()
+        stderr_at_call: list[str] = []
+
+        def fake(cmd, **kwargs):
+            stderr_at_call.append(err.getvalue())   # what the terminal shows at launch
+            return 0, "", False
+
+        with redirect_stderr(err), \
+             mock.patch.object(progress, "run_with_heartbeat", side_effect=fake) as spy:
+            self.assertTrue(publish._t4_passes(cfg, self.bundle))
+        self.assertIn("T4 gate", stderr_at_call[0], "nothing announced before the run")
+        self.assertIn("contribution lint", stderr_at_call[0])
+        self.assertEqual(spy.call_args.kwargs.get("label"), "T4-x: contribution lint")
+
+    def test_pending_id_mode_is_derived_per_run_never_inherited(self) -> None:
+        """#384: `_t4_passes` exports $PDCA_PENDING_ID from THIS run's flag (so the
+        registered `contribcheck` row can drop exactly the tracker-id rule), and
+        scrubs an ambient value rather than honouring it."""
+        cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4", "scope": "bundle",
+                               "cmd": 'test -n "$PDCA_PENDING_ID"'}])
+        with redirect_stderr(io.StringIO()):
+            self.assertTrue(publish._t4_passes(cfg, self.bundle, pending_id=True))
+            self.assertFalse(publish._t4_passes(cfg, self.bundle))    # default: absent
+            with mock.patch.dict(os.environ, {"PDCA_PENDING_ID": "1"}):
+                self.assertFalse(publish._t4_passes(cfg, self.bundle),
+                                 "an inherited $PDCA_PENDING_ID must be scrubbed")
 
     def test_unlaunchable_gate_blocks_instead_of_crashing(self) -> None:
         cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4", "scope": "bundle", "cmd": "false"}])

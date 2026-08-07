@@ -386,7 +386,8 @@ def main(argv: list[str] | None = None) -> int:
     p_publish.add_argument("--dry-run", action="store_true", help="print the git/gh commands without running them")
     p_publish.add_argument("--no-pr", action="store_true", help="push the branch but don't open the draft PR")
     p_publish.add_argument("--no-issue", action="store_true",
-                           help="no tracker id yet: relax T4 to a flag, record id_pending (vs a magic #0000)")
+                           help="no tracker id yet: T4 drops only the tracker-id rule "
+                                "(all else still blocks), record id_pending (vs a magic #0000)")
     p_publish.add_argument("--by", default="", help="who published (recorded in publish.json)")
 
     # Result-bundle recording (issue #317): commit terminal-finished bundles to the
@@ -1092,7 +1093,13 @@ def _contribcheck(cfg: Config, args: argparse.Namespace) -> int:
         print(f"{gates.DEFERRED_MARKER} {publish.PR_BODY} not drafted yet — the substantive "
               "T4 audit of the contribution artifacts runs at publish")
         return 0
-    problems = contribution_problems(d, no_issue=args.no_issue)
+    # `--no-issue` also arrives as $PDCA_PENDING_ID (#384): `publish._t4_passes` derives it
+    # from the `publish --no-issue` flag on each run (scrubbing any inherited value), so the
+    # SHIPPED gate row relaxes exactly the tracker-id requirement in pending-id mode without
+    # its registered cmd line ever changing — an in-place edit of that line breaks `copier
+    # update` for any instance that appended a row beside it (tests/test_update_compat.py).
+    no_issue = args.no_issue or bool(os.environ.get("PDCA_PENDING_ID"))
+    problems = contribution_problems(d, no_issue=no_issue)
     for p in problems:
         print(f"contribcheck: {p}", file=sys.stderr)
     return 1 if problems else 0
