@@ -8,6 +8,7 @@ worktree isolation off, no stageable tree. subprocess.run is mocked so no app is
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,6 +40,15 @@ class ManualTestLaunch(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
         self.cfg = _cfg(self.tmp)
+        # Hermetic against the ambient environment (#419): launch() hands the app
+        # {**os.environ, …} (manual_test.py), so when this suite runs under a
+        # lane-parallel outer driver's T3 gate — whose env carries the OUTER
+        # PDCA_LANE — the serial-path assertion below would see that ambient value.
+        env_guard = mock.patch.dict(os.environ)
+        env_guard.start()
+        self.addCleanup(env_guard.stop)
+        for key in [k for k in os.environ if k.startswith("PDCA_")]:
+            del os.environ[key]
 
     def tearDown(self) -> None:
         import shutil

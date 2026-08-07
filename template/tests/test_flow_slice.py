@@ -787,6 +787,16 @@ class LaneParallelism(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
         self.cfg = _stub_config(self.tmp)
+        # Hermetic against the ambient environment (#419): gate commands inherit the
+        # driver's env (gates._merged_env is {**os.environ, **extra}), so when THIS
+        # suite runs under a lane-parallel outer driver's T3 gate — which exports
+        # PDCA_LANE for its own lane (gates.py) — the serial-path assertion below
+        # would read the OUTER driver's lane, not this test's serial flow.
+        env_guard = mock.patch.dict(os.environ)
+        env_guard.start()
+        self.addCleanup(env_guard.stop)
+        for key in [k for k in os.environ if k.startswith("PDCA_")]:
+            del os.environ[key]
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)

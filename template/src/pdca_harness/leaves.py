@@ -36,11 +36,13 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from pathlib import Path
@@ -1641,7 +1643,12 @@ _REVIEW_PROMPT = (
     "allows), observe, and report; only where it genuinely can't be driven, hand the human "
     "concrete runnable steps, not a bare 'needs manual check'. If a verdict turns on an "
     "investigation, run it and show the result directly — don't ask whether to investigate. "
-    "Ground every cited path:line on the target source at $PDCA_TARGET (read-only); "
+    "Ground every cited path:line on the target source at $PDCA_TARGET. When the bundle "
+    "carries a patch, $PDCA_TARGET is a DISPOSABLE git-self-contained copy — the base as "
+    "one local commit, patch.diff applied uncommitted on top — so the independent "
+    "red→green re-run is executable in place: `git stash` restores the pre-fix tree, "
+    "`git stash pop` re-applies the patch, and no write of yours can reach the real "
+    "checkout. Otherwise treat $PDCA_TARGET as read-only. "
     "if $PDCA_TARGET is unset, ground against patch.diff alone — do NOT search other "
     "checkouts on the machine. If $PDCA_TARGET is SET yet stale or unreadable (its base "
     "lags what the patch was built/verified against — a dependent/stacked cycle's base "
@@ -1683,6 +1690,85 @@ def _reviewer_target(d: Path, cfg: Config) -> Path | None:
                        capture_output=True, text=True)
         return p
     except Exception:  # noqa: BLE001 — grounding access is best-effort, never fatal
+        return None
+
+
+def _reviewer_repo(d: Path, target: Path, sandbox: Path) -> Path | None:
+    """A DISPOSABLE, git-self-contained copy of ``target`` inside the reviewer sandbox —
+    the tree the reviewer may re-run the red→green on (issue #419).
+
+    The review contract asks the reviewer to independently re-verify C4 against
+    ``$PDCA_TARGET``: restore the pre-fix state, run the bundle's test, re-apply
+    (``git stash`` / ``git stash pop``). The tree :func:`_reviewer_target` resolves cannot
+    host that inside the reviewer's confinement: a linked worktree's git metadata — its
+    index included — lives under the PRIMARY checkout's ``.git/worktrees/<name>/``
+    (its ``.git`` is an absolute pointer, ``worktree.py:14-16``), and stash writes objects
+    into the shared ``.git/objects`` — both outside the granted dir and read-only to the
+    leaf. So every index-writing git op failed and the C4 verification claim landed in §6
+    NEEDS-HUMAN on every cycle instead of being mechanically re-checked.
+
+    Shape: ``<sandbox>/target`` holding the target's base tree as ONE local commit with
+    the bundle's ``patch.diff`` applied UNCOMMITTED on top — exactly the state the
+    reviewer must stash away, and the state the lane worktree itself carries (base
+    checked out, patch applied uncommitted), so ``HEAD`` of the source IS the pre-fix
+    tree. The copy's whole ``.git`` lives inside the sandbox cwd, so the pre-fix restore
+    + re-apply write nothing anywhere near the primary checkout's git metadata; the
+    source repo is only ever READ (``git archive`` / ``rev-parse``). Identity and signing
+    are pinned in the copy's local config so ``git stash`` (which commits) cannot depend
+    on the operator's global git config.
+
+    Only for a bundle WITH a patch: with nothing to stash there is no re-run, and
+    read-only grounding on the real checkout serves citations better (full history).
+    **Best-effort**, mirroring :func:`_seed_sandbox_gate_logs`: any failure — a non-git
+    target, an archive/extract/apply error — degrades to None with a stderr note and the
+    caller falls back to grounding on ``target`` directly; never an aborted Check.
+    """
+    patch = d / "patch.diff"
+    try:
+        patch_text = patch.read_text(encoding="utf-8") if patch.is_file() else ""
+    except (OSError, UnicodeDecodeError):
+        patch_text = ""
+    if not patch_text.strip() or not (target / ".git").exists():
+        return None
+    dest = sandbox / "target"
+
+    def _run(repo: Path, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True)
+
+    try:
+        # READ-ONLY against the source: export the tree at HEAD (the pre-fix base — the
+        # patch sits uncommitted on top of it in the lane) without touching its index.
+        archive = _run(target, "archive", "--format=tar", "HEAD")
+        if archive.returncode != 0:
+            raise OSError(archive.stderr.decode(errors="replace").strip()
+                          or "git archive failed")
+        base = _run(target, "rev-parse", "HEAD").stdout.decode(errors="replace").strip()
+        dest.mkdir()
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tf:
+            try:
+                tf.extractall(dest, filter="data")
+            except TypeError:  # Python 3.11.0–3.11.3: no filter= yet (PEP 706 backport)
+                tf.extractall(dest)
+        for args in (("init", "-q"),
+                     # stash COMMITS: pin identity + signing in the copy's own config so
+                     # the re-run cannot depend on the operator's global git config.
+                     ("config", "user.name", "pdca-reviewer"),
+                     ("config", "user.email", "pdca-reviewer@localhost"),
+                     ("config", "commit.gpgsign", "false"),
+                     # -f: a tracked-but-gitignored file in the base must not drop out.
+                     ("add", "-A", "-f"),
+                     ("commit", "-q", "--allow-empty", "-m", f"pre-fix base {base}"),
+                     ("apply", str(patch.resolve()))):
+            done = _run(dest, *args)
+            if done.returncode != 0:
+                raise OSError(
+                    f"git {args[0]}: {done.stderr.decode(errors='replace').strip()}")
+        return dest
+    except Exception as exc:  # noqa: BLE001 — materialization is best-effort, never fatal
+        print(f"leaves: could not materialize a git-writable reviewer copy of {target} "
+              f"({exc}); the leaf grounds on the target read-only and the red→green "
+              "re-run may land in §6", file=sys.stderr)
+        shutil.rmtree(dest, ignore_errors=True)
         return None
 
 
@@ -2085,13 +2171,24 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
         # earn an automated red→green at Check.
         seeded = _seed_sandbox_settings(cfg, sandbox, profile)
         # Ground citations on the brief's target checkout (#75): name it via $PDCA_TARGET
-        # so the reviewer doesn't wander into unrelated checkouts, and grant read access
-        # via the family's grounding flag (claude: --add-dir). Independence holds — the
-        # target is the upstream source, not build-notes.md.
+        # so the reviewer doesn't wander into unrelated checkouts. For a bundle WITH a
+        # patch, what is handed is a disposable git-self-contained copy INSIDE the
+        # sandbox (#419): the lane worktree's git index/objects live under the PRIMARY
+        # checkout's .git (worktree.py:14-16) — outside any granted dir and read-only to
+        # the leaf — so the contract's own pre-fix restore (`git stash`) could never run
+        # against it. The copy's .git is sandbox-local: stash/unstash work, and the
+        # primary checkout's git metadata sees no writes. Independence holds — the copy
+        # is materialized from the target source + patch.diff, never build-notes.md.
         target = _reviewer_target(d, cfg)
-        env = {"PDCA_TARGET": str(target)} if target else None
+        repo = _reviewer_repo(d, target, sandbox) if target is not None else None
+        grounded = repo if repo is not None else target
+        env = {"PDCA_TARGET": str(grounded)} if grounded else None
+        # The grounding grant (claude: --add-dir) is only needed for a target OUTSIDE
+        # the sandbox cwd. When the sandbox-local copy is handed, granting the real
+        # checkout too would hand a read+write family (codex --add-dir,
+        # families.py:112-113) the shared lane worktree for no reviewer need.
         extra_argv = ([profile.grounding_flag, str(target)]
-                      if target and profile.grounding_flag else [])
+                      if repo is None and target and profile.grounding_flag else [])
         # The confinement flag rides on `seeded` (a file that is not there must not cost
         # the leaf its ambient sandbox, #290); the codex network grant does not (#291).
         extra_argv += _sandbox_argv(cfg, profile, seeded=seeded)
@@ -2418,10 +2515,16 @@ def _run_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict, 
         # (#261) — without it a loopback-socket runtime test can't bind, so it can never
         # earn an automated red→green at Check.
         seeded = _seed_sandbox_settings(cfg, sandbox, profile)
+        # Same #419 shape as _run_review_sandboxed: a bundle with a patch gets a
+        # disposable git-self-contained copy inside the sandbox (the lane worktree's git
+        # metadata is read-only to the leaf, so stash/unstash could never run there);
+        # the grounding grant is withheld for the sandbox-local copy.
         target = _reviewer_target(d, cfg)
-        env = {"PDCA_TARGET": str(target)} if target else None
+        repo = _reviewer_repo(d, target, sandbox) if target is not None else None
+        grounded = repo if repo is not None else target
+        env = {"PDCA_TARGET": str(grounded)} if grounded else None
         extra = ([profile.grounding_flag, str(target)]
-                 if target and profile.grounding_flag else [])
+                 if repo is None and target and profile.grounding_flag else [])
         extra += _sandbox_argv(cfg, profile, seeded=seeded)   # see _run_review_sandboxed
         out = sandbox / f"check-advisory-{leaf_id}.md"
         error_log = advisory_error_log(d, leaf_id)
