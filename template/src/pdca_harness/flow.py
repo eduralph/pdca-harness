@@ -210,10 +210,53 @@ def _apply_decision(
     return action
 
 
+#: :func:`_apply_recorded_decision` outcome meaning "the bundle carries no decision, so it
+#: still owes a sign-off session". Deliberately distinct from every other outcome, because
+#: only this one may open a session: ``None`` means a decision WAS on disk but could not be
+#: recorded (the bundle was repaired / dropped to a state a later beat re-drives — asking
+#: again would ask about an artifact that no longer exists), :data:`REASSEMBLE` likewise,
+#: and ``"blocked"`` is the one case that DOES fall through (C6 refused an accept).
+UNDECIDED = "undecided"
+
+
+def _apply_recorded_decision(
+    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool
+) -> str | None:
+    """Consume the decision the bundle **already carries**, before any session is offered.
+
+    Read-before-asking (issue #453). ``signoff-decision`` is a bundle file, so it is
+    durable, un-consumed *input* to the driver — not an in-process by-product of the
+    session that wrote it. A run that dies between the leaf's write and the apply (a ``^C``:
+    :func:`_isolate` deliberately does not contain ``KeyboardInterrupt``) leaves that
+    decision orphaned on disk with §9 unrecorded and the bundle still AWAITING_SIGNOFF.
+    Every later pass and every later run then re-presents it, opens a **fresh session for a
+    bundle the human already judged**, and that session's write destroys their decision.
+    The state of an issue *is* the files in its bundle (:mod:`state` module docstring) —
+    a file read only through the variable of the call that produced it is not state.
+
+    Returns :data:`UNDECIDED` when there is nothing recorded (the caller must ask); anything
+    else is :func:`_apply_decision`'s own outcome, so the callers keep the single
+    C6-guarded record/transition path and handle ``REASSEMBLE`` / ``"blocked"`` / ``None``
+    exactly as they already do after a session. Never silent: an apply with no session
+    names the bundle and the action on stderr.
+    """
+    action = leaves.signoff_decision(d)
+    if not action:
+        return UNDECIDED
+    print(f"flow: {d.name} — applying the '{action}' sign-off decision already recorded in "
+          f"the bundle; no new session", file=sys.stderr)
+    return _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now)
+
+
 def _signoff_and_apply(
     cfg: Config, d: Path, *, by: str, today: str, apply_now: bool = True
 ) -> str | None:
-    """Single-issue: run the interactive sign-off leaf, then apply its decision."""
+    """Single-issue: apply the decision the bundle already carries (issue #453); only when
+    there is none — or when C6 refuses it, so the human genuinely must come back — run the
+    interactive sign-off leaf and apply the decision it writes."""
+    applied = _apply_recorded_decision(cfg, d, by=by, today=today, apply_now=apply_now)
+    if applied not in (UNDECIDED, "blocked"):
+        return applied
     leaves.run_signoff(d, cfg)
     return _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now)
 
@@ -224,9 +267,9 @@ def _maybe_auto_iterate(
     """Rebuild without asking, when Check found only implementation defects (issue #264).
 
     Returns True iff the bundle was routed to ITERATE_DO. Every other outcome — auto-iterate
-    off, the bundle not halted at AWAITING_SIGNOFF, an empty §6, any HUMAN-kind finding, or
-    the per-bundle budget spent — returns False and leaves the bundle exactly where it was,
-    for the human.
+    off, the bundle not halted at AWAITING_SIGNOFF, a decision already recorded in the bundle
+    and not yet consumed, an empty §6, any HUMAN-kind finding, or the per-bundle budget
+    spent — returns False and leaves the bundle exactly where it was, for the human.
 
     Deliberately routed through the existing ``_apply_decision`` rather than calling
     ``signoff.record`` directly: §9 then stays authored solely by ``signoff.record``, and the
@@ -239,6 +282,16 @@ def _maybe_auto_iterate(
     firing from inside a beat would have no budget to bound it.
     """
     if not cfg.auto_iterate or state.state(d) != state.AWAITING_SIGNOFF:
+        return False
+    # Never author a decision over one this driver did not write (issue #453).
+    # ``autoiterate.write_decision`` below is unconditional, so a `signoff-decision` still on
+    # disk — an earlier session's call, orphaned when that run died before the driver applied
+    # it — would be silently replaced by an `iterate-do` the human never gave. Declining also
+    # spends no budget on a bundle that is already decided: the sign-off paths apply it.
+    recorded = leaves.signoff_decision(d)
+    if recorded:
+        print(f"flow: {d.name} — not auto-iterating: a '{recorded}' sign-off decision is "
+              f"already recorded in the bundle, waiting to be applied", file=sys.stderr)
         return False
     try:
         items = assemble.collect_needs_human(d, cfg)
@@ -641,10 +694,12 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
     """Drive ONE wave's bundles to all-terminal (COMPLETE / DISCONTINUED) with iteration,
     then the cheap-first sign-off restricted to the wave. Publishing and folding are the
     caller's. The pass loop mirrors the prior single-batch driver: build-all
-    (beat-synchronised, isolated), then a chunked sign-off whose decisions are recorded
-    (``apply_now=False``) so an iterate-do doesn't rebuild mid-review — looping until the
-    wave makes no progress (an iterate-plan re-open #105 still counts as progress) or every
-    bundle is terminal.
+    (beat-synchronised, isolated), then — before anything is offered a session — a
+    pre-apply of every pending bundle that already carries a decision from an earlier,
+    interrupted session (issue #453), then a chunked sign-off over the bundles still
+    undecided, whose decisions are recorded (``apply_now=False``) so an iterate-do doesn't
+    rebuild mid-review — looping until the wave makes no progress (an iterate-plan re-open
+    #105 still counts as progress) or every bundle is terminal.
 
     Neither non-terminal exit is silent (issue #260): a bundle still iterating when the
     budget runs out, or when a pass stops making progress, is named with a resume hint.
@@ -683,7 +738,24 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
                 _warn_abandoned(wave, why="a full pass made no progress")
                 return
             continue    # progress (e.g. an iterate-plan re-open) — give it another pass
-        for chunk in _chunks(pending, SIGNOFF_BATCH_SIZE):
+        # Read before asking (issue #453). A pending bundle may already carry a decision from
+        # an earlier session whose run died before the driver applied it (a `^C`, which
+        # `_isolate` deliberately does not contain) — durable, un-consumed input, not a
+        # by-product of that session. Record + transition it HERE, isolated and deferred
+        # exactly like the post-session apply below, so the queue never re-presents a bundle
+        # the human already judged and no session overwrites their decision. Only two
+        # outcomes still owe a session: nothing was recorded, and an `accept` C6 refused (§6
+        # NEEDS-HUMAN still open, so that human really must come back). A pre-apply that
+        # RAISED is `_isolate`'s None — loudly skipped for this pass, like any other
+        # per-bundle step that fails, rather than handed a session over an unread decision.
+        needing_session: list[Path] = []
+        for d in pending:
+            applied = _isolate(d, "applying the recorded sign-off decision",
+                               lambda d=d: _apply_recorded_decision(
+                                   cfg, d, by=by, today=today, apply_now=False))
+            if applied in (UNDECIDED, "blocked"):
+                needing_session.append(d)
+        for chunk in _chunks(needing_session, SIGNOFF_BATCH_SIZE):
             try:
                 leaves.run_signoff_batch(cfg, chunk)
             except Exception as exc:  # noqa: BLE001 — a dropped session is not fatal
