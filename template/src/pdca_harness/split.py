@@ -24,6 +24,7 @@ are staged and moved into place only once all of them succeed.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -34,6 +35,18 @@ from pathlib import Path
 from . import state
 
 PROPOSAL = "split-proposal.md"
+
+#: The lineage provenance record (issue #456): written into each child AND merged into the
+#: parent by `accept`, so a split's edges survive ON DISK instead of living only in the
+#: filed tracker issue's body. Without it a split child is indistinguishable from a fresh
+#: oversized brief to everything that reads a bundle. See `read_lineage`.
+#:
+#: Deliberately NOT in `state.DOWNSTREAM_OF_BRIEF`: this is provenance about the split, not
+#: an attempt's output, so an `iterate-plan` that archives a rejected attempt must leave it
+#: exactly where it is.
+LINEAGE = "split-lineage.json"
+LINEAGE_VERSION = 1
+
 _VERSION_RE = re.compile(r"<!--\s*pdca:split-proposal\s+v(\d+)\s*-->")
 _OPEN_RE = re.compile(r"^\s*<!--\s*pdca:child\s+(\S+)\s*-->\s*$")
 _CLOSE_RE = re.compile(r"^\s*<!--\s*pdca:end\s+(\S+)\s*-->\s*$")
@@ -345,19 +358,145 @@ def rewrite_ordering(body: str, mapping: dict[str, str]) -> str:
     return "\n".join(out) + ("\n" if body.endswith("\n") else "")
 
 
-def materialise(children: list[Child], ids: list[str], cfg, staging: Path) -> list[Path]:
-    """Write each child's brief into ``staging``; return the staged bundle dirs.
+def _bundle_id(bundle: Path) -> str:
+    """The tracker id encoded in a bundle directory's name: ``issue_<id>`` -> ``<id>``.
+
+    Deliberately more permissive than `_parent_number` below, which is scoped to
+    `gh issue create --parent` and so demands a real (all-digit) GitHub issue number. A
+    lineage id is any token `validate()` accepts (``[A-Za-z0-9._-]+``) — including the
+    `MANT-1` shape a non-GitHub tracker uses.
+    """
+    name = bundle.name
+    return name[len("issue_"):] if name.startswith("issue_") else name
+
+
+def read_lineage(bundle: Path) -> dict | None:
+    """The parsed `split-lineage.json` in ``bundle``, or ``None`` — the one reader (#456).
+
+    Tolerant by construction: absent, unreadable, malformed JSON, a non-object payload and
+    an unrecognised ``version`` all return ``None``, and nothing raises. A provenance
+    reader that can throw into a beat is worse than one that abstains — every consumer must
+    behave exactly as it does today when this returns ``None``, so an operator who hand-
+    edits the file into nonsense degrades the hint, never the run.
+
+    The catch is TOTAL on purpose, not a list of the expected failure types. Enumerating
+    them is precisely what failed here: bytes that are not UTF-8 raise `UnicodeDecodeError`
+    out of the *read*, where only `OSError` was expected, and a pathologically nested
+    payload raises `RecursionError`, which is not a `ValueError` at all — so neither
+    "unreadable" nor "malformed" was caught by the handler written for it, and a corrupt
+    file could still crash a consumer. A reader whose entire contract is "never raises"
+    cannot be a predicate over the failure modes someone happened to think of; the file is
+    a hint, and no way of failing to read a hint is worth an exception. `BaseException`
+    still propagates, so Ctrl-C and `SystemExit` are untouched.
+
+    The record carries INDEPENDENT OPTIONAL EDGES and no role discriminator:
+    ``parent``/``siblings``/``depth`` iff the bundle is a split child, ``children`` iff it
+    has itself been split. A bundle can legitimately be both.
+    """
+    try:
+        data = json.loads((bundle / LINEAGE).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict) or data.get("version") != LINEAGE_VERSION:
+        return None
+    return data
+
+
+def _recorded_depth(record: dict | None) -> int:
+    """A record's ``depth`` as a usable int, or ``0`` — the arithmetic half of tolerance.
+
+    `read_lineage` abstains on a file it cannot parse; this abstains on a VALUE it cannot
+    compute with. `{"depth": "one"}` and `{"depth": null}` are valid JSON, so the reader
+    hands them straight back — and `depth + 1` below would then raise `TypeError` from
+    inside `accept`, crashing the split on a hand-edited provenance file exactly as a
+    raising reader would. Tolerating the file but not its contents would only move the
+    throw one line down.
+
+    Booleans are excluded deliberately: `True` is an `int` in Python, and a record saying
+    `"depth": true` should not produce a child at depth 2.
+    """
+    value = (record or {}).get("depth")
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return 0
+
+
+def _write_lineage(path: Path, record: dict) -> None:
+    """One serialiser for both edges, so a child's record and a parent's cannot drift.
+
+    Sorted keys and a trailing newline: the file lands in a bundle the cycle commits and
+    diffs, so a stable byte-for-byte rendering is part of the artifact.
+    """
+    path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _merge_parent_lineage(parent: Path, children_ids: list[str]) -> dict:
+    """The parent's post-accept record: whatever it already carried, PLUS ``children``.
+
+    MERGES rather than replaces. A parent that is itself a split child keeps its own
+    `parent` / `siblings` / `depth` and simply gains `children` — the mixed-role case is
+    the reason the schema has independent optional edges and no `role` field: one file
+    carrying one role cannot express a bundle that is both, and replacing the record
+    silently drops a depth-1 bundle's sibling set.
+    """
+    existing = read_lineage(parent) or {}
+    record: dict = {"version": LINEAGE_VERSION, "id": _bundle_id(parent)}
+    for key in ("parent", "siblings", "depth"):
+        if key in existing:
+            record[key] = existing[key]
+    record["children"] = list(children_ids)
+    return record
+
+
+def _restore_lineage(path: Path, prior: bytes | None) -> None:
+    """Put ``path`` back exactly as this accept found it. Best-effort, LOUD, never raises.
+
+    It runs from a rollback handler, where the exception on its way out is the one the
+    operator must see and where the `CLOSE_MARKER` cleanup below it must still run — so a
+    restore that failed by raising would both mask the real cause and leave "children
+    rolled back" and "parent still terminal" able to coexist, the one pairing `accept`'s
+    ordering exists to prevent. A restore that cannot complete is NAMED on stderr instead,
+    the same discipline as `_rollback`.
+    """
+    try:
+        if prior is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(prior)
+    except OSError as exc:
+        print(f"split: could not restore {path} while rolling back ({exc}). Check it by "
+              "hand before retrying — it may name children this run did not create.",
+              file=sys.stderr)
+
+
+def materialise(children: list[Child], ids: list[str], cfg, staging: Path, *,
+                parent: Path) -> list[Path]:
+    """Write each child's brief AND its lineage record into ``staging``; return the dirs.
 
     Staged rather than written in place so a failure part-way leaves the instance
-    untouched — see the module docstring.
+    untouched — see the module docstring. The lineage record is staged alongside the brief
+    in the same directory, so it moves with it: a bundle whose brief never landed must
+    never have a record either.
+
+    ``depth`` is the parent's own recorded depth + 1, so recursion depth is written down
+    at the moment it is known rather than recounted later by walking the chain.
     """
     mapping = {c.label: i for c, i in zip(children, ids)}
+    parent_id = _bundle_id(parent)
+    depth = _recorded_depth(read_lineage(parent)) + 1
     staged: list[Path] = []
     for child, issue_id in zip(children, ids):
         d = staging / cfg.bundle(issue_id).name
         d.mkdir(parents=True)
         (d / "brief.md").write_text(rewrite_ordering(child.body, mapping).lstrip("\n"),
                                     encoding="utf-8")
+        _write_lineage(d / LINEAGE, {
+            "version": LINEAGE_VERSION,
+            "id": issue_id,
+            "parent": parent_id,
+            "siblings": [i for i in ids if i != issue_id],
+            "depth": depth,
+        })
         staged.append(d)
     return staged
 
@@ -386,8 +525,13 @@ def _rollback(created: list[Path]) -> None:
 def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
     """Materialise a parent's proposal into child bundles. Returns the created dirs.
 
-    Raises :class:`SplitError` before writing anything if the proposal or the ids are
-    unusable. The parent is marked terminal only after every child is in place.
+    Raises :class:`SplitError` before writing anything if the proposal, the ids, or the
+    parent's existing lineage record are unusable. The parent is marked terminal only
+    after every child is in place.
+
+    Each child also gets a `LINEAGE` record naming this parent, its siblings and its
+    depth, and this parent's own record gains `children` — so the split's edges are on
+    disk, not only in the filed tracker issue's body.
     """
     proposal = parent / PROPOSAL
     if not proposal.exists():
@@ -403,11 +547,33 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
     children = parse(proposal.read_text(encoding="utf-8"))
     validate(children, ids, cfg)
 
+    # The parent's PRIOR lineage bytes, read in the pre-write phase — with the proposal and
+    # the ids, before a single directory is staged. This read is validation, not
+    # bookkeeping: a record that cannot be READ cannot be RESTORED, so an accept that
+    # reached it later and failed could not put the parent back the way it found it.
+    # Reading it here means an unreadable record (a directory at the path, a permissions
+    # error) refuses the accept while refusing is still free — nothing staged, nothing
+    # moved, nothing to roll back — instead of surfacing between the two protected regions
+    # below, where a raise escaped with the children already on disk and the parent left
+    # open. Absent is the ordinary case and is NOT a failure: it means the rollback path
+    # must remove whatever this run writes.
+    lineage_path = parent / LINEAGE
+    try:
+        prior_lineage: bytes | None = lineage_path.read_bytes()
+    except FileNotFoundError:
+        prior_lineage = None
+    except OSError as exc:
+        raise SplitError(
+            f"{parent.name}'s {LINEAGE} cannot be read ({exc}) — refusing to split. A "
+            "record this run cannot read is one it cannot restore if the accept fails, so "
+            "the parent could be left describing children that were rolled back. Fix or "
+            "remove it, then re-run") from exc
+
     staging = parent / ".split-staging"
     shutil.rmtree(staging, ignore_errors=True)
     created: list[Path] = []
     try:
-        staged = materialise(children, ids, cfg, staging)
+        staged = materialise(children, ids, cfg, staging, parent=parent)
         for src, issue_id in zip(staged, ids):
             dst = cfg.bundle(issue_id)          # the SAME path validate() checked
             if dst.exists():                    # re-checked at the moment of writing
@@ -443,6 +609,14 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
         if any((parent / n).exists() for n in driver.DOWNSTREAM_OF_BRIEF):
             driver._archive_iteration(parent, driver._next_iteration_no(parent),
                                       include_brief=False)
+        # The lineage record next — still BEFORE the breadcrumb and the marker, for the
+        # same reason those are ordered as they are: a failure here must not leave the
+        # parent terminal with the wrong provenance, or with none. `_merge_parent_lineage`
+        # keeps the mixed-role case whole (a parent that is itself a split child keeps its
+        # own `parent`/`siblings`/`depth` and gains `children`); `_archive_iteration` above
+        # cannot have touched it, because `LINEAGE` is deliberately not in
+        # `DOWNSTREAM_OF_BRIEF` — it is provenance, not this attempt's output.
+        _write_lineage(lineage_path, _merge_parent_lineage(parent, list(ids)))
         # The breadcrumb FIRST, the state-changing marker LAST. `CLOSE_MARKER` is what
         # makes the parent terminal, and `_rollback` only removes child directories — so
         # writing it first meant a failure on `build-notes.md` (a full disk, a path
@@ -461,6 +635,11 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
         (parent / state.CLOSE_MARKER).write_text("split\n", encoding="utf-8")
     except Exception:
         _rollback(created)
+        # The parent's record back to the bytes this accept found (or gone, if it found
+        # none): a failed accept must never leave a record naming children that were just
+        # rolled back, nor a half-merged one. The snapshot was taken before anything was
+        # written, so this is always a restore to a state that really existed.
+        _restore_lineage(lineage_path, prior_lineage)
         # Belt and braces: if the marker itself was the write that landed before the
         # failure, remove it, so "children rolled back" and "parent still terminal" can
         # never coexist.

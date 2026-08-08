@@ -214,6 +214,32 @@ rather than pretending it still needs a builder. Reopening it (`iterate-to-Do`)
 archives the split marker and re-enables the real Do+Check band, same as any
 other close disposition.
 
+`--accept` also writes the split's **lineage** into every bundle it touches —
+`split-lineage.json`, the machine-readable inverse of the "Child slice of #N"
+breadcrumb that otherwise lives only in the filed tracker issue's body. Without
+it, a split child on disk is indistinguishable from a fresh oversized brief.
+Each child gets `{"version": 1, "id", "parent", "siblings", "depth"}` — its own
+id, the parent's, the *other* children of the same split, and the parent's own
+recorded depth + 1, so recursion depth is written down rather than recounted;
+the parent gets `{"version": 1, "id", "children"}` **merged into** whatever it
+already carried. The merge is the point: a parent that is itself a split child
+keeps its own `parent` / `siblings` / `depth` and simply gains `children`. One
+file, independent optional edges, no `role` discriminator — a bundle can
+legitimately be both a child and a parent, and one filename carrying one role
+could only ever record half of it. It's read back through one tolerant reader,
+`split.read_lineage`, which returns `None` for an absent, unreadable, malformed
+or wrong-version file rather than raising — for *any* way of failing to read
+it, down to bytes that aren't valid UTF-8, and for a `depth` that isn't a
+number: provenance that can throw into a beat is worse than provenance that
+abstains, so a hand-edited record degrades the hint and never the run. The
+record sits deliberately *outside* `DOWNSTREAM_OF_BRIEF` — it describes the
+split, not an attempt's output, so an `iterate-plan` that archives a rejected
+attempt leaves it alone. It is covered by the same transactional guarantee as
+the rest: the children's records are staged and moved with their briefs, the
+parent's is written before the close marker, and a failed accept restores the
+parent's prior record byte-for-byte (a record that can't be *read* refuses the
+accept up front, since one that can't be read can't be restored).
+
 ---
 
 ## Iteration & carry-forward
