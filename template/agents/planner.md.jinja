@@ -159,19 +159,22 @@ You do **not** leave the session to file issues by hand. `--accept` does it (pas
 instead only when the issues already exist, or when the tracker is not one the driver can
 reach — it will say so plainly rather than skipping).
 
-What happens next depends on how this run was started, and the difference is worth
-knowing:
+What happens next no longer depends on how this run was started:
 
-- **A CSV-driven batch run** (`{{ cli_name }} flow --csv …`, no ids) re-enumerates every in-flight
-  bundle *from disk* after the Plan beat, so the children you just created are picked up by
-  the same run and scheduled into waves automatically — independent ones in parallel,
-  dependent ones stacked. Nothing further is needed from you.
-- **Every other shape** — `{{ cli_name }} flow <id>`, and an explicit list like `{{ cli_name }} flow 500 501` —
-  drives exactly the ids it was given and never looks for new ones. `--accept` prints the
-  exact `{{ cli_name }} flow <child-ids>` command; run it, and the children are driven as waves.
-
-An explicit id list looks like a batch and is not one on this point: it iterates the ids
-you named, so children born during its Plan beat are not among them.
+- **The run you are in adopts them.** A bundle that reaches `close-disposition = split`
+  while a flow is driving it has its children read from the split's lineage record and
+  spliced into the waves *after* its own — independent ones in parallel, dependent ones
+  stacked — and driven in the same run. That holds for every shape: a CSV-driven batch
+  (`{{ cli_name }} flow --csv …`), an explicit list like `{{ cli_name }} flow 500 501`, and a
+  single `{{ cli_name }} flow <id>`. Nothing further is needed from you.
+- **They spend the run's pass budget, not a fresh one.** `max_passes` sizes one pool for
+  the run, and the adopted waves draw from it, so a big split can exhaust it; whatever was
+  not reached is named on stderr with the command that resumes it.
+- **A child the run could not schedule is held, not dropped.** One whose declared
+  `Depends on:` cannot be resolved is named on stderr and left in flight; resolve it and
+  re-run that one.
+- **`--accept` still prints the `{{ cli_name }} flow <child-ids>` command.** That is the remedy
+  for a split accepted *outside* a running flow, and for a child that was held.
 
 Either way the `Depends on:` / `Conflicts with:` fields between children are what makes the
 scheduling work, which is why they are the part to get right.
