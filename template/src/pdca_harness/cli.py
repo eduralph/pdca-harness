@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, leaves, manual_test,
                merged, publish, queue, record, registry, revalidate, revert, signoff, sizing,
-               sources, split, state, sweep, triage, waves, worktree)
+               split, state, sweep, triage, waves, worktree)
 from .config import Config
 
 
@@ -558,11 +558,13 @@ def _run(cfg: Config, issue_id: str) -> int:
 def _flow(cfg: Config, args: argparse.Namespace) -> int:
     """Run the whole cycle for one or more issues (the single ``flow`` verb, #86).
 
-    Arity selects the mode: **one id** is a single sequential cycle (Plan→Do→Check→
-    sign-off→publish→Act); **several ids** fan out across lanes with a cheap-first
-    sign-off queue; **zero ids + --from-csv** plans a batch the planner picks from the
-    export. Unbriefed ids are auto-planned (one shared interactive Plan session) — no
-    --plan flag. Act runs by default after COMPLETE (--no-act to skip).
+    Arity selects the PRESENTATION, not the machinery (issue #468): **one or more ids**
+    all drive through :func:`flow.flow_ids` and the ONE results map it returns — one id
+    reports as ``state<TAB>path`` (+ the §6 listing), several as the batch table — while
+    **zero ids + --from-csv** plans a batch the planner picks from the export. A single id
+    therefore runs a one-bundle wave (Plan→Do→Check→sign-off→publish→Act), not a second,
+    parallel implementation of the same cycle. Unbriefed ids are auto-planned (one shared
+    interactive Plan session) — no --plan flag. Act runs by default (--no-act to skip).
     """
     if getattr(args, "lanes", None) is not None:
         cfg.lanes = max(1, args.lanes)
@@ -599,79 +601,82 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
             print(f"flow: {exc}", file=sys.stderr)
             return 1
 
-    if len(ids) == 1:  # single sequential cycle (auto-plans if unbriefed)
-        iid = ids[0]
-        d = cfg.bundle(iid)
-        if d.exists() and state.state(d) == state.COMPLETE:
-            print(f"{state.COMPLETE}\t{d}", file=sys.stderr)
-            print(f"  already complete — nothing to run. To redo it: rm -rf {d}", file=sys.stderr)
-            return 0
-        if d.exists() and state.state(d) == state.RESOLVED:
-            # A settled tracker item is a successful no-op, like COMPLETE (#302 review
-            # round 3): the multi-id path skips it and exits 0 — automation must not
-            # read this terminal state as a failed flow on the single-id path either.
-            # But the marker is a CACHE (#302 review round 4): the tracker can have
-            # REOPENED the issue since it was written, and the seed never refreshes an
-            # existing notes.json — so revalidate against the live tracker first, and
-            # a reopened issue clears the marker and proceeds to a real flow.
-            if sources.tracker_issue_reopened(cfg, iid):
-                if not sources.clear_resolved_marker(d):
-                    # clear_resolved_marker printed the why (#302 review round 11):
-                    # claiming "planning it" over a still-resolved bundle would
-                    # silently suppress the reopened work — fail loudly instead.
-                    return 1
-                print(f"flow: issue_{iid} — the tracker issue is OPEN again; cleared "
-                      "the resolved marker and planning it.", file=sys.stderr)
-            else:
-                print(f"{state.RESOLVED}\t{d}", file=sys.stderr)
-                # The manual remediation names the WHOLE file (#302 review round 15):
-                # deleting only the `resolved` key would leave the closure-era
-                # notes.json in place, and ensure_notes refuses to re-fetch while it
-                # exists — Plan would brief from the pre-reopen thread.
-                print("  tracker item resolved outside a cycle — nothing to run. Reopen "
-                      "it in the tracker (a reachable GitHub tracker is then picked up "
-                      "here automatically; otherwise rename notes.json away — e.g. to "
-                      "notes.superseded-by-reopen.json — so the next Plan re-fetches "
-                      "the fresh thread) to plan it again.", file=sys.stderr)
-                return 0
-        if not d.exists():
-            d.mkdir(parents=True)
-        final = flow.flow(cfg, iid, csv=args.from_csv,
-                          do_publish=do_publish, do_act=do_act, by=args.by)
-        print(f"{final}\t{d}")
-        if final == state.AWAITING_SIGNOFF:
-            for it in signoff.open_needs_human(d / "SUMMARY.md"):
-                print(f"    {it}")
-        # RESOLVED counts as success too: the flow can DISCOVER the resolution mid-run
-        # (the Plan seed fetches notes that carry the terminal marker, #302) — a settled
-        # ticket correctly skipped is not a failed cycle.
-        return 0 if final in (state.COMPLETE, state.AWAITING_SIGNOFF, state.RESOLVED) else 1
-
-    # Several ids: batch — auto-plan unbriefed, drive concurrently, cheap-first sign-off.
+    # ONE routing path and ONE results map, for BOTH CLI shapes (issue #468). The single-id
+    # route used to be structurally different machinery — a pre-run short-circuit on raw disk
+    # state, then `flow.flow` returning a bare state string, with no `except PreflightError`
+    # — and five iterations of #449 broke "both shapes do the same thing to the same disk" by
+    # a new route each round. There is nothing left to keep in step: `flow_ids` revalidates a
+    # cached RESOLVED marker against the live tracker (`flow.py:1086-1100`), skips an
+    # already-terminal bundle with its recovery hint (`flow.py:1121-1127`), and reports a
+    # disposition for EVERY id it was given — so both decisions, and the map the answer comes
+    # from, live in exactly one place.
     try:
-        return _report_batch(flow.flow_ids(
-            cfg, ids, plan_missing=True, csv=args.from_csv,
-            do_publish=do_publish, do_act=do_act, by=args.by))
+        results = flow.flow_ids(cfg, ids, plan_missing=True, csv=args.from_csv,
+                                do_publish=do_publish, do_act=do_act, by=args.by)
     except flow.PreflightError as exc:
         print(f"flow: {exc}", file=sys.stderr)
         return 1
 
+    # Two PRESENTATIONS of that one map — never two drive paths, and never a second source
+    # of truth: both read only `results`, so neither can report what the other cannot see.
+    return _report_single(cfg, ids[0], results) if len(ids) == 1 else _report_batch(results)
+
+
+#: States a flow run counts as a SUCCESSFUL terminal: finished, or settled in the tracker
+#: outside the cycle (#302 review round 11) — a correctly skipped item is not a failed flow.
+_FLOW_OK = (state.COMPLETE, state.RESOLVED)
+
+
+def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK) -> int:
+    """The ONE exit-code rule over a flow results map (issue #468): 0 iff every bundle in it
+    reached a successful terminal. An EMPTY map — nothing was asked for, or nothing driven —
+    is 0: a no-op is not a failure. (Only ``flow_batch``, which is handed no ids, can produce
+    one: :func:`flow.flow_ids` answers for every id it is given.)
+
+    ``ok`` carries the single documented difference between the shapes, in one place instead
+    of as an emergent property of two drive paths: a SINGLE-id run adds AWAITING_SIGNOFF,
+    because stopping for the human who just typed the command is the intended end of that
+    run, not a failure. A multi-id set keeps the batch rule (rc 0 iff all COMPLETE/RESOLVED).
+    """
+    return 0 if all(s in ok for s in results.values()) else 1
+
+
+def _report_single(cfg: Config, iid: str, results: dict[str, str]) -> int:
+    """The single-id presentation of the shared results map (issue #468).
+
+    Preserved from the pre-#468 single-id route, now DERIVED from the map the batch shape
+    also reports: the `state<TAB>path` line on stdout, the AWAITING_SIGNOFF listing of open
+    §6 items, and the rc-0 stop-for-the-human semantics.
+
+    Indexed, never ``.get``-with-a-fallback: :func:`flow.flow_ids` answers for every id it
+    was given, so a disk read here would be a SECOND authority — the one that let the two
+    shapes disagree about the same bundle. If the key is ever missing the map contract is
+    broken and the loud KeyError is the correct outcome, not a quietly divergent report.
+    """
+    final, d = results[iid], cfg.bundle(iid)
+    print(f"{final}\t{d}")
+    if final == state.AWAITING_SIGNOFF:
+        for it in signoff.open_needs_human(d / "SUMMARY.md"):
+            print(f"    {it}")
+    return _results_rc(results, ok=(*_FLOW_OK, state.AWAITING_SIGNOFF))
+
 
 def _report_batch(results: dict[str, str]) -> int:
-    """Print a batch result map and return a process code (0 iff every bundle reached
-    a SUCCESSFUL terminal — COMPLETE, or RESOLVED (#302 review round 11): a tracker
-    item settled outside the cycle is a successful no-op on the batch path exactly as
-    it is on the single-id path; automation must not read it as a failed flow."""
+    """Print a batch result map and return a process code — :func:`_results_rc`'s rule
+    (0 iff every bundle reached a SUCCESSFUL terminal — COMPLETE, or RESOLVED (#302 review
+    round 11): a tracker item settled outside the cycle is a successful no-op, and
+    automation must not read it as a failed flow), which the single-id shape derives its
+    own exit code from too (issue #468)."""
     if not results:
         print("flow: nothing to drive — no in-flight briefs among the ids.", file=sys.stderr)
         return 0
     for iid, st in sorted(results.items()):
         print(f"{st}\t{iid}")
-    done = sum(1 for s in results.values() if s in (state.COMPLETE, state.RESOLVED))
+    done = sum(1 for s in results.values() if s in _FLOW_OK)
     resolved = sum(1 for s in results.values() if s == state.RESOLVED)
     tail = f" ({resolved} resolved in the tracker)" if resolved else ""
     print(f"flow: {done}/{len(results)} complete{tail}")
-    return 0 if done == len(results) else 1
+    return _results_rc(results)
 
 
 def _prog() -> str:

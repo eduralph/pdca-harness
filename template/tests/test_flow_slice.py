@@ -403,14 +403,18 @@ class FlowSlice(unittest.TestCase):
 
     def test_flow_ids_skips_unbriefed_and_missing(self) -> None:
         # An id with no brief (UNPLANNED dir) and a non-existent id are both skipped;
-        # only the briefed id is driven.
+        # only the briefed id is driven. Skipped is not ABSENT (#468): every id asked
+        # for by name gets a disposition back, so the CLI shapes cannot disagree about
+        # one — the skipped ones report UNPLANNED, which is exactly "not driven".
         leaves.do_plan(self.cfg.bundle("HASBRIEF"), self.cfg)
         self.cfg.bundle("NOBRIEF").mkdir(parents=True)  # exists but UNPLANNED
         results = flow.flow_ids(
             self.cfg, ["HASBRIEF", "NOBRIEF", "GHOST"], today="2026-06-04"
         )
-        self.assertEqual(set(results), {"HASBRIEF"})
-        self.assertEqual(results["HASBRIEF"], state.COMPLETE)
+        self.assertEqual(results, {"HASBRIEF": state.COMPLETE,
+                                   "NOBRIEF": state.UNPLANNED,
+                                   "GHOST": state.UNPLANNED})
+        self.assertFalse((self.cfg.bundle("GHOST")).exists())  # never even created
 
     def test_batch_isolates_a_failing_bundle(self) -> None:
         # One bundle's build always raises (a leaf left it half-written). The sweep
@@ -510,15 +514,18 @@ class BatchPlanPrepass(unittest.TestCase):
             results = flow.flow_ids(self.cfg, ["SKIP"], plan_missing=True, today="2026-06-20")
         finally:
             leaves.do_plan_batch = orig
-        self.assertEqual(results, {})
+        # Reported as UNPLANNED, not dropped from the map (#468) — "left alone" is a
+        # disposition the caller must be able to see, not an absence it has to infer.
+        self.assertEqual(results, {"SKIP": state.UNPLANNED})
         self.assertEqual(state.state(self.cfg.bundle("SKIP")), state.UNPLANNED)
 
     def test_default_no_prepass_still_skips_unplanned(self) -> None:
-        # Without plan_missing, an UNPLANNED id is skipped exactly as before (no Plan beat).
+        # Without plan_missing, an UNPLANNED id is skipped exactly as before (no Plan beat)
+        # — and says so in the map (#468) rather than vanishing from it.
         self.cfg.bundle("U").mkdir(parents=True)
         leaves.do_plan(self.cfg.bundle("B"), self.cfg)
         results = flow.flow_ids(self.cfg, ["U", "B"], today="2026-06-20")
-        self.assertEqual(set(results), {"B"})  # U skipped, not briefed
+        self.assertEqual(results, {"U": state.UNPLANNED, "B": state.COMPLETE})
 
     def test_cli_flow_multi_id_auto_plans(self) -> None:
         # Unified `flow <id> <id>` (#86): several ids → batch with plan_missing=True
@@ -1710,9 +1717,11 @@ class MaxPassesConfig(unittest.TestCase):
 
     def _run_cli(self, cfg: Config, *extra: str) -> mock.Mock:
         """Real parser → dispatch → `_flow`; `main(argv)` skips the inhibitor re-exec.
-        `flow.flow` is stubbed so only the config plumbing is under test."""
+        `flow.flow_ids` — the ONE drive path both CLI shapes route through (issue #468) —
+        is stubbed, so only the config plumbing is under test."""
         with mock.patch.object(cli.Config, "load", return_value=cfg), \
-             mock.patch.object(cli.flow, "flow", return_value=state.COMPLETE) as driven, \
+             mock.patch.object(cli.flow, "flow_ids",
+                               return_value={"ID1": state.COMPLETE}) as driven, \
              redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             cli.main(["flow", "ID1", "--no-publish", "--no-act", *extra])
         return driven

@@ -27,7 +27,7 @@ from pathlib import Path
 
 from . import (act, assemble, autoiterate, brief, driver, gates, integrate, lane, leaves,
                merge, merged, preflight, publish, queue, signoff, size_signal, sources,
-               state, sweep, waves)
+               split, state, sweep, waves)
 from .config import Config
 
 
@@ -377,6 +377,15 @@ def flow(
 ) -> str:
     """Drive one issue through the whole cycle; return its final state.
 
+    **Not a CLI route** (issue #468). ``pdca flow <id>`` and ``pdca flow <id> <id>`` both go
+    through :func:`flow_ids` and the one results map it returns; this is the single-bundle
+    library driver (used by the offline slices, which inject a per-bundle
+    ``leaves.run_signoff`` the wave path does not call). Anything that must report or exit
+    on a bundle's disposition belongs on ``flow_ids`` — a state STRING cannot carry the
+    per-id map both CLI shapes derive their report and exit code from, and giving one shape
+    its own drive path is exactly the asymmetry #468 removed. ``cli._flow`` calling this
+    again is a regression a test pins (``test_flow_entrypoint_parity``).
+
     ``max_iters`` defaults to ``cfg.max_passes`` (``[driver].max_passes``). Exhausting it
     with the bundle still iterating is NOT silent (issue #260) — the ``for``/``else`` names
     it with a resume hint. The ``break`` paths are the ordinary halts (COMPLETE, a human
@@ -657,6 +666,66 @@ def _audit_wave_overlap(wave: list[Path]) -> None:
 # stops driving it is work in flight — it will not be published, and nothing else advances
 # it this run.
 _TERMINAL = (state.COMPLETE, state.DISCONTINUED, state.RESOLVED)
+
+
+def _lineage_children(record: dict) -> list[str]:
+    """The child ids a lineage record's ``children`` edge names, or ``[]`` — never raises.
+
+    The value-level half of the tolerance :func:`split.read_lineage` gives the FILE
+    (``split.py:373``), mirroring :func:`split._recorded_depth` (``split.py:405``): the
+    reader abstains on a file it cannot parse, this abstains on a VALUE it cannot format
+    with. ``{"children": 7}`` and ``{"children": [1, null]}`` are valid JSON with a valid
+    ``version``, so the reader hands them straight back — and ``" ".join(...)`` on either
+    raises ``TypeError`` out of :func:`flow_ids`, aborting the run on a hand-edited
+    provenance file exactly as a raising reader would. Tolerating the file but not its
+    contents would only move the throw one line down.
+    """
+    value = record.get("children")
+    if not isinstance(value, list):
+        return []
+    # Stripped, so a hand-added space cannot render an uncopyable `pdca flow " 469 "` hint;
+    # `split.validate` only ever writes `[A-Za-z0-9._-]+` tokens (``split.py:281``).
+    return [c.strip() for c in value if isinstance(c, str) and c.strip()]
+
+
+def _terminal_hint(d: Path, s: str) -> str:
+    """What an operator can DO about a bundle the drive set skipped as terminal, or ``""``.
+
+    One hint, on the one shared path (issue #468). Both ``pdca flow <id>`` and ``pdca flow
+    <id> <id>`` reach a terminal bundle through :func:`flow_ids`'s filter below, so the
+    recovery advice cannot differ by CLI arity — which is exactly how the single-id route
+    came to print ``rm -rf`` at a SPLIT PARENT while the batch route printed a bare skip.
+
+    Deleting a split parent is destructive: its ``split-lineage.json`` (``split.py:47``) is
+    the only on-disk record of the split's edges, so ``rm -rf`` there orphans the children
+    the parent already produced. A record carrying a ``children`` key IS a split parent
+    (independent optional edges, ``children`` iff split — ``split.py:392``), so the key's
+    mere PRESENCE suppresses the destructive advice; only the ability to NAME the children
+    depends on the value being usable (:func:`_lineage_children`).
+    """
+    record = split.read_lineage(d) or {}
+    if "children" in record:
+        kids = _lineage_children(record)
+        if kids:
+            return (f"split into children — nothing to run here; drive them instead with "
+                    f"`pdca flow {' '.join(kids)}`. Do not delete this bundle: its "
+                    f"{split.LINEAGE} is the only on-disk record of the split.")
+        return (f"split into children, but its {split.LINEAGE} names none readably — "
+                f"nothing to run here. Do not delete this bundle; read that file (or the "
+                f"parent's tracker issue) to find the child bundles.")
+    if s == state.RESOLVED:
+        # Verbatim from the single-id CLI short-circuit this shared path replaces
+        # (`cli.py:631-635` on f7876f2). The remediation names the WHOLE file (#302
+        # review round 15): deleting only the `resolved` key would leave the closure-era
+        # notes.json in place, and ensure_notes refuses to re-fetch while it exists — so
+        # Plan would brief from the pre-reopen thread.
+        return ("tracker item resolved outside a cycle — nothing to run. Reopen it in the "
+                "tracker (a reachable GitHub tracker is then picked up here automatically; "
+                "otherwise rename notes.json away — e.g. to notes.superseded-by-reopen.json "
+                "— so the next Plan re-fetches the fresh thread) to plan it again.")
+    if s == state.COMPLETE:
+        return f"already complete — nothing to run. To redo it: rm -rf {d}"
+    return ""
 
 
 def _warn_abandoned(bundles: list[Path], *, why: str) -> None:
@@ -1000,7 +1069,17 @@ def flow_ids(
     session (``do_plan_batch`` over those ids, reading each bundle's ``notes.json``), making
     this the id-seeded analogue of ``flow_batch``. Ids still UNPLANNED after the pre-pass
     (planner skipped them) and terminal ids (COMPLETE / DISCONTINUED) are left alone.
-    Returns ``{issue_id: state}``.
+
+    Returns ``{issue_id: state}`` for **every id it was given** (issue #468), driven or
+    skipped — a skipped id's disposition is its state on disk, the same value
+    ``_drive_and_act`` records for a bundle it DID drive. TOTAL, because this map is the
+    single authority both ``pdca flow <id>`` and ``pdca flow <id> <id>`` report and derive
+    their exit code from (``cli._flow``): a map that silently omitted the ids it skipped
+    would force each caller to fill the gaps itself, which is precisely how the two CLI
+    shapes came to disagree — the same DISCONTINUED bundle exited 1 alone and 0 next to a
+    completing sibling, because only one shape could see it. Unlike ``flow_batch``, whose
+    caller passes no id list and can therefore only be told what was driven, every id here
+    was ASKED FOR by name and so gets an answer.
     """
     today = today or datetime.date.today().isoformat()
 
@@ -1031,21 +1110,27 @@ def flow_ids(
             leaves.do_plan_batch(cfg, csv, ids=plan_targets)
 
     bundles: list[Path] = []
+    skipped: dict[str, str] = {}   # asked for, not driven — still gets a disposition (#468)
     for iid in ids:
         d = cfg.bundle(iid)
         s = state.state(d)
         if not d.exists() or s == state.UNPLANNED:
             print(f"flow: {d.name} — no brief.md, skipped (brief it at Plan first)", file=sys.stderr)
+            skipped[iid] = s
             continue
         if s in _TERMINAL:
             print(f"flow: {d.name} — already terminal ({s}), skipped", file=sys.stderr)
+            hint = _terminal_hint(d, s)   # the ONE recovery advice, both CLI shapes (#468)
+            if hint:
+                print(f"  {hint}", file=sys.stderr)
+            skipped[iid] = s
             continue
         bundles.append(d)
     if not bundles:
-        return {}
+        return skipped
     bundles.sort(key=lambda p: p.name)
-    return _drive_and_act(cfg, bundles, do_publish=do_publish, do_act=do_act, by=by,
-                          today=today, max_passes=max_passes)
+    return skipped | _drive_and_act(cfg, bundles, do_publish=do_publish, do_act=do_act,
+                                    by=by, today=today, max_passes=max_passes)
 
 
 def _bundle_dirs(cfg: Config) -> set[str]:
