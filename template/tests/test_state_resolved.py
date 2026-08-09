@@ -146,7 +146,12 @@ class ResolvedIsTerminal(unittest.TestCase):
         d = self.cfg.bundle("10")
         d.mkdir(parents=True)
         (d / "notes.json").write_text(json.dumps(_RESOLVED), encoding="utf-8")
-        self.assertEqual(flow.flow_ids(self.cfg, ["10"], plan_missing=False), {})
+        # Skipped as terminal — and REPORTED as RESOLVED (#468) rather than dropped from
+        # the map: RESOLVED is a successful no-op, and both CLI shapes derive that verdict
+        # from this one entry (`cli._report_single` / `cli._report_batch`).
+        self.assertEqual(flow.flow_ids(self.cfg, ["10"], plan_missing=False),
+                         {"10": state.RESOLVED})
+        self.assertFalse((d / "brief.md").exists())   # nothing driven, nothing planned
 
 
 class PlanNeverReopensResolved(unittest.TestCase):

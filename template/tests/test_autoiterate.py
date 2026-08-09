@@ -771,8 +771,11 @@ class ConfigPlumbing(unittest.TestCase):
     def test_cli_flag_opts_in(self) -> None:
         cfg = _stub_config(self.tmp)
         cfg.auto_iterate = False
+        # `flow_ids` is the ONE drive path `cli._flow` routes a single id through (#468),
+        # so that is the call to stub out for a flag-plumbing test.
         with mock.patch.object(cli.Config, "load", return_value=cfg), \
-             mock.patch.object(cli.flow, "flow", return_value=state.COMPLETE), \
+             mock.patch.object(cli.flow, "flow_ids",
+                               return_value={"ID1": state.COMPLETE}), \
              redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             cli.main(["flow", "ID1", "--auto-iterate", "--no-publish", "--no-act"])
         self.assertTrue(cfg.auto_iterate)
