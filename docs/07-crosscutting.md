@@ -240,6 +240,36 @@ parent's is written before the close marker, and a failed accept restores the
 parent's prior record byte-for-byte (a record that can't be *read* refuses the
 accept up front, since one that can't be read can't be restored).
 
+That record is what lets **a split hand its children back to the run that is
+driving it**. When a bundle in the drive set reaches `close-disposition =
+split`, the flow reads its `children`, drops the ones it can't drive (no brief,
+already terminal, already in this run), and splices the rest into the waves
+*after* the parent's — never the wave being driven, whose fold has a base about
+to move. From there they are ordinary members of the run: scheduled by their own
+`Depends on` / `Conflicts with` ([waves](#waves-in-execution)), pointed at the
+same per-target integration branch, published and folded by the same code, and
+drawn from [the same run's pass pool](#the-iteration-budget), so an adopted wave
+can never quietly double it. It is one implementation on the one drive path, so
+it applies to every shape that reaches it — `pdca flow <id>`, an explicit id
+list, and the CSV batch alike — and Entry B (`iterate-plan` at sign-off →
+re-plan → split) no longer ends in a restart.
+
+Adoption follows the **lineage edge only**: a flow drives the children of the
+bundles it is driving, transitively (an adopted child that splits again is
+adopted in its turn, on the same pass pool), and never widens into a sweep of
+`results/`. The ids you name keep their strict contract — an id list with a
+cycle or an unresolvable `Depends on` is still refused up front — while a
+*child* that can't be scheduled is held with the reason and left in flight (the
+resume sweep's tolerance), out of the run's results rather than counted as work
+it did. That holds whenever the hold happens: a child adopted into a later wave
+that becomes unschedulable before its wave arrives is dropped back out of the
+run, and its adoption announcement retracted by name, so "held" always reads the
+same way. A parent marked `split` with no readable record is reported and skipped;
+both holds degrade to the old remedy, the `pdca flow <child-ids>` command
+`--accept` still prints, which remains the right answer for a split accepted
+outside any running flow — including a parent an earlier run already closed,
+whose children a later run does not yet pick up on its own.
+
 ---
 
 ## Iteration & carry-forward
@@ -282,9 +312,17 @@ heading both mechanisms use is the one place they have to agree.
 ### The iteration budget
 
 `[driver].max_passes` (default `20`) bounds how many build→sign-off passes one
-`pdca flow` run gives a bundle before it stops driving it — not silently: the
+wave of a `pdca flow` run spends before it stops driving — not silently: the
 bundle is named on stderr with a `pdca flow <id>` resume hint, and its accepted
 siblings still publish. Raise it in `pdca.toml` rather than editing anything.
+
+It also sizes the run's **pool**: that many passes per wave the run *set out to*
+drive, spent down by every wave in turn. A run whose waves are fixed can never
+reach that pool — each of its waves is separately capped at the same number — so
+this changes nothing for it. It is the ceiling on a run whose drive set **grows**:
+children [adopted from a split](#the-split) draw from what their parent's schedule
+was allowed, so a split can never quietly multiply the budget. A run that spends
+the pool stops there and says so, naming what it walked away from.
 
 ### Auto-iterate: the driver deciding for itself
 

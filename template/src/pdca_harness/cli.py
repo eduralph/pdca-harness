@@ -606,8 +606,8 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
     # state, then `flow.flow` returning a bare state string, with no `except PreflightError`
     # — and five iterations of #449 broke "both shapes do the same thing to the same disk" by
     # a new route each round. There is nothing left to keep in step: `flow_ids` revalidates a
-    # cached RESOLVED marker against the live tracker (`flow.py:1086-1100`), skips an
-    # already-terminal bundle with its recovery hint (`flow.py:1121-1127`), and reports a
+    # cached RESOLVED marker against the live tracker (`flow.py:1619-1633`), skips an
+    # already-terminal bundle with its recovery hint (`flow.py:1654-1660`), and reports a
     # disposition for EVERY id it was given — so both decisions, and the map the answer comes
     # from, live in exactly one place.
     try:
