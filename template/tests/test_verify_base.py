@@ -20,13 +20,26 @@ Real gate commands, no model/network. Run from the project root:
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from pdca_harness import gates, publish
 from pdca_harness.config import Config, LeafConfig
+
+#: The three exports this module is about. It reads them back out of a real gate
+#: SUBPROCESS, whose environment is `{**os.environ, **exports}` (`gates.py:782`) — so one
+#: of them already present in the ambient environment is read back as though the driver
+#: had set it, and every assertion here about which base is set (and about only ONE being
+#: set) fails with nothing wrong in the code under test. Not hypothetical: this harness
+#: drives itself, and the outer run exports `PDCA_VERIFY_BASE` (the folded base of a
+#: wave-dependent bundle) to the gate command that runs this very suite, which turned 11
+#: of these tests red in a frozen gate record. A module that asserts what the driver
+#: exports has to own the baseline it measures against.
+_BASE_VARS = ("PDCA_BASE", "PDCA_VERIFY_BASE", "PDCA_BRIEF_BASE")
 
 # A bundle-scoped gate whose cmd records ALL THREE exported bases into the bundle dir, so the
 # test reads back exactly what the driver set (`UNSET` when a var is absent). All three,
@@ -60,6 +73,15 @@ def _stub_config(root: Path) -> Config:
 
 class VerifyBaseExport(unittest.TestCase):
     def setUp(self) -> None:
+        # Hermetic baseline (see _BASE_VARS): snapshot the environment, drop the three vars
+        # under test for the duration of the test, restore it afterwards. Only these three
+        # — the gate subprocess still needs the rest of the environment (PATH, HOME) to run
+        # at all, so this narrows the ambient env, it never replaces it.
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        for var in _BASE_VARS:
+            os.environ.pop(var, None)
         self.tmp = Path(tempfile.mkdtemp())
         self.cfg = _stub_config(self.tmp)
         self.cfg.gates_checks = [_ECHO_BASES]

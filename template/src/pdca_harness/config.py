@@ -292,9 +292,14 @@ class Config:
     lanes: int = 1
     # Sign-off pass budget for one `pdca flow` run (issue #260): how many build-all →
     # sign-off passes a wave (or iterations a single issue) gets before the driver stops
-    # driving it. A bundle still iterating when the budget runs out is left un-terminal and
-    # NAMED on stderr with a resume hint — never silently dropped. ``[driver].max_passes``;
-    # ``PDCA_MAX_PASSES`` overrides for one run; ``--max-passes`` overrides both.
+    # driving it. It also sizes the RUN's pool (#469) — this many passes per wave the run
+    # set out to drive, spent down by every wave in turn — so a run whose drive set GROWS
+    # (a split whose children it adopts) draws the extra waves from the same pool instead
+    # of multiplying what the operator allowed. A run that adopts nothing can never reach
+    # that pool, so nothing about it changes. A bundle still iterating when the budget runs
+    # out is left un-terminal and NAMED on stderr with a resume hint — never silently
+    # dropped. ``[driver].max_passes``; ``PDCA_MAX_PASSES`` overrides for one run;
+    # ``--max-passes`` overrides both.
     max_passes: int = 20
     # Auto-iterate (issue #264): when every open SUMMARY §6 item is implementation-level
     # (a `gate` cell of the 5/5/1 — C2/C4/T1..T4), let the driver record `iterate-do` and
@@ -304,8 +309,23 @@ class Config:
     # ``PDCA_AUTO_ITERATE`` / ``--auto-iterate`` override.
     auto_iterate: bool = False
     # The per-bundle cap on those automatic rounds; on exhaustion the bundle halts at
-    # AWAITING_SIGNOFF for the human. Clamped below ``max_passes`` so a wave's pass budget
-    # can't run out mid-auto-iteration (which #260 would then report as abandoned).
+    # AWAITING_SIGNOFF for the human. Clamped below ``max_passes``
+    # (``max_auto_iters = min(max_auto_iters, max(1, max_passes - 1))``, ``config.py:686``)
+    # so a wave driven on its FULL allowance can't run its pass budget out
+    # mid-auto-iteration (which #260 would then report as abandoned).
+    #
+    # That clamp is a statement about the ALLOWANCE, not a promise about every wave (#469).
+    # A wave that split adoption ADDED is drawn from what is left of the run's pool
+    # (``min(allowance, budget - spent)``, ``flow.py:1429``), which can be smaller than
+    # ``max_passes`` — so an adopted child can be cut off mid-auto-iteration after all.
+    # That is the run-wide cap binding, and it is the intended trade: the alternative —
+    # flooring an adopted wave at ``max_auto_iters`` — spends more passes than the operator
+    # allowed, which is the one thing the pool exists to prevent
+    # (``test_the_pass_budget_is_one_cap_for_the_whole_run`` measures exactly that). It is
+    # never silent: such a wave is named with its allowance and a resume hint
+    # (``flow.py:1310``, pinned by
+    # ``test_an_adopted_wave_only_gets_what_is_left_of_the_run_budget``). A run that adopts
+    # nothing cannot reach the pool at all, so the clamp holds there exactly as before.
     max_auto_iters: int = 3
     # Worktree isolation (issue #94): run a cycle's Do/Check in a dedicated git worktree
     # off the target's base, so the host's primary checkout is never mutated in place.
