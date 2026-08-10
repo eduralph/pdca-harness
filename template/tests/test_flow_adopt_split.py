@@ -392,69 +392,88 @@ class AdoptSplitChildren(unittest.TestCase):
         # carries the parent's work too — that is the base 602 is meant to build on.
         self.assertEqual(folds, [["issue_500"], ["issue_500", "issue_601"]])
 
-    # -- one run-wide pass budget --------------------------------------------------------
+    # -- the pass pool: one allowance per LIVE wave ---------------------------------------
 
-    def test_the_pass_budget_is_one_cap_for_the_whole_run(self) -> None:
-        """`--max-passes` bounds the RUN, not each wave it grows into — otherwise every
-        adopted wave silently multiplies the operator's budget. The parent's wave spends 2
-        passes (build → iterate-plan → re-plan → split → accept) and 601's spends 1, so a
-        run that set out to drive ONE wave at a budget of 3 is exhausted before 602's wave:
-        it is left PLANNED and NAMED, never driven on borrowed budget. One more pass and
-        the same run finishes it."""
+    def test_every_wave_the_run_grows_into_is_funded_at_the_allowance(self) -> None:
+        """`--max-passes` is the allowance ONE wave gets, and the run's pool holds one of
+        those per wave its schedule CURRENTLY has — read off the live schedule, so a splice
+        that grows it re-sizes the pool (#473, `flow._pass_pool`).
+
+        Sized once, off the schedule the run set out with, the pool broke its own promise:
+        at `--max-passes 3` this run (the parent's wave 2 passes, 601's 1) was spent before
+        602's wave and abandoned it PLANNED — a bundle this run had SCHEDULED, starved by
+        arithmetic done before that wave existed. The run now finishes what it scheduled and
+        says nothing about a spent budget.
+
+        The bound did not go with it: every wave is still capped at one allowance
+        (`test_an_adopted_wave_is_capped_at_one_allowance_like_any_other`), nothing gives
+        back what the run has spent, and what stops a chain of splits is that adoption is
+        finite — a bundle is adopted once, a candidate examined once."""
         self._briefed("500")
         self._arm({"500": ["601", "602"]})
 
         self._cli(["500"], max_passes=3)
 
-        self.assertEqual(self._state("601"), state.COMPLETE)   # adoption did happen
-        self.assertEqual(self._state("602"), state.PLANNED)    # …but on the run's budget
-        self.assertEqual(self.waves_driven, [["issue_500"], ["issue_601"]])
+        self.assertEqual(self._state("601"), state.COMPLETE)   # adoption did happen…
+        self.assertEqual(self._state("602"), state.COMPLETE)   # …and was driven to the end
+        self.assertEqual(self.waves_driven,
+                         [["issue_500"], ["issue_601"], ["issue_602"]])
         err = self.err.getvalue()
-        self.assertIn("the run's pass budget is spent (3 pass(es) over 2 wave(s))", err)
-        self.assertIn("issue_602 [PLANNED] — resume with `pdca flow 602`", err)
-        self.assertEqual(self.passes, 3)                       # spent, not overspent
+        self.assertNotIn("pass budget is spent", err)
+        self.assertEqual(self.passes, 4)          # 2 + 1 + 1 — what the SCHEDULE needs
 
-        # The cap is what stopped it — not adoption. One more pass, everything lands.
+        # …and the funding follows the schedule at an allowance that leaves nothing over:
+        # 2 is exactly what the parent's own wave costs, so a pool fixed at sizing time
+        # (1 wave × 2) stopped right there. Both waves the splice added are still funded.
         self._reset()
         self._briefed("500")
         self._arm({"500": ["601", "602"]})
 
-        self._cli(["500"], max_passes=4)
+        self._cli(["500"], max_passes=2)
 
         self.assertEqual(self._state("602"), state.COMPLETE)
         self.assertEqual(self.passes, 4)
         self.assertNotIn("pass budget is spent", self.err.getvalue())
 
-    def test_an_adopted_wave_only_gets_what_is_left_of_the_run_budget(self) -> None:
-        """The cap is not merely re-checked between waves, it is HANDED DOWN. 601 costs two
-        passes (it iterates once), and the parent's wave already spent 2 of 3 — so 601 gets
-        the ONE pass that is left, stops there and is named. Handing each wave the full
-        budget again would finish 601 on a 4th pass, i.e. spend more than the operator
-        allowed the run."""
+    def test_an_adopted_wave_is_capped_at_one_allowance_like_any_other(self) -> None:
+        """Funding every wave is not a licence to spend: a wave adoption added gets ONE
+        allowance, exactly like a wave the run set out with, and stops there.
+
+        601's sign-off session is never answered, so its wave would pass forever; at
+        `--max-passes 2` it takes its two, is named with a resume hint and left in flight,
+        never driven on borrowed budget. Its independent sibling 602, in the same wave,
+        still lands. (Before #473 this wave got only what a pool sized for the parent's
+        schedule had left — one pass — which is how a run starved the children it created.)
+        """
         self._briefed("500")
-        self._arm({"500": ["601", "602"]}, iterate_once="601")
+        self._arm({"500": ["601", "602"]}, bodies={"500": [_CHILD_ONE, _SIBLING_TWO]},
+                  walk_away="601")
 
-        self._cli(["500"], max_passes=3)
+        self._cli(["500"], max_passes=2)
 
-        self.assertEqual(self.passes, 3)                        # never a 4th pass
-        self.assertEqual(self._state("601"), state.ITERATE_DO)  # left mid-iteration…
+        self.assertEqual(self.passes, 4)                        # 2 per wave, never a 5th
+        self.assertEqual(self.waves_driven,
+                         [["issue_500"], ["issue_601", "issue_602"]])
+        self.assertEqual(self._state("601"), state.AWAITING_SIGNOFF)  # stopped at the cap…
+        self.assertEqual(self._state("602"), state.COMPLETE)          # …its sibling landed
         err = self.err.getvalue()
-        self.assertIn("pass budget exhausted after 1 pass(es)", err)   # …its share of 3
-        self.assertIn("issue_601 [ITERATE_DO] — resume with `pdca flow 601`", err)
+        self.assertIn("pass budget exhausted after 2 pass(es)", err)   # …this wave's own
+        self.assertIn("issue_601 [AWAITING_SIGNOFF] — resume with `pdca flow 601`", err)
 
-    def test_a_wave_that_runs_its_allowance_out_still_charges_the_run_pool(self) -> None:
-        """The pool only caps a run if a wave that does NOT finish charges it too.
+    def test_a_wave_that_runs_its_allowance_out_does_not_starve_the_one_it_created(
+            self) -> None:
+        """A wave that does NOT finish is still charged to the run and named — and since
+        #473 that charge no longer decides whether the next wave opens.
 
-        `_drive_wave` returns the passes it consumed on EVERY exit, and the budget-exhausted
-        one is exactly where "one pool, never multiplied" bites: the wave that ran its
-        allowance out is the wave that spent the most. Here 810's session is walked away
-        from, so wave 0 never goes all-terminal and burns the operator's whole 4 — while the
-        two independent children 500 split off ARE a runnable wave. The run must decline to
-        open it, not spend a 5th pass on it.
+        810's session is walked away from, so wave 0 never goes all-terminal and takes its
+        whole allowance of 4 — while the two independent children 500 split off ARE a
+        runnable wave. Sized once, the pool was spent exactly there and the run declined to
+        open the wave it had just created, leaving 601/602 PLANNED after announcing their
+        adoption. Read off the live waves, they get the allowance every wave gets.
 
-        Asserted because it is unobservable from the finishing waves: an exhausted
-        `_drive_wave` that reported 0 leaves `spent` untouched, so this same run drives both
-        children to COMPLETE on 6 passes — over budget, and silently."""
+        What has not changed is the accounting or the verdict: `_drive_wave` still reports
+        what every exit consumed, no wave gets more than one allowance, and a run that left
+        a bundle un-terminal still exits 1 — the walked-away 810 is named, not dropped."""
         self._briefed("500")
         self._briefed("810")
         self._arm({"500": ["601", "602"]}, bodies={"500": [_CHILD_ONE, _SIBLING_TWO]},
@@ -462,27 +481,30 @@ class AdoptSplitChildren(unittest.TestCase):
 
         rc = self._cli(["500", "810"], max_passes=4)
 
-        self.assertEqual(self.passes, 4)      # the operator's 4 — never a 5th
-        self.assertEqual(self.waves_driven, [["issue_500", "issue_810"]])  # wave 1 unopened
-        self.assertEqual(self._adoptions(),   # the children WERE adopted…
+        self.assertEqual(self.passes, 5)      # 4 for the exhausted wave + 1 for the new one
+        self.assertEqual(self.waves_driven,
+                         [["issue_500", "issue_810"], ["issue_601", "issue_602"]])
+        self.assertEqual(self._adoptions(),   # the children were adopted…
                          ["issue_500 split → adopted children issue_601, issue_602 into "
                           "wave 1"])
-        self.assertEqual(self._state("601"), state.PLANNED)   # …and then left, not driven
-        self.assertEqual(self._state("602"), state.PLANNED)
+        self.assertEqual(self._state("601"), state.COMPLETE)  # …and then actually driven
+        self.assertEqual(self._state("602"), state.COMPLETE)
         err = self.err.getvalue()
-        self.assertIn("the run's pass budget is spent (4 pass(es) over 1 wave(s))", err)
-        self.assertIn("issue_601 [PLANNED] — resume with `pdca flow 601`", err)
+        self.assertNotIn("the run's pass budget is spent", err)
+        self.assertIn("pass budget exhausted after 4 pass(es)", err)   # wave 0's own
+        self.assertIn("issue_810 [AWAITING_SIGNOFF] — resume with `pdca flow 810`", err)
         self.assertEqual(rc, 1)               # un-terminal work, named, never rc 0
 
-    def test_a_wave_that_stalls_charges_the_run_pool_for_what_it_spent(self) -> None:
-        """The same accounting on `_drive_wave`'s OTHER un-finished exit — the wave that
-        stops making progress rather than running its allowance out.
+    def test_a_wave_that_stalls_is_charged_and_the_adopted_wave_still_runs(self) -> None:
+        """The same on `_drive_wave`'s OTHER un-finished exit — the wave that stops making
+        progress rather than running its allowance out.
 
-        820's Do leaf fails every pass, so once 500 has split, a whole pass changes nothing
-        and the wave gives up after 3 of the run's 4. What is left is ONE pass, and that is
-        what the adopted wave gets: 601 iterates once, so it is left ITERATE_DO and named.
-        A stalled wave that reported 0 passes would hand the children a fresh allowance of
-        4 and finish 601 on a fifth pass the operator never allowed."""
+        820's Do leaf fails every pass, so once 500 has split a whole pass changes nothing
+        and the wave gives up after 3 of its 4. The wave that splice created then gets its
+        OWN allowance instead of the remainder of a pool sized before it existed (#473):
+        601 iterates once, costs two passes, and lands — where the fixed pool left it
+        ITERATE_DO on the single pass that happened to be left over. 820 itself is still
+        named as work this run walked away from."""
         self._briefed("500")
         self._briefed("820")
         self._arm({"500": ["601", "602"]}, bodies={"500": [_CHILD_ONE, _SIBLING_TWO]},
@@ -491,14 +513,14 @@ class AdoptSplitChildren(unittest.TestCase):
 
         self._cli(["500", "820"], max_passes=4)
 
-        self.assertEqual(self.passes, 4)                      # 3 stalled + the 1 left
+        self.assertEqual(self.passes, 5)                      # 3 stalled + the wave's 2
         self.assertEqual(self.waves_driven,
                          [["issue_500", "issue_820"], ["issue_601", "issue_602"]])
         err = self.err.getvalue()
         self.assertIn("a full pass made no progress", err)    # …the stall really happened
-        self.assertIn("pass budget exhausted after 1 pass(es)", err)   # …its share of 4
-        self.assertEqual(self._state("601"), state.ITERATE_DO)  # stopped mid-iteration
-        self.assertEqual(self._state("602"), state.COMPLETE)    # its sibling did land
+        self.assertIn("issue_820 [PLANNED] — resume with `pdca flow 820`", err)
+        self.assertEqual(self._state("601"), state.COMPLETE)   # the iteration completed
+        self.assertEqual(self._state("602"), state.COMPLETE)   # …and so did its sibling
 
     def test_a_run_that_adopts_nothing_keeps_a_full_budget_per_wave(self) -> None:
         """The run-wide pool must not become a NEW way for an ordinary batch to be
@@ -521,12 +543,11 @@ class AdoptSplitChildren(unittest.TestCase):
         self.assertNotIn("budget is spent", self.err.getvalue())
 
     def test_an_adopted_child_that_splits_again_is_re_adopted_and_bounded(self) -> None:
-        """Recursion, on the same pool. 601 is adopted, then splits in ITS wave; its own
-        children are adopted into a later wave of the SAME run and driven — and they draw
-        from the same budget, so the recursion is bounded rather than reset. Both halves
-        are asserted, because either alone is satisfiable by the wrong implementation: a
-        budget that reset would still finish the grandchildren, and a run that never
-        re-examined an adopted child would still respect the cap."""
+        """Recursion, in one run. 601 is adopted, then splits in ITS wave; its own children
+        are adopted into a later wave of the SAME run and driven. Both halves are asserted,
+        because either alone is satisfiable by the wrong implementation: a run that never
+        re-examined an adopted child would drive nothing here, and a run with no bound would
+        not stop."""
         self._briefed("500")
         self._arm({"500": ["601", "602"], "601": ["701", "702"]})
 
@@ -536,20 +557,26 @@ class AdoptSplitChildren(unittest.TestCase):
         self.assertEqual(self._state("702"), state.COMPLETE)
         self.assertIn("issue_601 split → adopted children issue_701 into wave 2",
                       self.err.getvalue())
-        self.assertEqual(self.passes, 6)   # 2 (500) + 2 (601) + 1 + 1 — one pool, no reset
+        self.assertEqual(self.passes, 6)   # 2 (500) + 2 (601) + 1 + 1 — no wave repeated
 
-        # …and the pool BINDS across the recursion: the same run, allowed 5 passes, stops
-        # inside the grandchildren rather than borrowing a fresh budget for the new wave.
+        # …and the recursion is bounded by ADOPTION, not by arithmetic (#473): the same run
+        # at an allowance of 2 — exactly what a splitting wave costs, so a pool sized once
+        # off the schedule the run set out with (1 wave × 2) stopped at the parent — still
+        # ends, on the same 6 passes, having adopted each bundle exactly once.
         self._reset()
         self._briefed("500")
         self._arm({"500": ["601", "602"], "601": ["701", "702"]})
 
-        self._cli(["500"], max_passes=5)
+        self._cli(["500"], max_passes=2)
 
-        self.assertEqual(self.passes, 5)
-        self.assertEqual(self._state("702"), state.PLANNED)
-        self.assertIn("the run's pass budget is spent (5 pass(es) over 3 wave(s))",
-                      self.err.getvalue())
+        self.assertEqual(self.passes, 6)
+        self.assertEqual(self._state("702"), state.COMPLETE)
+        self.assertEqual(self._adoptions(), [
+            "issue_500 split → adopted children issue_601 into wave 1",
+            "issue_500 split → adopted children issue_602 into wave 2",
+            "issue_601 split → adopted children issue_701 into wave 2",
+            "issue_601 split → adopted children issue_702 into wave 3"])
+        self.assertNotIn("pass budget is spent", self.err.getvalue())
 
     # -- scope: the lineage edge, never a disk sweep -------------------------------------
 
