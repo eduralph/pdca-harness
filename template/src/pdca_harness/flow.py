@@ -800,14 +800,20 @@ def _report_held(held: dict[str, str]) -> None:
 # Adoption follows the LINEAGE EDGE, never the disk: a run adopts the children of the
 # bundles IT IS DRIVING (transitively — an adopted child that splits in its turn is adopted
 # in ITS wave), so the deliberate difference between ``flow_ids`` and the CSV resume sweep
-# survives. It is bounded: a bundle already in the drive set is never adopted again, and
-# every wave the children join spends the SAME run's pass budget, which is what stops a
-# chain of splits from running forever.
+# survives. It is bounded by ADOPTION, not by arithmetic (#473): a bundle already in the
+# drive set is never adopted again, a candidate is examined at most once per splice, and
+# every adopted child is a bundle already on disk — so each splice consumes a finite set and
+# a chain of splits stops. The pass pool then funds every wave that chain produced
+# (:func:`_pass_pool`) instead of truncating a schedule the run itself created.
 #
-# A bundle ALREADY terminal on a split when the run STARTS is the separate, deliberately
-# out-of-scope case (recovering children an earlier run stranded): ``flow_ids`` still skips
-# such an id with :func:`_terminal_hint`'s ``pdca flow <child-ids>`` advice, and a later
-# child of this issue makes it an adoption seed.
+# A bundle ALREADY terminal on a split when the run STARTS is the RECOVERY case (#473) — the
+# children an earlier run (a crash, a ``^C``, a split accepted in another session) left
+# PLANNED. ``flow_ids`` still SKIPS such an id, because a terminal bundle has nothing to
+# build, and still prints :func:`_terminal_hint`'s non-destructive advice; what is new is
+# that it hands the bundle on as an adoption SEED. The seed's children are spliced by this
+# same code at ``k = -1`` ("the wave before wave 0"), under the same guards, the same
+# reschedule and the same announcements a mid-run split gets — recovery is one more USE of
+# the adoption path, never a second mechanism beside it.
 # ----------------------------------------------------------------------------
 #: The close-disposition ``split.accept`` writes into a parent it has decomposed
 #: (``split.py:635``). Spelled here rather than imported because the split command owns
@@ -894,8 +900,9 @@ def _is_split_parent(d: Path) -> bool:
 
 
 def _adoptable(cfg: Config, parent: Path, *, known: set[str],
-               refused: list[tuple[str, str, str]]) -> list[Path]:
-    """The children of ``parent`` this run can drive — ``[]`` unless it split.
+               refused: list[tuple[str, str, str]]) -> tuple[list[Path], list[Path]]:
+    """The children of ``parent`` this run can drive, and the ones to WALK THROUGH —
+    ``([], [])`` unless it split.
 
     Detect and validate in ONE step: a bundle that is not terminal on a ``split``
     (:func:`_is_split_parent`) has no adoptable children, so no caller can decide "is this a
@@ -936,9 +943,18 @@ def _adoptable(cfg: Config, parent: Path, *, known: set[str],
     DIRECTORY under (the child's own, except for an alias), since that is the name whose
     disposition the report looks up. What is true about such a child is not yet decided at
     this point in the run, and the eager line said the wrong one of the two.
+
+    One dropped child is not a dead end (#473). A child that is terminal **on a split of its
+    own** cannot be driven — but the generation below it can still be sitting where an
+    earlier run left it (a 500 → 601 → 701 chain abandoned part-way down). Those come back
+    as the SECOND return value, for the caller's queue, so the walk continues by re-entering
+    this reader under that child's name — with these same guards, and its grandchildren
+    attributed to the parent that actually declared them — rather than by a second reader of
+    the same lineage record. It is a pair, not one list, because the two are different
+    claims: the first is work this run takes on, the second is a bundle to ASK about.
     """
     if not _is_split_parent(parent):
-        return []
+        return [], []
     record = split.read_lineage(parent) or {}  # tolerant by contract: never raises
     ids = _lineage_children(record)
     entries = record.get("children")
@@ -956,7 +972,7 @@ def _adoptable(cfg: Config, parent: Path, *, known: set[str],
         print(f"flow: {parent.name} — close-disposition '{SPLIT_DISPOSITION}' but no "
               f"readable children record ({split.LINEAGE}); its children were NOT adopted "
               f"— drive them with `pdca flow <child-ids>`", file=sys.stderr)
-        return []
+        return [], []
     # The run's drive set as DIRECTORIES: `known` is keyed by name, and the name a bundle is
     # driven under is not the only one that can reach it. First name wins, sorted, so the one
     # reported does not depend on set iteration order.
@@ -966,6 +982,7 @@ def _adoptable(cfg: Config, parent: Path, *, known: set[str],
         if root_real is not None:
             driven.setdefault(root_real, name)
     out: list[Path] = []
+    walk: list[Path] = []          # terminal on a split of their own — asked, not driven
     seen: set[str] = set()
     seen_real: set[Path] = set()
     for cid in ids:
@@ -1014,11 +1031,20 @@ def _adoptable(cfg: Config, parent: Path, *, known: set[str],
                   f"(brief it at Plan, then `pdca flow {cid}`)", file=sys.stderr)
             continue
         if s in _TERMINAL:
-            print(f"flow: {d.name} — child of {parent.name} NOT adopted: already "
-                  f"terminal ({s})", file=sys.stderr)
+            if _is_split_parent(d):
+                # Terminal AND split: nothing to drive HERE, but this is the only route to
+                # a generation an earlier run may have stranded below it. Handed back to
+                # the caller's queue instead of dropped, so recovery reaches the whole brood
+                # rather than stopping at the first child that already closed.
+                print(f"flow: {d.name} — child of {parent.name} is itself terminal on a "
+                      f"split; examining it for children to adopt", file=sys.stderr)
+                walk.append(d)
+            else:
+                print(f"flow: {d.name} — child of {parent.name} NOT adopted: already "
+                      f"terminal ({s})", file=sys.stderr)
             continue
         out.append(d)
-    return sorted(out, key=lambda p: p.name)
+    return sorted(out, key=lambda p: p.name), sorted(walk, key=lambda p: p.name)
 
 
 def _reschedule(cfg: Config, remaining: list[Path]) -> list[list[Path]] | None:
@@ -1083,7 +1109,17 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
                           wave_list: list[list[Path]], bundles: list[Path],
                           batch_names: set[str], named: frozenset[str]) -> None:
     """Splice the children of any bundle in ``candidates`` that has split into the waves
-    AFTER ``k``, and announce each child's REAL wave. ``k`` is the wave just driven.
+    AFTER ``k``, and announce each child's REAL wave. ``k`` is the wave just driven; ``-1``
+    is the pre-pass over the run's adoption SEEDS (#473) — ids the operator named whose
+    bundles were ALREADY terminal on a split when the run started — whose children are
+    levelled in front of the whole schedule (``wave_list[-1 + 1:]`` is ``wave_list[0:]``).
+
+    ``candidates`` seeds a work QUEUE, not a list read once: a child that is itself terminal
+    on a split comes back from :func:`_adoptable` and is examined in its turn, under its own
+    name, so a chain an earlier run abandoned part-way down (500 → 601 → 701, with 601
+    already split) hands over the descendants that are ACTUALLY stranded instead of stopping
+    at the first closed generation. Each bundle leaves the queue at most once, so a
+    hand-edited record naming an ancestor drains rather than spins.
 
     Mutates the run's state in place: ``wave_list[k+1:]`` is replaced by the recomputed
     remainder (so the children join a wave AFTER the one their parent was in — never the
@@ -1115,14 +1151,17 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
     it was given, so a held one stays in the map (``flow.py:1370-1379``,
     ``test_a_named_id_in_the_re_scheduled_tail_is_held_not_lost``).
 
-    Adoption is bounded: a child already in the drive set is never re-adopted (``known``),
-    every adopted child is a bundle already on disk, and every wave adoption adds spends the
-    run's own pool — a recursion bound, not a recursion reset. (A child RETRACTED above is
-    no longer in the set, so a later parent naming it may take it up again; each such round
-    still needs a fresh split, and every one of those costs the same pool.) An adopted child
-    that splits LATER, while this run drives it, is picked up by this same call in ITS wave.
-    Either way the scope stays "the children of the bundles this run is driving,
-    transitively" and never becomes a glob of ``results/``.
+    Adoption is bounded, and since #473 it is what bounds the RUN: a child already in the
+    drive set is never re-adopted (``known``), a candidate leaves the queue once
+    (``examined``), and every adopted child is a bundle already on disk — so each splice
+    strictly consumes a finite set, and the schedule :func:`_pass_pool` funds cannot grow
+    forever. (A child RETRACTED above is no longer in the set, so a later parent naming it
+    may take it up again; each such round still needs a fresh split.) An adopted child that
+    splits LATER, while this run drives it, is picked up by this same call in ITS wave — a
+    recursion bound, not a recursion reset: nothing gives the run back what it has already
+    spent, and no wave ever gets a second allowance. Either way the scope stays "the children
+    of the bundles this run is driving, transitively" and never becomes a glob of
+    ``results/``.
 
     ``known`` is ``batch_names | taken``, and it needs both halves: ``taken`` dedupes WITHIN
     one call — two parents that split in the SAME wave, the second's record also naming the
@@ -1158,9 +1197,24 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
     # (parent, child, the name the run holds that child's DIRECTORY under) — skipped as
     # already-claimed, answered by `_report_refused` once the splice has settled which.
     refused: list[tuple[str, str, str]] = []
-    for parent in candidates:
-        kids = _isolate(parent, "split adoption", lambda parent=parent: _adoptable(
+    # A work queue (not the `queue` MODULE this file imports): a child terminal on a split
+    # of its own re-enters it under its own name, and `examined` lets each bundle leave it
+    # once — so the walk drains on any record, including a hand-edited one naming an
+    # ancestor. `pop(0)` keeps it breadth-first, so a generation is examined before the one
+    # below it and the announcements read in lineage order.
+    to_examine = list(candidates)
+    examined: set[str] = set()
+    while to_examine:
+        parent = to_examine.pop(0)
+        if parent.name in examined:
+            continue
+        examined.add(parent.name)
+        # `_isolate` returns None iff the read RAISED: that candidate then contributes
+        # neither children nor a walk-through, and the run carries on (its own report).
+        got = _isolate(parent, "split adoption", lambda parent=parent: _adoptable(
             cfg, parent, known=batch_names | taken, refused=refused))
+        kids, onward = got or ([], [])
+        to_examine += onward      # a generation that already closed is walked THROUGH
         if kids:
             taken |= {c.name for c in kids}
             adopted.append((parent, kids))
@@ -1212,6 +1266,30 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
         for idx in sorted(by_wave):
             print(f"flow: {parent.name} split → adopted children "
                   f"{', '.join(sorted(by_wave[idx]))} into wave {idx}", file=sys.stderr)
+
+
+def _pass_pool(allowance: int, wave_list: list[list[Path]]) -> int:
+    """The run's pass pool: one wave ``allowance`` for every wave the schedule holds RIGHT
+    NOW — the waves the run set out to drive AND the ones adoption has spliced in (#473).
+
+    Sized ONCE, before the loop, the pool was a promise the run could not keep: a splice
+    pushes work into waves the arithmetic never counted, and the run then abandons bundles it
+    had SCHEDULED with "the run's pass budget is spent". Two reproductions, at both ends of
+    the feature: ``pdca flow 500 810 --max-passes 2``, with 500 splitting into 601 and 810
+    declaring ``Conflicts with: 601``, left **810 — an id the operator typed** — PLANNED and
+    exited 1; and a pure RECOVERY run, whose own drive set is empty, sized a pool off nothing
+    at all however many children the seed then handed over.
+
+    So it is read off the LIVE ``wave_list`` at each wave, which is the same thing as
+    recomputing it at every splice — a splice is the only thing that changes that list — and
+    the run's ceiling moves to somewhere it can be honoured: each wave gets the allowance the
+    operator set, no wave gets two (:func:`_drive_wave`'s own cap), and nothing gives back
+    what the run has already spent. What stops a chain of splits is that ADOPTION is bounded
+    — a bundle is adopted once, a candidate examined once, the disk is finite
+    (:func:`_adopt_split_children`) — not an arithmetic that starves whatever the schedule
+    grew past.
+    """
+    return allowance * len(wave_list)
 
 
 def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
@@ -1322,6 +1400,7 @@ def _drive_and_act(
     by: str,
     today: str,
     max_passes: int | None = None,
+    adopt_seeds: list[Path] | None = None,
 ) -> dict[str, str]:
     """Drive a set of in-flight bundles through the full cycle to Act, in waves.
 
@@ -1336,15 +1415,21 @@ def _drive_and_act(
     The drive set is no longer frozen (#469): a bundle that reaches
     ``close-disposition = split`` while this run is driving it hands its children back to
     the run, spliced into the waves after its own (:func:`_adopt_split_children`).
+    ``adopt_seeds`` extends that to bundles the caller is NOT driving but wants examined for
+    stranded children (#473) — an id the operator named whose bundle was ALREADY terminal on
+    a split when the run started, which is how a run that stopped before its children were
+    driven is recovered. They are spliced by the same call at ``k=-1``, so recovery is one
+    more use of the adoption path rather than a second mechanism beside it.
 
-    ``max_passes`` (``[driver].max_passes``) keeps its meaning — the allowance ONE wave
-    gets — and additionally sizes the run's **pool**: ``max_passes`` × the waves the run set
-    out to drive, spent down by every wave in turn, adopted ones included. A run that adopts
-    nothing cannot reach that pool (each of its waves is separately capped at
-    ``max_passes``), so it behaves exactly as before; a run whose drive set GROWS draws the
-    extra waves from the same pool, so a split can never multiply what the operator allowed.
-    Running the pool out stops the run and names what it walked away from (#260's
-    discipline).
+    ``max_passes`` (``[driver].max_passes``) keeps its meaning — the allowance ONE wave gets
+    — and sizes the run's **pool** at one allowance per wave the schedule holds, read LIVE so
+    that a splice which grows it re-sizes it (:func:`_pass_pool`, #473). So a wave the run
+    acquired mid-flight is funded like any other, and no bundle the run has SCHEDULED — an
+    adopted child, or an id the operator typed that a splice pushed further back — is
+    abandoned to arithmetic done before that wave existed. What bounds a chain of splits is
+    that adoption itself is bounded; ``spent`` is never reset, and a wave still gets no more
+    than one allowance. Running the pool out stops the run and names what it walked away
+    from (#260's discipline).
 
     ``--no-publish`` (``do_publish=False``) drives every wave to COMPLETE but sequences
     nothing — no publish, no fold — so a later wave builds on the unchanged base.
@@ -1378,11 +1463,21 @@ def _drive_and_act(
     # that same re-levelling goes the other way — out of the drive set again, so it is not
     # reported as this run's work (`_adopt_split_children`, `named` above).
     wave_list = waves.compute_waves(cfg, bundles)  # validates (raises) + levels the batch
-    # The run's pass pool (#469). Sized off the ORIGINAL schedule, so it is exactly the
-    # allowance this run would have had with no adoption at all — provably non-binding
-    # there (each wave spends ≤ `allowance`, and there are `len(wave_list)` of them), and
-    # the ceiling on a run whose waves multiply.
-    budget = allowance * len(wave_list)
+    # Recovery (#473): a seed is an id the operator named whose bundle was ALREADY terminal
+    # on a split, so an earlier run's children may still be sitting where it left them.
+    # `k=-1` makes `wave_list[k+1:]` the WHOLE schedule — the children are levelled in front
+    # of everything else, by the same splice, the same guards and the same report a mid-run
+    # split gets. With no seeds this is not even entered and the waves above stand.
+    if adopt_seeds:
+        _adopt_split_children(cfg, list(adopt_seeds), k=-1, wave_list=wave_list,
+                              bundles=bundles, batch_names=batch_names, named=named)
+        if not bundles:
+            # A recovery run whose seeds offered nothing adoptable (the brood was already
+            # driven, or every child was refused and named above). There is no schedule, so
+            # there is nothing to drive, sweep, publish or Act on — the quiet no-op naming a
+            # finished bundle has always been. The seeds' own dispositions are `flow_ids`'
+            # `skipped` map, which is what the caller reports.
+            return {}
     # `wave_list` is iterated by a LIST iterator on purpose (#469): adoption splices the
     # recomputed remainder into `wave_list[k+1:]` after wave k drives, and the iterator —
     # which simply indexes forward — picks the new tail up. So "how many waves are left" is
@@ -1392,10 +1487,21 @@ def _drive_and_act(
         runnable = _runnable(cfg, wave, batch_names)
         if not runnable:
             continue
+        # The pool, read off the schedule as it stands NOW — so a splice below has already
+        # re-sized it by the time the wave it created asks to open (#473).
+        budget = _pass_pool(allowance, wave_list)
         if spent >= budget:
-            # The cap is the RUN's, so it has to bind here as well as inside a wave (#469):
-            # a run that has spent it must not open another wave — least of all one adoption
-            # added. Never silent (#260): everything still in flight is named with a hint.
+            # No wave opens on budget the pool does not hold (#469) — the pool's ADMISSION
+            # rule, which is not the same statement as the arithmetic that feeds it. Since
+            # #473 the pool covers the LIVE schedule, so a run whose waves each spend
+            # ≤ `allowance` no longer reaches this, and that is the point: the wave adoption
+            # added is funded instead of abandoned. The rule stays because it still has to
+            # hold when the arithmetic does not — a wave that came to spend more than it was
+            # handed must stop the run here rather than overspend silently. The one input
+            # that still reaches it is an allowance of 0, which no operator can type
+            # (`config.py` clamps `[driver].max_passes` / `PDCA_MAX_PASSES`, `cli.py:572`
+            # clamps `--max-passes`) but a `Config` built in-process can hold.
+            # Never silent (#260): everything still in flight is named with a hint.
             _warn_abandoned([d for w in wave_list[k:] for d in w],
                             why=f"the run's pass budget is spent ({budget} pass(es) over "
                                 f"{k} wave(s)); raise [driver].max_passes / "
@@ -1423,14 +1529,17 @@ def _drive_and_act(
         # stale-clear must run even before any wave has folded (integ still empty).
         _point_at_integration(integ, runnable)
         # This wave's allowance is its own cap AND what is left of the run's pool, whichever
-        # is smaller — the second term can only bite once adoption has added waves the pool
-        # was not sized for (#469).
+        # is smaller — the second term is the admission rule again, applied to the wave that
+        # was let in (#469); with the pool covering the live schedule (#473) it can only bite
+        # if a wave came to spend more than it was handed.
         spent += _drive_wave(cfg, runnable, by=by, today=today,
                              max_passes=min(allowance, budget - spent))
         # A bundle that SPLIT during this wave hands its children back to the run that
         # caused the split (#469), spliced into the waves AFTER this one — instead of
         # ending with the parent terminal, the children PLANNED, and the operator
-        # restarting by hand with `pdca flow <child-ids>`.
+        # restarting by hand with `pdca flow <child-ids>`. The waves it adds are funded by
+        # the `_pass_pool` read at the top of the NEXT iteration (#473); `spent` is untouched
+        # here and never anywhere else — a bound, not a reset.
         _adopt_split_children(cfg, runnable, k=k, wave_list=wave_list, bundles=bundles,
                               batch_names=batch_names, named=named)
         complete = [d for d in sorted(runnable, key=lambda p: p.name)
@@ -1601,7 +1710,10 @@ def flow_ids(
     **Plan pre-pass** first briefs any UNPLANNED id in the list in ONE shared interactive
     session (``do_plan_batch`` over those ids, reading each bundle's ``notes.json``), making
     this the id-seeded analogue of ``flow_batch``. Ids still UNPLANNED after the pre-pass
-    (planner skipped them) and terminal ids (COMPLETE / DISCONTINUED) are left alone.
+    (planner skipped them) and terminal ids (COMPLETE / DISCONTINUED) are left alone —
+    except that an id terminal on a ``split`` is ALSO handed to :func:`_drive_and_act` as an
+    **adoption seed** (#473), so a run named after a parent whose children an earlier run
+    stranded drives those children instead of only re-printing the hint at them.
 
     Returns ``{issue_id: state}`` for **every id it was given** (issue #468), driven or
     skipped — a skipped id's disposition is its state on disk, the same value
@@ -1644,6 +1756,7 @@ def flow_ids(
 
     bundles: list[Path] = []
     skipped: dict[str, str] = {}   # asked for, not driven — still gets a disposition (#468)
+    seeds: list[Path] = []       # terminal on a split — examined for stranded kids (#473)
     for iid in ids:
         d = cfg.bundle(iid)
         s = state.state(d)
@@ -1657,13 +1770,28 @@ def flow_ids(
             if hint:
                 print(f"  {hint}", file=sys.stderr)
             skipped[iid] = s
+            if _is_split_parent(d):
+                # Terminal on a `split` is nothing to DRIVE — but its children may still be
+                # sitting PLANNED where the split left them, and naming the parent again is
+                # the operator's recovery (#473). Dropping the id HERE, with nothing else
+                # done about it, is precisely what stranded them; the run is handed the
+                # parent as an adoption seed instead. Its own disposition stays in
+                # `skipped`, so the results map both CLI shapes report still answers for
+                # every id it was given (#468), and each child gets its own line from the
+                # adoption report. The hint above still stands for whatever this run cannot
+                # adopt, which is why it is qualified rather than replaced.
+                print("  its children are examined for adoption into THIS run — that "
+                      "command is only needed for whatever cannot be adopted, which is "
+                      "named below.", file=sys.stderr)
+                seeds.append(d)
             continue
         bundles.append(d)
-    if not bundles:
+    if not bundles and not seeds:
         return skipped
     bundles.sort(key=lambda p: p.name)
-    return skipped | _drive_and_act(cfg, bundles, do_publish=do_publish, do_act=do_act,
-                                    by=by, today=today, max_passes=max_passes)
+    return skipped | _drive_and_act(cfg, bundles, adopt_seeds=seeds, do_publish=do_publish,
+                                    do_act=do_act, by=by, today=today,
+                                    max_passes=max_passes)
 
 
 def _bundle_dirs(cfg: Config) -> set[str]:

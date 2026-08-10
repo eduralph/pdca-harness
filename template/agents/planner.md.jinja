@@ -167,14 +167,20 @@ What happens next no longer depends on how this run was started:
   stacked — and driven in the same run. That holds for every shape: a CSV-driven batch
   (`{{ cli_name }} flow --csv …`), an explicit list like `{{ cli_name }} flow 500 501`, and a
   single `{{ cli_name }} flow <id>`. Nothing further is needed from you.
-- **They spend the run's pass budget, not a fresh one.** `max_passes` sizes one pool for
-  the run, and the adopted waves draw from it, so a big split can exhaust it; whatever was
-  not reached is named on stderr with the command that resumes it.
+- **Every wave the split creates is funded, none of them twice.** `max_passes` is the
+  allowance one wave gets, and the run's pool holds one per wave its schedule currently
+  has — re-sized when a split grows it, so an adopted wave is neither starved by
+  arithmetic done before it existed nor handed a second allowance. Whatever a wave does
+  not finish is named on stderr with the command that resumes it.
 - **A child the run could not schedule is held, not dropped.** One whose declared
   `Depends on:` cannot be resolved is named on stderr and left in flight; resolve it and
   re-run that one.
+- **A split an earlier run left behind is recovered by naming the parent.** If the run that
+  accepted the split ended before its children were driven, `{{ cli_name }} flow <parent-id>`
+  picks them up — the parent is still skipped as finished, its children (and theirs, through
+  a generation that already closed) are adopted into that run.
 - **`--accept` still prints the `{{ cli_name }} flow <child-ids>` command.** That is the remedy
-  for a split accepted *outside* a running flow, and for a child that was held.
+  for whatever a run could not adopt, and for a child that was held.
 
 Either way the `Depends on:` / `Conflicts with:` fields between children are what makes the
 scheduling work, which is why they are the part to get right.

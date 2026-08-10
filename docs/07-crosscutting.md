@@ -248,16 +248,33 @@ already terminal, already in this run), and splices the rest into the waves
 to move. From there they are ordinary members of the run: scheduled by their own
 `Depends on` / `Conflicts with` ([waves](#waves-in-execution)), pointed at the
 same per-target integration branch, published and folded by the same code, and
-drawn from [the same run's pass pool](#the-iteration-budget), so an adopted wave
-can never quietly double it. It is one implementation on the one drive path, so
+funded like every other wave from [the run's pass
+pool](#the-iteration-budget) — which is re-sized when a splice grows the
+schedule, so a wave the run acquired mid-flight is neither starved nor handed a
+second allowance. It is one implementation on the one drive path, so
 it applies to every shape that reaches it — `pdca flow <id>`, an explicit id
 list, and the CSV batch alike — and Entry B (`iterate-plan` at sign-off →
 re-plan → split) no longer ends in a restart.
 
+The same machinery **recovers a split an earlier run left behind**. Name a
+parent that is already terminal on a `split` — `pdca flow <parent-id>`, after a
+crash, a `^C`, or a split accepted in another session — and it is still skipped
+as finished (a terminal bundle has nothing to build, and the non-destructive
+hint still prints), but it is handed to the run as an adoption *seed*: its
+children are spliced in front of the schedule by the same code, under the same
+guards, with the same announcements. The walk goes *through* a generation that
+already closed, so a chain abandoned part-way down (500 → 601 → 701, with 601
+itself split) hands over the descendants that are actually stranded. The parent
+keeps its own disposition in the results map; what a run cannot adopt is named,
+and stays the operator's `pdca flow <child-ids>`.
+
 Adoption follows the **lineage edge only**: a flow drives the children of the
-bundles it is driving, transitively (an adopted child that splits again is
-adopted in its turn, on the same pass pool), and never widens into a sweep of
-`results/`. The ids you name keep their strict contract — an id list with a
+bundles it is driving (or was asked to recover), transitively — an adopted child
+that splits again is adopted in its turn — and never widens into a sweep of
+`results/`. What bounds it is adoption itself: a bundle is adopted once, a
+candidate examined once, and every child is a bundle already on disk, so the
+walk consumes a finite set however the lineage is edited. The ids you name keep
+their strict contract — an id list with a
 cycle or an unresolvable `Depends on` is still refused up front — while a
 *child* that can't be scheduled is held with the reason and left in flight (the
 resume sweep's tolerance), out of the run's results rather than counted as work
@@ -266,9 +283,17 @@ that becomes unschedulable before its wave arrives is dropped back out of the
 run, and its adoption announcement retracted by name, so "held" always reads the
 same way. A parent marked `split` with no readable record is reported and skipped;
 both holds degrade to the old remedy, the `pdca flow <child-ids>` command
-`--accept` still prints, which remains the right answer for a split accepted
-outside any running flow — including a parent an earlier run already closed,
-whose children a later run does not yet pick up on its own.
+`--accept` still prints, which remains the right answer for whatever a run
+could not adopt.
+
+One more thing changes at the reporting end, because adoption puts bundles you
+never typed into the run's results map and the exit code is derived from all of
+them: the single-id shape prints its `state<TAB>path` line for **every** bundle
+in that map, the named id first. A run that adopted nothing prints exactly the
+one line it always did, and one that adopted prints what it did to each child —
+so `pdca flow 500` can no longer report `COMPLETE` on stdout while exiting 1
+because of a bundle it never named, nor return 0 while a child it drove waits at
+`AWAITING_SIGNOFF` unmentioned.
 
 ---
 
@@ -316,13 +341,16 @@ wave of a `pdca flow` run spends before it stops driving — not silently: the
 bundle is named on stderr with a `pdca flow <id>` resume hint, and its accepted
 siblings still publish. Raise it in `pdca.toml` rather than editing anything.
 
-It also sizes the run's **pool**: that many passes per wave the run *set out to*
-drive, spent down by every wave in turn. A run whose waves are fixed can never
-reach that pool — each of its waves is separately capped at the same number — so
-this changes nothing for it. It is the ceiling on a run whose drive set **grows**:
-children [adopted from a split](#the-split) draw from what their parent's schedule
-was allowed, so a split can never quietly multiply the budget. A run that spends
-the pool stops there and says so, naming what it walked away from.
+It also sizes the run's **pool**: that many passes per wave the schedule holds,
+read live and therefore re-sized whenever [a split](#the-split) splices new waves
+in. Every wave is funded at the allowance you set and none gets a second one, so
+a run whose drive set **grows** neither multiplies your budget nor starves the
+work it just created — the earlier fixed pool, sized before those waves existed,
+could abandon a bundle the run had already scheduled, including an id you typed
+yourself. What bounds a chain of splits is that adoption is finite (a bundle is
+adopted once, a candidate examined once), not arithmetic that truncates the
+schedule; nothing gives back what the run has already spent. A run that does
+spend the pool stops there and says so, naming what it walked away from.
 
 ### Auto-iterate: the driver deciding for itself
 

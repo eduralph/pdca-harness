@@ -641,6 +641,21 @@ def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK) -> int:
     return 0 if all(s in ok for s in results.values()) else 1
 
 
+def _report_entry(cfg: Config, iid: str, st: str) -> None:
+    """One bundle's stdout report in the single-id shape: the documented ``state<TAB>path``
+    machine contract, plus the §6 listing when it stopped for the human.
+
+    One shape for every bundle the run answers for, named or adopted (#473) — so a caller
+    parsing stdout reads the same two fields for each, and the run cannot describe a child
+    it drove in a format it never described the named id in.
+    """
+    d = cfg.bundle(iid)
+    print(f"{st}\t{d}")
+    if st == state.AWAITING_SIGNOFF:
+        for it in signoff.open_needs_human(d / "SUMMARY.md"):
+            print(f"    {it}")
+
+
 def _report_single(cfg: Config, iid: str, results: dict[str, str]) -> int:
     """The single-id presentation of the shared results map (issue #468).
 
@@ -652,12 +667,28 @@ def _report_single(cfg: Config, iid: str, results: dict[str, str]) -> int:
     was given, so a disk read here would be a SECOND authority — the one that let the two
     shapes disagree about the same bundle. If the key is ever missing the map contract is
     broken and the loud KeyError is the correct outcome, not a quietly divergent report.
+
+    The map can hold bundles the operator never typed — split adoption puts the children of
+    a bundle this run drove, or recovered, into it (#469, #473) — and the exit code is
+    derived from ALL of them. Reporting only ``iid`` then printed ``COMPLETE`` while exiting
+    1: a caller reading the machine contract saw a successful run, and the bundle that
+    actually failed it was named nowhere it was looking. The worst shape is the recovery
+    one, where ``iid``'s own ``COMPLETE`` was written by an EARLIER run, so stdout carried
+    nothing this run did at all. Every other entry therefore gets the SAME line, after the
+    named id's — the whole answer, in the one format, whatever the rc.
+
+    Printing them unconditionally rather than only on a failure is deliberate: a child left
+    AWAITING_SIGNOFF keeps the run at rc 0 (stopping for the human is this shape's intended
+    end, :func:`_results_rc`), so a failure-gated report would stay silent about the bundle
+    that is waiting for them. The terse one-line shape a non-adopting run prints is
+    untouched — ``flow_ids`` answers for exactly the ids it was given, so a second entry can
+    only come from an adoption (pinned by
+    ``test_a_single_id_run_that_adopts_nothing_still_prints_exactly_one_line``).
     """
-    final, d = results[iid], cfg.bundle(iid)
-    print(f"{final}\t{d}")
-    if final == state.AWAITING_SIGNOFF:
-        for it in signoff.open_needs_human(d / "SUMMARY.md"):
-            print(f"    {it}")
+    _report_entry(cfg, iid, results[iid])
+    for other in sorted(results):
+        if other != iid:
+            _report_entry(cfg, other, results[other])
     return _results_rc(results, ok=(*_FLOW_OK, state.AWAITING_SIGNOFF))
 
 
