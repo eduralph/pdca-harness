@@ -126,6 +126,19 @@ The estimate has **two independent signals**, combined by deterministic code
    | `brief_bytes` | 3 | brief size above a 12 KB cutoff |
    | `is_plan_pointer` | **−2** | a brief pointing at a host planning artifact converges *better* — the one de-escalating term |
 
+   `conflicts_with` counts **organic** conflicts only. Every child of a split
+   declares a `Conflicts with` entry for each of its siblings because the
+   splitter put it there — those ordering fields *between* children are the point
+   of a split — so scoring them counted the process's own scheduling metadata as
+   churn, against a weight calibrated over organic bundles. Together with a
+   `Difficulty: high` inherited from the parent and the parent's dependency
+   tokens copied down, that banded every materialised child `oversized` (3+3+3
+   against a cutoff of 7) before anyone read its scope. Ids that are **not** this
+   bundle's siblings score exactly as before, and a bundle with no
+   `split-lineage.json` is unaffected. The excluded count is reported on the
+   estimate as `sibling_conflicts`: not scored, but visible, because children
+   that conflict pairwise are the splitter saying the split separated nothing.
+
    The score sorts into two separate readouts, because they answer different
    questions: **churn** (how many sign-off rounds this will take) and **patch
    size** (how big the diff will be). A large-but-coherent change scores high on
@@ -160,12 +173,15 @@ size signal (a blank outcome means the bundle predates the signal — "not
 measured", never "measured small"). When the two visibly drift, re-run
 `scripts/size-calibrate` over the instance and walk its output back into
 `[driver.sizing]` — the step-by-step procedure lives in that table's comment
-block in `pdca.toml`. The model half of the estimate is covered by the same
-review: `model_weight` (how much a sizer-leaf escalation adds to the score,
-`0` = band-only, today's behaviour) is a `[driver.sizing]` config value
-revisited at Act cadence rather than a constant baked into the engine. That
-revisit has a named blind spot: the index's `sizing:` line shows the
-structural estimate only (the stored sizer verdict is not joined in) and
+block in `pdca.toml`. Its `conflicts_with` column is the same organic count the
+engine scores (both call one exclusion, and the excluded siblings are reported
+beside it as `sibling_conflicts`, correlated against nothing), so a retune fits
+the quantity the weight is actually applied to. The model half of the estimate
+is covered by the same review: `model_weight` (how much a sizer-leaf escalation
+adds to the score, `0` = band-only, today's behaviour) is a `[driver.sizing]`
+config value revisited at Act cadence rather than a constant baked into the
+engine. That revisit has a named blind spot: the index's `sizing:` line shows
+the structural estimate only (the stored sizer verdict is not joined in) and
 `size-calibrate` mines no model-verdict feature, so whether sizer escalations
 track real churn is not yet observable from either artifact. Until one of them
 grows that column, the evidenced Act-cadence outcome for `model_weight` is
