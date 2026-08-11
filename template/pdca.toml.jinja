@@ -123,6 +123,22 @@ wave_mode = "stack"
 # The `gh pr merge` strategy when wave_mode = "merge": "merge" (a merge commit — auditable,
 # bisectable; the default), "squash", or "rebase".
 merge_method = "merge"
+# Which checks must be green before wave_mode = "merge" merges a non-final wave's PR
+# (issue #413). `gh pr merge` alone fails closed ONLY on the checks this host marks
+# *required* in branch protection — so on a thinly-protected repo a red non-required job,
+# or a run still in flight, merges anyway and the next wave builds on a base that never
+# went green.
+#   merge_requires = "all"       (default) — read the PR's FULL check rollup here, with
+#       `gh pr checks`, AFTER the ready-mark (which can itself trigger `ready_for_review`
+#       CI) and immediately before the merge; refuse — no merge, the run STOPs — on any
+#       failing check, any pending/queued one, and on an EMPTY rollup (no checks reported
+#       at all: absence of evidence is not green). Skipped/neutral checks are completed
+#       non-failures and do not block. Refusing is cheap: re-run once CI is green and the
+#       wave resumes idempotently.
+#   merge_requires = "required"  — host-config-only semantics: skip that gate, so branch
+#       protection is again the only backstop (and an empty rollup merges). Correct only
+#       where the host's required checks really are the whole verification.
+merge_requires = "all"
 # Optional integration re-gate (#wave-model). After each wave folds (stack mode), run the
 # repo-scoped gates over the folded integration tip before the next wave builds on it, so a
 # combination that is red though each fix was green ALONE stops the run. Off by default

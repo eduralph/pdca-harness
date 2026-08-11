@@ -45,7 +45,19 @@ it there, not by editing this file (so `copier update` keeps the rules current).
 
 - The automation **commits, pushes a branch, and opens a *draft* PR — then stops.** It
   never marks a PR ready and never merges. Marking ready is the human's disposition
-  after a fresh-eyes re-read.
+  after a fresh-eyes re-read. This binds **every model leaf, unconditionally** — no
+  builder, reviewer or publisher run readies or merges anything, ever — and it binds
+  **every final-wave PR**: the last PR a run opens is always left a draft for you.
+- **The one exception: `[driver].wave_mode = "merge"`** (opt-in, own-repo / CD only,
+  where you hold merge rights on the base — `pdca.toml`). There the *deterministic
+  driver*, never a model leaf, marks each **non-final** wave's PR ready and merges it at
+  the wave boundary, so the next wave builds on a genuinely merged base. What stands in
+  for your ready-mark is not nothing: each such PR carries the **per-bundle human
+  sign-off** that made the bundle `COMPLETE` before it was published at all, and the
+  driver refuses to merge unless the PR's **full check rollup is green**
+  (`[driver].merge_requires`, read after the ready-mark and immediately before the
+  merge). A fork keeps the default `wave_mode = "stack"`, where nothing is ever readied
+  or merged for you.
 - No push / PR-open / ready-mark happens without explicit instruction. This is
   **mechanically enforced** by the builder/publisher PreToolUse hook (`builder_guard.py`),
   not left to prompt discipline.

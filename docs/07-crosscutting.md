@@ -488,6 +488,14 @@ wave builds on, via `[driver].wave_mode`:
   Needs merge rights on the base remote and relaxes STOP discipline for the
   batch; fails closed if a PR turns out non-mergeable. `[driver].merge_method`
   picks the merge strategy (`"merge"` / `"squash"` / `"rebase"`).
+  Before each merge the driver reads that PR's **full check rollup** itself —
+  after the ready-mark, immediately before merging — and refuses (the run STOPs)
+  on any failing check, any still-running one, and on a rollup with nothing in it
+  at all; `gh pr merge` alone would only refuse what *this host* marks required in
+  branch protection, so without that read a thin protection config lets the next
+  wave build on a base that never went green.
+  `[driver].merge_requires = "required"` opts back into host-config-only
+  semantics.
 
 In merge mode the merge is unattended, so **publish refuses to open a PR against
 any branch this run produced** — the work must land on a base that exists
