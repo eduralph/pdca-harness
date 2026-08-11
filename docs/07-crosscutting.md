@@ -47,7 +47,9 @@ flowchart TD
         A1["brief.md exists, was never split"] --> A2["Size estimate: structural score<br/>+ a freshly-paid [leaves.sizer] verdict"]
         A2 --> A3{"combined band?"}
         A3 -->|"ok / watch"| A4["No action — Do dispatches"]
-        A3 -->|"oversized"| A5{"splittable?"}
+        A3 -->|"oversized"| A4b{"split child whose brief still<br/>declares SIBLING conflicts?"}
+        A4b -->|"yes — the split's metadata"| A8["Remedy: driven by inherited/sibling fields<br/>— prefer building; Do dispatches anyway"]
+        A4b -->|"no"| A5{"splittable?"}
         A5 -->|"no — patch-only, coherent"| A6["Warn: expect a large patch —<br/>Do dispatches anyway"]
         A5 -->|"yes"| A7["Remedy: consider pdca split first"]
     end
@@ -56,7 +58,7 @@ flowchart TD
         B1["patch.diff exists"] --> B2["Size estimate: structural score<br/>+ the STORED sizer verdict (read free, not re-paid)"]
         B2 --> B3{"combined band?"}
         B3 -->|"ok / watch"| B4["No action — Check dispatches"]
-        B3 -->|"oversized"| B5{"splittable?"}
+        B3 -->|"oversized"| B5{"splittable?<br/>(no sibling fork — a patch exists,<br/>so the route back is iterate-plan either way)"}
         B5 -->|"no — patch-only, coherent"| B6["Warn: expect a large patch —<br/>Check dispatches anyway"]
         B5 -->|"yes"| B7["Remedy: iterate-plan at sign-off,<br/>re-plan lands back at Entry P"]
     end
@@ -87,7 +89,20 @@ oversized, or the patch-size signal isn't the *sole* thing that fired, is a
 split even offered. A brief that's oversized purely on predicted patch size —
 a large but coherent change — gets a different message entirely ("expect a
 large patch," not "split this"), because splitting a coherent change produces
-artificial seams, not a real decomposition.
+artificial seams, not a real decomposition. **At Entry A one question comes
+first:** if the estimate excluded any *sibling* conflicts — `Conflicts with`
+entries naming this bundle's own split siblings, the ordering metadata the
+splitter wrote — then the size that's left is what the split handed the child
+(the parent's `Difficulty`, its dependency tokens, its brief), and the message
+names that provenance — "scores large for a split child (child 601 of a split
+of #500, depth 1) — driven by inherited/sibling fields; prefer building over
+re-splitting" — instead of recommending the split its parent already had. The
+*count* is the test, never the presence of a lineage record: a child carries
+lineage forever, so keying on that would tell a child whose conflicts are all
+organic that its size was inherited — and the ordinary remedy comes back on
+its own once the siblings land and those entries leave the brief, with no paid
+sizer involved. Entry B doesn't ask: a bundle that already has a patch routes
+through `iterate-plan` either way, and the re-plan lands back at Entry A.
 
 **The two backstops differ because the beat does.** At Entry A the bundle is
 still just a brief, so `pdca split` runs directly. At Entry B a patch already

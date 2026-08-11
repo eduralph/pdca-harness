@@ -521,6 +521,38 @@ def do_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
     run_plan_advisory(d, cfg)  # opt-in antagonistic review of the brief (#301); no-op unless configured
 
 
+def _split_provenance_note(d: Path) -> str:
+    """One sentence of split-child provenance for a prompt, or "" — shared by both (#458).
+
+    The plan and split prompts each tell the model to split an oversized slice, and neither
+    said the one thing that stops a split child being re-split over evidence the split
+    itself created: a `Conflicts with:` entry naming a SIBLING is scheduling metadata the
+    splitter wrote (`split.py:493-499`), not scope this brief acquired.
+    ``plan_policy.size_reasons`` now makes that distinction for the DRIVER's advisory, off
+    the count ``sizing`` exposes; a model reading the brief in the next Plan session reaches
+    its own conclusion first, so the same context has to travel with the prompt or the
+    session re-proposes exactly the split the advisory would argue against.
+
+    Presence of the child edge is the right gate HERE, where the advisory's is not: this
+    adds context to a brief the model is about to read, and "your `Conflicts with` may be
+    inherited — check" is true for every child. It asserts nothing about this brief's score,
+    which is what made presence the wrong predicate for the advisory's verdict.
+    """
+    record = split.read_lineage(d) or {}
+    parent = record.get("parent")
+    if not isinstance(parent, str) or not parent:
+        return ""
+    return (
+        f"Note: this bundle is itself a split child of #{parent} — a `Conflicts with:` "
+        "entry naming one of its own split SIBLINGS is the splitter's ordering metadata "
+        "rather than scope this brief acquired (it is excluded from the size score, and "
+        "the driver's advisory reports a child that still reads oversized beside one as "
+        "driven by inherited/sibling fields), so inherited size is not by itself a reason "
+        "to split again — prefer building unless THIS brief's own new scope justifies "
+        "another split.\n\n"
+    )
+
+
 def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
     fix_tpl = cfg.templates_dir / "brief.md.tpl"
     geps_tpl = cfg.templates_dir / "design-proposal.md.tpl"
@@ -573,6 +605,9 @@ def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
         # given, and Check can only report that what it built is misshapen. Stated in the
         # runtime prompt as well as agents/planner.md because the role file alone has
         # twice proved insufficient — the prompt the model actually receives is built here.
+        # Provenance first, where the bundle has any (#458): the split instruction below is
+        # what a child's inherited `Conflicts with` would otherwise be read against.
+        + _split_provenance_note(d) +
         "If this slice turns out to be several slices, SPLIT IT IN THIS BEAT — a split "
         "produces briefs, and briefs are yours. Run `pdca split "
         f"{issue_id}` to have the splitter draft a proposal, read it with the human, then "
@@ -1254,6 +1289,9 @@ def _split_prompt(d: Path, cfg: Config) -> str:
         f"You are the SPLITTER. Read {d / 'brief.md'}. This slice has been judged too "
         "large to build as one cycle. The driver sized it "
         f"{est.band}: {'; '.join(est.reasons) or 'no structural signal'}.{prior}\n\n"
+        # A split OF a split child is the case this exists for (#458): the splitter is being
+        # asked to decompose a bundle whose size may be the previous split's own metadata.
+        + _split_provenance_note(d) +
         f"Fill {tpl} and write the result to {d / split.PROPOSAL} — exactly one file, "
         "nothing else. Do NOT create bundles, branches or tracker items, and do NOT edit "
         "brief.md. The split is authored in PLAN, by the human: they read your proposal "
