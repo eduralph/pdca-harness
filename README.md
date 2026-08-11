@@ -85,6 +85,12 @@ copier copy gh:<you>/pdca-harness ../my-new-project   # answer the prompts
 cd ../my-new-project
 ```
 
+Render from a `gh:`/`https:` URL or an **absolute** path — not a relative local
+path like `../pdca-harness`. Copier stores the source as given, and resolves it
+from the *project* directory on the next run, so a relative source breaks
+`copier update` later (issue #373). Already rendered that way? Fix it once:
+edit `_src_path` in `.copier-answers.yml` to the absolute path or URL.
+
 Re-apply template updates later, from inside the rendered project:
 
 ```bash

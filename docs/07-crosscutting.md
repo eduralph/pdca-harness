@@ -491,6 +491,19 @@ third resource the driver bounds, alongside a gate's wall clock
 (`[gates].default_timeout_secs`) and the workspace's disk footprint
 (`[driver].sweep_worktrees` below).
 
+Processes are swept the same way memory is bounded — automatically, per child
+(issue #372). Every captured or wall-clock-bounded child runs in its own
+session, and whatever it leaves running in its process group when it exits — by
+any path: normal return, timeout, Ctrl-C — is terminated (SIGTERM, a short
+grace, SIGKILL), with one stderr note naming the command. `proc.wait` returning
+only proves the *direct* child exited; under `shell=True` — every gate — that
+child is just the shell, so surviving grandchildren are the rule, not the edge
+case (measured: a leaked test process burned a full core for 21 hours, and a
+straggler still holds ports, locks and fixtures when the next cycle's gates run
+in the same lane worktree). A child that exits clean sees no sweep and no note,
+and the interactive leaves are never sessionized — they keep the terminal
+exactly as before.
+
 Two things it deliberately does **not** do:
 
 - **Unset means unset.** With no bound configured the spawn is byte-identical to

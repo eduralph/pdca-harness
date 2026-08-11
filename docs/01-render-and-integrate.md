@@ -170,7 +170,16 @@ argv = ["claude", "--agent", "signoff", "--permission-mode", "acceptEdits"]
 
 The interactive leaves (planner, signoff, publisher, act) open Claude in your
 terminal because they're the human touch points. The headless ones (builder,
-reviewer) run unattended. Each agent's role prompt lives in a canonical,
+reviewer) run unattended.
+
+Every interactive session also has a **checked exit** (issue #331): before you
+end it, run `/handoff <issue-id>` — it verifies the session's expected artifact
+exists and is well-formed, and reports PASS or FAIL with the items to fix. The
+same contract is enforced mechanically at session end by a Stop hook, so a
+session can't silently close with its artifact missing or malformed; a
+deliberate walk-away is recorded with
+`python3 .claude/hooks/handoff_guard.py --abandon "<why>"` rather than by
+ignoring the guard. Each agent's role prompt lives in a canonical,
 vendor-neutral body at `agents/<name>.md`; Claude leaves additionally get
 `.claude/agents/<name>.md` (a frontmatter wrapper that includes that body, so
 `--agent` resolves), materialized only when the leaf's family is `claude`.
@@ -226,6 +235,14 @@ proof that the fix actually fixes the bug — and left every conformance tier
 advisory, so a pre-existing lint failure or an environmental test segfault
 surfaces to a human (in §6 NEEDS-HUMAN) rather than silently blocking a correct
 fix. You'll see that play out in [step 05](05-check.md).
+
+One more wiring question the gate ladder can't answer for you: **does the host
+repo's CI run anything on every PR that your gates don't?** A spell-checker, a
+docs linter — jobs like that let a bundle pass Check green and open a PR that
+immediately fails a required status. Declare them in `[gates].host_ci` (issue
+#311) and the harness runs each one against the patched tree at Check *and*
+re-runs it at publish, immediately before anything is pushed — a failure there
+refuses the push. Empty or absent changes nothing.
 
 ### The build ladder — what order to wire `pdca.toml` in
 
