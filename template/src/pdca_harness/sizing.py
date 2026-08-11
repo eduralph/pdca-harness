@@ -38,6 +38,16 @@ exactly the confusion this module has to avoid.
 planning artifact converges *better* than a self-contained one, and without it the score
 has no de-escalating term at all.
 
+Those ρ values were measured over ORGANIC bundles, which is what makes ``conflicts_with``
+mean *organic* conflicts here (issue #457). A split child declares a `Conflicts with`
+entry for each of its siblings because ``split.materialise`` put it there — the ordering
+fields between children are the point of a split — so counting them scored the process's
+own scheduling metadata as churn: with ``difficulty_high`` inherited from the parent and
+``ext_deps`` copied down, 3+3+3 = 9 banded every materialised child `oversized` before
+anyone read its scope, and ``is_plan_pointer`` is a term a split child never has.
+:func:`sibling_conflict_count` excludes exactly those ids and nothing else; the count it
+excluded is reported on the estimate rather than dropped.
+
 ## Two readouts, because they are two questions
 
 Structure predicts **patch size** well (0.67–0.69) and **churn** weakly (best 0.32).
@@ -81,7 +91,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import brief
+from . import brief, split
 
 #: Weights, proportional to |ρ| against rounds over the surviving features. In
 #: ``[driver.sizing]`` so an instance retunes against its own corpus without patching the
@@ -192,6 +202,17 @@ class SizeEstimate:
     #: justifies a SPLIT — and a caller choosing between "split this" and "expect a large
     #: coherent patch" needs it whether or not it moved the number.
     model_band: str = ""
+    #: How many of this bundle's `Conflicts with` entries name its own split siblings
+    #: (`split.py:493-499`) and so were EXCLUDED from what `conflicts_with` contributed to
+    #: ``score`` (issue #457). 0 for every bundle with no lineage record, which is today's
+    #: behaviour exactly.
+    #:
+    #: Recorded even though it no longer moves the number, and for the same reason
+    #: ``model_band`` is: the count is evidence about the SPLIT, not about the score. A
+    #: proposal whose children all conflict pairwise is the splitter's own statement that
+    #: the split separated nothing — and a caller that keyed off "does this bundle have
+    #: lineage" instead would report that non-convergence identically to a clean split.
+    sibling_conflicts: int = 0
 
 
 def _cfg_int(cfg, key: str, default: int) -> int:
@@ -212,6 +233,50 @@ def _weights(cfg) -> dict[str, int]:
             except (TypeError, ValueError, OverflowError):
                 pass
     return weights
+
+
+def sibling_conflict_count(brief_path: Path, conflict_ids: list[str]) -> int:
+    """How many of ``conflict_ids`` name THIS bundle's own split siblings (issue #457).
+
+    ``split.materialise`` writes a `Conflicts with` entry into every child naming its
+    siblings (`split.py:493-499`), and ``split.rewrite_ordering`` turns the proposal-local
+    labels into the same real ids the lineage record stores under ``siblings``
+    (`split.py:333-358`) — the splitter is told outright that those ordering fields
+    "BETWEEN children are the point" (`leaves.py:1261`). So a sibling id in `Conflicts
+    with` is the split's own scheduling metadata, not organic churn: the ρ 0.32 behind the
+    ``conflicts_with`` weight was measured over organic bundles (module docstring), and
+    scoring the artifact the process itself created inflated every materialised child
+    regardless of its scope.
+
+    ``brief_path`` is the bundle's real brief path — the lineage record is read as
+    ``brief_path.parent / split.LINEAGE``. Deliberately NOT reachable through
+    :class:`AprioriBrief`: its allowlist (:data:`_DELEGATED`) refuses everything that could
+    hand back a real ``Path``, and widening it to reach a *sibling file* would reopen the
+    route to the brief's own post-Do bytes that the allowlist exists to close.
+
+    Defined ONCE, here, and imported by both :func:`estimate` and
+    ``scripts/size-calibrate`` — the same discipline as :func:`apriori_text` and
+    :class:`AprioriBrief` above. A second definition would make one shared feature name
+    denote two different quantities, and the next calibration would retune the weight
+    against a number the engine no longer scores.
+
+    **Total, like the reader it stands on.** ``split.read_lineage`` abstains on any file it
+    cannot parse (`split.py:373-402`); this abstains on any VALUE it cannot compare with,
+    the same division of labour as ``split._recorded_depth`` (`split.py:405-421`) —
+    tolerating the file but not its contents only moves the throw one line down, into
+    :func:`estimate`, whose whole contract is that a malformed brief never crashes the Plan
+    beat. The record is a hand-editable hint, so ``{"siblings": "602"}`` (iterable, but a
+    string — membership would match single CHARACTERS) and ``{"siblings": [[]]}`` (a member
+    that cannot even be hashed, so building the set raises ``TypeError``) are both
+    reachable. Hence the rule, stated once rather than as a list of the malformed shapes
+    someone thought of: **both sides are narrowed to ``str`` before anything hashes them.**
+    Whatever that drops is simply not a sibling, so it scores at full weight — pre-#457
+    behaviour, the direction that under-corrects rather than silently discarding a real
+    conflict.
+    """
+    raw = (split.read_lineage(brief_path.parent) or {}).get("siblings")
+    siblings = {s for s in raw if isinstance(s, str)} if isinstance(raw, list) else set()
+    return sum(1 for c in conflict_ids if isinstance(c, str) and c in siblings)
 
 
 def estimate(brief_path: Path, cfg) -> SizeEstimate:
@@ -238,7 +303,7 @@ def estimate(brief_path: Path, cfg) -> SizeEstimate:
         ap = AprioriBrief(brief_path, apriori_text(brief_path))
         apriori = len(ap.read_text().encode("utf-8"))
         difficulty = brief.field(ap, "difficulty").lower()
-        conflicts = len(brief.conflicts_with(ap))
+        conflict_ids = brief.conflicts_with(ap)
         ext_deps = len(brief.external_dependency_tokens(ap))
         plan_pointer = bool(brief.planning_artifact(ap))
     except OSError:
@@ -248,6 +313,16 @@ def estimate(brief_path: Path, cfg) -> SizeEstimate:
         # docstring — an abstention scores `ok`, which is a confident "small" for a brief
         # nobody read, and one stray byte is a bad reason to emit one.
         return SizeEstimate(0, OK, ["brief unreadable — not sized"])
+
+    # ORGANIC conflicts only (#457). A materialised child's siblings are in its `Conflicts
+    # with` because the SPLIT put them there, and counting them made three of the five
+    # weighted features artifacts of the process — 3+3+3 = 9 against a cutoff of 7 before
+    # anyone looked at the child's scope, with `is_plan_pointer` (the one de-escalating
+    # term) something a split child never has. Outside the `try` deliberately:
+    # `sibling_conflict_count` is total (its docstring), so it cannot turn a hand-edited
+    # lineage record into a crashed Plan beat, and there is no OSError here to catch.
+    sibling_conflicts = sibling_conflict_count(brief_path, conflict_ids)
+    conflicts = len(conflict_ids) - sibling_conflicts
 
     # Word-matched, not equality and not bare substring. The field is prose in practice
     # ("high — the widest-surface slice: …") so equality scores nearly every real brief as
@@ -290,7 +365,8 @@ def estimate(brief_path: Path, cfg) -> SizeEstimate:
         patch_band = OK
 
     return SizeEstimate(score, higher(churn_band, patch_band), reasons,
-                        churn_band=churn_band, patch_band=patch_band)
+                        churn_band=churn_band, patch_band=patch_band,
+                        sibling_conflicts=sibling_conflicts)
 
 
 def _band(value: str) -> str:
@@ -481,4 +557,9 @@ def combine(structural: SizeEstimate, model: dict | None, cfg=None) -> SizeEstim
     return SizeEstimate(score, combined, reasons,
                         churn_band=structural.churn_band,
                         patch_band=structural.patch_band,
-                        model_band=band)
+                        model_band=band,
+                        # Carried, not recomputed: an escalation is about the brief's
+                        # meaning and says nothing about the split's own metadata, so
+                        # dropping the count here would hide a non-converged split behind
+                        # exactly the verdict most likely to be attached to one.
+                        sibling_conflicts=structural.sibling_conflicts)
