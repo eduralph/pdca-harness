@@ -358,6 +358,14 @@ class Config:
     # The `gh pr merge` strategy for wave_mode="merge" (issue #wave-model): merge | squash |
     # rebase. Default "merge" (a merge commit — auditable, bisectable). [driver].merge_method.
     merge_method: str = "merge"
+    # Which checks must be green before wave_mode="merge" merges a non-final wave's PR
+    # (issue #413). "all" (the default) reads the PR's FULL check rollup — `gh pr checks`,
+    # after the ready-mark, immediately before the merge — and refuses on any failing,
+    # pending or MISSING check, so a later wave cannot build on a base whose CI never went
+    # green. "required" restores host-config-only semantics: skip that gate and let `gh pr
+    # merge`'s own enforcement (whatever branch protection marks required — possibly
+    # nothing) decide, including merging with an empty rollup. [driver].merge_requires.
+    merge_requires: str = "all"
     # Optional integration re-gate (#wave-model): after each wave folds onto the
     # integration branch, run the repo-scoped gates over that tip before the next wave
     # builds on it, so a combination that is red though each fix was green alone STOPs the
@@ -689,6 +697,14 @@ class Config:
         lane_preflight = driver_cfg.get("lane_preflight", "")  # issue #213
         wave_mode = driver_cfg.get("wave_mode", "stack")  # #wave-model: stack | merge
         merge_method = driver_cfg.get("merge_method", "merge")  # merge | squash | rebase
+        # Check-rollup policy for merge mode (issue #413). An unknown value falls back to
+        # "all" with a note — the fail-safe direction is the STRICTER reading (verify the
+        # rollup ourselves), never a typo silently buying host-config-only semantics.
+        merge_requires = str(driver_cfg.get("merge_requires", "all")).strip().lower()
+        if merge_requires not in ("all", "required"):
+            print(f"config: unknown [driver].merge_requires '{merge_requires}' — expected "
+                  "all | required; using 'all'", file=sys.stderr)
+            merge_requires = "all"
         regate_between_waves = bool(driver_cfg.get("regate_between_waves", False))
         act_cadence = max(1, int(driver_cfg.get("act_cadence", 5)))  # issue #109
         # Footprint sweep mode (issue #297). An unknown value falls back to "clean" with a
@@ -794,6 +810,7 @@ class Config:
             lane_preflight=lane_preflight,
             wave_mode=wave_mode,
             merge_method=merge_method,
+            merge_requires=merge_requires,
             regate_between_waves=regate_between_waves,
             act_cadence=act_cadence,
             sweep_worktrees=sweep_worktrees,
