@@ -237,6 +237,23 @@ proposal-local label (`child-2`); acceptance rewrites those to the real
 [waves](#waves-in-execution) correctly from the first `pdca flow` on the
 children.
 
+Before either shape does anything irreversible, acceptance also prints a
+**convergence report** — the one question the checks above never asked: *does
+this split actually make the children smaller?* Each child's own body is staged
+through the same structural estimate a materialised bundle gets (labels standing
+in for the tracker ids that don't exist yet, including in the lineage record the
+estimate reads), and the report names each child's band against the parent's and
+the feature carrying its score, saying so plainly when most children don't band
+lower. It isn't fooled by a proposal whose children conflict pairwise either: a
+`Conflicts with` edge *between* siblings is the splitter's own statement that
+those two children edit a shared resource, so a complete set of them is a split
+that separated nothing, reported as NOT converged even where the estimate
+excludes those declarations from the band printed beside them. It is strictly
+advisory — it never blocks and never prompts, exactly like the [size
+guard](#the-estimate) it mirrors — and its own writes are guarded, so a stream
+that breaks part-way (`pdca split 13636 --accept 2>&1 | head`) changes neither
+the exit code nor which bundles are created.
+
 The parent bundle doesn't just sit there afterward — it's marked via the same
 [close-disposition fast path](04-do.md#the-close-disposition-fast-path) a
 duplicate or wontfix uses (`close-disposition` = `split`), so it routes straight
