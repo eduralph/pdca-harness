@@ -754,76 +754,80 @@ def _split(cfg: Config, args) -> int:
         if token:
             ids.append(token)
     filed = False
+    # Read the proposal and run `preflight` on BOTH shapes, before either does anything
+    # irreversible (issue #459). It carries the checks that do not need the ids — a second
+    # acceptance filed a whole second set of real sub-issues before discovering the parent
+    # was already split; a cyclic proposal filed its children before `validate` refused
+    # them — and now also the CONVERGENCE REPORT, the one statement of whether this split
+    # actually makes the children smaller. `--ids` reached neither: it went straight to
+    # `accept`, and it is the path the docs call *required* for a tracker this cannot reach
+    # — the operator who has already paid for the issues by hand, and so most needs the
+    # verdict. Tracker issues cannot be withdrawn and a materialised bundle is barely
+    # better, so this order is the whole guarantee.
+    try:
+        children = split.parse((d / split.PROPOSAL).read_text(encoding="utf-8"))
+        split.preflight(d, children, cfg)
+    except OSError:
+        split.advisory(f"split: {d.name} has no {split.PROPOSAL} — run "
+                       f"`{_prog()} split {args.issue_id}` first")
+        return 1
+    except split.SplitError as exc:
+        split.advisory(f"split: {exc}")
+        return 1
     if not ids:
-        # No ids given: file one issue per child, parented to this bundle's issue. Reading
-        # the proposal here rather than inside `accept` so a malformed one is refused
-        # BEFORE anything is filed — a tracker issue cannot be rolled back, and creating
-        # three of them for a proposal that then fails to parse is the worst order.
-        try:
-            children = split.parse((d / split.PROPOSAL).read_text(encoding="utf-8"))
-            # Every reason acceptance would fail that does not need the ids — run BEFORE a
-            # single issue is filed. Without it, a second `--accept` filed a whole second
-            # set of real sub-issues and only then discovered the parent was already
-            # split; a cyclic proposal filed its children before `validate` refused them.
-            # Tracker issues cannot be withdrawn, so the order is the whole guarantee.
-            split.preflight(d, children, cfg)
-        except OSError:
-            print(f"split: {d.name} has no {split.PROPOSAL} — run "
-                  f"`{_prog()} split {args.issue_id}` first", file=sys.stderr)
-            return 1
-        except split.SplitError as exc:
-            print(f"split: {exc}", file=sys.stderr)
-            return 1
+        # No ids given: file one issue per child, parented to this bundle's issue.
         try:
             ids = split.file_children(d, children, cfg, prog=_prog())
         except split.TrackerUnavailable as exc:
             # Never a silent skip: name the reason AND the way forward. A split that
             # filed nothing and materialised nothing would otherwise look like a no-op.
-            print(f"split: {exc}. File one issue per child yourself and pass them in "
-                  f"proposal order:\n  {_prog()} split {args.issue_id} --accept --ids "
-                  + ",".join(f"<id-{n}>" for n in range(1, len(children) + 1)),
-                  file=sys.stderr)
+            split.advisory(f"split: {exc}. File one issue per child yourself and pass them "
+                           f"in proposal order:\n  {_prog()} split {args.issue_id} "
+                           "--accept --ids "
+                           + ",".join(f"<id-{n}>" for n in range(1, len(children) + 1)))
             return 1
         except split.SplitError as exc:
-            print(f"split: {exc}", file=sys.stderr)
+            split.advisory(f"split: {exc}")
             return 1
         filed = True
-        try:
-            print(f"filed {len(ids)} child issue(s): "
-                  + ", ".join("#" + i for i in ids), file=sys.stderr)
-        except OSError:
-            # A closed or full stderr must not abort the run HERE: the issues exist, and
-            # stopping between filing and accepting is the one state with no artifact
-            # naming them. Carry on; the failure paths below re-print the numbers.
-            pass
+        # A closed or full stderr must not abort the run HERE: the issues exist, and
+        # stopping between filing and accepting is the one state with no artifact naming
+        # them. `split.advisory` absorbs it; the failure paths below re-print the numbers.
+        split.advisory(f"filed {len(ids)} child issue(s): "
+                       + ", ".join("#" + i for i in ids))
     try:
         created = split.accept(d, ids, cfg)
     except split.SplitError as exc:
-        print(f"split: {exc}", file=sys.stderr)
+        split.advisory(f"split: {exc}")
         if filed:
             # The issues are real and cannot be withdrawn. Say so explicitly and give the
             # command that resumes against them, or they are orphaned with nothing on
             # screen naming them — the one failure this feature must not have.
-            print("split: the child issues were already filed and CANNOT be rolled back: "
-                  + ", ".join("#" + i for i in ids) + ".", file=sys.stderr)
+            split.advisory("split: the child issues were already filed and CANNOT be "
+                           "rolled back: " + ", ".join("#" + i for i in ids) + ".")
             if "already marked" in str(exc):
                 # `preflight` passed and `accept` then found the parent terminal, so
                 # ANOTHER acceptance won the race between them. Printing the ordinary
                 # retry here would be a false instruction: it cannot succeed against an
                 # already-split parent, and following it would file a third set.
-                print("split: the parent was marked split by another run while these were "
-                      "being filed, so its children already exist. Do NOT re-run --accept: "
-                      "close the issues above as duplicates, or reopen the parent if this "
-                      "run's split is the one you want.", file=sys.stderr)
+                split.advisory(
+                    "split: the parent was marked split by another run while these were "
+                    "being filed, so its children already exist. Do NOT re-run --accept: "
+                    "close the issues above as duplicates, or reopen the parent if this "
+                    "run's split is the one you want.")
             else:
-                print("Fix the problem above, then re-run against them:\n"
-                      f"  {_prog()} split {args.issue_id} --accept --ids {','.join(ids)}",
-                      file=sys.stderr)
+                split.advisory("Fix the problem above, then re-run against them:\n"
+                               f"  {_prog()} split {args.issue_id} --accept --ids "
+                               f"{','.join(ids)}")
         return 1
+    # Everything below is advisory in the strongest sense: the bundles are on disk and the
+    # issues are filed, so no write here can change the outcome — but an unguarded one
+    # could still change the EXIT CODE. `pdca split 500 --accept 2>&1 | head` breaks both
+    # streams part-way and, before #459, turned a completed acceptance into a traceback.
     for child in created:
-        print(child)
-    print(f"{d.name} marked split; run `{_prog()} flow {' '.join(ids)}` to drive the "
-          "children", file=sys.stderr)
+        split.advisory(str(child), file=sys.stdout)
+    split.advisory(f"{d.name} marked split; run `{_prog()} flow {' '.join(ids)}` to drive "
+                   "the children")
     return 0
 
 

@@ -29,6 +29,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -234,6 +235,44 @@ def _cycles(children: list[Child]) -> list[str]:
     return bad
 
 
+def advisory(text: str, *, file=None) -> None:
+    """Write one ADVISORY line, absorbing a stream failure rather than raising (issue #459).
+
+    Every write on the acceptance path is advisory in this exact sense: what the
+    convergence report below prints can only change the human's *decision*, and what
+    `cli._split` prints after :func:`accept` returns cannot change anything at all — the
+    tracker issues are filed and the child bundles are on disk. Neither may fail the
+    command, and `pdca split 500 --accept 2>&1 | head` is enough to break the stream
+    part-way through and make them try.
+
+    Both failure shapes were real. A `BrokenPipeError` out of a report line escaped
+    `preflight`, where `cli._split`'s own `except OSError` reads it as "this bundle has no
+    split-proposal.md" (`cli.py:770-773`) — so a perfectly good proposal was refused with
+    rc 1 and a flatly wrong reason. Out of the status line *after* `accept` returned it was
+    worse: an unhandled traceback and a non-zero exit on a run whose irreversible half had
+    already succeeded, which is the one thing an advisory line must never do.
+
+    ONE definition, used by the report here, by the notices :func:`_rollback`,
+    :func:`_restore_lineage` and :func:`file_children` print when something goes wrong
+    mid-acceptance, and by every line `cli._split` writes — so "output can never abort an
+    acceptance" is a property of the whole path rather than of the writes someone
+    remembered to wrap. Guarding the report alone was not enough: the status line after
+    `accept` returned still raised, and a persistently broken stream still changed the exit
+    code of a run whose bundles were already on disk. In the interrupt report
+    (:func:`file_children`) it also keeps a `KeyboardInterrupt` from being replaced by the
+    `OSError` of failing to describe it. ``flush=True`` because a piped stdout is
+    block-buffered: without it the failure lands in the interpreter's own shutdown flush,
+    outside every handler, where CPython reports it and exits 120.
+
+    The stream is resolved at CALL time (``file=None`` → ``sys.stderr``), so a caller that
+    redirects `sys.stderr` — the CLI under a pipe, a test — is honoured.
+    """
+    try:
+        print(text, file=sys.stderr if file is None else file, flush=True)
+    except OSError:
+        pass
+
+
 def preflight(parent: Path, children: list[Child], cfg) -> None:
     """Every reason acceptance would fail that does NOT depend on the ids.
 
@@ -242,6 +281,14 @@ def preflight(parent: Path, children: list[Child], cfg) -> None:
     run a second time filed a whole second set of real sub-issues and only THEN
     discovered the parent was already split — and a proposal with a dependency cycle
     filed its children before `validate` refused them.
+
+    It also emits the **convergence report** (issue #459), last, once the proposal is known
+    to be acceptable. This is the only point BOTH acceptance shapes reach before anything
+    irreversible happens — a filed tracker sub-issue, a materialised bundle — so it is the
+    last point at which "does this split actually make the children smaller?" can still
+    change the decision. Advisory in the strict sense: :func:`_emit_convergence_report`
+    neither raises nor blocks, so nothing about it can change what is filed, what is
+    materialised, or the exit code.
     """
     proposal = parent / PROPOSAL
     if not proposal.exists():
@@ -255,6 +302,7 @@ def preflight(parent: Path, children: list[Child], cfg) -> None:
             "first orphaned from the parent's breadcrumb. Reopen it first if that is what "
             "you want")
     _validate_ordering(children)
+    _emit_convergence_report(parent, children, cfg)
 
 
 def _validate_ordering(children: list[Child]) -> None:
@@ -276,6 +324,168 @@ def _validate_ordering(children: list[Child]) -> None:
             f"the proposal's `Depends on` fields form a cycle among {', '.join(cyclic)} — "
             "the children could be created but never driven (compute_waves would refuse "
             "them). Fix the ordering in the proposal first")
+
+
+# ---------------------------------------------------------------------------
+# The convergence report (issue #459)
+#
+# `preflight` used to check only the reasons acceptance would FAIL. Nothing asked the one
+# question the human is actually deciding: does this split make the children smaller? A
+# split that leaves every child `oversized` was discovered a whole cycle later, when each
+# child's own size guard fired and pointed the planner at `pdca split` again — by which
+# time the sub-issues are filed, and a tracker issue cannot be withdrawn (#358). So the
+# estimate runs here, at the last point where the answer can still change the decision,
+# and it only ever REPORTS: the size guard it mirrors is warn-only for a calibrated reason
+# (`plan_policy.size_reasons` — 62% precision at its best), and a blocking check at that
+# rate is one people learn to override.
+# ---------------------------------------------------------------------------
+
+
+def _staged_estimates(parent: Path, children: list[Child], cfg) -> list[tuple[Child, object]]:
+    """``(child, estimate)`` per child, scored exactly as the materialised bundle will be.
+
+    Staged through :func:`materialise` — the writer acceptance itself uses — into a
+    throwaway directory, with each child's LABEL standing in for the tracker id it does not
+    have yet. Reusing that function is the whole point: the staged bundle differs from the
+    one `--accept` will write only in the ids that do not exist yet, so the report cannot
+    end up describing a bundle assembled differently from the one about to land.
+
+    The lineage record it writes matters as much as the brief. `sizing.estimate` reads the
+    sibling set from it to decide which declared conflicts are the split's own scheduling
+    metadata rather than churn (#457), and at `preflight` time every ordering ref is a
+    sibling LABEL by construction (:func:`_validate_ordering` has just proven it) — so
+    staging with labels as ids is what makes the estimate apply the SAME rule the live
+    estimator will apply the moment the children exist.
+
+    Nothing lands in the instance: `_LABEL_RE` pins every label to ``child-\\d+`` so a path
+    composed from one cannot traverse, and the `TemporaryDirectory` is outside the instance
+    and removed on every exit, success or failure. That is `preflight`'s standing guarantee
+    — it runs BEFORE `file_children` and must leave nothing behind.
+    """
+    from . import sizing   # lazy: sizing imports split, so a module-level import cycles
+    labels = [c.label for c in children]
+    with tempfile.TemporaryDirectory(prefix="pdca-split-convergence-") as tmp:
+        staged = materialise(children, labels, cfg, Path(tmp), parent=parent)
+        return [(child, sizing.estimate(d / "brief.md", cfg))
+                for child, d in zip(children, staged)]
+
+
+def _exposed_sibling_conflicts(est) -> int | None:
+    """How many `Conflicts with` entries the estimator EXCLUDED as siblings, or ``None``.
+
+    `SizeEstimate.sibling_conflicts` (#457) is the only honest source for this. A reader
+    that judged sibling entanglement from the estimate's ``score`` or ``reasons`` instead
+    would see an *excluded* 0 — the exclusion is precisely that those declarations no
+    longer contribute — and report a proposal whose children all conflict pairwise as
+    clean, which is the one shape that means the split separated nothing.
+
+    ``None`` (not 0) when the estimator predates #457 and excludes nothing, so the caller
+    can say so in the report rather than silently read "no sibling conflicts" off a field
+    that was never written. A malformed value is treated the same way: this must not turn
+    an advisory line into an exception.
+    """
+    value = getattr(est, "sibling_conflicts", None)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def convergence_report(parent: Path, children: list[Child], cfg) -> list[str]:
+    """Does this split make the children smaller? One line per child, then a verdict.
+
+    Read-only and deterministic: computed from the proposal and the parent's brief, with
+    no tracker id involved and nothing written into the instance
+    (:func:`_staged_estimates`). Returns the lines rather than printing them, so the
+    guarded writer is the only thing that touches a stream.
+
+    Two independent NOT-CONVERGED signals, because the band comparison alone is blind to
+    the second. A `Conflicts with` edge *between* siblings is the splitter's own statement
+    that those two children edit a shared resource — `leaves._split_prompt` tells it
+    outright that those fields "BETWEEN children are the point" — so a proposal whose
+    children conflict pairwise has separated nothing, however small each child reads. That
+    signal
+    survives #457's exclusion only because it is taken from the count the estimate
+    EXPOSES (:func:`_exposed_sibling_conflicts`), never from the score those declarations
+    were removed from.
+    """
+    from . import sizing   # lazy: see _staged_estimates
+    parent_est = sizing.estimate(parent / "brief.md", cfg)
+    labels = [c.label for c in children]
+    lines = [f"split: convergence report for {parent.name} (advisory, changes nothing) — "
+             f"parent bands {parent_est.band} (score {parent_est.score})"]
+    lower = 0
+    edges: set[frozenset[str]] = set()
+    unexposed = False
+    for child, est in _staged_estimates(parent, children, cfg):
+        siblings = [label for label in labels if label != child.label]
+        # WHICH siblings this child names; `_validate_ordering` has already refused every
+        # ref that is not one. The count comes from the estimate, the identities can only
+        # come from here — no id exists yet — so the estimate's count is what decides how
+        # many of these edges are credited.
+        declared = [ref for ref in dict.fromkeys(child.ordering("Conflicts with"))
+                    if ref in siblings]
+        exposed = _exposed_sibling_conflicts(est)
+        if exposed is None:
+            unexposed = True
+        conflicts = len(declared) if exposed is None else exposed
+        for ref in declared[:conflicts]:
+            edges.add(frozenset((child.label, ref)))
+        if est.band == parent_est.band:
+            relation = "same band as the parent"
+        elif sizing.higher(est.band, parent_est.band) == parent_est.band:
+            relation, lower = "LOWER than the parent", lower + 1
+        else:
+            relation = "HIGHER than the parent"
+        note = f" [{conflicts} sibling conflict(s) declared]" if conflicts else ""
+        lines.append(f"split:   {child.label}: {est.band} (score {est.score}) — {relation} "
+                     f"— {'; '.join(est.reasons) or 'no structural signal'}{note}")
+    not_lower = len(children) - lower
+    verdicts: list[str] = []
+    if children and not_lower * 2 > len(children):
+        verdicts.append(
+            f"split: NOT CONVERGED — {not_lower} of {len(children)} child(ren) do not band "
+            f"lower than {parent.name}: this split does not make the work smaller, and "
+            "each child costs a full cycle. Reconsider the seams before accepting.")
+    if len(children) > 1 and len(edges) == len(children) * (len(children) - 1) // 2:
+        verdicts.append(
+            "split: NOT CONVERGED — every pair of children declares a `Conflicts with` "
+            "edge, so the split separated nothing: the splitter is saying each pair edits "
+            "a shared resource, and they cannot be built independently.")
+    if not verdicts:
+        verdicts.append(f"split: converged — {lower} of {len(children)} child(ren) band "
+                        f"lower than {parent.name}.")
+    lines += verdicts
+    if unexposed:
+        # NAMED, never absorbed: this estimator excludes nothing, so the counts above are
+        # the proposal's own — identical here by construction (`_validate_ordering` has
+        # just proven every ref names a sibling), but the difference belongs on screen
+        # rather than hidden behind a fallback, so a base missing #457 is visible.
+        lines.append("split:   note: this estimator exposes no `sibling_conflicts` count "
+                     "(#457), so the sibling edges above are read from the proposal's own "
+                     "ordering fields.")
+    return lines
+
+
+def _emit_convergence_report(parent: Path, children: list[Child], cfg) -> None:
+    """Print :func:`convergence_report`, and never let it change what `--accept` does.
+
+    Total, in both directions. Every line goes out through :func:`advisory`, so a stream
+    that fails part-way — or on every write, which is what a broken pipe actually does —
+    changes neither the exit code nor the set of bundles created. And the report's own
+    computation is wrapped: an advisory estimate that raised (a full disk under the
+    staging directory, a future estimator that stops abstaining) would otherwise escape
+    `preflight` and refuse an acceptance over a line nobody reads twice. A failure is
+    NAMED on the same guarded stream rather than swallowed — the discipline
+    :func:`_restore_lineage` already follows.
+    """
+    try:
+        lines = convergence_report(parent, children, cfg)
+    except Exception as exc:   # noqa: BLE001 — an advisory report may never abort an accept
+        advisory(f"split: the convergence report could not be produced ({exc!r}) — "
+                 "continuing, it is advisory and decides nothing")
+        return
+    for line in lines:
+        advisory(line)
 
 
 def validate(children: list[Child], ids: list[str], cfg) -> None:
@@ -464,9 +674,8 @@ def _restore_lineage(path: Path, prior: bytes | None) -> None:
         else:
             path.write_bytes(prior)
     except OSError as exc:
-        print(f"split: could not restore {path} while rolling back ({exc}). Check it by "
-              "hand before retrying — it may name children this run did not create.",
-              file=sys.stderr)
+        advisory(f"split: could not restore {path} while rolling back ({exc}). Check it by "
+                 "hand before retrying — it may name children this run did not create.")
 
 
 def materialise(children: list[Child], ids: list[str], cfg, staging: Path, *,
@@ -517,9 +726,9 @@ def _rollback(created: list[Path]) -> None:
         if d.exists():
             stuck.append(d)
     if stuck:
-        print("split: could not remove " + ", ".join(str(d) for d in stuck)
-              + " while rolling back. Delete them by hand before retrying, or the retry "
-                "will refuse them as existing bundles.", file=sys.stderr)
+        advisory("split: could not remove " + ", ".join(str(d) for d in stuck)
+                 + " while rolling back. Delete them by hand before retrying, or the retry "
+                   "will refuse them as existing bundles.")
 
 
 def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
@@ -810,8 +1019,8 @@ def file_children(parent: Path, children: list[Child], cfg, *,
         # non-numeric id). The children can still be filed, but NOT as sub-issues — and
         # the umbrella relationship is half the reason this exists, so say so rather than
         # quietly producing a flat set of unrelated issues.
-        print(f"split: {parent.name} carries no numeric tracker id — filing the children "
-              "as standalone issues, NOT as sub-issues", file=sys.stderr)
+        advisory(f"split: {parent.name} carries no numeric tracker id — filing the "
+                 "children as standalone issues, NOT as sub-issues")
     body_head = (f"Child slice of #{parent_no}, split during Plan.\n\n"
                  if parent_no else "Child slice, split during Plan.\n\n")
     created: list[str] = []
@@ -860,7 +1069,7 @@ def file_children(parent: Path, children: list[Child], cfg, *,
             if not isinstance(exc, Exception):
                 # An interrupt stays an interrupt: report, then let it propagate, so Ctrl-C
                 # still aborts rather than being converted into an ordinary error.
-                print(f"split: {exc!r}\n{report}", file=sys.stderr)
+                advisory(f"split: {exc!r}\n{report}")
                 raise
             raise SplitError(f"{exc}\n{report}") from exc
     return created
