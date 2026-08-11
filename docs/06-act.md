@@ -18,6 +18,7 @@ delta can land, and the cadence that keeps it from firing on noise.
 ```bash
 pdca act index                              # read-only: frozen cycles + recurring signals
 pdca act log --date 2026-06-12 --append     # scaffold a dated entry into process/act-log.md
+pdca triage <pr>                            # ingest a published PR's external review findings
 ```
 
 Act reads the `COMPLETE` bundles' SUMMARYs — especially §6 (what needed a
@@ -94,6 +95,28 @@ to mark it **applied**; and on a later review Act flags any applied delta
 whose miss **recurs** in a cycle frozen after the applied date — a loud
 "⚠ Ineffective deltas" section in `act index` / the `act log` scaffold. So Act
 audits its own prescriptions instead of writing them and forgetting.
+
+### External review findings — `pdca triage` (issue #316)
+
+The maintainer review on a *published* PR is the outer loop's highest-value
+signal — and, until someone transcribes it, invisible to Act. `pdca triage`
+does the transcription:
+
+```bash
+pdca triage https://github.com/OWNER/REPO/pull/123   # or OWNER/REPO#123, or a bare number with --repo
+```
+
+It pulls the PR's reviews and review comments via `gh api`, classifies each
+finding (**BUG / CONVENTION / NOISE / TEST-GAP** — keyword heuristics, tunable
+from the instance rubric's class list), and routes by class: a BUG on a merged
+PR files a tracker issue whose body carries a carry-forward note; CONVENTION /
+NOISE / TEST-GAP append candidate gate-row, rubric-line and rubric-exclusion
+entries to `process/act-log.md`. Every finding also registers in the Act
+ledger under a class-keyed signal (`codex-pr:<slug>`), so the ineffective-delta
+audit above covers external findings too: a class that recurs *after* its
+process delta was applied gets flagged. It **proposes only** — it never edits
+`pdca.toml` or the rubric — and re-running the same PR ingests only findings
+that arrived since the last run.
 
 ---
 

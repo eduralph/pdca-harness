@@ -272,6 +272,13 @@ pdca publish 11589              # open the draft PR
 pdca publish 11589 --dry-run    # print the git/gh plan without pushing
 ```
 
+A fix whose tracker issue doesn't exist yet takes `--no-issue` (issue #384): it
+amnesties exactly one requirement — the not-yet-assigned tracker id — and
+records `id_pending` in `publish.json` instead of inventing a magic `#0000`.
+Every *other* contribution check still blocks the push in both modes; the mode
+travels to the T4 gate as `$PDCA_PENDING_ID`, so the checker knows precisely
+what it is excusing.
+
 `pdca status` (and bare `pdca`) shows each `COMPLETE` bundle's publish state —
 `[PR <url>]` when a PR was opened, `[unpublished]` when it wasn't (dry-run /
 no-target / failed / not-yet-run), `[close: no PR]` for a close/no-fix bundle —
@@ -291,6 +298,16 @@ f1092ca results(46): record published GraphView import-safety cycle
 
 That's one full cycle, [steps 03–05](03-plan.md), from tracker issue to merged
 record.
+
+Those record commits don't have to be hand-made. **`pdca record [<ids>…]`**
+(issue #317) commits every bundle whose cycle is *over* —
+`COMPLETE` / `DISCONTINUED` / `RESOLVED`, never one in motion or halted for a
+human — to the instance repo as **one batch commit**, so a bundle's provenance
+stops living on the machine that ran it. Enable it via the `[records]` table in
+`pdca.toml` (`mode = "commit"` or `"pr"`, which pushes a `records/{date}` branch
+and opens one draft PR for the batch); once enabled, publish also triggers it,
+strictly after its `publish.json` write. Off by default — turn it on only if
+the instance versions its `results/` bundle root.
 
 **Undoing one.** If a landed fix turns out wrong, `pdca revert <id>` undoes the
 contribution from its recorded `publish.json`: a **merged** PR gets a draft
@@ -413,6 +430,24 @@ environmental failure never blocks a correct fix, and why a real regression
 still can't slip through as an advisory footnote — a **gating** row that
 hard-FAILS also lands in §6 (issue #166), covered under the C6 guard below.
 
+Three properties every row has, learned from rows that lacked them:
+
+- **A wall clock** (issue #368). A row can set `timeout_secs = N`, and
+  `[gates].default_timeout_secs` bounds every row without its own (measured
+  before the bound existed: one hung advisory row held a Check beat for 19
+  hours, and the heartbeat's "still working" made it never *look* hung). On
+  expiry the whole process group is killed and the row records UNVERIFIABLE —
+  the oracle didn't answer, which is not a pass or a fail — landing in §6.
+- **Its full output is kept** (issue #370). Each check's complete stdout/stderr
+  lands in `gate-logs/<id>.log` inside the bundle, so a red row is
+  diagnosable after the fact — the matrix keeps its one-line summary, the log
+  keeps the reason.
+- **Host-CI parity** (issue #311). CI jobs the host repo runs on every PR but
+  the gate ladder doesn't know about (a `typos` pass, a docs linter) used to
+  surface only after the draft PR opened red. Declare them in `[gates].host_ci`
+  and they run against the patched tree at Check like any other row — and
+  again right before publish pushes, where a failure refuses the push.
+
 ### Reviewer — the decorrelated second opinion
 
 The `reviewer` leaf runs against `{patch.diff, test, brief.md,
@@ -425,8 +460,11 @@ never gates. The blocking path contains no LLM at all.
 The reviewer runs in an isolation sandbox (only `{patch.diff, brief.md,
 check-gates.json}` plus the round's `gate-logs/` are present — the frozen gate
 evidence, so a row it cannot re-run is adjudicated from the log its `log` key
-names rather than escalated, issue #403), so the driver hands it a read-only grounding
-target as **`$PDCA_TARGET`** (for a `claude` reviewer also via `--add-dir`).
+names rather than escalated, issue #403). For the stash → red → unstash → green
+re-run itself the sandbox carries a throwaway, git-writable copy of the target
+(issue #419) — the C4 reproduction needs a working git index, and the real
+checkout must receive no writes. For grounding citations the driver hands it a
+read-only target as **`$PDCA_TARGET`** (for a `claude` reviewer also via `--add-dir`).
 That target is the **per-cycle worktree** ([step 04](04-do.md)) — pinned to the
 *same* base the gates ran against and carrying the patch — so a stale or
 unreadable sibling checkout can't drift the reviewer's grounding (issue #120);
