@@ -47,7 +47,9 @@ flowchart TD
         A1["brief.md exists, was never split"] --> A2["Size estimate: structural score<br/>+ a freshly-paid [leaves.sizer] verdict"]
         A2 --> A3{"combined band?"}
         A3 -->|"ok / watch"| A4["No action — Do dispatches"]
-        A3 -->|"oversized"| A5{"splittable?"}
+        A3 -->|"oversized"| A4b{"split child whose brief still<br/>declares SIBLING conflicts?"}
+        A4b -->|"yes — the split's metadata"| A8["Remedy: driven by inherited/sibling fields<br/>— prefer building; Do dispatches anyway"]
+        A4b -->|"no"| A5{"splittable?"}
         A5 -->|"no — patch-only, coherent"| A6["Warn: expect a large patch —<br/>Do dispatches anyway"]
         A5 -->|"yes"| A7["Remedy: consider pdca split first"]
     end
@@ -56,7 +58,7 @@ flowchart TD
         B1["patch.diff exists"] --> B2["Size estimate: structural score<br/>+ the STORED sizer verdict (read free, not re-paid)"]
         B2 --> B3{"combined band?"}
         B3 -->|"ok / watch"| B4["No action — Check dispatches"]
-        B3 -->|"oversized"| B5{"splittable?"}
+        B3 -->|"oversized"| B5{"splittable?<br/>(no sibling fork — a patch exists,<br/>so the route back is iterate-plan either way)"}
         B5 -->|"no — patch-only, coherent"| B6["Warn: expect a large patch —<br/>Check dispatches anyway"]
         B5 -->|"yes"| B7["Remedy: iterate-plan at sign-off,<br/>re-plan lands back at Entry P"]
     end
@@ -87,7 +89,20 @@ oversized, or the patch-size signal isn't the *sole* thing that fired, is a
 split even offered. A brief that's oversized purely on predicted patch size —
 a large but coherent change — gets a different message entirely ("expect a
 large patch," not "split this"), because splitting a coherent change produces
-artificial seams, not a real decomposition.
+artificial seams, not a real decomposition. **At Entry A one question comes
+first:** if the estimate excluded any *sibling* conflicts — `Conflicts with`
+entries naming this bundle's own split siblings, the ordering metadata the
+splitter wrote — then the size that's left is what the split handed the child
+(the parent's `Difficulty`, its dependency tokens, its brief), and the message
+names that provenance — "scores large for a split child (child 601 of a split
+of #500, depth 1) — driven by inherited/sibling fields; prefer building over
+re-splitting" — instead of recommending the split its parent already had. The
+*count* is the test, never the presence of a lineage record: a child carries
+lineage forever, so keying on that would tell a child whose conflicts are all
+organic that its size was inherited — and the ordinary remedy comes back on
+its own once the siblings land and those entries leave the brief, with no paid
+sizer involved. Entry B doesn't ask: a bundle that already has a patch routes
+through `iterate-plan` either way, and the re-plan lands back at Entry A.
 
 **The two backstops differ because the beat does.** At Entry A the bundle is
 still just a brief, so `pdca split` runs directly. At Entry B a patch already
@@ -126,6 +141,19 @@ The estimate has **two independent signals**, combined by deterministic code
    | `brief_bytes` | 3 | brief size above a 12 KB cutoff |
    | `is_plan_pointer` | **−2** | a brief pointing at a host planning artifact converges *better* — the one de-escalating term |
 
+   `conflicts_with` counts **organic** conflicts only. Every child of a split
+   declares a `Conflicts with` entry for each of its siblings because the
+   splitter put it there — those ordering fields *between* children are the point
+   of a split — so scoring them counted the process's own scheduling metadata as
+   churn, against a weight calibrated over organic bundles. Together with a
+   `Difficulty: high` inherited from the parent and the parent's dependency
+   tokens copied down, that banded every materialised child `oversized` (3+3+3
+   against a cutoff of 7) before anyone read its scope. Ids that are **not** this
+   bundle's siblings score exactly as before, and a bundle with no
+   `split-lineage.json` is unaffected. The excluded count is reported on the
+   estimate as `sibling_conflicts`: not scored, but visible, because children
+   that conflict pairwise are the splitter saying the split separated nothing.
+
    The score sorts into two separate readouts, because they answer different
    questions: **churn** (how many sign-off rounds this will take) and **patch
    size** (how big the diff will be). A large-but-coherent change scores high on
@@ -160,12 +188,15 @@ size signal (a blank outcome means the bundle predates the signal — "not
 measured", never "measured small"). When the two visibly drift, re-run
 `scripts/size-calibrate` over the instance and walk its output back into
 `[driver.sizing]` — the step-by-step procedure lives in that table's comment
-block in `pdca.toml`. The model half of the estimate is covered by the same
-review: `model_weight` (how much a sizer-leaf escalation adds to the score,
-`0` = band-only, today's behaviour) is a `[driver.sizing]` config value
-revisited at Act cadence rather than a constant baked into the engine. That
-revisit has a named blind spot: the index's `sizing:` line shows the
-structural estimate only (the stored sizer verdict is not joined in) and
+block in `pdca.toml`. Its `conflicts_with` column is the same organic count the
+engine scores (both call one exclusion, and the excluded siblings are reported
+beside it as `sibling_conflicts`, correlated against nothing), so a retune fits
+the quantity the weight is actually applied to. The model half of the estimate
+is covered by the same review: `model_weight` (how much a sizer-leaf escalation
+adds to the score, `0` = band-only, today's behaviour) is a `[driver.sizing]`
+config value revisited at Act cadence rather than a constant baked into the
+engine. That revisit has a named blind spot: the index's `sizing:` line shows
+the structural estimate only (the stored sizer verdict is not joined in) and
 `size-calibrate` mines no model-verdict feature, so whether sizer escalations
 track real churn is not yet observable from either artifact. Until one of them
 grows that column, the evidenced Act-cadence outcome for `model_weight` is
@@ -205,6 +236,23 @@ proposal-local label (`child-2`); acceptance rewrites those to the real
 (possibly just-filed) ids, so the batch schedules into
 [waves](#waves-in-execution) correctly from the first `pdca flow` on the
 children.
+
+Before either shape does anything irreversible, acceptance also prints a
+**convergence report** — the one question the checks above never asked: *does
+this split actually make the children smaller?* Each child's own body is staged
+through the same structural estimate a materialised bundle gets (labels standing
+in for the tracker ids that don't exist yet, including in the lineage record the
+estimate reads), and the report names each child's band against the parent's and
+the feature carrying its score, saying so plainly when most children don't band
+lower. It isn't fooled by a proposal whose children conflict pairwise either: a
+`Conflicts with` edge *between* siblings is the splitter's own statement that
+those two children edit a shared resource, so a complete set of them is a split
+that separated nothing, reported as NOT converged even where the estimate
+excludes those declarations from the band printed beside them. It is strictly
+advisory — it never blocks and never prompts, exactly like the [size
+guard](#the-estimate) it mirrors — and its own writes are guarded, so a stream
+that breaks part-way (`pdca split 13636 --accept 2>&1 | head`) changes neither
+the exit code nor which bundles are created.
 
 The parent bundle doesn't just sit there afterward — it's marked via the same
 [close-disposition fast path](04-do.md#the-close-disposition-fast-path) a

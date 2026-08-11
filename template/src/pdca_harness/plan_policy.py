@@ -51,7 +51,7 @@ from __future__ import annotations
 import sys
 from typing import NamedTuple
 
-from . import doctor, sizing
+from . import doctor, sizing, split
 
 #: `[driver].size_guard` values. `hold` is NOT among them, deliberately — see
 #: :func:`size_reasons`.
@@ -85,6 +85,32 @@ class HoldReason(NamedTuple):
     detail: str    # one line for the human
 
 
+def _split_child_provenance(d) -> str:
+    """Name the split a child came from, for the advisory's message — decides nothing.
+
+    The DECISION is :attr:`sizing.SizeEstimate.sibling_conflicts` alone (`sizing.py:205-215`);
+    this only formats the ids that count is about, and is reached only once that count is
+    non-zero. Keeping the two apart is the correction #458 needed: a predicate re-derived
+    here from the lineage record plus the brief is a second answer to a question `sizing`
+    already answers, and the two drift — the version that read the record's mere presence
+    told a child whose four conflicts were all organic that it "scored large … driven by
+    inherited/sibling fields", in the same string as its own contradicting evidence.
+
+    Total, like the reader it stands on (``split.read_lineage``, `split.py:373-402`): a
+    hand-edited record missing an edge degrades the sentence, never the beat. ``depth``
+    is formatted `?` rather than routed through ``split._recorded_depth`` (`split.py:405`)
+    — that helper's floor of 0 is the right ANSWER for arithmetic (a parent at unknown
+    depth still has children at 1) and the wrong STATEMENT for a human, since depth 0 is
+    what a bundle that was never split reads.
+    """
+    record = split.read_lineage(d) or {}
+    parent = record.get("parent")
+    depth = record.get("depth")
+    return (f"child {record.get('id') or d.name.removeprefix('issue_')} of a split of "
+            f"#{parent if isinstance(parent, str) and parent else '?'}, depth "
+            f"{depth if isinstance(depth, int) and not isinstance(depth, bool) else '?'}")
+
+
 def size_reasons(d, cfg, *, before_do: bool = True) -> list[HoldReason]:
     """Size advisories for a bundle, per ``[driver].size_guard``.
 
@@ -99,6 +125,24 @@ def size_reasons(d, cfg, *, before_do: bool = True) -> list[HoldReason]:
 
     ``size_guard = "hold"`` is therefore accepted but treated as ``warn``, with a note —
     silently downgrading it would let an instance believe it is protected when it is not.
+
+    **A split child's remedy is not another split** (#458). When the estimate reports
+    ``sibling_conflicts`` — the `Conflicts with` entries naming this bundle's own split
+    siblings, which ``sizing`` excludes from the score and reports instead
+    (`sizing.py:205-215`, #457) — the oversized readout is what the split HANDED this
+    child: the ordering fields between children, on top of the parent's `Difficulty`,
+    dependency tokens and brief size. Answering that with `pdca split` reprints the
+    parent's advice at every depth, over the one readout a split inflates.
+
+    That count is the predicate, and the mere PRESENCE of a lineage record is not: every
+    child carries one forever, including a child whose conflicts are entirely organic, so
+    presence asserts "driven by inherited/sibling fields" beside its own contradicting
+    "N conflict(s) declared". It is also what keeps the ordinary remedy REACHABLE on the
+    sizer this project ships (``leaves._stub_sizer``, an unconditional `band: "ok"`): a
+    split child with no sibling conflicts is advised exactly like any other bundle, and
+    one whose siblings have landed gets that advice back the moment the stale `Conflicts
+    with` entries leave its brief. Gating the recovery on the sizer's own verdict instead
+    would have made it dead config on every offline instance.
     """
     mode = str(getattr(cfg, "size_guard", OFF) or OFF).strip().lower()
     if mode == OFF:
@@ -134,7 +178,23 @@ def size_reasons(d, cfg, *, before_do: bool = True) -> list[HoldReason]:
     splittable = (est.churn_band == sizing.OVERSIZED
                   or est.model_band == sizing.OVERSIZED
                   or est.patch_band != sizing.OVERSIZED)
-    if not splittable:
+    extra = ""
+    # Provenance is asked BEFORE the readout fork, not inside one of its branches. Which
+    # readout carried the number does not change the answer for a child that still declares
+    # its siblings — it is oversized on fields the split gave it either way — and asking
+    # second put the branch out of reach for exactly the shape #457 leaves behind: with the
+    # sibling conflicts no longer scored, such a child routinely lands `churn=watch` with
+    # `patch=oversized`, i.e. `splittable is False`, and fell through to "expect a large
+    # patch" with nothing said about where its size came from.
+    if before_do and est.sibling_conflicts:
+        remedy = (f"scores large for a split child ({_split_child_provenance(d)}) — driven "
+                  "by inherited/sibling fields; prefer building over re-splitting")
+        # Stated, not left to be inferred from the reasons: `sizing` excludes these from the
+        # score, so `est.reasons` says either nothing about conflicts or counts only the
+        # organic ones — and "driven by inherited/sibling fields" beside a silent or smaller
+        # conflict count is a claim the rest of the line does not support.
+        extra = f"; {est.sibling_conflicts} sibling conflict(s) not counted"
+    elif not splittable:
         remedy = ("expect a large patch — worth a look before Do, but a large COHERENT "
                   "change is not a split candidate")
     elif before_do:
@@ -144,10 +204,12 @@ def size_reasons(d, cfg, *, before_do: bool = True) -> list[HoldReason]:
         # back is `iterate-plan`, which archives this brief and returns the bundle to
         # Plan, where the split belongs. Telling the human to run `pdca split` on a bundle
         # that already has a patch would decompose it AFTER the build the children will
-        # not inherit.
+        # not inherit. Provenance does not fork this branch: a built bundle is routed back
+        # through `iterate-plan` whether or not its size was inherited, because the re-plan
+        # is where a split can happen at all — and the re-plan re-enters the branch above.
         remedy = ("if this will not converge, answer `iterate-plan` at sign-off and split "
                   "in the re-plan — a split authors briefs, which is Plan's beat")
-    detail = f"oversized — {remedy} ({'; '.join(est.reasons)})"
+    detail = f"oversized — {remedy} ({'; '.join(est.reasons)}{extra})"
     if mode not in (OFF, WARN):
         detail += (f" [size_guard={mode!r} is treated as 'warn': a blocking mode is "
                    "unimplemented — the signal peaks at 62% precision, see #321]")

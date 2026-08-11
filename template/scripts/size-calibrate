@@ -38,6 +38,15 @@ including the ones parsed by the harness's own ``brief`` / ``waves`` helpers, wh
 :class:`AprioriBrief` is for. :func:`carry_forward_bytes` reports what was excluded, so the leak
 stays visible instead of merely handled.
 
+**One feature name, one quantity.** ``conflicts_with`` here means what ``sizing.estimate``
+weights: ORGANIC conflicts, with a split child's own siblings excluded (#457) by the estimator's
+own :func:`sizing.sibling_conflict_count`, not by a second copy of the rule. Mining the raw count
+instead would fit the next retune of that weight on a number the engine no longer uses for split
+children — and the two sides would each stay self-consistent, so nothing would show it. What was
+excluded is reported beside it as ``sibling_conflicts`` (not a feature: it is metadata the split
+writes into its own children), the same "keep the withheld quantity visible" discipline
+:func:`carry_forward_bytes` already sets.
+
 **Read-only by construction:** it opens files, and never writes into the bundle tree. The only
 path it writes is an explicit ``--csv`` destination, which is refused if it resolves inside the
 bundle root.
@@ -67,7 +76,12 @@ try:
     # ONE definition of the a-priori split, shared with the runtime estimator (#355). A
     # second copy here drifted from `sizing` the moment either side changed — and the drift
     # would be invisible, because both sides would still look self-consistent.
-    from pdca_harness.sizing import AprioriBrief, apriori_text, carry_forward_bytes
+    # ONE definition of "which declared conflicts are the split's own scheduling metadata"
+    # (#457), for the same reason: a shared feature NAME over two different quantities is
+    # the drift that survives review, because both sides stay self-consistent — and a
+    # retune fitted here would move a weight the engine applies to another number.
+    from pdca_harness.sizing import (AprioriBrief, apriori_text, carry_forward_bytes,
+                                     sibling_conflict_count)
     # ONE definition of "rounds attributable to the current brief", shared with the
     # runtime backstop (#324). This file defined it; the estimator was counting every
     # archive, so it measured a different quantity from the one these thresholds describe.
@@ -216,7 +230,19 @@ class Row:
     declares_prod_reach: int
     is_plan_pointer: int
     depends_on: int
+    #: UNIQUE ORGANIC ids only — this bundle's own split siblings are excluded, exactly as
+    #: ``sizing.estimate`` excludes them from the weighted feature of the same name (#457).
+    #: Both sides call ``sizing.sibling_conflict_count``, so a retune derived from this
+    #: column fits the quantity the engine actually scores. Unchanged for every bundle with
+    #: no lineage record, which is the whole published corpus.
     conflicts_with: int
+    #: How many declared `Conflicts with` ids WERE this bundle's siblings, and so are
+    #: missing from the column above. 0 for every bundle with no lineage record.
+    #: Deliberately NOT in :data:`FEATURES`: it is metadata the split writes into its own
+    #: children, not a candidate churn predictor. Reported anyway, so the exclusion is
+    #: auditable rather than invisible — the discipline ``carry_forward_bytes`` already
+    #: sets for the other quantity this table withholds.
+    sibling_conflicts: int
     # --- observed: what the cycle actually cost -------------------------------------
     rounds: int
     replans: int
@@ -275,6 +301,11 @@ def extract(d: Path) -> Row | None:
     scope = value_block(ap, text, "scope")
     difficulty = normalize_difficulty(brief.field(ap, "difficulty"))
     bundle_state = state.state(d)
+    # UNIQUE ids (see the `depends_on` comment below for why), split ONCE into the two
+    # columns — computed here rather than twice inside the constructor so the organic count
+    # and the excluded count cannot be derived from two different sets (#457).
+    declared_conflicts = set(brief.conflicts_with(ap))
+    sibling_conflicts = sibling_conflict_count(bp, list(declared_conflicts))
     return Row(
         bundle=d.name,
         difficulty=difficulty,
@@ -297,7 +328,10 @@ def extract(d: Path) -> Row | None:
         # rows for one edge. Counting declarations would inflate the feature on exactly the
         # briefs most likely to be old enough to matter. Same for a repeated `Conflicts with`.
         depends_on=len(set(waves.declared_deps(ap))),
-        conflicts_with=len(set(brief.conflicts_with(ap))),
+        # The SAME exclusion `sizing.estimate` weights against, not a re-derivation of it,
+        # so this column measures what the engine scores for a split child too (#457).
+        conflicts_with=len(declared_conflicts) - sibling_conflicts,
+        sibling_conflicts=sibling_conflicts,
         rounds=rounds,
         replans=replans,
         auto_iters=autoiterate.count(d),
