@@ -75,6 +75,12 @@ SIGNOFF_DECISION = "signoff-decision"
 # reviewer/advisory `check-*.error.log` (#138), so a failed batch can be post-mortem'd from
 # the bundle instead of terminal scrollback.
 BUILD_ERROR_LOG = "build.error.log"
+
+# Where the Do builder's memory-telemetry samples land (the #420 bound's observability
+# arm): one JSON line per heartbeat tick while the leaf runs inside its scope. The
+# reviewer/advisory leaves get the same file derived from their error log —
+# `check-review.error.log` → `check-review.memory.jsonl` (`_memory_log_for`).
+BUILD_MEMORY_LOG = "build.memory.jsonl"
 VALID_DECISIONS = frozenset({"accept", "iterate-do", "iterate-plan", "discontinue"})
 
 
@@ -325,6 +331,238 @@ def _resolve_memory_cap(bound: str) -> list[str]:
     return []
 
 
+# ----------------------------------------------------------------------------
+# Leaf memory telemetry — the #420 bound's observability arm.
+#
+# The bound made an OOM kill ATTRIBUTABLE (the leaf's own scope dies, not the session),
+# but not EXPLAINABLE: the kernel's task table names bare comms ("python3" ×1187), the
+# stderr tail of a SIGKILLed leaf is empty, and by the time a human looks, the scope —
+# and with `--collect` its cgroup, including `memory.peak` — is gone. The measured
+# incident: a builder's test run forked ~1200 python3 processes in under a minute,
+# filled its 16G scope, and the only artifact was "died with SIGKILL".
+#
+# So: while a capped headless leaf runs, sample its scope cgroup on every heartbeat
+# tick (the harness is already awake then) and append one JSON line per sample to a
+# bundle-local `*.memory.jsonl` — memory used, process count, and the top command
+# lines by RSS, aggregated by argv so a fork storm reads as `1187× python3 -m
+# unittest …` rather than 1187 rows. On a failed leaf, a post-mortem — the last
+# sample plus the systemd/kernel journal's account of the scope's death — rides the
+# existing stderr-tail capture into `*.error.log`. Everything here is best-effort by
+# the `status`-probe contract: an observer can never break the run it observes.
+# ----------------------------------------------------------------------------
+
+#: How many distinct command lines a sample keeps (largest total RSS first). A storm
+#: is by definition one command repeated, so the interesting set is tiny.
+_MEMORY_TOP_COMMANDS = 5
+
+#: Journal lines kept in a post-mortem, per source (systemd's and the kernel's).
+_MEMORY_JOURNAL_LINES = 20
+
+
+def _memory_log_for(error_log: Path) -> Path | None:
+    """The telemetry file that pairs with a leaf's error log, or ``None``.
+
+    Derived, not configured: every resilient leaf already names a ``*.error.log``,
+    and the two files are two halves of the same post-mortem (what the leaf said /
+    what it consumed), so they must sit next to each other under the same stem.
+    """
+    if not error_log.name.endswith(".error.log"):
+        return None
+    stem = error_log.name[:-len(".error.log")]
+    return error_log.with_name(stem + ".memory.jsonl")
+
+
+def _fmt_bytes(n: int) -> str:
+    """`memory.current` for a heartbeat line: '512MB', '15.9GB'."""
+    if n >= 1024 ** 3:
+        return f"{n / 1024 ** 3:.1f}GB"
+    return f"{n // (1024 ** 2)}MB"
+
+
+def _scope_journal(unit: str, since: float) -> list[str]:
+    """systemd's and the kernel's account of a scope's death, best-effort.
+
+    Two sources because the story is split across them: the user manager logs the
+    verdict ("Failed with result 'oom-kill'", the memory peak), the kernel logs the
+    cause (which task invoked the OOM killer, the cgroup's anon/file breakdown).
+    Kernel lines are matched on the unit name OR the OOM phrases — the memcg kill
+    line ("Memory cgroup out of memory: Killed process …") does not carry the unit.
+    ``since`` (epoch seconds, the leaf's spawn) bounds both reads: without it, a
+    previous run's OOM kill matches the phrases and lands in THIS leaf's
+    post-mortem, which is precisely the misattribution telemetry exists to end.
+    Any failure — no journalctl, no permission, a hung journal — returns what was
+    gathered so far: this runs inside a post-mortem, where raising loses the log
+    that prompted it.
+    """
+    lines: list[str] = []
+    stamp = f"@{int(since)}"
+    try:
+        if unit:
+            out = subprocess.run(
+                ["journalctl", "--user", "-q", "--no-pager", "-u", unit,
+                 "--since", stamp, "-n", str(_MEMORY_JOURNAL_LINES)],
+                capture_output=True, text=True, timeout=10).stdout
+            lines += [f"systemd: {ln}" for ln in out.splitlines() if ln.strip()]
+        out = subprocess.run(
+            ["journalctl", "-q", "-k", "--no-pager", "--since", stamp, "-n", "2000"],
+            capture_output=True, text=True, timeout=10).stdout
+        oomish = ("oom", "out of memory")
+        kern = [ln for ln in out.splitlines()
+                if (unit and unit in ln) or any(s in ln.lower() for s in oomish)]
+        lines += [f"kernel: {ln}" for ln in kern[-_MEMORY_JOURNAL_LINES:]]
+    except Exception:  # noqa: BLE001 — diagnostics must never mask the failure they explain
+        pass
+    return lines
+
+
+class _MemoryTelemetry:
+    """One capped headless leaf's scope observer; ``tick`` is the heartbeat hook.
+
+    Instantiated per spawn (attempts under `_invoke_leaf_resilient` each get their
+    own, appending to the same file with a fresh ``spawn`` record as the boundary).
+    ``proc_root`` / ``cgroup_root`` exist for the tests, which point them at a fake
+    tree — there is no hermetic way to fake a real scope.
+    """
+
+    def __init__(self, log: Path, bound: str, *,
+                 proc_root: Path = Path("/proc"),
+                 cgroup_root: Path = Path("/sys/fs/cgroup")) -> None:
+        self.log = log
+        self.bound = bound
+        self.proc_root = proc_root
+        self.cgroup_root = cgroup_root
+        self.cgroup: Path | None = None  # discovered lazily: the scope outlives no race
+        self.unit = ""
+        self.start = time.monotonic()
+        self.wall_start = time.time()  # bounds the post-mortem's journal harvest
+        self.last: dict | None = None
+        self._append({"event": "spawn", "bound": bound})
+
+    # -- the heartbeat hook ----------------------------------------------------------
+    def tick(self, pid: int) -> str:
+        """Sample the scope; return a short suffix for the tick line ('' = nothing).
+
+        Returns '' — and logs nothing — until the child is observed in a cgroup of
+        its OWN (the scope): sampling the cgroup it shares with the harness would
+        attribute the whole terminal session to the leaf, which is exactly the
+        unattributable state #420 removed.
+        """
+        try:
+            return self._sample(pid)
+        except Exception:  # noqa: BLE001 — the observer contract (progress.py `status`)
+            return ""
+
+    def _sample(self, pid: int) -> str:
+        if self.cgroup is None:
+            self._discover(pid)
+        if self.cgroup is None:
+            return ""
+        mem = int((self.cgroup / "memory.current").read_text())
+        try:
+            peak = int((self.cgroup / "memory.peak").read_text())
+        except (OSError, ValueError):  # memory.peak needs Linux ≥ 5.19
+            peak = None
+        pids = [int(p) for p in (self.cgroup / "cgroup.procs").read_text().split()]
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "elapsed": round(time.monotonic() - self.start, 1),
+            "unit": self.unit,
+            "memory": mem,
+            "peak": peak,
+            "procs": len(pids),
+            "top": self._top_commands(pids),
+        }
+        self.last = record
+        self._append(record)
+        return f"mem {_fmt_bytes(mem)}/{self.bound} · {len(pids)} procs"
+
+    def _discover(self, pid: int) -> None:
+        """Find the child's scope cgroup — but only once it differs from our own.
+
+        Right after the spawn, `systemd-run` has not necessarily entered its scope
+        yet, and an unwrapped child never leaves the harness's cgroup at all; both
+        look identical here and both must sample nothing.
+        """
+        own = (self.proc_root / "self" / "cgroup").read_text()
+        child = (self.proc_root / str(pid) / "cgroup").read_text()
+        if child == own:
+            return
+        for line in child.splitlines():  # cgroup v2: the single '0::/path' entry
+            if line.startswith("0::"):
+                path = line[len("0::"):].strip()
+                self.cgroup = self.cgroup_root / path.lstrip("/")
+                self.unit = self.cgroup.name
+                return
+
+    def _top_commands(self, pids: list[int]) -> list[dict]:
+        """The scope's population, aggregated by command line, largest RSS first.
+
+        The aggregation is the diagnosis: the kernel's own OOM table lists bare
+        comms one row per task, which for the measured incident read as 1187
+        indistinguishable "python3" rows — the *argv* (which test, which runner)
+        is the datum it lacked, and per-cmdline grouping is what turns a storm
+        into one legible line.
+        """
+        page = os.sysconf("SC_PAGE_SIZE")
+        groups: dict[str, list[int]] = {}  # cmd → [count, rss_bytes]
+        for p in pids:
+            try:
+                raw = (self.proc_root / str(p) / "cmdline").read_bytes()
+                # Collapse ALL whitespace, not just the NUL separators: an argv
+                # carrying newlines (`python3 -c "…\n…"`) would otherwise break the
+                # post-mortem's one-command-one-line layout.
+                cmd = " ".join(raw.replace(b"\0", b" ").decode(errors="replace").split())
+                if not cmd:  # kernel thread / zombie: fall back to the bare comm
+                    cmd = (self.proc_root / str(p) / "comm").read_text().strip()
+                rss = int((self.proc_root / str(p) / "statm").read_text().split()[1]) * page
+            except (OSError, ValueError, IndexError):
+                continue  # raced with an exit — the scope's population is a moving target
+            entry = groups.setdefault(cmd[:160], [0, 0])
+            entry[0] += 1
+            entry[1] += rss
+        top = sorted(groups.items(), key=lambda kv: kv[1][1], reverse=True)
+        return [{"cmd": cmd, "n": n, "rss": rss}
+                for cmd, (n, rss) in top[:_MEMORY_TOP_COMMANDS]]
+
+    # -- the failure path ------------------------------------------------------------
+    def post_mortem(self, rc: int) -> str:
+        """The death explained, for the `*.error.log` capture: last sample + journal.
+
+        Appended to the LeafError's ``output`` by `_invoke` so it rides the existing
+        #138/#279 capture into the bundle — the error log a human already opens on a
+        failed leaf is where the explanation belongs, not a fourth file.
+        """
+        try:
+            journal = _scope_journal(self.unit, self.wall_start)
+            self._append({"event": "exit", "rc": rc, "journal": journal})
+            lines = [f"----- memory telemetry (bound {self.bound}) -----"]
+            if self.last is not None:
+                age = round(time.monotonic() - self.start - self.last["elapsed"])
+                head = (f"last sample {age}s before exit: "
+                        f"{_fmt_bytes(self.last['memory'])} used")
+                if self.last.get("peak"):
+                    head += f" (peak {_fmt_bytes(self.last['peak'])})"
+                head += f", {self.last['procs']} processes in {self.unit or 'the scope'}"
+                lines.append(head)
+                lines += [f"  {t['n']}× {t['cmd']} — {_fmt_bytes(t['rss'])}"
+                          for t in self.last["top"]]
+            else:
+                lines.append("no sample captured (the leaf died before the first tick, "
+                             "or it never entered a scope)")
+            lines += [f"  {ln}" for ln in journal]
+            lines.append(f"samples: {self.log}")
+            return "\n" + "\n".join(lines) + "\n"
+        except Exception:  # noqa: BLE001 — never mask the failure being explained
+            return ""
+
+    def _append(self, record: dict) -> None:
+        try:
+            with self.log.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+        except OSError:
+            pass  # a read-only bundle costs the telemetry, never the leaf
+
+
 def _invoke(
     leaf: LeafConfig,
     workdir: Path,
@@ -336,6 +574,7 @@ def _invoke(
     env: dict | None = None,
     extra_argv: list[str] | None = None,
     cfg: Config | None = None,
+    memory_log: Path | None = None,
 ) -> None:
     """Run the leaf's configured command in ``workdir``, feeding it ``prompt``.
 
@@ -357,6 +596,13 @@ def _invoke(
     (``[driver].leaf_memory_max`` / ``[leaves.*].memory_max``, issue #420) — see
     :func:`_memory_cap_prefix`. Unset (the default) or unenforceable on this host ⇒
     the argv spawned here is byte-identical to what it was before that knob existed.
+
+    ``memory_log``, when given AND the bound is actually in force, turns on the
+    bound's observability arm for a headless leaf (:class:`_MemoryTelemetry`): scope
+    samples land there as JSONL, the heartbeat line grows a ``mem …/… · N procs``
+    suffix, and a failing leaf's :class:`LeafError` carries a memory post-mortem in
+    its ``output``. Unbounded or interactive spawns ignore it — without a scope
+    there is nothing attributable to sample.
     """
     profile = families.resolve(leaf.family, cfg.families if cfg else None)
     role_argv, prompt_prefix = _role_injection(cfg, leaf, profile)
@@ -369,7 +615,8 @@ def _invoke(
     # so the default spawn is byte-identical to before. Prepended here, ahead of the
     # per-branch tails (the stream flags, the interactive seed): everything after the
     # wrapper's `--` is the leaf's own command line, in its original order.
-    argv = _memory_cap_prefix(leaf, cfg) + argv
+    cap = _memory_cap_prefix(leaf, cfg)
+    argv = cap + argv
     prompt = prompt_prefix + prompt
     run_env = {**os.environ, **env} if env else None
     if leaf.interactive:
@@ -402,11 +649,20 @@ def _invoke(
                   and profile.stream_format in progress.STREAM_FORMATS)
     if use_stream:
         argv += list(profile.stream_argv)
+    # Observe the scope only when there IS one (`cap`): telemetry against an unwrapped
+    # spawn would sample the cgroup the leaf shares with the harness — the whole
+    # session's numbers attributed to one leaf, worse than no numbers.
+    telemetry = (_MemoryTelemetry(memory_log, _leaf_memory_bound(leaf, cfg))
+                 if cap and memory_log is not None else None)
     rc, output, produced = progress.run_with_heartbeat(
         argv, cwd=workdir, input_text=prompt, label=label, status=status,
         stream_json=use_stream, tee_stderr=True, stream_format=profile.stream_format,
-        env=run_env)
+        env=run_env, telemetry=telemetry.tick if telemetry else None)
     if rc != 0:
+        if telemetry is not None:
+            # The death explained next to the death reported: the post-mortem rides
+            # `output` into the same `*.error.log` the stderr tail lands in.
+            output = (output or "") + telemetry.post_mortem(rc)
         # Only the stream path gives a real "did a session start" signal. Without it
         # (a stream-less family) we cannot tell invocation-death from a substantive
         # failure, so report produced=True → not transient, not retried — preserving
@@ -433,8 +689,17 @@ def _invoke_leaf_resilient(
     not found), is substantive: do not retry. On final failure the captured stderr
     tail of every attempt is written to ``error_log`` so the bundle carries
     recoverable error text, not just an exit code. Returns ``None`` on success, else
-    the final exception (a :class:`LeafError` exposes ``.transient``)."""
+    the final exception (a :class:`LeafError` exposes ``.transient``).
+
+    Every attempt also runs under memory telemetry when its spawn is memory-capped:
+    the ``*.memory.jsonl`` twin of ``error_log`` (`_memory_log_for`), cleared here
+    under the same staleness rule, each attempt's samples separated by its ``spawn``
+    record."""
     error_log.unlink(missing_ok=True)  # clear any stale tail from a prior cycle run
+    memory_log = _memory_log_for(error_log)
+    if memory_log is not None:
+        memory_log.unlink(missing_ok=True)
+        kw.setdefault("memory_log", memory_log)
     records: list[str] = []
     last: Exception | None = None
     for attempt in range(1, attempts + 1):
@@ -1485,6 +1750,7 @@ def do_build(d: Path, cfg: Config) -> None:
     # a failure this build never had (#280 review).
     error_log = d / BUILD_ERROR_LOG
     error_log.unlink(missing_ok=True)
+    (d / BUILD_MEMORY_LOG).unlink(missing_ok=True)  # same staleness rule (#280 review)
     if builder.mode != "command":
         _stub_build(d, cfg)
         return
@@ -1561,6 +1827,7 @@ def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None
         status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
         stream_json=True,  # Tier 3: show the builder's live tool-use
         env=env, extra_argv=extra, cfg=cfg,
+        memory_log=d / BUILD_MEMORY_LOG,  # scope telemetry, active only when capped
     )
 
 

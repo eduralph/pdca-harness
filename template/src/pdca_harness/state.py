@@ -115,8 +115,10 @@ DOWNSTREAM_OF_BRIEF = [
 
 # Cycle artifacts matched by pattern rather than name. ONE definition, read by both
 # `_archive_iteration` (what an iterate moves) and `is_resolved` (what counts as evidence
-# a cycle ran), so those two answers cannot drift apart.
-DOWNSTREAM_GLOBS = ("check-advisory-*.md", "*.error.log")
+# a cycle ran), so those two answers cannot drift apart. `*.memory.jsonl` is a leaf run's
+# scope telemetry (`leaves._MemoryTelemetry`): per-attempt like its `*.error.log` twin, so
+# it archives with the round it describes — and a bundle can only hold one if a leaf ran.
+DOWNSTREAM_GLOBS = ("check-advisory-*.md", "*.error.log", "*.memory.jsonl")
 
 # Cycle evidence that must NOT be archived — the one set where "what the archive moves"
 # and "what proves a cycle ran" deliberately differ, so it is deliberately NOT read by

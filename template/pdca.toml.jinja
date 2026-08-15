@@ -216,6 +216,14 @@ size_guard = "off"
 #     failure, and never a silent one;
 #   * per-leaf override: `memory_max` under any [leaves.*] table (below) wins for that leaf;
 #     `memory_max = "off"` there opts one leaf out of the driver-level bound entirely.
+#
+# A bound in force also turns on memory telemetry for the headless leaves (no extra knob):
+# on every heartbeat tick the driver samples the leaf's scope — memory used, process
+# count, top command lines by RSS — into a bundle-local `*.memory.jsonl` (the builder's is
+# `build.memory.jsonl`), the tick line grows a `mem 1.2GB/8G · 34 procs` suffix, and a leaf
+# that dies gets a post-mortem (last sample + the scope's journal excerpt) appended to its
+# `*.error.log`. So an OOM kill names WHAT filled the scope — e.g. `1187× python3 -m
+# unittest …` — not just that it died.
 # leaf_memory_max = "8G"
 
 
