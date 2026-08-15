@@ -47,6 +47,7 @@ def run_with_heartbeat(
     timeout: int | None = None,
     label: str = "",
     status: Callable[[], str] | None = None,
+    telemetry: Callable[[int], str] | None = None,
 ) -> tuple[int, str, bool]:
     """Run ``cmd``, printing ``… still working (NmSSs elapsed)`` every ``interval`` s.
 
@@ -104,6 +105,14 @@ def run_with_heartbeat(
     and its tail returned — so a stream-less leaf's failure is diagnosable too, and not
     only claude's. Implied by ``stream_json``; ignored under ``capture`` (which already
     keeps everything).
+
+    ``telemetry``, if given, is called with the **child's pid** once right after the
+    spawn and again on every tick; a non-empty return is appended to the tick line.
+    It is the resource-observation hook (`leaves._MemoryTelemetry` samples the child's
+    scope cgroup through it): the pid is the one datum only this function has, and the
+    tick is the one moment the harness is already awake while the child works. The same
+    best-effort contract as ``status``: any exception it raises is swallowed — an
+    observer can never break the run it observes.
     """
     tee_err = (stream_json or tee_stderr) and not capture
     capture_out = capture or stream_json
@@ -169,6 +178,15 @@ def run_with_heartbeat(
         except BrokenPipeError:
             pass
 
+    if telemetry is not None:
+        # Baseline sample at t≈0. The observer's cgroup discovery is racy this early
+        # (systemd-run may not have entered its scope yet) and skips itself when it is;
+        # the point is that a leaf which dies before the first tick still had one chance
+        # to be observed.
+        try:
+            telemetry(proc.pid)
+        except Exception:
+            pass
     suffix = f" — {label}" if label else ""
     start = time.monotonic()
     deadline = None if timeout is None else start + timeout
@@ -201,6 +219,13 @@ def run_with_heartbeat(
                         if snap:
                             bits.append(snap)
                     except Exception:  # a status probe must never break the run
+                        pass
+                if telemetry is not None:
+                    try:
+                        sample = telemetry(proc.pid)
+                        if sample:
+                            bits.append(sample)
+                    except Exception:  # an observer must never break the run
                         pass
                 extra = (" · " + " · ".join(bits)) if bits else ""
                 print(f"   … still working ({mins}m{secs:02d}s elapsed){suffix}{extra}",
