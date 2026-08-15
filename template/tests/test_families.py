@@ -327,46 +327,169 @@ class SandboxConfig(unittest.TestCase):
 
 
 
+_TEMPLATE_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _sandbox_active_headers(text: str) -> list[str]:
+    """Every UNCOMMENTED `[leaves.sandbox]` header. More than one is the PR #292 defect:
+    `tomllib` refuses a table declared twice, so the driver will not start at all — in
+    EVERY posture, not only the template's own default (issue #507)."""
+    return re.findall(r"^\[leaves\.sandbox\]\s*$", text, re.M)
+
+
+def _sandbox_commented_block(text: str) -> str | None:
+    """The copy-paste example block, if `text` still carries one. An instance that
+    enrolled the seam MAY have deleted the now-redundant example, so its absence is not
+    itself a defect — only whether a KEPT one is still valid TOML matters everywhere."""
+    m = re.search(r"^# \[leaves\.sandbox\]\n(?:^#[^\n]*\n)+", text, re.M)
+    return m.group(0) if m else None
+
+
+def _sandbox_example_parses(block: str) -> dict:
+    """The example block, uncommented and parsed under ONE `[leaves.sandbox]` table."""
+    uncommented = "\n".join(
+        line[2:] if line.startswith("# ") else line.lstrip("#")
+        for line in block.strip().splitlines())
+    parsed = tomllib.loads('[project]\ndefault_branch = "main"\n' + uncommented)
+    return parsed["leaves"]["sandbox"]
+
+
 class ShippedPdcaTomlExamples(unittest.TestCase):
     """PR #292 review (codex). The template shipped TWO commented `[leaves.sandbox]` headers —
     one per key. The docs say the keys are independent opt-ins, so an operator enabling both
     naturally uncomments both, and `tomllib` then refuses the file outright ("Cannot declare
     ('leaves','sandbox') twice"): `pdca.toml` fails to load and the driver will not start AT ALL.
 
-    The commented examples are copy-paste instructions, so they must be valid TOML when
-    uncommented — that is the contract this pins.
+    This suite ships INTO rendered instances, so it may assert only what holds in every
+    posture the template sanctions (issue #386, #507). "The example stays commented" is the
+    template's own DEFAULT — an instance that enrols the seam (the sanctioned #277/#287
+    opt-in the block's own comment invites) is not obliged to keep the copy-paste text
+    beside its now-active table. What holds everywhere is that `pdca.toml` stays LOADABLE:
+    at most one ACTIVE header, and any commented example that IS still present round-trips
+    to valid TOML under that one table with an unquoted boolean.
     """
 
-    def _source(self) -> str:
-        """The config an operator actually edits: `pdca.toml.jinja` in-tree, and `pdca.toml` in a
-        RENDERED instance — this test file ships INTO the render, where the .jinja is gone. Both
-        carry the same commented block, so the guard covers the template AND its output. (The
-        first cut hardcoded the .jinja and blew up inside `render-check` — precisely the job that
-        gate exists to do.)"""
-        root = Path(__file__).resolve().parents[1]
+    #: Overridable by `ShippedPdcaTomlExamplePostures` below to drive this suite's own
+    #: assertions against synthetic text/posture in a temp dir, without touching the real
+    #: checkout and without a subprocess (issue #507's fork-storm constraint).
+    SOURCE_TEXT: str | None = None
+    SOURCE_RENDERED: bool | None = None
+
+    def _source(self) -> tuple[str, bool]:
+        """(text, rendered) — `pdca.toml.jinja` in-tree, `pdca.toml` in a RENDERED
+        instance; this test file ships INTO the render, where the .jinja is gone. The
+        earlier version returned only the text, so the posture was not exposed at the
+        point of assertion the way `RENDERED` is in `test_remote_control_docs.py:35`
+        (issue #507)."""
+        if self.SOURCE_TEXT is not None:
+            return self.SOURCE_TEXT, bool(self.SOURCE_RENDERED)
         for name in ("pdca.toml.jinja", "pdca.toml"):
-            path = root / name
+            path = _TEMPLATE_ROOT / name
             if path.is_file():
-                return path.read_text(encoding="utf-8")
-        return self.skipTest("no pdca.toml(.jinja) beside the tests")
+                return path.read_text(encoding="utf-8"), name == "pdca.toml"
+        self.skipTest("no pdca.toml(.jinja) beside the tests")
+        raise AssertionError("unreachable")  # skipTest raises; keeps this a total function
 
-    def test_leaves_sandbox_is_declared_exactly_once(self) -> None:
-        src = self._source()
-        headers = re.findall(r"^#?\s*\[leaves\.sandbox\]\s*$", src, re.M)
-        self.assertEqual(len(headers), 1,
-                         "a second [leaves.sandbox] header makes the uncommented file unparseable")
+    def test_leaves_sandbox_is_declared_at_most_once_active(self) -> None:
+        """Binds EVERY posture (issue #507): TOML forbids the same table twice, so more
+        than one ACTIVE `[leaves.sandbox]` header makes `pdca.toml` unparseable regardless
+        of whether a commented example also sits nearby."""
+        src, _ = self._source()
+        headers = _sandbox_active_headers(src)
+        self.assertLessEqual(len(headers), 1,
+                             "a second ACTIVE [leaves.sandbox] header makes pdca.toml unparseable")
 
-    def test_the_commented_example_parses_when_uncommented(self) -> None:
-        src = self._source()
-        block = re.search(r"^# \[leaves\.sandbox\]\n(?:^#[^\n]*\n)+", src, re.M)
-        self.assertIsNotNone(block, "the [leaves.sandbox] example must still be there")
-        uncommented = "\n".join(
-            line[2:] if line.startswith("# ") else line.lstrip("#")
-            for line in block.group(0).strip().splitlines())
-        parsed = tomllib.loads('[project]\ndefault_branch = "main"\n' + uncommented)
-        sandbox = parsed["leaves"]["sandbox"]
+    def test_the_commented_example_round_trips_when_present(self) -> None:
+        """Binds EVERY posture (issue #507): an instance MAY keep the copy-paste example
+        beside its now-active table (the template does not forbid it) — if it does, the
+        example must still be valid TOML under ONE table with an unquoted boolean, same
+        as the template's own default. An instance that deleted the example has nothing
+        to round-trip, which is not a defect this test is about."""
+        src, _ = self._source()
+        block = _sandbox_commented_block(src)
+        if block is None:
+            return
+        sandbox = _sandbox_example_parses(block)
         self.assertIn("unsandboxed_commands", sandbox)   # both keys, under ONE table
         self.assertIs(sandbox["network_access"], True)   # …and an UNQUOTED boolean
+
+    def test_the_commented_example_is_still_present(self) -> None:
+        """Binds the TEMPLATE CHECKOUT ONLY (issue #507): shipping the example commented
+        is the template's own DEFAULT, not an invariant every render must preserve — an
+        instance that enrolled the seam at its own Act review (the sanctioned #277/#287
+        opt-in) is not obliged to keep the now-redundant copy-paste text beside the
+        now-active table."""
+        src, rendered = self._source()
+        if rendered:
+            self.skipTest("the commented example's mere presence is the template's own "
+                          "default, not an invariant a render must preserve (issue #507)")
+        self.assertIsNotNone(_sandbox_commented_block(src),
+                             "the [leaves.sandbox] example must still be there")
+
+
+class ShippedPdcaTomlExamplePostures(unittest.TestCase):
+    """Posture regressions (issue #507). The checkout this suite runs in can only show ONE
+    posture at a time, so these build the OTHER postures as synthetic `pdca.toml` text in a
+    temp dir and drive the REAL `ShippedPdcaTomlExamples` suite against it in-process — no
+    subprocess (the brief's fork-storm constraint; the Success criterion already mandates
+    this shape) — the same idea `test_remote_control_docs.py`'s `RemoteControlPostures`
+    uses for issue #386, applied to a whole TestCase run rather than one pure function."""
+
+    _EXAMPLE = ("# [leaves.sandbox]\n"
+               "# unsandboxed_commands = [\"cargo xtask fdb-conformance\"]  # claude\n"
+               "# network_access = true                                    # codex\n")
+    _ACTIVE = ("[leaves.sandbox]\n"
+              "unsandboxed_commands = [\"cargo xtask fdb-conformance\"]\n"
+              "network_access = true\n")
+
+    def _run(self, text: str, rendered: bool) -> unittest.TestResult:
+        suite = unittest.TestSuite()
+        for name in unittest.defaultTestLoader.getTestCaseNames(ShippedPdcaTomlExamples):
+            case = ShippedPdcaTomlExamples(name)
+            case.SOURCE_TEXT = text
+            case.SOURCE_RENDERED = rendered
+            suite.addTest(case)
+        result = unittest.TestResult()
+        suite.run(result)
+        return result
+
+    def test_unrendered_checkout_is_unchanged(self) -> None:
+        """Posture (i): today's green, driven from the real template checkout text."""
+        src, rendered = ShippedPdcaTomlExamples()._source()
+        result = self._run(src, rendered)
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+
+    def test_active_table_without_the_example_is_loadable(self) -> None:
+        """Posture (ii): this instance's own posture (enabled 2026-08-01, `pdca.toml:977-978`
+        in the sibling instance) — an active table, no commented example beside it. RED
+        today (`test_the_commented_example_parses_when_uncommented` required the example
+        unconditionally)."""
+        src = "[project]\ndefault_branch = \"main\"\n\n" + self._ACTIVE
+        result = self._run(src, rendered=True)
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+
+    def test_active_table_with_the_kept_example_is_loadable(self) -> None:
+        """Posture (iii): an active table that ALSO kept the commented example beside it.
+        RED today (the combined regex counts both -> 2 headers -> the "exactly once"
+        assertion fails)."""
+        src = "[project]\ndefault_branch = \"main\"\n\n" + self._EXAMPLE + "\n" + self._ACTIVE
+        result = self._run(src, rendered=True)
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+
+    def test_two_active_headers_still_fails(self) -> None:
+        """Posture (v), the PR #292 defect: must stay caught in EVERY posture — `tomllib`
+        refuses the file outright, so the driver will not start at all. Still RED, by
+        design; this is the negative control proving the loosened assertion still bites."""
+        src = "[project]\ndefault_branch = \"main\"\n\n" + self._ACTIVE + "\n" + self._ACTIVE
+        result = self._run(src, rendered=True)
+        self.assertFalse(result.wasSuccessful())
+        self.assertTrue(
+            any("at_most_once_active" in t.id() for t, _ in result.failures),
+            [t.id() for t, _ in result.failures])
+        # …and the underlying defect is real: tomllib itself refuses the uncommented file.
+        with self.assertRaises(tomllib.TOMLDecodeError):
+            tomllib.loads(src)
+
 
 if __name__ == "__main__":
     unittest.main()
