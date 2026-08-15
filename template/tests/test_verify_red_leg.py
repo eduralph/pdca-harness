@@ -29,9 +29,17 @@ from pathlib import Path
 # The C4 outline every rendered instance fills in: what it says about deciding a leg's
 # verdict IS the rule, because nothing else in the harness can decide it (how many tests ran
 # depends on the project's language and runner).
-_ENGINE = Path(__file__).resolve().parents[1] / "engine"
+_TEMPLATE_ROOT = Path(__file__).resolve().parents[1]
+_ENGINE = _TEMPLATE_ROOT / "engine"
 # `run-verify.sh` carries no `.jinja` suffix, so copier copies it verbatim (copier.yml:14).
+# Unlike `pdca.toml`, this file's own NAME never signals which posture it is in — every
+# instance is instructed to overwrite it with its own gate — so the posture is read off the
+# project root's `pdca.toml(.jinja)` instead, the same signal `test_families.py` and
+# `test_remote_control_docs.py` use (issue #507).
 _SKELETON = _ENGINE / "scripts" / "run-verify.sh"
+_TOML = next((_TEMPLATE_ROOT / n for n in ("pdca.toml.jinja", "pdca.toml")
+             if (_TEMPLATE_ROOT / n).is_file()), None)
+RENDERED = _TOML is not None and _TOML.name == "pdca.toml"
 # …and the prose that carries the longer explanation, §"The two gate shapes that matter".
 # `README.md.jinja` in the template checkout, `README.md` in a rendered instance — this
 # suite ships to instances and the render/update-compat suites run it there.
@@ -63,10 +71,26 @@ class _WordingCase(unittest.TestCase):
 
 
 class C4RedLegVerdictRule(_WordingCase):
-    """The published instructions must make "no test ran" its own outcome, not a red."""
+    """The published instructions must make "no test ran" its own outcome, not a red.
+
+    Binds the TEMPLATE CHECKOUT ONLY (issue #507): `run-verify.sh` is the one file every
+    instance is *told* to replace (`engine/scripts/run-verify.sh:2`, "SKELETON. Fill this
+    in for your project."; `engine/README.md.jinja:31,84`) — what the harness *publishes*
+    in its skeleton, not what an instance's own filled-in gate must go on quoting."""
+
+    #: Overridable by `C4SkeletonWordingPostures` below to drive this suite's own
+    #: assertions against synthetic text/posture in a temp dir, without touching the real
+    #: checkout and without a subprocess (issue #507's fork-storm constraint).
+    SKELETON_TEXT: str | None = None
+    RENDERED: bool = RENDERED
 
     def setUp(self) -> None:
-        self.text = _SKELETON.read_text(encoding="utf-8")
+        if self.RENDERED:
+            self.skipTest("run-verify.sh is instructed to become the instance's own "
+                          "filled-in gate once rendered — the skeleton wording binds "
+                          "the template checkout only (issue #507)")
+        self.text = self.SKELETON_TEXT if self.SKELETON_TEXT is not None \
+            else _SKELETON.read_text(encoding="utf-8")
 
     def _two_factor_block(self) -> str:
         """The section of the outline that states the verdict rule.
@@ -139,6 +163,61 @@ class C4RedLegVerdictRule(_WordingCase):
         for sentence in ("exit 77", "PDCA-UNVERIFIABLE: <reason>",
                          "SUMMARY §6", "NEEDS-HUMAN, non-gating"):
             self.assertSays(sentence, block, "the C4 outline")
+
+
+class C4SkeletonWordingPostures(unittest.TestCase):
+    """Posture regressions (issue #507). Drives the REAL `C4RedLegVerdictRule` suite
+    in-process against synthetic text/posture — no subprocess (the brief's fork-storm
+    constraint; the Success criterion already mandates this shape) — by pointing its
+    overridable `SKELETON_TEXT`/`RENDERED` at synthetic values instead of the checkout's
+    own files, the same `RemoteControlPostures`-style construction #386 used, applied to
+    a whole TestCase run rather than one pure function."""
+
+    #: A filled-in project gate that quotes none of the skeleton's wording — the shape
+    #: `engine/README.md.jinja:31,84` instructs every instance to replace the skeleton
+    #: with (a real apply/run/revert script for the project's own runner).
+    _FILLED_IN = (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "# our project's own C4 gate\n"
+        "pytest -q --junitxml=report.xml\n"
+        "exit $?\n"
+    )
+
+    def _run(self, text: str, rendered: bool) -> unittest.TestResult:
+        suite = unittest.TestSuite()
+        for name in unittest.defaultTestLoader.getTestCaseNames(C4RedLegVerdictRule):
+            case = C4RedLegVerdictRule(name)
+            case.SKELETON_TEXT = text
+            case.RENDERED = rendered
+            suite.addTest(case)
+        result = unittest.TestResult()
+        suite.run(result)
+        return result
+
+    def test_the_unrendered_posture_still_requires_the_full_wording(self) -> None:
+        """Posture (i): today's green, unchanged — the real skeleton text against the
+        template checkout."""
+        result = self._run(_SKELETON.read_text(encoding="utf-8"), rendered=False)
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+
+    def test_a_filled_in_gate_missing_the_wording_is_not_flagged_once_rendered(self) -> None:
+        """Posture (iv): a rendered instance replaced the skeleton with its own real gate
+        that quotes none of the skeleton's wording — 8 failures today (these 7 plus the
+        base-ladder case in `test_verify_base.py`). Must be green: the property is scoped
+        to what the harness PUBLISHES, not to what every instance is instructed to
+        overwrite (issue #507)."""
+        result = self._run(self._FILLED_IN, rendered=True)
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+        self.assertEqual(result.testsRun, len(result.skipped))
+
+    def test_the_same_filled_in_text_would_fail_if_it_were_still_bound(self) -> None:
+        """Negative control: without the posture scope this fixture fails loudly (it
+        quotes none of the skeleton's wording), so the previous test is exercising the
+        skip, not a fixture that happens to pass anyway."""
+        result = self._run(self._FILLED_IN, rendered=False)
+        self.assertFalse(result.wasSuccessful())
+        self.assertEqual(len(result.failures), 7, result.failures)
 
 
 class EngineReadmeExplainsTheRule(_WordingCase):

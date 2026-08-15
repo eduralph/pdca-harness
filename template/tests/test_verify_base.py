@@ -52,7 +52,15 @@ _ECHO_BASES = {
 
 # The C4 skeleton every rendered instance fills in: it publishes the ladder gate scripts
 # follow, so it is where an instance learns whether to read the export or parse the brief.
-_SKELETON = Path(__file__).resolve().parents[1] / "engine" / "scripts" / "run-verify.sh"
+_TEMPLATE_ROOT = Path(__file__).resolve().parents[1]
+_SKELETON = _TEMPLATE_ROOT / "engine" / "scripts" / "run-verify.sh"
+# `run-verify.sh` carries no `.jinja` suffix, so its own name never signals which posture
+# it is in — every instance is instructed to overwrite it with its own gate. Read the
+# posture off the project root's `pdca.toml(.jinja)` instead, same signal `test_families.py`
+# and `test_remote_control_docs.py` use (issue #507).
+_TOML = next((_TEMPLATE_ROOT / n for n in ("pdca.toml.jinja", "pdca.toml")
+             if (_TEMPLATE_ROOT / n).is_file()), None)
+RENDERED = _TOML is not None and _TOML.name == "pdca.toml"
 
 
 def _stub_config(root: Path) -> Config:
@@ -72,6 +80,14 @@ def _stub_config(root: Path) -> Config:
 
 
 class VerifyBaseExport(unittest.TestCase):
+    #: Overridable by `C4BaseLadderPostures` below to drive
+    #: `test_the_c4_skeleton_names_the_export_as_the_last_rung` against synthetic
+    #: text/posture in a temp dir, without touching the real checkout and without a
+    #: subprocess (issue #507's fork-storm constraint). Every other test method in this
+    #: class ignores these — they bind every instance and are untouched by issue #507.
+    SKELETON_TEXT: str | None = None
+    RENDERED: bool = RENDERED
+
     def setUp(self) -> None:
         # Hermetic baseline (see _BASE_VARS): snapshot the environment, drop the three vars
         # under test for the duration of the test, restore it afterwards. Only these three
@@ -293,12 +309,71 @@ class VerifyBaseExport(unittest.TestCase):
     def test_the_c4_skeleton_names_the_export_as_the_last_rung(self) -> None:
         """The guidance every rendered instance fills in must terminate the ladder in the
         export, not in "parse the brief yourself" — that instruction is what made each
-        instance re-derive the anchored parse in bash."""
-        text = _SKELETON.read_text(encoding="utf-8")
+        instance re-derive the anchored parse in bash.
+
+        Binds the TEMPLATE CHECKOUT ONLY (issue #507): `run-verify.sh` is the one file
+        every instance is *told* to replace (`engine/scripts/run-verify.sh:2`,
+        `engine/README.md.jinja:31,84`) — what the harness *publishes* in its skeleton,
+        not what an instance's own filled-in gate must go on quoting. (The base ladder
+        itself is unaffected — `$PDCA_BASE`/`$PDCA_VERIFY_BASE`/`$PDCA_BRIEF_BASE` are
+        still exported to every gate subprocess by every other test in this class.)"""
+        if self.RENDERED:
+            self.skipTest("run-verify.sh is instructed to become the instance's own "
+                          "filled-in gate once rendered — the base-ladder wording binds "
+                          "the template checkout only (issue #507)")
+        text = self.SKELETON_TEXT if self.SKELETON_TEXT is not None \
+            else _SKELETON.read_text(encoding="utf-8")
         self.assertIn("$PDCA_BRIEF_BASE", text)
         self.assertIn("Resolve as: $PDCA_BASE > $PDCA_VERIFY_BASE > your own override "
                       "> $PDCA_BRIEF_BASE", text)
         self.assertNotIn("origin/<default>", text)   # the old, un-supplied last rungs
+
+
+class C4BaseLadderPostures(unittest.TestCase):
+    """Posture regressions (issue #507). Drives the REAL
+    `VerifyBaseExport.test_the_c4_skeleton_names_the_export_as_the_last_rung` method
+    in-process against synthetic text/posture — no subprocess (the brief's fork-storm
+    constraint; the Success criterion already mandates this shape) — by pointing its
+    overridable `SKELETON_TEXT`/`RENDERED` at synthetic values instead of the checkout's
+    own files."""
+
+    _METHOD = "test_the_c4_skeleton_names_the_export_as_the_last_rung"
+
+    #: A filled-in project gate that names none of the base-ladder vocabulary — the
+    #: shape `engine/README.md.jinja:31,84` instructs every instance to replace the
+    #: skeleton with.
+    _FILLED_IN = "#!/usr/bin/env bash\nset -euo pipefail\npytest -q\n"
+
+    def _run(self, text: str, rendered: bool) -> unittest.TestResult:
+        case = VerifyBaseExport(self._METHOD)
+        case.SKELETON_TEXT = text
+        case.RENDERED = rendered
+        result = unittest.TestResult()
+        case.run(result)
+        return result
+
+    def test_the_unrendered_posture_still_requires_the_base_ladder(self) -> None:
+        """Posture (i): today's green, unchanged — the real skeleton text against the
+        template checkout."""
+        result = self._run(_SKELETON.read_text(encoding="utf-8"), rendered=False)
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+
+    def test_a_filled_in_gate_missing_the_ladder_is_not_flagged_once_rendered(self) -> None:
+        """Posture (iv): a rendered instance replaced the skeleton with its own real gate
+        that names none of the base-ladder vocabulary — one of today's 8 failures (the
+        other 7 are `C4RedLegVerdictRule` in `test_verify_red_leg.py`). Must be green:
+        the property is scoped to what the harness PUBLISHES, not to what every instance
+        is instructed to overwrite (issue #507)."""
+        result = self._run(self._FILLED_IN, rendered=True)
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+        self.assertEqual(len(result.skipped), 1)
+
+    def test_the_same_missing_ladder_would_fail_if_it_were_still_bound(self) -> None:
+        """Negative control: without the posture scope this fixture fails (it names none
+        of the base-ladder vocabulary), so the previous test is exercising the skip, not
+        a fixture that happens to pass anyway."""
+        result = self._run(self._FILLED_IN, rendered=False)
+        self.assertFalse(result.wasSuccessful())
 
 
 if __name__ == "__main__":
