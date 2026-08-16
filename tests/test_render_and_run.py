@@ -1,8 +1,11 @@
 """Template-repo test: render with copier, then run the generated slice.
 
 This verifies the *template* (copier.yml + .jinja rendering) and the generated
-driver together. Skips cleanly if copier isn't importable, so a bare checkout
-without dev deps still collects. Run with: python -m unittest discover -s tests
+driver together. Skips cleanly if copier isn't importable by the interpreter
+running it — reached at the point of use, so the reason names that and not some
+proposition settled at import time (see tests/copier_support.py). A run in which
+that skip happened is not evidence of anything: `python3 -m tests.run_root_suite`
+reports it as such. Run with: python -m unittest discover -s tests
 """
 
 from __future__ import annotations
@@ -20,17 +23,18 @@ REPO = Path(__file__).resolve().parents[1]
 def _git(cwd: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
-try:
-    from copier import run_copy  # type: ignore
 
-    HAVE_COPIER = True
-except Exception:  # pragma: no cover - environment without copier
-    HAVE_COPIER = False
+try:  # `discover -s tests` puts tests/ on sys.path; `-m unittest tests.<mod>` puts the root
+    from copier_support import import_copier
+except ImportError:  # the other invocation shape — this repo's own callers use both
+    from tests.copier_support import import_copier
 
 
-@unittest.skipUnless(HAVE_COPIER, "copier not installed")
 class RenderAndRun(unittest.TestCase):
     def test_render_then_slice(self) -> None:
+        # At the point of use, before any fixture work: an interpreter that cannot import
+        # copier skips here, with the import error and where the CLI was found on PATH.
+        copier = import_copier()
         tmp = Path(tempfile.mkdtemp())
         try:
             # Render from a tagged git copy so copier records a version (what
@@ -42,7 +46,7 @@ class RenderAndRun(unittest.TestCase):
             _git(src, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x")
             _git(src, "tag", "v0test")
             out = tmp / "out"
-            run_copy(
+            copier.run_copy(
                 str(src),
                 str(out),
                 data={"project_name": "Render Test", "tracker_url": "https://x/issues"},

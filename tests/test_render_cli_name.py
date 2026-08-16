@@ -7,7 +7,10 @@ source that quotes the default name literally (e.g. the CI re-gate's
 `run: pdca gates --working-tree`, issue #375) breaks every such instance:
 CI fails command-not-found on every PR. This renders with a namespaced answer
 and asserts no file rendered from a template/**/*.jinja source still carries a
-bare `pdca <subcommand>` invocation. Skips cleanly if copier isn't importable.
+bare `pdca <subcommand>` invocation. Skips cleanly if copier isn't importable by
+the interpreter running it, reached at the point of use so the reason names that
+(tests/copier_support.py); `python3 -m tests.run_root_suite` reports such a run as
+no evidence rather than as a pass.
 Run with: python -m unittest tests.test_render_cli_name
 """
 
@@ -41,17 +44,17 @@ BARE_INVOCATION = re.compile(
 def _git(cwd: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
-try:
-    from copier import run_copy  # type: ignore
 
-    HAVE_COPIER = True
-except Exception:  # pragma: no cover - environment without copier
-    HAVE_COPIER = False
+try:  # `discover -s tests` puts tests/ on sys.path; `-m unittest tests.<mod>` puts the root
+    from copier_support import import_copier
+except ImportError:  # the other invocation shape — this repo's own callers use both
+    from tests.copier_support import import_copier
 
 
-@unittest.skipUnless(HAVE_COPIER, "copier not installed")
 class RenderCliName(unittest.TestCase):
     def test_namespaced_cli_name_reaches_every_rendered_command(self) -> None:
+        # At the point of use, before any fixture work (see tests/copier_support.py).
+        copier = import_copier()
         tmp = Path(tempfile.mkdtemp())
         try:
             # Render from a tagged git copy of the working tree (the same harness
@@ -63,7 +66,7 @@ class RenderCliName(unittest.TestCase):
             _git(src, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x")
             _git(src, "tag", "v0test")
             out = tmp / "out"
-            run_copy(
+            copier.run_copy(
                 str(src),
                 str(out),
                 data={

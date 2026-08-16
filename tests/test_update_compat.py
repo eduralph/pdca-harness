@@ -12,8 +12,11 @@ single commit of the *current* tree and tags only `v0test`, so there is no prior
 render from. Here the throwaway repo carries two commits — a genuine prior release tree
 (`git archive <tag>`) and the current working tree — tagged so copier can move between them.
 
-Skips cleanly when copier is missing, or when the checkout has no release tags (a shallow
-CI clone: `actions/checkout` needs `fetch-depth: 0` for this to run).
+Skips cleanly when copier is not importable by the interpreter running it, or when the
+checkout has no release tags (a shallow CI clone: `actions/checkout` needs `fetch-depth: 0`
+for this to run). Both preconditions are discovered where they are used, so the reason names
+the one that actually stopped the run; `python3 -m tests.run_root_suite` then reports a run
+in which neither ran as no evidence rather than as a pass (issue #342's other half).
 """
 
 from __future__ import annotations
@@ -29,12 +32,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
-try:
-    from copier import run_copy, run_update  # type: ignore
-
-    HAVE_COPIER = True
-except Exception:  # pragma: no cover - environment without copier
-    HAVE_COPIER = False
+try:  # `discover -s tests` puts tests/ on sys.path; `-m unittest tests.<mod>` puts the root
+    from copier_support import import_copier
+except ImportError:  # the other invocation shape — this repo's own callers use both
+    from tests.copier_support import import_copier
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -204,11 +205,16 @@ def load_updated_config(out: Path) -> tuple[dict | None, str]:
 def render_prior_edit_and_update(tmp: Path, prior: str) -> tuple[dict | None, str]:
     """The whole flow, returning the merged config. Shared so per-issue update assertions
     (e.g. #339's T4 publish-selection rule) reuse one fixture instead of rebuilding it."""
+    # Resolved here, at the point of use, rather than passed in: this is the shared fixture
+    # other update assertions reuse, so it must stand on its own. `UpdateCompat.setUpClass`
+    # settles the same precondition before it allocates its temp dir, so by the time this
+    # runs the module is already in `sys.modules` and this call is only the lookup.
+    copier = import_copier()
     src = build_two_ref_source(tmp, prior)
     out = tmp / "instance"
-    run_copy(str(src), str(out),
-             data={"project_name": "Update Test", "tracker_url": "https://x/issues"},
-             vcs_ref="v_old", defaults=True, unsafe=True, quiet=True)
+    copier.run_copy(str(src), str(out),
+                    data={"project_name": "Update Test", "tracker_url": "https://x/issues"},
+                    vcs_ref="v_old", defaults=True, unsafe=True, quiet=True)
     # copier update refuses to run on a non-repo / dirty tree, and a real instance is
     # always a repo — so commit the render, then the edits, as an instance would.
     _git(out, "init", "-q")
@@ -216,8 +222,8 @@ def render_prior_edit_and_update(tmp: Path, prior: str) -> tuple[dict | None, st
     apply_instance_edits(out)
     _commit(out, "instance edits")
 
-    run_update(str(out), vcs_ref="v_new", defaults=True, unsafe=True,
-               quiet=True, overwrite=True)
+    copier.run_update(str(out), vcs_ref="v_new", defaults=True, unsafe=True,
+                      quiet=True, overwrite=True)
     # Positive postcondition: without it every assertion below still holds on the v_old
     # render, so a no-op update — a resolution change, a future Copier behaviour — would
     # leave this suite permanently green while exercising nothing.
@@ -229,7 +235,6 @@ def render_prior_edit_and_update(tmp: Path, prior: str) -> tuple[dict | None, st
     return load_updated_config(out)
 
 
-@unittest.skipUnless(HAVE_COPIER, "copier not installed")
 class UpdateCompat(unittest.TestCase):
     """`copier update` from the previous release must not silently change an instance."""
 
@@ -239,6 +244,11 @@ class UpdateCompat(unittest.TestCase):
         if cls.prior is None:  # pragma: no cover - shallow clone
             raise unittest.SkipTest(
                 "no vX.Y.Z tags in this checkout (shallow clone? needs fetch-depth: 0)")
+        # BOTH preconditions before anything is allocated. A skip out of setUpClass sets
+        # `_classSetupFailed` in unittest.suite, so tearDownClass never runs and a temp dir
+        # created above the check would survive the run — the same order the two sibling
+        # suites use (test_render_and_run.py:37, test_render_cli_name.py:57).
+        import_copier()
         cls.tmp = Path(tempfile.mkdtemp())
         cls.out = cls.tmp / "instance"
         cls.cfg, cls.load_error = render_prior_edit_and_update(cls.tmp, cls.prior)
