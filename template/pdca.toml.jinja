@@ -908,6 +908,15 @@ argv = []
 # C4 — the per-fix CORRECTNESS gate (bundle-scoped, GATING). Applies the bundle's
 # patch.diff and runs ONLY its test, asserting red-without-fix / green-with-fix.
 # This is what makes a cycle mean something — it validates THIS change.
+#
+# THE BASE LADDER (issue #474) — `$PDCA_BASE` / `$PDCA_VERIFY_BASE` / `$PDCA_BRIEF_BASE`,
+# the base a per-fix verifier resets to before applying `patch.diff` — is exported to this
+# row ONLY, never to any other configured row (repo-scoped or bundle-scoped). A row is the
+# verifier iff `verifies_base = true` is set explicitly, OR (undeclared) iff its `tier` is
+# `"C4"` — which the row below already is, so this default costs a rendered instance
+# NOTHING: your existing C4 row keeps receiving the base with no edit here. Give a
+# differently-tiered row `verifies_base = true` only if IT is the one that resets to and
+# tests against the base (rare — most projects have exactly one such row, this one).
 # [[gates.checks]]
 # id = "C4-verify"
 # tier = "C4"

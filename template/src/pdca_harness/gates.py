@@ -470,6 +470,31 @@ def _gate_timeout(chk: dict, default: int | None) -> int | None:
     return secs if secs > 0 else None
 
 
+def _verifies_base(chk: dict) -> bool:
+    """True iff ``chk`` is **the per-fix verifier** — the one row the base ladder
+    (``PDCA_BASE`` / ``PDCA_VERIFY_BASE`` / ``PDCA_BRIEF_BASE``, :func:`_run_one` below)
+    is exported to (issue #474).
+
+    Declared explicitly, either direction, via ``verifies_base`` on the ``[[gates.checks]]``
+    row — the same shape :func:`_deferrable`'s ``at_publish`` already uses for a row-level
+    override. Undeclared, it defaults to ``tier == "C4"``: not scope, because scope alone
+    does not separate the verifier from an ordinary bundle-scoped row (a repo's own T3
+    row can be bundle-scoped too), and tier because ``"C4"`` is already, by convention,
+    reserved for exactly this row — the skeleton's own comment names it "the per-fix
+    CORRECTNESS gate" (``template/pdca.toml.jinja:908-917``) and every shipped example row
+    (there and in ``tests/test_verify_base.py``'s ``_ECHO_BASES``) tags it ``tier = "C4"``.
+
+    **Compatibility rule (issue #474):** an instance whose C4 row predates this change
+    carries no ``verifies_base`` key at all, so it falls through to the ``tier == "C4"``
+    default and keeps receiving the base with NO config edit — the tier it already
+    declares is the declaration. Only a row that is NEITHER tagged ``tier = "C4"`` NOR
+    explicitly opted in with ``verifies_base = true`` loses the export; a row that used to
+    (wrongly) receive it only because it happened to be bundle-scoped never had a
+    contractual claim to it in the first place.
+    """
+    return bool(chk.get("verifies_base", chk.get("tier") == "C4"))
+
+
 def _run_one(chk: dict, *, cfg: Config, cwd: Path, bundle: Path | None, runner: str = "",
              worktree_path: Path | None = None,
              default_timeout: int | None = None,
@@ -521,8 +546,12 @@ def _run_one(chk: dict, *, cfg: Config, cwd: Path, bundle: Path | None, runner: 
     #
     # Exporting more than one would tell the gate to verify against the integration branch
     # while publish commits to the Onto branch — exactly the divergence #54 exists to prevent
-    # (PR #282 review). Exactly one is set for every bundle-scoped gate invocation.
-    if bundle is not None:
+    # (PR #282 review). Exactly one is set for every bundle-scoped gate invocation of the
+    # per-fix VERIFIER row — and, since issue #474, of that row alone: a repo-scoped
+    # whole-suite row, a docs-lint row, or ANY OTHER bundle-scoped row (scope does not
+    # separate them — this project's own T3 row is bundle-scoped too) never asked to
+    # reconstruct a base and must not observe one (see :func:`_verifies_base`).
+    if bundle is not None and _verifies_base(chk):
         onto = brief.onto_branch(bundle / "brief.md")
         if onto is not None:
             env = {**(env or {}), "PDCA_BASE": f"{onto[0]}/{onto[1]}"}
