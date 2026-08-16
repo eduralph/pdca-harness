@@ -731,6 +731,143 @@ def _format_leaf_attempt(exc: Exception, attempt: int) -> str:
 
 
 # ----------------------------------------------------------------------------
+# Workspace admission for the INTERACTIVE leaves (issue #494).
+#
+# Every directory the harness INSTRUCTS a leaf to read must be admitted to that leaf's
+# workspace BY THE HARNESS, through the family's grounding flag. The headless half
+# already does it — ``_do_build_command`` for the builder's worktree and bundle dir,
+# ``_run_review_sandboxed`` for the reviewer's resolved target, both advisories — but the
+# six interactive spawns (Plan single/batch, sign-off single/batch, Act, publish) passed no
+# ``extra_argv`` at all, while their prompts point straight at the target checkout
+# (``_plan_prompt``'s citation line, planner.md.jinja, publisher.md.jinja). Their cwd is
+# ``cfg.root``, so that checkout sat OUTSIDE the workspace: the human was asked to
+# approve the same out-of-workspace read every session, and could not make the approval
+# stick — a hand-granted rule lives in the operator's untracked
+# ``.claude/settings.local.json``, which a lane worktree never materializes and
+# ``--setting-sources project`` (families.py:100-102) drops by design. The spawn's argv
+# is the durable channel, and the one the headless half already uses.
+#
+# The set is DERIVED, never guessed, and both edges of the confinement doctrine bind:
+# under-admission asks the human for a decision that cannot take effect, on the one band
+# that cannot be retried unattended; over-admission hands a leaf reach the configuration
+# never granted (:func:`_plan_fallback_target` refuses exactly that). So there are TWO
+# grants, and which one a call site may use is a property of its ROLE:
+#
+#   :func:`_bundle_grant` — sign-off (single/batch), Act, publish. Strictly the
+#       checkouts the bundles THIS session is about resolve to. A session that HAS a
+#       bundle whose checkout does not resolve admits nothing; it must never widen to
+#       the instance's other, unrelated targets — that is over-admission for a session
+#       that already knows what it is about.
+#   :func:`_plan_grant`   — Plan (single/batch) ONLY. The same resolution, falling back
+#       to the instance's KNOWN targets when nothing resolves — which pre-brief is the
+#       normal case, and is the whole of the question "what may the planner read before
+#       a brief exists to name a repo".
+# ----------------------------------------------------------------------------
+def _primary_checkout(d: Path, cfg: Config) -> Path | None:
+    """The primary target checkout bundle ``d``'s brief names, or ``None``.
+
+    Resolved the way :func:`_plan_fallback_target` resolves it (``publish._resolve_target``
+    → ``publish._checkout_path``, guarded) — deliberately NOT :func:`_reviewer_target`,
+    which the interactive band must not reuse: it prefers ``worktree.path()``, and these
+    leaves run SERIALLY, so ``lane.current()`` is ``None`` (lane.py:26-28) and
+    ``worktree._wt_dir`` (worktree.py:107-112) names the *unsuffixed* ``<name>.pdca-wt``
+    — a harness-owned tree left at whatever commit its last user built, owned by no
+    bundle, and not the checkout the human has open in front of them.
+    :func:`_reviewer_target` also ``git fetch``es for a grounding freshness these leaves
+    do not need, against the human's own checkout, on every spawn.
+
+    Best-effort, like every other grounding resolution here: no brief yet, an
+    unresolvable target field, or a checkout that is not a directory on this disk ⇒
+    ``None``, contributing nothing. The grant is never faked or guessed.
+    """
+    from . import publish  # lazy: publish imports leaves, avoid an import cycle
+    try:
+        repo_spec, _base, _slug = publish._resolve_target(d)
+        if not repo_spec:
+            return None
+        p = publish._checkout_path(cfg, repo_spec)
+    except Exception:  # noqa: BLE001 — admission is best-effort, never fatal
+        return None
+    return p if p.is_dir() else None
+
+
+def _bundle_targets(bundles: list[Path], cfg: Config) -> list[Path]:
+    """The primary checkouts ``bundles`` resolve to: deduped, in encounter order,
+    existing directories only. The whole admission set for a session that HAS bundles."""
+    dirs: list[Path] = []
+    for d in bundles:
+        p = _primary_checkout(d, cfg)
+        if p is not None and p not in dirs:
+            dirs.append(p)
+    return dirs
+
+
+def _known_targets(cfg: Config) -> list[Path]:
+    """The instance's KNOWN target checkouts — Plan's fallback, and Plan's alone.
+
+    ``[publisher.checkouts]`` — read through the same ``publish._checkout_path``, so a
+    relative entry resolves against the project root exactly as publish resolves it —
+    union the distinct primaries the instance's EXISTING briefs resolve to, active and
+    archived. Every element is therefore a directory the configuration or an artifact
+    already on disk names: it never derives a repo from the tracker URL, never guesses a
+    sibling that no brief mentions, and never admits a parent.
+    """
+    from . import publish  # lazy: publish imports leaves, avoid an import cycle
+    out: list[Path] = []
+    for spec in sorted(cfg.repo_checkouts):
+        try:
+            p = publish._checkout_path(cfg, spec)
+        except Exception:  # noqa: BLE001 — one bad mapping must not cost the others
+            continue
+        if p.is_dir() and p not in out:
+            out.append(p)
+    for b in sorted(cfg.bundle_root.glob("issue_*")) + \
+            sorted(cfg.bundle_root.glob("completed/issue_*")):
+        p = _primary_checkout(b, cfg)
+        if p is not None and p not in out:
+            out.append(p)
+    return out
+
+
+def _grant_argv(dirs: list[Path], profile: families.FamilyProfile) -> list[str]:
+    """``dirs`` as ``extra_argv`` for a spawn, shaped on the reviewer's own grant in
+    :func:`_run_review_sandboxed`: the flag is emitted ONLY when the family has one. A
+    family with no grounding mechanism (``generic``, families.py:44/:126) is spawned
+    byte-identically to before this existed — the grant is skipped, not faked with a flag
+    the CLI does not have."""
+    if not profile.grounding_flag:
+        return []
+    extra: list[str] = []
+    for p in dirs:
+        extra += [profile.grounding_flag, str(p)]
+    return extra
+
+
+def _bundle_grant(bundles: list[Path], cfg: Config,
+                  profile: families.FamilyProfile) -> list[str]:
+    """Admission for a session that is ABOUT bundles — sign-off (single/batch), Act,
+    publish: exactly what those bundles' briefs resolve to, and nothing else.
+
+    No fallback, deliberately: when this session's own bundle names a repo that is not
+    checked out here, the honest grant is none. Widening to the instance's other targets
+    would hand a sign-off session reach over repos its bundle has nothing to do with.
+    """
+    return _grant_argv(_bundle_targets(bundles, cfg), profile)
+
+
+def _plan_grant(bundles: list[Path], cfg: Config,
+                profile: families.FamilyProfile) -> list[str]:
+    """Admission for the Plan leaf, the one session with no brief to resolve from.
+
+    ``do_plan`` runs on an UNPLANNED bundle and :func:`do_plan_batch`'s CSV/default path
+    picks its ids MID-session, so there is usually nothing to resolve — the set is then
+    the instance's known targets (:func:`_known_targets`). A re-plan over a bundle that
+    DOES carry a brief resolves like any other session and stays at its own checkout.
+    """
+    return _grant_argv(_bundle_targets(bundles, cfg) or _known_targets(cfg), profile)
+
+
+# ----------------------------------------------------------------------------
 # Notes-fetch (issue #65): retrieve a bundle's tracker thread before the Plan beat.
 # ----------------------------------------------------------------------------
 def ensure_notes(cfg: Config, d: Path) -> None:
@@ -779,8 +916,12 @@ def do_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
         # The session's exit contract (#331): register the bundle + role so /handoff
         # and the Stop hook can verify the brief (structure + dependency probe).
         with handoff.session(cfg, "planner", [d]) as henv:
+            # Admit what this session is told to read (#494). Pre-brief nothing resolves
+            # from `d`, so this is the instance's known target set; a re-plan over an
+            # existing brief resolves to that bundle's own checkout.
             _invoke(cfg.planner, cfg.root, _plan_prompt(cfg, csv, d), cfg=cfg,
-                    env=henv or None)
+                    env=henv or None,
+                    extra_argv=_plan_grant([d], cfg, cfg.profile(cfg.planner)))
     else:
         _stub_plan(d, cfg)
     run_plan_advisory(d, cfg)  # opt-in antagonistic review of the brief (#301); no-op unless configured
@@ -965,11 +1106,15 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
         # brief.md) and say why" as legitimate, so an absent brief passes at Stop while
         # a malformed one never does. CSV/default: the planner chooses ids MID-session,
         # so no set can be registered — the session names its work via /handoff.
-        with handoff.session(cfg, "planner",
-                             [cfg.bundle(i) for i in (ids or [])],
+        seeded = [cfg.bundle(i) for i in (ids or [])]
+        with handoff.session(cfg, "planner", seeded,
                              require_artifact=False) as henv:
+            # Same admission as the single-bundle Plan (#494): an id-seeded batch is
+            # normally UNPLANNED and the CSV/default path has no ids at all, so both
+            # fall through to the instance's known targets.
             _invoke(cfg.planner, cfg.root, _plan_batch_prompt(cfg, csv, ids), cfg=cfg,
-                    env=henv or None)
+                    env=henv or None,
+                    extra_argv=_plan_grant(seeded, cfg, cfg.profile(cfg.planner)))
         if ids is None:
             _warn_unseeded_briefs(cfg, before)
     else:
@@ -3258,7 +3403,10 @@ def run_signoff(d: Path, cfg: Config) -> None:
         # Exit contract (#331): the Stop hook verifies the bundle's decision token
         # (+ rationale for iterate-*/discontinue) before the session may end.
         with handoff.session(cfg, "signoff", [d]) as henv:
-            _invoke(cfg.signoff, cfg.root, _signoff_prompt(d), cfg=cfg, env=henv or None)
+            # This bundle's own target checkout, and only it (#494): §6 items routinely
+            # ask the human to check the patch against the source it was built on.
+            _invoke(cfg.signoff, cfg.root, _signoff_prompt(d), cfg=cfg, env=henv or None,
+                    extra_argv=_bundle_grant([d], cfg, cfg.profile(cfg.signoff)))
         return
     _stub_signoff(d, cfg)
 
@@ -3305,8 +3453,12 @@ def run_signoff_batch(cfg: Config, bundles: list[Path]) -> None:
         # Exit contract (#331): every bundle of the batch is registered, so the Stop
         # hook verifies each decision; ending early is a deliberate abandon.
         with handoff.session(cfg, "signoff", list(bundles)) as henv:
+            # One session, several bundles: each bundle's own resolved checkout is
+            # admitted, exactly once (#494) — a batch may span repos.
             _invoke(cfg.signoff, cfg.root, _signoff_batch_prompt(bundles), cfg=cfg,
-                    env=henv or None)
+                    env=henv or None,
+                    extra_argv=_bundle_grant(list(bundles), cfg,
+                                             cfg.profile(cfg.signoff)))
         return
     for d in bundles:
         _stub_signoff(d, cfg)
@@ -3397,8 +3549,12 @@ def run_act(cfg: Config, date: str) -> None:
             # baseline (an end-of-session check structurally cannot take one), so
             # /handoff can distinguish the entry THIS session wrote from a prior one.
             with handoff.session(cfg, "act") as henv:
+                # Admit the checkouts the REVIEWED bundles name (#494) — the snapshot
+                # `covered`, the same set the prompt indexes and the frontier advances
+                # over, so Act reads no repo it was not handed.
                 _invoke(cfg.act, cfg.root, _act_prompt(cfg, date, bundles=covered),
-                        cfg=cfg, env=henv or None)
+                        cfg=cfg, env=henv or None,
+                        extra_argv=_bundle_grant(covered, cfg, cfg.profile(cfg.act)))
         else:
             _stub_act(cfg, date, bundles=covered)
 
@@ -3462,8 +3618,12 @@ def run_publish(d: Path, cfg: Config) -> None:
         # both contribution artifacts (existence + the instance's deterministic lint).
         with handoff.session(cfg, "publisher", [d]) as henv:
             merged = {**(env or {}), **henv}
+            # The publisher is told to read the target checkout, and the deterministic
+            # half of publish already runs git against that very tree
+            # (publish.py:439-448) — admit it (#494) instead of asking the human.
             _invoke(cfg.publisher, cfg.root, _publish_prompt(d, cfg),
-                    env=merged or None, cfg=cfg)
+                    env=merged or None, cfg=cfg,
+                    extra_argv=_bundle_grant([d], cfg, profile))
         return
     _stub_publish(d, cfg)
 
