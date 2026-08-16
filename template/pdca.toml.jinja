@@ -139,6 +139,18 @@ merge_method = "merge"
 #       protection is again the only backstop (and an empty rollup merges). Correct only
 #       where the host's required checks really are the whole verification.
 merge_requires = "all"
+# Bounded wait for that same non-final check-rollup gate (issue #462). A wave boundary
+# fires SECONDS after the PR is opened, so the FIRST rollup read is routinely `pending`
+# (queued/running) or `empty` (nothing reported yet) — that is absence of evidence, not a
+# verdict. `_merge_one` re-reads the rollup until it clears pending/empty or this many
+# wall-clock seconds elapse; only then does an unresolved rollup refuse (with a message
+# that says the checks never reported in time, distinct from a check that actually failed).
+# On every refusal after the ready-mark — timeout, a red/unreadable rollup, or a failing
+# `gh pr merge` — the PR is returned to draft (`gh pr ready --undo`) before the run STOPs,
+# so a stopped wave never leaves a PR advertising a readiness no human granted.
+#   300  (default) — a sensible bound for CI to register and report on a freshly-opened PR.
+#   0    — perform no wait at all: a single read, the original immediate-refusal behaviour.
+merge_wait_secs = 300
 # Optional integration re-gate (#wave-model). After each wave folds (stack mode), run the
 # repo-scoped gates over the folded integration tip before the next wave builds on it, so a
 # combination that is red though each fix was green ALONE stops the run. Off by default
