@@ -33,8 +33,14 @@ jobs:
       - name: Install copier
         run: pip install copier
 
+      # Run through tests/run_root_suite.py, not `python -m unittest`, for both steps: these
+      # cases skip themselves when copier is not importable by the interpreter running them,
+      # and `unittest` reports a run of nothing but skips as `OK`, exit 0 — a green job that
+      # rendered nothing. The entry point exits 77 with a `PDCA-UNVERIFIABLE:` line instead,
+      # so a step that produced no evidence stops the job rather than passing it. Same module
+      # selection as before: one step per guarantee, so each is named in the CI log.
       - name: Render the template (copier) + run the generated slice
-        run: python -m unittest tests.test_render_and_run -v
+        run: python -m tests.run_root_suite tests.test_render_and_run -v
 
       - name: copier update from the previous release (instance compatibility)
-        run: python -m unittest tests.test_update_compat -v
+        run: python -m tests.run_root_suite tests.test_update_compat -v
