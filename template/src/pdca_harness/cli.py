@@ -765,7 +765,8 @@ def _split(cfg: Config, args) -> int:
     # verdict. Tracker issues cannot be withdrawn and a materialised bundle is barely
     # better, so this order is the whole guarantee.
     try:
-        children = split.parse((d / split.PROPOSAL).read_text(encoding="utf-8"))
+        proposal_text = (d / split.PROPOSAL).read_text(encoding="utf-8")
+        children = split.parse(proposal_text)
         split.preflight(d, children, cfg)
     except OSError:
         split.advisory(f"split: {d.name} has no {split.PROPOSAL} — run "
@@ -775,6 +776,19 @@ def _split(cfg: Config, args) -> int:
         split.advisory(f"split: {exc}")
         return 1
     if not ids:
+        # A stub-authored proposal must never reach the tracker (#466): refuse HERE, on
+        # the filing branch only — before `split.can_file` is consulted and before any
+        # `gh issue create` — so `--ids` (criterion (c): the operator supplied real ids
+        # deliberately, and files nothing) stays byte-identical. Never a raise into the
+        # CLI, the same shape as the `TrackerUnavailable` handler just below.
+        if split.is_stub_proposal(proposal_text):
+            split.advisory(
+                f"split: {d.name}'s {split.PROPOSAL} was written by the OFFLINE STUB "
+                "splitter — no model authored it, so this refuses to file real tracker "
+                "issues for a placeholder. Set [leaves.splitter] mode = \"command\" and "
+                f"re-run `{_prog()} split {args.issue_id}`, or pass --ids if the children "
+                "were already filed by hand.")
+            return 1
         # No ids given: file one issue per child, parented to this bundle's issue.
         try:
             ids = split.file_children(d, children, cfg, prog=_prog())

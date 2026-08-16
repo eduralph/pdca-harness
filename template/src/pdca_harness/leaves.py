@@ -1594,6 +1594,12 @@ def do_split(d: Path, cfg: Config) -> int:
     if cfg.splitter.mode == "command":
         _invoke(cfg.splitter, d, _split_prompt(d, cfg), cfg=cfg, label="splitter")
     else:
+        # Never a silent skip (#466): the operator's only OTHER signal that no model ran
+        # is recognising the fixture text by eye, after `--accept` has already had a
+        # chance to file it. Say so here, at the moment the stub branch is taken.
+        print(f"split: [leaves.splitter] mode is {cfg.splitter.mode!r}, not \"command\" — "
+              f"writing the OFFLINE STUB proposal for {d.name}; `--accept` without --ids "
+              "will refuse to file its children", file=sys.stderr)
         _stub_split(d)
     if not (d / split.PROPOSAL).exists():
         print(f"split: the splitter produced no {split.PROPOSAL} in {d}", file=sys.stderr)
@@ -1611,6 +1617,11 @@ def _stub_split(d: Path) -> None:
     """
     (d / split.PROPOSAL).write_text(
         "<!-- pdca:split-proposal v1 -->\n"
+        # Provenance that SURVIVES the process boundary (#466): `--accept` runs in a
+        # different process from `do_split`, where an in-memory "this was a stub" flag
+        # could not reach it, and this proposal is otherwise byte-identical in shape to
+        # a real splitter's output. `split.is_stub_proposal` reads this back.
+        "<!-- pdca:split-proposal-stub -->\n"
         f"# Split proposal — {d.name}\n\n## Wave sketch\n\n"
         "child-2 stacks on child-1 (stub).\n\n"
         "<!-- pdca:child child-1 -->\n"

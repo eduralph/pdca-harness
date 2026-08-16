@@ -49,6 +49,11 @@ LINEAGE = "split-lineage.json"
 LINEAGE_VERSION = 1
 
 _VERSION_RE = re.compile(r"<!--\s*pdca:split-proposal\s+v(\d+)\s*-->")
+#: Written into a proposal by `leaves._stub_split` itself (#466), so the provenance
+#: SURVIVES the process boundary between `do_split` and `--accept` — those run in
+#: different invocations, where an in-memory "this came from a stub" flag could not
+#: reach the filing branch. See `is_stub_proposal`.
+_STUB_RE = re.compile(r"<!--\s*pdca:split-proposal-stub\s*-->")
 _OPEN_RE = re.compile(r"^\s*<!--\s*pdca:child\s+(\S+)\s*-->\s*$")
 _CLOSE_RE = re.compile(r"^\s*<!--\s*pdca:end\s+(\S+)\s*-->\s*$")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
@@ -121,6 +126,19 @@ class Child:
                     continue
                 return [t.strip() for t in value.split(",") if t.strip()]
         return found or []
+
+
+def is_stub_proposal(text: str) -> bool:
+    """Whether `text` carries the OFFLINE STUB splitter's on-disk provenance (#466).
+
+    A stub proposal is otherwise byte-identical in SHAPE to a real one — same header,
+    same delimiters — so this marker is the only thing that lets a reader who never saw
+    `do_split` run (the process `--accept` runs in) tell them apart. Checked by the
+    filing branch of `cli._split` BEFORE `split.can_file` is consulted and before any
+    `gh issue create`: an irreversible tracker write must never be taken on an artifact
+    no model authored.
+    """
+    return bool(_STUB_RE.search(text))
 
 
 def parse(text: str) -> list[Child]:
