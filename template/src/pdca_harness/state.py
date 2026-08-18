@@ -58,13 +58,46 @@ DEPENDENCY_ADJUDICATION = "dependency-adjudication.json"
 # attempt via DOWNSTREAM_OF_BRIEF below.
 SESSION_CARRY = "session-carry-forward"
 
-# The reviewer leaf's captured-error tail (#138): written when the reviewer RAN AND
-# FAILED (retries exhausted), removed at the start of a successful run — which makes it
-# the discriminator (#369) between a reviewer that ran-and-failed and one that NEVER ran
-# (an interrupted beat), since neither leaves a check-review.md. Named here (like
-# CLOSE_MARKER) so the writer (``leaves``), the CHECKED-resume check (``driver``) and
-# the §6 wording split (``assemble``) share one spelling.
+# The reviewer leaf's captured-error tail (#138): each failed attempt's record is written
+# as that attempt happens (#540) and the record is SETTLED once the attempts are spent —
+# which makes it, SETTLED, the discriminator (#369) between a reviewer that ran-and-failed
+# and one that NEVER ran (an interrupted beat), since neither leaves a check-review.md.
+# Named here (like CLOSE_MARKER) so the writer (``leaves``), the CHECKED-resume check
+# (``driver``) and the §6 wording split (``assemble``) share one spelling. What a given
+# log MEANS is :func:`leaf_ran_and_failed` below — never the path's existence.
 REVIEW_ERROR_LOG = "check-review.error.log"
+
+# The settlement marker (#540) — the ONE point of truth for what an ``*.error.log`` means,
+# and what makes it safe for one to exist before its leaf has finished.
+#
+# ``leaves._invoke_leaf_resilient`` writes each failed attempt's record BEFORE the next
+# attempt starts, so a run killed inside the retry loop still leaves a post-mortem (it used
+# to write nothing until the loop ended, so a mid-retry death lost every attempt's account
+# and a leaf observing the bundle during attempt 2 found nothing about attempt 1). The
+# file's mere PRESENCE therefore cannot carry the old sentence any more: a record whose
+# leaf still has attempts left is emphatically NOT "the leaf ran and FAILED".
+#
+# So settlement is asserted POSITIVELY: the harness ends a spent leaf's record with this
+# line, and :func:`leaf_ran_and_failed` is exactly "the last non-blank line is this marker,
+# alone". Every other shape — absent, empty, unreadable, unfinished, a record a dead write
+# tore off part-way, one written by an older harness — answers False and the leaf is RE-RUN.
+# That direction costs one leaf run; the other one costs the review itself (a reviewer the
+# death window merely INTERRUPTED, retired as if it had failed, and a bundle reaching
+# sign-off with no review of the diff at all). Four readers, one sentence, so none of them
+# can be left speaking the old meaning: ``leaves.review_never_ran``,
+# ``leaves.run_advisory_leaves(only_missing=True)``, ``assemble._missing_review_text`` and
+# ``driver._resume_interrupted_check``.
+ATTEMPTS_SPENT_MARKER = "----- attempts spent: this leaf ran and FAILED -----"
+
+# The line an UNFINISHED record ends with. Prose for whoever opens the file mid-retry, not
+# a discriminator: nothing reads it (the question is only ever "does the marker above end
+# this file"), so a leaf that prints this line changes nothing.
+_UNFINISHED_TRAILER = ("----- attempts NOT yet spent: the leaf was still retrying when this "
+                       "record was written -----")
+
+# What a marker-shaped line out of a LEAF's own mouth is rewritten to (see
+# :func:`neutralize_leaf_text`). Kept beside the marker: they are one decision.
+_QUOTED_SUFFIX = "(quoted from the leaf's own output — not the harness's marker)"
 
 # The per-rule gate evidence logs (issue #370): ``gate-logs/<rule_id>.log`` — the full
 # combined output behind each ``check-gates.json`` row, written by a bundle-scoped
@@ -144,6 +177,72 @@ _OUTCOME_TO_STATE = {
     "iterated-to-Plan": ITERATE_PLAN,
     "discontinued": DISCONTINUED,
 }
+
+
+def leaf_ran_and_failed(error_log: Path) -> bool:
+    """True iff ``error_log`` is the SETTLED account of a leaf that SPENT its attempts.
+
+    The engine's one failed-leaf discriminator (#138 / #369 / #540) — see
+    :data:`ATTEMPTS_SPENT_MARKER` for why every reader asks this instead of testing the
+    path's existence, and why every ambiguous shape answers False: absent, empty,
+    unreadable, unfinished, torn off part-way by a dead write, or written by an older
+    harness all fail towards RE-RUNNING the leaf. A needless re-run costs a leaf; the
+    opposite error costs the review of the diff.
+    """
+    try:
+        text = error_log.read_text(encoding="utf-8", errors="replace")
+    except OSError:  # absent, unreadable, a directory — no settled account either way
+        return False
+    return _last_nonblank(text) == ATTEMPTS_SPENT_MARKER
+
+
+def _last_nonblank(text: str) -> str:
+    """``text``'s last non-blank line, stripped — ``""`` when it has none.
+
+    The marker is read here and nowhere else, and only as a WHOLE final line:
+    deliberately not a substring or mid-line test, because these records embed each failed
+    attempt's captured stderr verbatim, so a looser rule would let a leaf's own output
+    settle the harness's account of the leaf's own run. The writer side of that pair is
+    :func:`neutralize_leaf_text`.
+    """
+    for line in reversed(text.splitlines()):
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def settled_record(records: str) -> str:
+    """``records`` marked SETTLED — the form that reads as "the leaf ran and FAILED",
+    written once the attempts are spent."""
+    return records + ATTEMPTS_SPENT_MARKER + "\n"
+
+
+def unfinished_record(records: str) -> str:
+    """The attempts SO FAR — what a leaf's error log holds BETWEEN attempts. It carries no
+    settlement marker, so every reader treats it exactly as it treats an absent log."""
+    return records + _UNFINISHED_TRAILER + "\n"
+
+
+def neutralize_leaf_text(text: str) -> str:
+    """A leaf's captured output with any line that would read as
+    :data:`ATTEMPTS_SPENT_MARKER` defused, so a leaf cannot settle the harness's account of
+    the leaf's own run.
+
+    The records embed captured stderr verbatim; the marker is only ever read as a record's
+    last non-blank line, so the exposure is narrow but real — a record cut short right
+    after such a line (a torn write, an older harness's file) would read as spent and
+    retire a leaf that was only interrupted. Only a line that IS the marker (bar
+    surrounding whitespace) can be read as one, so only such a line is rewritten — and it
+    is rewritten, never dropped: the text stays in the post-mortem, including anything
+    riding the same channel (the #420 memory telemetry), it simply can no longer BE the
+    marker.
+    """
+    if ATTEMPTS_SPENT_MARKER not in text:
+        return text
+    out = "\n".join(f"{line} {_QUOTED_SUFFIX}" if line.strip() == ATTEMPTS_SPENT_MARKER
+                    else line
+                    for line in text.splitlines())
+    return out + "\n" if text.endswith("\n") else out
 
 
 def is_resolved(d: Path) -> bool:
