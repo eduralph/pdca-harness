@@ -120,11 +120,11 @@ def advance(d: Path, cfg: Config) -> None:
         # and a model leaf (Ctrl-C, OOM, a killed session) landed the bundle HERE with
         # that leaf never run — and nothing ever ran it again: assemble filled the
         # missing-review placeholder and the only escape was hand-deleting
-        # check-gates.json, re-paying the entire gate run. Recover the never-ran leaf
-        # (artifact AND error log both absent — the #138 failed-leaf discriminator)
-        # before assembly, preserving the paid gate record; a leaf that ran and FAILED
-        # left its error log and is NOT re-run. An uninterrupted cycle has every
-        # artifact in place, so this is a no-op there.
+        # check-gates.json, re-paying the entire gate run. Recover the unfinished leaf
+        # (no artifact and no SETTLED error log — `state.leaf_ran_and_failed`, the #138
+        # failed-leaf discriminator) before assembly, preserving the paid gate record; a
+        # leaf that ran and spent its attempts left a settled error log and is NOT re-run.
+        # An uninterrupted cycle has every artifact in place, so this is a no-op there.
         _resume_interrupted_check(d, cfg, close)
         _say(f"→ {d.name}: assembling SUMMARY…")
         assemble.assemble_summary(d, cfg)  # pure code → SUMMARY.md §1–8
@@ -149,10 +149,15 @@ def _resume_interrupted_check(d: Path, cfg: Config, close: str) -> None:
     dependency-halted bundle never runs model leaves — its reviewer stand-in note is
     deterministic (``_close_review_note`` / ``dependency_halt.blocked_review_note``),
     so a note the death window swallowed is simply rewritten. A normal bundle gets the
-    reviewer leaf back iff it NEVER RAN (``leaves.review_never_ran`` — no artifact,
-    no error log) and each configured advisory leaf back under the same discriminator
-    (``only_missing``); a leaf that ran and failed left its error log (#138) and is
-    left alone — today's behaviour for a failed leaf is unchanged.
+    reviewer leaf back iff it left no settled account of itself (``leaves.review_never_ran``
+    — no artifact, and no error log or an unfinished one, #540) and each configured
+    advisory leaf back under the same discriminator (``only_missing``); a leaf that ran and
+    SPENT its attempts left a settled error log (#138) and is left alone — today's
+    behaviour for a failed leaf is unchanged.
+
+    Two shapes reach the recovery, not one: the leaf that never started (the window between
+    the gate write and the leaf) and the leaf a death interrupted INSIDE its retry loop,
+    whose unfinished record is the only account of the attempts it made.
     """
     if close:
         if not (d / "check-review.md").exists():
@@ -168,8 +173,9 @@ def _resume_interrupted_check(d: Path, cfg: Config, close: str) -> None:
             dependency_halt.blocked_review_note(d, dependency_halt.recorded_verdicts(d))
         return
     if leaves.review_never_ran(d):
-        _say(f"→ {d.name}: Check — reviewer never ran (beat was interrupted after the "
-             f"gate write); recovering it{_headless_note(cfg.reviewer)}…")
+        _say(f"→ {d.name}: Check — reviewer left no settled account of itself (it never "
+             "ran, or a death inside its retry loop left an unfinished attempt record); "
+             f"recovering it{_headless_note(cfg.reviewer)}…")
         leaves.run_review(d, cfg)
     if cfg.advisory_leaves:
         leaves.run_advisory_leaves(d, cfg, only_missing=True)

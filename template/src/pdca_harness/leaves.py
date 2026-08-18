@@ -686,10 +686,18 @@ def _invoke_leaf_resilient(
     child died at/near invocation (usage/rate limit, 5xx, auth, network), not a
     reviewer that read the diff and couldn't decide — so retry it with exponential
     backoff. A failure that *did* produce output, or a non-LeafError (e.g. command
-    not found), is substantive: do not retry. On final failure the captured stderr
-    tail of every attempt is written to ``error_log`` so the bundle carries
-    recoverable error text, not just an exit code. Returns ``None`` on success, else
-    the final exception (a :class:`LeafError` exposes ``.transient``).
+    not found), is substantive: do not retry. Each failed attempt's captured stderr
+    tail is written to ``error_log`` AS IT HAPPENS (#540), so the bundle carries
+    recoverable error text, not just an exit code, from the moment there is any — and a
+    run killed inside the retry loop leaves a post-mortem instead of nothing at all. The
+    record is settled (:func:`state.settled_record`) only when the attempts are spent;
+    until then it carries no settlement marker, so every reader treats it exactly as it
+    treats an absent log and the leaf is re-run rather than retired. Returns ``None`` on
+    success, else the final exception (a :class:`LeafError` exposes ``.transient``).
+
+    The unfinished state's whole lifetime is inside this function: the loop ends either by
+    failing, which settles the records, or by succeeding, which discards them — so no
+    caller ever has to know about it.
 
     Every attempt also runs under memory telemetry when its spawn is memory-capped:
     the ``*.memory.jsonl`` twin of ``error_log`` (`_memory_log_for`), cleared here
@@ -705,28 +713,90 @@ def _invoke_leaf_resilient(
     for attempt in range(1, attempts + 1):
         try:
             _invoke(leaf, workdir, prompt, **kw)
-            return None  # success — leave no error log behind
+            # Success — leave no error log behind, as before (#138). Now that a failed
+            # attempt flushes its record as it happens (#540), "no error log" has to be
+            # RESTORED on the retry that recovers: an unfinished record left beside a
+            # produced artifact would describe a leaf that has since succeeded. Suppressed
+            # like the flush itself — a leaf that worked must not be turned into a failure
+            # by the cleanup of its own post-mortem.
+            with contextlib.suppress(OSError):
+                error_log.unlink(missing_ok=True)
+            return None
         except Exception as exc:  # noqa: BLE001 — a failed leaf must never crash the cycle
             last = exc
             records.append(_format_leaf_attempt(exc, attempt))
             transient = getattr(exc, "transient", False)
             if not transient or attempt == attempts:
                 break
+            # This attempt's account, on disk BEFORE the next one starts (#540) and
+            # UNSETTLED — the only write used to be the one after the loop, so a run killed
+            # mid-retry lost every attempt's account and a leaf observing the bundle during
+            # attempt 2 found nothing about attempt 1.
+            _flush_attempt_records(error_log, records)
             delay = backoff * (2 ** (attempt - 1))
             print(f"leaves: {workdir.name} — leaf exited {getattr(exc, 'returncode', '?')} "
                   f"with no output (transient); retry {attempt}/{attempts - 1} in "
                   f"{delay:.0f}s", file=sys.stderr)
             time.sleep(delay)
-    error_log.write_text("".join(records), encoding="utf-8")
+    # The attempts are spent: the same records, now SETTLED — which is what makes the log
+    # read as "the leaf ran and FAILED" (state.leaf_ran_and_failed). Raises exactly as the
+    # single write it replaces did: a bundle that cannot hold its own error log is not a
+    # failure this wrapper may swallow.
+    _replace_record(error_log, state.settled_record("".join(records)))
     return last
+
+
+def _flush_attempt_records(error_log: Path, records: list[str]) -> None:
+    """Persist the attempts so far as an UNFINISHED record (#540) — best-effort.
+
+    Best-effort by decision, not by omission: a flush that fails (a read-only bundle dir,
+    ENOSPC) must NOT end a run the shipped stop rule would have kept going — attempt count,
+    the transient rule and the backoff schedule are unchanged by this write. The records
+    stay in hand, so the loop's final write still persists them: strictly no worse than
+    before, when nothing reached disk until then.
+    """
+    try:
+        _replace_record(error_log, state.unfinished_record("".join(records)))
+    except OSError as exc:
+        print(f"leaves: could not flush the attempt record to {error_log.name} ({exc}); "
+              "it will be written when the retry loop ends", file=sys.stderr)
+
+
+def _replace_record(error_log: Path, text: str) -> None:
+    """Put ``text`` in ``error_log`` in ONE step — a sibling temp file, then ``os.replace``.
+
+    ``Path.write_text`` is open(O_TRUNC) → write → close, so a write that dies part-way
+    (ENOSPC, RLIMIT_FSIZE, a killed run) leaves the log 0-byte or truncated. For these
+    records a truncated file is not merely incomplete, it says something else: it has lost
+    whatever the complete record said about the leaf, and the previous complete record it
+    overwrote is gone with it — so the mid-retry post-mortem this function exists to
+    guarantee would be destroyed by the very next flush that fails. Replacing the file
+    whole means a failed write leaves the last good record exactly where it was, and a
+    reader never sees a half-written one. The temp is removed on failure so a partial
+    sibling is never left in the bundle.
+    """
+    tmp = error_log.with_name(f".{error_log.name}.partial")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, error_log)
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
 
 
 def _format_leaf_attempt(exc: Exception, attempt: int) -> str:
     """One attempt's record for the error log: the captured stderr tail, or the
-    exception text when nothing was captured (e.g. command not found)."""
+    exception text when nothing was captured (e.g. command not found).
+
+    The tail is embedded through :func:`state.neutralize_leaf_text` (#540): it is the
+    leaf's own text landing in the harness's account of the leaf's own run, so a
+    marker-shaped line out of the leaf's mouth must not be able to say "this leaf spent
+    its attempts" on the harness's behalf."""
     tail = (getattr(exc, "output", "") or "").strip()
     rc = getattr(exc, "returncode", "?")
-    body = tail if tail else f"(no output captured) {type(exc).__name__}: {exc}"
+    body = (state.neutralize_leaf_text(tail) if tail
+            else f"(no output captured) {type(exc).__name__}: {exc}")
     return f"----- attempt {attempt} — exit {rc} -----\n{body}\n\n"
 
 
@@ -2092,16 +2162,19 @@ def run_review(d: Path, cfg: Config) -> None:
 
 
 def review_never_ran(d: Path) -> bool:
-    """True iff the reviewer leaf NEVER RAN for this Check round (#369).
+    """True iff the reviewer leaf left no settled account of this Check round (#369/#540).
 
-    The error log is the engine's failed-leaf discriminator (#138): a reviewer that ran
-    and FAILED wrote ``state.REVIEW_ERROR_LOG`` (and a §6 placeholder review); a
-    successful run removed any stale log. So *both* artifacts absent means the beat
-    died in the window between the gate write and the reviewer leaf — "not yet run",
-    never "ran and failed" — and the leaf is safe (and necessary) to run now.
+    ``state.leaf_ran_and_failed`` is the engine's failed-leaf discriminator (#138): a
+    reviewer that ran and SPENT its attempts left a settled ``state.REVIEW_ERROR_LOG``
+    (and a §6 placeholder review); a successful run removed any stale log. So no
+    check-review.md and no *settled* log means the reviewer never finished — either it
+    never started (the beat died in the window between the gate write and the leaf) or a
+    death inside its retry loop left an unfinished record (#540). Both are "not yet run",
+    never "ran and failed", and the leaf is safe (and necessary) to run now: the
+    alternative is a bundle reaching sign-off with no review of the diff at all.
     """
     return (not (d / "check-review.md").exists()
-            and not (d / state.REVIEW_ERROR_LOG).exists())
+            and not state.leaf_ran_and_failed(d / state.REVIEW_ERROR_LOG))
 
 
 def _seed_sandbox_agents(cfg: Config, sandbox: Path) -> None:
@@ -2660,9 +2733,10 @@ def advisory_artifact(d: Path, leaf_id: str) -> Path:
 
 
 def advisory_error_log(d: Path, leaf_id: str) -> Path:
-    """The captured-error tail an advisory leaf leaves when it ran and FAILED (#138) —
+    """The captured-error tail an advisory leaf leaves per failed attempt (#138/#540) —
     named beside :func:`advisory_artifact` so the writer and the CHECKED-resume
-    discriminator (#369, ``only_missing`` below) share one spelling."""
+    discriminator (#369, ``only_missing`` below) share one spelling. Whether one of these
+    means "ran and FAILED" is ``state.leaf_ran_and_failed``, never its existence."""
     return d / f"check-advisory-{leaf_id}.error.log"
 
 
@@ -2786,10 +2860,11 @@ def run_advisory_leaves(d: Path, cfg: Config, *, only_missing: bool = False) -> 
     check-advisory-<id>.md; failures degrade to a §6 NEEDS-HUMAN placeholder, never crash
     the cycle (advisory, like the main reviewer).
 
-    ``only_missing`` (#369) is the CHECKED-resume mode: a leaf whose artifact OR error
-    log already exists is skipped, so only a leaf the interrupted BUILT beat never
-    reached is run (a leaf that ran and FAILED left its error log + placeholder, #138,
-    and is not re-run). The selection policy is re-applied FIRST — under
+    ``only_missing`` (#369) is the CHECKED-resume mode: a leaf whose artifact exists, or
+    whose error log is SETTLED (``state.leaf_ran_and_failed``), is skipped — so a leaf the
+    interrupted BUILT beat never reached, or left mid-retry with an unfinished record
+    (#540), is run (a leaf that ran and spent its attempts left a settled error log +
+    placeholder, #138, and is not re-run). The selection policy is re-applied FIRST — under
     ``vendor-complement`` (#200) only one of the pool runs, so an unselected leaf's
     absent artifact is legitimate, never "missing"; filtering the pool by absence
     before selecting would instead promote an excluded leaf. On an uninterrupted
@@ -2798,7 +2873,7 @@ def run_advisory_leaves(d: Path, cfg: Config, *, only_missing: bool = False) -> 
     for spec in _select_advisory(applicable, d, cfg):
         leaf_id = spec.get("id") or "advisory"
         if only_missing and (advisory_artifact(d, leaf_id).exists()
-                             or advisory_error_log(d, leaf_id).exists()):
+                             or state.leaf_ran_and_failed(advisory_error_log(d, leaf_id))):
             continue
         leaf = _advisory_leaf(spec, "advisory", leaf_id)
         if leaf.mode == "command":

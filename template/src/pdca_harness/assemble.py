@@ -407,14 +407,17 @@ def _missing_review_text(d: Path) -> str:
     """Placeholder when ``check-review.md`` is absent — flags a §6 NEEDS-HUMAN so the
     bundle assembles and reaches sign-off but cannot be accepted without a review.
 
-    Two wordings (#369), split on the error log — the engine's failed-leaf
-    discriminator (#138: a reviewer that ran and FAILED wrote
+    Two wordings (#369), split on ``state.leaf_ran_and_failed`` — the engine's failed-leaf
+    discriminator (#138: a reviewer that ran and SPENT its attempts left a settled
     ``state.REVIEW_ERROR_LOG``; a successful run removed any stale one). Without the
     split, a reviewer that NEVER RAN (the beat died between the gate write and the
     leaf) read exactly like one that ran and failed, and the record could not
-    distinguish "not yet run" from "ran and yielded nothing".
+    distinguish "not yet run" from "ran and yielded nothing". The second wording names
+    BOTH unfinished shapes (#540): no log at all, and an unsettled log left by a death
+    inside the leaf's retry loop — the discriminator treats them alike, so the prose must
+    not assert only one of them.
     """
-    if (d / state.REVIEW_ERROR_LOG).exists():
+    if state.leaf_ran_and_failed(d / state.REVIEW_ERROR_LOG):
         return (
             "# Advisory review MISSING — the reviewer RAN AND FAILED\n\n"
             "- NEEDS-HUMAN — no check-review.md was produced: the reviewer leaf ran "
@@ -423,12 +426,15 @@ def _missing_review_text(d: Path) -> str:
             "accepting.\n"
         )
     return (
-        "# Advisory review MISSING — the reviewer NEVER RAN\n\n"
-        "- NEEDS-HUMAN — no check-review.md was produced and no "
-        f"`{state.REVIEW_ERROR_LOG}` exists: the reviewer leaf NEVER RAN (the Check "
-        "beat was interrupted before it), it did not run-and-fail. The driver "
-        "recovers a never-ran reviewer on the next `advance` (#369); if this text "
-        "persists, re-run the Check reviewer before accepting.\n"
+        "# Advisory review MISSING — the reviewer NEVER RAN or was INTERRUPTED\n\n"
+        "- NEEDS-HUMAN — no check-review.md was produced and no *settled* "
+        f"`{state.REVIEW_ERROR_LOG}`: either the reviewer leaf NEVER RAN (the Check "
+        "beat was interrupted before it), or it was interrupted INSIDE its retry loop "
+        f"and the `{state.REVIEW_ERROR_LOG}` in this bundle is the unfinished account of "
+        "the attempts it had made by then (#540) — read it for the post-mortem. Neither "
+        "shape is a leaf that ran and exhausted its attempts. The driver recovers both on "
+        "the next `advance` (#369); if this text persists, re-run the Check reviewer "
+        "before accepting.\n"
     )
 
 
