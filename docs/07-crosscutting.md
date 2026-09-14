@@ -275,10 +275,18 @@ keeps its own `parent` / `siblings` / `depth` and simply gains `children`. One
 file, independent optional edges, no `role` discriminator — a bundle can
 legitimately be both a child and a parent, and one filename carrying one role
 could only ever record half of it. It's read back through one tolerant reader,
-`split.read_lineage`, which returns `None` for an absent, unreadable, malformed
-or wrong-version file rather than raising — for *any* way of failing to read
-it, down to bytes that aren't valid UTF-8, and for a `depth` that isn't a
-number: provenance that can throw into a beat is worse than provenance that
+`split.read_lineage`, which abstains rather than raising on anything it
+can't turn into a version-1 record: absent, unreadable, malformed JSON, a
+non-object payload and an unrecognised `version` all return `None`. The
+first three cover *any* way of failing to parse the file at all, down to bytes
+that aren't valid UTF-8; the last two parse cleanly and are turned away
+on shape and version. A `depth` that isn't a number is in neither group —
+`{"depth": "one"}` is valid JSON of the right version, so the reader hands
+the record straight back, and the depth arithmetic one layer down absorbs the
+value it can't compute with, counting it as unknown (`0`) so the child lands
+at depth 1. The parent's own record keeps `"one"` verbatim by a separate
+route: the merge copies an existing `depth` through rather than recomputing
+it. Provenance that can throw into a beat is worse than provenance that
 abstains, so a hand-edited record degrades the hint and never the run. The
 record sits deliberately *outside* `DOWNSTREAM_OF_BRIEF` — it describes the
 split, not an attempt's output, so an `iterate-plan` that archives a rejected
