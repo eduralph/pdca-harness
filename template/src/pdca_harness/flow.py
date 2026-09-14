@@ -239,14 +239,25 @@ def _apply_recorded_decision(
     else is :func:`_apply_decision`'s own outcome, so the callers keep the single
     C6-guarded record/transition path and handle ``REASSEMBLE`` / ``"blocked"`` / ``None``
     exactly as they already do after a session. Never silent: an apply with no session
-    names the bundle and the action on stderr.
+    names the bundle and the action on stderr — printed AFTER the apply, and only when the
+    decision was genuinely recorded. ``_apply_decision`` returns the action itself in that
+    one case and a sentinel in every other, and ``leaves.VALID_DECISIONS`` holds none of the
+    sentinels, so ``outcome == action`` IS "it was applied" and cannot collide with a token
+    named after one. Announced up front instead, the notice claimed an outcome nothing had
+    decided yet, and each of the other outcomes is a later step withdrawing it one line
+    later: the C6 accept-guard refuses and a fresh session follows (:func:`_apply_decision`),
+    or the record is dropped / the summary repaired and the bundle goes back to reassemble
+    (:func:`_repair_unsignable`). Those paths stay reported — each already prints its own
+    line naming this bundle and this action — but they must not be reported as an apply.
     """
     action = leaves.signoff_decision(d)
     if not action:
         return UNDECIDED
-    print(f"flow: {d.name} — applying the '{action}' sign-off decision already recorded in "
-          f"the bundle; no new session", file=sys.stderr)
-    return _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now)
+    outcome = _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now)
+    if outcome == action:
+        print(f"flow: {d.name} — applied the '{action}' sign-off decision already recorded "
+              f"in the bundle; no new session", file=sys.stderr)
+    return outcome
 
 
 def _signoff_and_apply(
