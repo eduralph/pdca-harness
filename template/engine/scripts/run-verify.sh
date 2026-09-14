@@ -13,9 +13,11 @@
 # holds patch.diff and the brief that names the test. It also exports, when set:
 #   - $PDCA_WORKTREE   — the tree Do edited (worktree isolation, #94); run/reset here.
 #   - $PDCA_BASE / $PDCA_VERIFY_BASE / $PDCA_BRIEF_BASE — the base to reset to before
-#       applying patch.diff. The driver sets EXACTLY ONE of these for every bundle-scoped
-#       gate: the test base must never diverge from the base publish will commit to. Each is
-#       already a fully-qualified remote-tracking ref (`<remote>/<branch>`) — use it as-is,
+#       applying patch.diff. The driver sets EXACTLY ONE of these for the PER-FIX VERIFIER
+#       row — this script, wired as tier "C4" above — and NONE for any other configured
+#       gate (issue #474): the test base must never diverge from the base publish will
+#       commit to, and only the row that resets to it has any use for it. Each is already
+#       a fully-qualified remote-tracking ref (`<remote>/<branch>`) — use it as-is,
 #       never `origin/$VAR` (that doubles the remote).
 #         * $PDCA_BASE (issue #54) — the brief's `Onto branch`. Publish appends the fix as a
 #           commit to that existing PR head, so the gate must prove red->green on IT.
