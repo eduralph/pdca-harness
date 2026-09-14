@@ -29,6 +29,17 @@ time. Refusing after the ready-mark is safe — a re-run resumes idempotently. A
 rollup refuses too (absence of evidence is not green); skipped/neutral checks are
 completed non-failures and do not block. ``[driver].merge_requires = "required"``
 (default ``"all"``) opts back into host-config-only semantics, skipping the gate.
+
+A wave boundary fires SECONDS after the PR was opened (issue #462: getwyrd/wyrd#703, six
+seconds between create and ready_for_review), so the FIRST rollup read above is routinely
+``pending`` or ``empty`` — not a verdict, just evidence that has not arrived yet.
+``_wait_for_green`` re-reads the rollup until it resolves or ``[driver].merge_wait_secs``
+(default 300; ``0`` disables the wait — the original immediate-refusal behaviour) of
+wall-clock time elapses, through the patchable ``_sleep`` below so a test costs no real
+time. Whichever way ``_merge_one`` declines to merge a PR it already readied — the rollup
+never resolving green, a failing ``gh pr merge`` — ``_undo_ready`` marks it back to draft
+(``gh pr ready --undo``) before returning, so a stopped wave never leaves a PR advertising
+a readiness no human granted (``docs/INTEGRATION.md`` §10).
 """
 
 from __future__ import annotations
@@ -36,10 +47,15 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import merged, publish, state
 from .config import Config
+
+# Patchable indirection so a test can drive the wait loop below with no real wall-clock
+# cost (issue #462) — tests replace this, never `time.sleep` itself.
+_sleep = time.sleep
 
 # `gh pr checks --json name,bucket` classifies every check into one of five buckets:
 # pass | fail | pending | skipping | cancel (`gh pr checks --help`). "pass" and "skipping"
@@ -124,6 +140,41 @@ def _names(checks: list) -> str:
         for c in checks)
 
 
+def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15) -> tuple[str, str]:
+    """Re-read ``pr_url``'s check rollup (``_check_rollup``) until it clears ``pending``/
+    ``empty`` or ``wait_secs`` of (patchable) wall-clock time is exhausted (issue #462).
+    Returns the final ``(verdict, detail)`` unchanged — this never itself decides to merge.
+
+    ``wait_secs <= 0`` performs exactly one read and returns immediately: the original
+    behaviour, for a host whose checks are known to already be in by the time the wave
+    boundary fires. Sleeps go through the module-level ``_sleep`` so a test can make the
+    whole loop cost no real time.
+    """
+    verdict, detail = _check_rollup(pr_url)
+    waited = 0
+    while verdict in ("pending", "empty") and waited < wait_secs:
+        step = min(poll_interval, wait_secs - waited)
+        _sleep(step)
+        waited += step
+        verdict, detail = _check_rollup(pr_url)
+    return verdict, detail
+
+
+def _undo_ready(pr_url: str) -> None:
+    """Return ``pr_url`` to draft (issue #462): the documented inverse of the ``gh pr
+    ready`` call in ``_merge_one``, run on every path where that function declines to merge
+    a PR it already readied, so a stopped wave never leaves a PR advertising a readiness no
+    human granted. Its own failure is reported — never masking the real reason the wave
+    stopped — but does not change the caller's already-decided non-zero return."""
+    print(f"→ gh pr ready {pr_url} --undo")
+    undo = subprocess.run(["gh", "pr", "ready", str(pr_url), "--undo"],
+                          capture_output=True, text=True)
+    if undo.returncode != 0:
+        print((undo.stderr or undo.stdout).strip(), file=sys.stderr)
+        print(f"!!! merge: could not return {pr_url} to draft after declining to merge it "
+              "— it is left marked ready; a human must re-draft it.", file=sys.stderr)
+
+
 def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
                fetched: set[str]) -> int:
     """Merge one bundle's recorded PR (idempotent, fail-closed). ``fetched`` dedupes the
@@ -174,21 +225,27 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
     # merge past a red rollup).
     if cfg.merge_requires != "required":
         print(f"→ gh pr checks {pr_url}")
-        verdict, detail = _check_rollup(str(pr_url))
+        # A wave boundary fires seconds after the PR opened (issue #462), so the first read
+        # is routinely pending/empty — not a verdict yet. Wait for it to resolve, bounded by
+        # [driver].merge_wait_secs, before treating an unresolved rollup as a refusal.
+        verdict, detail = _wait_for_green(str(pr_url), cfg.merge_wait_secs)
         if verdict != "green":
             why = {
                 "failing": f"a check is FAILING — {detail}",
-                "pending": f"a check has not finished — {detail}",
-                "empty": f"the check rollup is EMPTY — {detail}; absence of evidence is "
-                         "not green",
+                "pending": f"a check has not finished within {cfg.merge_wait_secs}s — "
+                           f"{detail}",
+                "empty": f"the check rollup was still EMPTY after {cfg.merge_wait_secs}s "
+                         f"— {detail}; absence of evidence is not green",
                 "unreadable": f"the check rollup could not be read — {detail}",
             }[verdict]
             print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. The host's "
                   "required-checks config is not enough: this wave's base must be green "
                   "before the next wave builds on it. STOP: later waves are NOT run; "
-                  "re-run once the checks are green (the run resumes idempotently — the "
-                  "PR stays ready), or set [driver] merge_requires = \"required\" to "
-                  "merge on the host's required checks alone.\n", file=sys.stderr)
+                  "re-run once the checks are green (the run resumes idempotently), or set "
+                  "[driver] merge_requires = \"required\" to merge on the host's required "
+                  "checks alone, or raise [driver] merge_wait_secs if the checks just take "
+                  "longer than that to report.\n", file=sys.stderr)
+            _undo_ready(pr_url)
             return 1
         # Positive evidence in the run log that this merge was gated, not merged blind.
         print(f"   check rollup green ({detail})")
@@ -201,6 +258,7 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
               "rights on the base, or a host-required check that failed or started after "
               "the rollup gate above. STOP: later waves are NOT run; resolve at the PR, "
               "then re-run.\n", file=sys.stderr)
+        _undo_ready(pr_url)
         return 1
     # Refresh the base so the NEXT wave's worktree resets to the merged result.
     if repo_spec and repo_spec not in fetched:

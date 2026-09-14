@@ -366,6 +366,14 @@ class Config:
     # merge`'s own enforcement (whatever branch protection marks required — possibly
     # nothing) decide, including merging with an empty rollup. [driver].merge_requires.
     merge_requires: str = "all"
+    # Bounded wait for that same non-final check-rollup gate (issue #462). A wave boundary
+    # fires SECONDS after `_publish_bundle` opens the PR — its checks are routinely still
+    # queued or not yet registered, so a rollup read that moment is `pending` or `empty`:
+    # absence of evidence, not a verdict. `_merge_one` re-reads the rollup until it resolves
+    # or this many wall-clock seconds elapse; only an unresolved rollup at the bound (or a
+    # genuinely failing/unreadable one) refuses. `0` performs no wait at all — a single
+    # read, the original immediate-refusal behaviour. [driver].merge_wait_secs.
+    merge_wait_secs: int = 300
     # Optional integration re-gate (#wave-model): after each wave folds onto the
     # integration branch, run the repo-scoped gates over that tip before the next wave
     # builds on it, so a combination that is red though each fix was green alone STOPs the
@@ -705,6 +713,20 @@ class Config:
             print(f"config: unknown [driver].merge_requires '{merge_requires}' — expected "
                   "all | required; using 'all'", file=sys.stderr)
             merge_requires = "all"
+        # Bounded wait for the rollup gate above (issue #462). A bad value degrades to the
+        # DEFAULT wait (300s), never to 0 — a typo must not silently buy back the old
+        # immediate-refusal race.
+        try:
+            merge_wait_secs = int(driver_cfg.get("merge_wait_secs", 300))
+        except (TypeError, ValueError):
+            print(f"config: [driver].merge_wait_secs must be an integer number of seconds, "
+                  f"got {driver_cfg.get('merge_wait_secs')!r} — using the default 300",
+                  file=sys.stderr)
+            merge_wait_secs = 300
+        if merge_wait_secs < 0:
+            print(f"config: [driver].merge_wait_secs must be >= 0, got {merge_wait_secs} — "
+                  "using the default 300", file=sys.stderr)
+            merge_wait_secs = 300
         regate_between_waves = bool(driver_cfg.get("regate_between_waves", False))
         act_cadence = max(1, int(driver_cfg.get("act_cadence", 5)))  # issue #109
         # Footprint sweep mode (issue #297). An unknown value falls back to "clean" with a
@@ -811,6 +833,7 @@ class Config:
             wave_mode=wave_mode,
             merge_method=merge_method,
             merge_requires=merge_requires,
+            merge_wait_secs=merge_wait_secs,
             regate_between_waves=regate_between_waves,
             act_cadence=act_cadence,
             sweep_worktrees=sweep_worktrees,

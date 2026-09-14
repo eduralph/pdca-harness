@@ -13,6 +13,13 @@ the PR's own FULL check rollup (`gh pr checks`) after the ready-mark and immedia
 the merge, and refuses on any failing, pending or missing check — whatever branch
 protection is (or isn't) configured to require. `[driver].merge_requires = "required"` opts
 back into the host-config-only behaviour.
+
+Issue #462 extends it once more: a non-final wave's PR is only seconds old, so that same
+rollup read is routinely `pending`/`empty` NOT because anything is wrong but because the
+checks have not reported yet. `_merge_one` now waits (`_wait_for_green`, bounded by
+`[driver].merge_wait_secs`, driven through the patchable `merge._sleep` so these tests cost
+no wall-clock) before treating an unresolved rollup as a refusal, and undoes the ready-mark
+(`gh pr ready --undo`) on every path where it declines to merge a PR it already readied.
 """
 
 from __future__ import annotations
@@ -134,14 +141,22 @@ class MergeWave(unittest.TestCase):
         # ready + the check rollup succeed; the merge itself fails (a conflict, no rights).
         fail_merge = _gh(merge=SimpleNamespace(returncode=1, stdout="",
                                                stderr="not mergeable"))
+        calls: list[list[str]] = []
 
-        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fail_merge), \
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return fail_merge(cmd, **kw)
+
+        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
                 mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
                 mock.patch.object(merge.merged, "is_merged", return_value=False), \
                 redirect_stderr(io.StringIO()) as err:
             rc = merge.merge_wave(self.cfg, [b])
         self.assertEqual(rc, 1)
         self.assertIn("did not merge", err.getvalue())
+        # issue #462 (iii): a failing `gh pr merge` declines AFTER the ready-mark too, so it
+        # must be undone the same as a rollup refusal.
+        self.assertIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
 
     def test_readies_before_merging(self) -> None:
         # #279: the publisher opens every PR --draft, but `gh pr merge` refuses a draft, so a
@@ -219,7 +234,8 @@ class MergeWave(unittest.TestCase):
                **by_verb: SimpleNamespace) -> tuple[int, list[list[str]], str]:
         """Run one bundle through `merge_wave` against a stubbed `gh`. Returns the exit
         code, every command shelled, and stderr — so a test can assert BOTH the refusal
-        and that `gh pr merge` was never reached."""
+        and that `gh pr merge` was never reached. `_sleep` is patched to a no-op so a
+        pending/empty rollup's wait (issue #462) costs no wall-clock here."""
         b = self._bundle(iid)
         calls: list[list[str]] = []
         gh = _gh(**by_verb)
@@ -229,6 +245,7 @@ class MergeWave(unittest.TestCase):
             return gh(cmd, **kw)
 
         with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
+                mock.patch.object(merge, "_sleep", create=True), \
                 mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
                 mock.patch.object(merge.merged, "is_merged", return_value=False), \
                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
@@ -248,13 +265,66 @@ class MergeWave(unittest.TestCase):
         self.assertFalse(self._merged(calls))
         self.assertIn("FAILING", err)
         self.assertIn("lint (fail)", err)              # names the offending check
+        # issue #462 (iii): a red rollup declines AFTER the ready-mark, so it must be undone.
+        self.assertIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
 
     def test_pending_check_refuses(self) -> None:
-        # Never merge past an in-flight run: wait-or-STOP, not merge-and-hope.
+        # issue #462: "nothing was wrong, the evidence had simply not arrived" must not be a
+        # terminal verdict. `_merge_one` waits (bounded, re-reading the rollup) before it
+        # gives up — and STILL refuses, cleanly, once the bound is exhausted and the checks
+        # genuinely never reported.
         rc, calls, err = self._drive("MD", checks=_rollup(("ci", "pending"), code=8))
         self.assertEqual(rc, 1)
         self.assertFalse(self._merged(calls))
         self.assertIn("not finished", err)
+        self.assertIn(f"within {self.cfg.merge_wait_secs}s", err)   # distinguishes the two
+        self.assertNotIn("FAILING", err)                            # from "a check is red"
+        # The wait actually happened — the rollup was re-read, not just checked once.
+        checks_calls = [c for c in calls if c[:3] == ["gh", "pr", "checks"]]
+        self.assertGreater(len(checks_calls), 1)
+        # issue #462 (iii): declined after the ready-mark ⇒ the ready-mark is undone, so the
+        # stopped wave leaves no PR advertising a readiness no human granted.
+        self.assertIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
+
+    def test_pending_then_green_merges(self) -> None:
+        # issue #462 (i): the wait pays off — a rollup that resolves green after the checks
+        # report merges, and the ready-mark is left alone (nothing to undo).
+        b = self._bundle("MD2")
+        calls: list[list[str]] = []
+        reads = {"n": 0}
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[:3] == ["gh", "pr", "checks"]:
+                reads["n"] += 1
+                return (_rollup(("ci", "pending"), code=8) if reads["n"] < 3
+                        else _rollup(("ci", "pass")))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
+                mock.patch.object(merge, "_sleep", create=True) as sleep, \
+                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
+                mock.patch.object(merge.merged, "is_merged", return_value=False), \
+                redirect_stdout(io.StringIO()):
+            rc = merge.merge_wave(self.cfg, [b], method="merge")
+        self.assertEqual(rc, 0)
+        self.assertEqual(reads["n"], 3)               # pending, pending, then green
+        self.assertTrue(sleep.called)                 # the wait actually slept in between
+        self.assertIn(["gh", "pr", "merge", "https://gh/pr/1", "--merge"], calls)
+        self.assertNotIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
+
+    def test_wait_bound_zero_performs_no_wait(self) -> None:
+        # 0 means "do not wait" — the original immediate-refusal behaviour, for a host
+        # whose checks are known to report before the wave boundary ever fires.
+        cfg = _cfg(self.tmp, merge_wait_secs=0)
+        rc, calls, err = self._drive("MD3", cfg=cfg,
+                                     checks=_rollup(("ci", "pending"), code=8))
+        self.assertEqual(rc, 1)
+        self.assertFalse(self._merged(calls))
+        self.assertIn("within 0s", err)
+        checks_calls = [c for c in calls if c[:3] == ["gh", "pr", "checks"]]
+        self.assertEqual(len(checks_calls), 1)         # exactly one read — no re-poll
+        self.assertIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
 
     def test_all_green_readies_then_checks_then_merges(self) -> None:
         rc, calls, _ = self._drive("ME")
@@ -313,6 +383,7 @@ class MergeWave(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
+                mock.patch.object(merge, "_sleep", create=True), \
                 mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
                 mock.patch.object(merge.merged, "is_merged", return_value=False), \
                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
@@ -320,6 +391,7 @@ class MergeWave(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertFalse(self._merged(calls))
         self.assertIn("not finished", err.getvalue())
+        self.assertIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
 
     def test_a_red_wave_member_stops_the_wave_before_later_bundles(self) -> None:
         # Wave-level consequence of the gate: the red PR is not merged AND the next
@@ -371,6 +443,33 @@ class MergeWave(unittest.TestCase):
             cfg = Config.load(root)
         self.assertEqual(cfg.merge_requires, "all")   # an unknown value fails CLOSED
         self.assertIn("merge_requires", err.getvalue())
+
+    def test_merge_wait_secs_comes_from_the_driver_table(self) -> None:
+        # issue #462: through the REAL config loader — `[driver] merge_wait_secs` in a
+        # rendered pdca.toml has to actually reach `_merge_one` (the same plumbing as
+        # merge_requires: dataclass field, load(), constructor kwarg).
+        root = self.tmp / "instance2"
+        root.mkdir()
+        toml = root / "pdca.toml"
+        base = '[paths]\nbundle_root = "results"\n'
+
+        toml.write_text(base + '\n[driver]\nmerge_wait_secs = 30\n', encoding="utf-8")
+        self.assertEqual(Config.load(root).merge_wait_secs, 30)
+
+        toml.write_text(base, encoding="utf-8")                    # unset ⇒ the default
+        self.assertEqual(Config.load(root).merge_wait_secs, 300)
+
+        toml.write_text(base + '\n[driver]\nmerge_wait_secs = "soon"\n', encoding="utf-8")
+        with redirect_stderr(io.StringIO()) as err:
+            cfg = Config.load(root)
+        self.assertEqual(cfg.merge_wait_secs, 300)     # an unparseable value fails CLOSED
+        self.assertIn("merge_wait_secs", err.getvalue())
+
+        toml.write_text(base + '\n[driver]\nmerge_wait_secs = -5\n', encoding="utf-8")
+        with redirect_stderr(io.StringIO()) as err:
+            cfg = Config.load(root)
+        self.assertEqual(cfg.merge_wait_secs, 300)     # negative also fails CLOSED
+        self.assertIn("merge_wait_secs", err.getvalue())
 
 
 if __name__ == "__main__":
