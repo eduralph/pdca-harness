@@ -425,8 +425,17 @@ whether a red gate is a real fix regression or just a missing tool.
 `setup` is a third, narrower thing — a one-time **permission** grant, and only
 relevant if a Claude CLI is one of your leaf backends. Without it, the
 interactive leaves (planner, signoff, publisher, act) prompt you file-by-file the
-first time they need to read something outside the project, e.g. a sibling
-checkout your gates or briefs reference.
+first time they need to read something outside the project.
+
+The **target checkouts** are no longer part of that: the driver admits them
+itself, on the spawn's own argv (`--add-dir` and the other families' equivalents),
+exactly as it already did for the headless builder and reviewer — each interactive
+session gets the primary checkouts its bundles' briefs resolve to, and Plan, which
+runs before a brief exists, gets the instance's known targets
+(`[publisher.checkouts]` ∪ what the existing briefs resolve to). Never a lane
+worktree, never a directory neither the config nor a brief names (issue #494). So
+`make setup` is for what remains outside: a build output dir, a docs toolchain,
+a second checkout no brief mentions.
 
 ```bash
 make setup
