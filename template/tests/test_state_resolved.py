@@ -8,10 +8,12 @@ threaded through every terminal set (driver HALTED, flow terminals, status order
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 from unittest import mock
@@ -199,8 +201,11 @@ class PlanNeverReopensResolved(unittest.TestCase):
                                         encoding="utf-8")
 
         # No gh on PATH → the reopen revalidation stays conservative (False) offline.
+        # The fake session names no work through /handoff, so the reap reports that on
+        # stderr (#534): captured, never printed to the real stderr.
         with mock.patch.object(leaves, "_invoke", side_effect=fake_invoke), \
-                mock.patch.object(sources.shutil, "which", return_value=None):
+                mock.patch.object(sources.shutil, "which", return_value=None), \
+                redirect_stderr(io.StringIO()):
             leaves.do_plan_batch(self.cfg)
         self.assertFalse((d / "brief.md").exists())
         self.assertTrue((d / "brief.superseded-by-resolution.md").exists())  # kept, aside
@@ -208,7 +213,8 @@ class PlanNeverReopensResolved(unittest.TestCase):
         # A second offending session gets its own destination (#302 review round 3) —
         # the first rejection artifact is never overwritten.
         with mock.patch.object(leaves, "_invoke", side_effect=fake_invoke), \
-                mock.patch.object(sources.shutil, "which", return_value=None):
+                mock.patch.object(sources.shutil, "which", return_value=None), \
+                redirect_stderr(io.StringIO()):
             leaves.do_plan_batch(self.cfg)
         self.assertTrue((d / "brief.superseded-by-resolution.md").exists())
         self.assertTrue((d / "brief.superseded-by-resolution-2.md").exists())
@@ -231,9 +237,11 @@ class PlanNeverReopensResolved(unittest.TestCase):
 
         gh_open = SimpleNamespace(returncode=0, stdout=json.dumps({"state": "OPEN"}),
                                   stderr="")
+        # The reap reports the session that named no work (#534): captured, not printed.
         with mock.patch.object(leaves, "_invoke", side_effect=fake_invoke), \
                 mock.patch.object(sources.subprocess, "run", return_value=gh_open), \
-                mock.patch.object(sources.shutil, "which", return_value="/usr/bin/gh"):
+                mock.patch.object(sources.shutil, "which", return_value="/usr/bin/gh"), \
+                redirect_stderr(io.StringIO()):
             leaves.do_plan_batch(self.cfg)
         self.assertFalse((d / "brief.md").exists())         # stale-context brief aside
         self.assertTrue((d / "brief.stale-reopen-context.md").exists())

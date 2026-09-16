@@ -1044,7 +1044,8 @@ def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
         "fewer, larger children: each costs a full cycle. Before ending the session, "
         f"verify the Plan exit contract with `/handoff {d.name}` — brief structure plus "
         "every backticked External-dependencies token registered in [[doctor.checks]] "
-        "with its detect cmd passing; the Stop hook enforces it."
+        "with its detect cmd passing. `/handoff` is your self-check; when the session "
+        "ends, the driver reports anything still unmet to the human."
     )
 
 
@@ -1113,8 +1114,8 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
                                     if (d / "brief.md").exists()}
         # Exit contract (#331). Id-seeded: register the listed bundles, with
         # require_artifact=False — the prompt documents "leave it UNPLANNED (write no
-        # brief.md) and say why" as legitimate, so an absent brief passes at Stop while
-        # a malformed one never does. CSV/default: the planner chooses ids MID-session,
+        # brief.md) and say why" as legitimate, so the reap passes an absent brief and
+        # reports a malformed one (#534). CSV/default: the planner picks ids MID-session,
         # so no set can be registered — the session names its work via /handoff.
         seeded = [cfg.bundle(i) for i in (ids or [])]
         with handoff.session(cfg, "planner", seeded,
@@ -1296,8 +1297,8 @@ def _plan_batch_prompt(cfg: Config, csv: str | None, ids: list[str] | None = Non
             "defect), leave it UNPLANNED (write no brief.md) and say why. One id = one "
             "`issue_<id>/brief.md`. Plan only — do not implement. After each brief is "
             "written, verify it with `/handoff issue_<id>` (ids required, one bundle per "
-            "invocation); the Stop hook re-checks every briefed bundle before the "
-            "session may end."
+            "invocation). That is your self-check; when the session ends, the driver "
+            "re-checks every listed bundle and reports anything unmet to the human."
         )
     tracker_csv = csv or cfg.tracker_export_csv
     src = f"the tracker export at '{tracker_csv}'" if tracker_csv \
@@ -1313,7 +1314,8 @@ def _plan_batch_prompt(cfg: Config, csv: str | None, ids: list[str] | None = Non
         "tracker id. One issue = one `issue_<id>/brief.md`. Plan only — do not implement. "
         "After EACH brief is written, verify it with `/handoff issue_<id>` (ids required "
         "— the driver cannot know mid-session choices, so the passing /handoff runs are "
-        "how the session names its work; the Stop hook requires them)."
+        "how the session names its work; if none passed, the driver tells the human "
+        "when the session ends)."
     )
 
 
@@ -3453,8 +3455,9 @@ def run_plan_advisory(d: Path, cfg: Config) -> None:
 # ----------------------------------------------------------------------------
 def run_signoff(d: Path, cfg: Config) -> None:
     if cfg.signoff.mode == "command":
-        # Exit contract (#331): the Stop hook verifies the bundle's decision token
-        # (+ rationale for iterate-*/discontinue) before the session may end.
+        # Exit contract (#331): when the session ends, handoff.session reports a missing
+        # or malformed decision token (or an iterate-*/discontinue with no rationale) to
+        # the human. Report only, never a block (#534).
         with handoff.session(cfg, "signoff", [d]) as henv:
             # This bundle's own target checkout, and only it (#494): §6 items routinely
             # ask the human to check the patch against the source it was built on.
@@ -3476,8 +3479,9 @@ def _signoff_prompt(d: Path) -> str:
         f"discontinued / where the work goes instead). Do not edit §9 yourself; the "
         "driver records it under a deterministic guard. When the decision is written, "
         f"verify this leaf's exit contract with `/handoff {d.name}` — the rationale "
-        "lines are the carry-forward the driver folds into the next attempt's brief, "
-        "and the Stop hook blocks the session ending on a missing/malformed decision."
+        "lines are the carry-forward the driver folds into the next attempt's brief. "
+        "`/handoff` is your self-check; when the session ends, the driver reports a "
+        "missing or malformed decision to the human."
     )
 
 
@@ -3503,8 +3507,8 @@ def run_signoff_batch(cfg: Config, bundles: list[Path]) -> None:
     if not bundles:
         return
     if cfg.signoff.mode == "command":
-        # Exit contract (#331): every bundle of the batch is registered, so the Stop
-        # hook verifies each decision; ending early is a deliberate abandon.
+        # Exit contract (#331): every bundle of the batch is registered, so the report
+        # at session end names each bundle still without a valid decision (#534).
         with handoff.session(cfg, "signoff", list(bundles)) as henv:
             # One session, several bundles: each bundle's own resolved checkout is
             # admitted, exactly once (#494) — a batch may span repos.
@@ -3531,9 +3535,10 @@ def _signoff_batch_prompt(bundles: list[Path]) -> str:
         "its own `issue_<id>` bundle — never leave an item ambient to the batch or write "
         "it into the wrong bundle. Do not edit §9 yourself; the driver records it under a "
         "deterministic guard. After EACH bundle's decision is written, verify it with "
-        "`/handoff issue_<id>` (one bundle per invocation — ids are required); the Stop "
-        "hook checks every listed bundle before the session may end, and a deliberate "
-        "early stop is recorded via the --abandon escape hatch it names."
+        "`/handoff issue_<id>` (one bundle per invocation — ids are required). That is "
+        "your self-check; when the session ends, the driver reports every listed bundle "
+        "still without a valid decision to the human. To stop early on purpose, record "
+        "why with `python3 .claude/hooks/handoff_guard.py --abandon \"<why>\"`."
     )
 
 
@@ -3667,8 +3672,9 @@ def run_publish(d: Path, cfg: Config) -> None:
         # a no-op for claude, whose native hook already enforces this).
         profile = families.resolve(cfg.publisher.family, cfg.families)
         env = None if profile.native_guard else guard.shim_env(cfg, None)
-        # Exit contract (#331), merged over the gh-shim env: the Stop hook verifies
-        # both contribution artifacts (existence + the instance's deterministic lint).
+        # Exit contract (#331), merged over the gh-shim env: when the session ends,
+        # handoff.session reports a missing or lint-failing contribution artifact
+        # (existence + the instance's deterministic lint) to the human (#534).
         with handoff.session(cfg, "publisher", [d]) as henv:
             merged = {**(env or {}), **henv}
             # The publisher is told to read the target checkout, and the deterministic
@@ -3732,8 +3738,9 @@ def _publish_prompt(d: Path, cfg: Config) -> str:
         "Write ONLY those two files. Do NOT push, branch, or open a PR — the driver's "
         "`pdca publish` does the branch/apply/commit/push/draft-PR after you finish. "
         f"When both are written, verify with `/handoff {d.name}` — it checks both "
-        "artifacts against the instance's deterministic contribution lint; the Stop "
-        "hook enforces the same contract when the session ends."
+        "artifacts against the instance's deterministic contribution lint. That is your "
+        "self-check; when the session ends, the driver reports anything still unmet to "
+        "the human."
     )
 
 
