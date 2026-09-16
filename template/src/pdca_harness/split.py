@@ -983,16 +983,43 @@ def child_title(child: Child, parent: Path) -> str:
     return f"{parent.name} — {child.label}"
 
 
-def _create_issue(repo: str, title: str, body: str, parent_no: str, root: Path) -> str:
+def _gh_label_value(name: str) -> str:
+    """``name`` as ONE CSV field — the format gh parses every ``--label`` value in.
+
+    gh registers ``--label`` as a string slice, and pflag parses EVERY occurrence of such a
+    flag with Go's ``encoding/csv``, so one ``--label`` per name does not protect a name by
+    itself: ``--label area,backend`` asks for two labels, ``area`` and ``backend``, and a
+    bare ``"`` is a parse error that fails the whole ``gh issue create`` (issue #467). A
+    name holding a comma, a double quote or a line break is therefore quoted, with its
+    quotes doubled; any other name (``bug``, ``help wanted``) goes out byte-for-byte.
+    """
+    if any(c in name for c in ',"\r\n'):
+        return '"' + name.replace('"', '""') + '"'
+    return name
+
+
+def _create_issue(repo: str, title: str, body: str, parent_no: str, root: Path, *,
+                  milestone: str = "", labels: list[str] | None = None) -> str:
     """File ONE child issue; return its number. Raises SplitError naming the failure.
 
     ``--parent`` makes this a real tracker sub-issue rather than a convention in the body
     text, so the parent becomes an umbrella and each child gets its own PR — which is what
     the one-PR-per-issue rule requires.
+
+    ``milestone``/``labels`` are keyword-only with defaults so `triage.py`'s own call
+    (`triage.py:530-535`, five positional args, no metadata) keeps working unchanged
+    (issue #467). ``labels`` are label NAMES: each gets its own ``--label``, encoded by
+    :func:`_gh_label_value` so gh reads it back as that one name. ``--milestone`` is a
+    plain string flag, so the title goes out verbatim — quoting it would put the quotes
+    into the name gh looks up.
     """
     cmd = ["gh", "issue", "create", "--repo", repo, "--title", title, "--body", body]
     if parent_no:
         cmd += ["--parent", parent_no]
+    if milestone:
+        cmd += ["--milestone", milestone]
+    for name in labels or ():
+        cmd += ["--label", _gh_label_value(name)]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(root))
     except OSError as exc:
@@ -1010,6 +1037,50 @@ def _create_issue(repo: str, title: str, body: str, parent_no: str, root: Path) 
             "`gh issue create` exited 0 but printed no issue URL, so the new issue's "
             f"number could not be read from: {(proc.stdout or '').strip()!r}")
     return matches[-1]
+
+
+def _parent_metadata(repo: str, parent_no: str, root: Path) -> tuple[str, list[str], bool]:
+    """The parent issue's milestone TITLE and label NAMES, looked up once (issue #467).
+
+    ``gh issue create --milestone`` takes the milestone by NAME, not by number, so the
+    title is what a caller needs, even though ``gh issue view`` also hands back the
+    milestone's number.
+
+    Mirrors the best-effort lookup at ``sources.tracker_issue_reopened``
+    (`sources.py:150-176`): the repo is always passed explicitly, a non-zero exit or a
+    raised exception means unknown, ``json.loads`` is guarded, and a non-object result
+    (``gh``, or a shim, emitting ``null`` or ``[]``) is treated as unknown rather than
+    crashing ``.get``. The returned ``bool`` is False exactly when the metadata could not
+    be determined, so the caller can warn without confusing that with a parent that
+    genuinely carries neither a milestone nor a label — the ordinary, silent case.
+
+    ``Exception``, not ``BaseException``: Ctrl-C here is the operator stopping the split,
+    not a failed lookup. Nothing has been filed yet, so it propagates and ends the run
+    before the first irreversible ``gh issue create`` instead of being swallowed on the
+    way to one.
+    """
+    try:
+        proc = subprocess.run(
+            ["gh", "issue", "view", parent_no, "--json", "milestone,labels",
+             "--repo", repo],
+            capture_output=True, text=True, cwd=str(root))
+    except Exception:  # noqa: BLE001 — best-effort: a failed lookup never stops filing
+        return "", [], False
+    if proc.returncode != 0:
+        return "", [], False
+    try:
+        data = json.loads(proc.stdout or "")
+    except ValueError:
+        return "", [], False
+    if not isinstance(data, dict):
+        return "", [], False
+    milestone = data.get("milestone")
+    title = milestone.get("title") if isinstance(milestone, dict) else None
+    labels = data.get("labels") if isinstance(data.get("labels"), list) else []
+    names = [label["name"] for label in labels
+             if isinstance(label, dict) and isinstance(label.get("name"), str)
+             and label["name"]]
+    return (title if isinstance(title, str) else ""), names, True
 
 
 def file_children(parent: Path, children: list[Child], cfg, *,
@@ -1039,6 +1110,18 @@ def file_children(parent: Path, children: list[Child], cfg, *,
         # quietly producing a flat set of unrelated issues.
         advisory(f"split: {parent.name} carries no numeric tracker id — filing the "
                  "children as standalone issues, NOT as sub-issues")
+    # Looked up ONCE, before the filing loop — the parent's milestone/labels cannot
+    # change between children in a single batch, so a per-child lookup would only add a
+    # round trip for the same answer. A parent with no number (above) has no issue to
+    # look up either. Best-effort (issue #467): a lookup that fails — a non-zero exit, an
+    # error, output that is not a JSON object — still files every child, just without
+    # the metadata, and says so exactly once.
+    milestone_title, label_names = "", []
+    if parent_no:
+        milestone_title, label_names, lookup_ok = _parent_metadata(why, parent_no, cfg.root)
+        if not lookup_ok:
+            advisory(f"split: could not read #{parent_no}'s milestone/labels — filing the "
+                     "children WITHOUT them; set them on the tracker by hand")
     body_head = (f"Child slice of #{parent_no}, split during Plan.\n\n"
                  if parent_no else "Child slice, split during Plan.\n\n")
     created: list[str] = []
@@ -1049,7 +1132,9 @@ def file_children(parent: Path, children: list[Child], cfg, *,
                 title=child_title(child, parent),
                 body=body_head + child.body.strip() + "\n",
                 parent_no=parent_no,
-                root=cfg.root))
+                root=cfg.root,
+                milestone=milestone_title,
+                labels=label_names))
         except BaseException as exc:
             # `BaseException`, not `Exception`. Ctrl-C during a run that has already filed
             # issues is an ordinary operator action, and `KeyboardInterrupt` is not an
