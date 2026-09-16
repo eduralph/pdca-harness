@@ -57,6 +57,25 @@ _ELEMENT_RE = re.compile(r"^(C[1-5]|T[1-5]|V)\b")
 # findings stay HUMAN, so a legacy advisory file can never trigger an auto-iteration.
 _IMPL_MARKER_RE = re.compile(r"^\[impl\]\s*[—:-]*\s*", re.IGNORECASE)
 
+# Where a `- NEEDS-HUMAN` bullet's continuation ENDS (issue #527), mirroring the
+# membership rule `brief._block_for` already uses for a wrapped field value
+# (`brief.py:91-98`): a line indented deeper than the bullet is prose that keeps
+# going, until one of these signals the block is over — a new list item at ANY
+# indent (so an indented `  - NEEDS-HUMAN …` sub-bullet is still its own item), a
+# heading, a table row, or a code fence.
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s")
+_CODE_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+
+def _ends_needs_human_continuation(line: str) -> bool:
+    s = line.strip()
+    return bool(
+        _LIST_ITEM_RE.match(line)
+        or s.startswith("#")
+        or s.startswith("|")
+        or _CODE_FENCE_RE.match(line)
+    )
+
 # The one STANDING row (#293) — recognised by the canonical label, not a hardcoded string, so
 # it cannot drift from the matrix the reviewer's table mirrors. `V` is the only element the
 # reviewer's prompt hard-codes to NEEDS-HUMAN on every cycle; C5/T5 are judgment too, but the
@@ -437,7 +456,12 @@ def _needs_human(review_text: str) -> list[tuple[str, bool]]:
 
     The reviewer always emits the 5/5/1 verdict table (see leaves._REVIEW_PROMPT);
     a table row whose verdict cell is NEEDS-HUMAN becomes a §6 item (Item — Basis).
-    Legacy ``- NEEDS-HUMAN — …`` bullet lines are still honoured.
+    Legacy ``- NEEDS-HUMAN — …`` bullet lines are still honoured, continuation lines
+    included (issue #527): a bullet's text is its first line plus every following line
+    indented deeper than the bullet, space-joined into one line (never a newline — a
+    second physical line would lose its §6 checkbox), until a blank line, a line no
+    deeper than the bullet, a new list item at any indent, a heading, a table row, or a
+    code fence ends it (see :func:`_ends_needs_human_continuation`).
 
     The second element says whether the item IS the canonical standing row — the one the prompt
     hard-codes every cycle. It demands an **exact** match on the row's *Item cell* against the
@@ -462,20 +486,40 @@ def _needs_human(review_text: str) -> list[tuple[str, bool]]:
             seen.add(text.lower())
             items.append((text, standing))
 
-    for i, line in enumerate(lines):
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
         s = line.strip()
         if s.startswith("- NEEDS-HUMAN"):
-            add(s[len("- NEEDS-HUMAN"):].lstrip(" —:-").strip(), standing=False)
+            bullet_indent = len(line) - len(line.lstrip())
+            parts = [s[len("- NEEDS-HUMAN"):].lstrip(" —:-").strip()]
+            j = i + 1
+            while j < n:
+                cont = lines[j]
+                cont_s = cont.strip()
+                if not cont_s:
+                    break  # blank line ends the item (out of scope: multi-paragraph bullets)
+                cont_indent = len(cont) - len(cont.lstrip())
+                if cont_indent <= bullet_indent:
+                    break  # not indented deeper than the bullet
+                if _ends_needs_human_continuation(cont):
+                    break  # a new list item, heading, table row, or code fence
+                parts.append(cont_s)
+                j += 1
+            add(" ".join(p for p in parts if p), standing=False)
+            i = j
+            continue
         elif s.startswith("|") and "needs-human" in s.lower():
             cells = [c.strip() for c in s.strip("|").split("|")]
-            vi = next((j for j, c in enumerate(cells) if "needs-human" in c.lower()), None)
-            if vi is None:
-                continue
-            label = cells[0] if cells else ""
-            basis = cells[vi + 1] if vi + 1 < len(cells) else ""
-            add(f"{label} — {basis}" if basis else label,
-                standing=(i in verdict_table
-                          and label.strip().casefold() == _V_LABEL.casefold()))
+            vi = next((k for k, c in enumerate(cells) if "needs-human" in c.lower()), None)
+            if vi is not None:
+                label = cells[0] if cells else ""
+                basis = cells[vi + 1] if vi + 1 < len(cells) else ""
+                add(f"{label} — {basis}" if basis else label,
+                    standing=(i in verdict_table
+                              and label.strip().casefold() == _V_LABEL.casefold()))
+        i += 1
 
     # FAIL CLOSED on ambiguity. The template row is a CONSTANT — it occurs exactly once. If two
     # survive (a second verdict-shaped table, a duplicated row), at least one of them is not the
