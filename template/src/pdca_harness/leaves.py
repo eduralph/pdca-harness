@@ -912,6 +912,15 @@ def do_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
         print(f"leaves: {d.name} — tracker item is resolved (notes.json `resolved`); "
               "skipping Plan (terminal, #302)", file=sys.stderr)
         return
+    # Snapshot the WHOLE bundle root, not just `d`, before the session (#480). A
+    # single-bundle session can `pdca split <id> --accept` mid-session: that writes
+    # authored briefs into new child bundles this call was never handed, and can mark
+    # `d` itself terminal (a split parent). Reviewing only `d` afterwards either
+    # reviews a superseded parent brief on a closed bundle or, once the parent has no
+    # brief, reviews nothing at all — the children never get a look. Matches
+    # `do_plan_batch`'s pre-session snapshot (`:1073-1075`) so both paths select the
+    # same way (`_fresh_plan_briefs`).
+    briefed_before = _brief_snapshot(cfg)
     if cfg.planner.mode == "command":
         # The session's exit contract (#331): register the bundle + role so /handoff
         # and the Stop hook can verify the brief (structure + dependency probe).
@@ -924,7 +933,10 @@ def do_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
                     extra_argv=_plan_grant([d], cfg, cfg.profile(cfg.planner)))
     else:
         _stub_plan(d, cfg)
-    run_plan_advisory(d, cfg)  # opt-in antagonistic review of the brief (#301); no-op unless configured
+    # #301, extended to cover what the session actually produced (#480): review every
+    # bundle it authored or rewrote, not just `d` — `run_plan_advisory_batch` itself
+    # skips a terminal (`close-disposition`) bundle and a placeholder brief.
+    run_plan_advisory_batch(cfg, _fresh_plan_briefs(cfg, briefed_before))
 
 
 def _split_provenance_note(d: Path) -> str:
@@ -1070,9 +1082,7 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
     # brief; unchanged resumptions still skip). An unfilled template copy is NOT
     # briefed (round 2 — the same placeholder semantics as state.state(), #113): the
     # session replaces it with a real brief that must get its plan review.
-    briefed_before = {d.name: _brief_sha(d) for d in cfg.bundle_root.glob("issue_*")
-                      if (d / "brief.md").exists()
-                      and not brief.is_placeholder(d / "brief.md")}
+    briefed_before = _brief_snapshot(cfg)
     for iid in ids or []:
         sources.seed(cfg, cfg.bundle(iid))  # seed notes.json + sources/ per bundle (#65/#102)
     # RESOLVED trackers are terminal and must not enter the Plan session (#302 review):
@@ -1126,11 +1136,7 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
     # #301: one advisory pass over the freshly briefed OR rewritten bundles, then ONE
     # revision session if any review found something. No-op unless
     # [[leaves.plan_advisory]] is configured.
-    fresh = sorted(d for d in cfg.bundle_root.glob("issue_*")
-                   if (d / "brief.md").exists()
-                   and (d.name not in briefed_before
-                        or _brief_sha(d) != briefed_before[d.name]))
-    run_plan_advisory_batch(cfg, fresh)
+    run_plan_advisory_batch(cfg, _fresh_plan_briefs(cfg, briefed_before))
 
 
 def _reject_resolved_briefs(cfg: Config, resolved_before: set[str]) -> None:
@@ -3351,6 +3357,38 @@ def _plan_revision_prompt(cfg: Config, bundles: list[Path]) -> str:
     )
 
 
+def _brief_snapshot(cfg: Config) -> dict[str, str]:
+    """Content-hash snapshot of every non-placeholder brief in the bundle root, keyed
+    by bundle name — the pre-session "before" picture `_fresh_plan_briefs` diffs
+    against (#301 review round 5's content-hash rule, shared by `do_plan` and
+    `do_plan_batch` so a single-bundle session's PLAN reach is snapshotted the same
+    way a batch session's is, #480). An unfilled template copy is NOT briefed (round
+    2 — the same placeholder semantics as `state.state()`, #113): the session
+    replaces it with a real brief that must get its plan review."""
+    return {d.name: _brief_sha(d) for d in cfg.bundle_root.glob("issue_*")
+            if (d / "brief.md").exists() and not brief.is_placeholder(d / "brief.md")}
+
+
+def _fresh_plan_briefs(cfg: Config, briefed_before: dict[str, str]) -> list[Path]:
+    """Every bundle in the root a Plan session authored or REWROTE a brief for, against
+    the pre-session `_brief_snapshot` (#301 review round 5's content-hash rule).
+
+    Shared by `do_plan` and `do_plan_batch` (#480) so a single-bundle session's
+    plan-advisory reach matches the batch session's: a `pdca split <id> --accept`
+    run INSIDE either session's planner call writes authored briefs into new child
+    bundles neither call was individually handed, and this re-scan over the whole
+    root (not just the bundle the caller started with) is what picks them up.
+    Terminal bundles (a split parent that reached `close-disposition`) and
+    placeholder briefs are excluded downstream, by `run_plan_advisory_batch`
+    itself — the one choke point both Plan paths funnel through — so a bundle
+    marked terminal by a split accepted mid-session is filtered there whether it
+    reached this list or not."""
+    return sorted(d for d in cfg.bundle_root.glob("issue_*")
+                  if (d / "brief.md").exists()
+                  and (d.name not in briefed_before
+                       or _brief_sha(d) != briefed_before[d.name]))
+
+
 def run_plan_advisory_batch(cfg: Config, bundles: list[Path]) -> None:
     """The Plan-beat advisory pass over freshly briefed bundles (issue #301).
 
@@ -3358,11 +3396,15 @@ def run_plan_advisory_batch(cfg: Config, bundles: list[Path]) -> None:
     has findings, ONE planner revision invocation covers them all (bounded by
     construction — never a loop), and each reviewed bundle gets its benefit record.
     No-op when nothing is configured or nothing is reviewable (a placeholder brief is
-    a template, not a plan — reviewing it would grade boilerplate)."""
+    a template, not a plan — reviewing it would grade boilerplate). A bundle carrying
+    `close-disposition` (terminal — split parent decomposed rather than built,
+    `split.py:862`) is excluded on BOTH Plan paths (#480): the parent's superseded
+    brief must never trigger the revision session over a bundle nothing will build."""
     if not cfg.plan_advisory_leaves:
         return
     reviewed = [d for d in bundles
-                if (d / "brief.md").exists() and not brief.is_placeholder(d / "brief.md")]
+                if (d / "brief.md").exists() and not brief.is_placeholder(d / "brief.md")
+                and not (d / state.CLOSE_MARKER).exists()]
     ran: dict[Path, list[str]] = {}
     for d in reviewed:
         # A rewritten brief (or a changed pool/`when` selection) must not inherit the
