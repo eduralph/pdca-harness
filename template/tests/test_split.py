@@ -39,6 +39,20 @@ _TWO_DEP = "- **Slug:** second\n- **Defect / goal:** b\n- **Depends on:** child-
 _TWO_INDEP = "- **Slug:** second\n- **Defect / goal:** b\n"
 
 
+def _is_metadata_lookup(cmd: list[str]) -> bool:
+    """True for the `gh issue view <n> --json milestone,labels --repo <repo>` call
+    `split._parent_metadata` makes once, before the filing loop (issue #467) — every fake
+    `gh` below counts/indexes `gh issue create` calls only, so this lookup has to be
+    recognised and answered separately or it shifts every call-count-based index by one."""
+    return list(cmd[:3]) == ["gh", "issue", "view"]
+
+
+#: A parent with neither a milestone nor a label: `{}` parses as a JSON object with
+#: neither key present, which `split._parent_metadata` reads as "looked up fine, nothing
+#: to inherit" — the ordinary, silent case the existing tests below all assume.
+_NO_PARENT_METADATA = SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+
 class Parsing(unittest.TestCase):
     def test_children_are_returned_in_document_order(self) -> None:
         """Order is load-bearing: `--accept` maps children to ids POSITIONALLY, so a
@@ -676,6 +690,8 @@ class FilingChildIssues(unittest.TestCase):
             assert isinstance(cmd, list), f"argv must be a list, not {type(cmd).__name__}"
             assert capture_output is True, "stdout must be captured to read the issue URL"
             assert text is True, "text=True is required or stdout arrives as bytes"
+            if _is_metadata_lookup(cmd):
+                return _NO_PARENT_METADATA
             self.calls.append(list(cmd))
             n = len(self.calls)
             if fail_at is not None and n == fail_at:
@@ -1035,6 +1051,8 @@ class CodexReviewHardening(unittest.TestCase):
 
     def _run_returning(self, stdout: str):
         def run(cmd, capture_output=False, text=False, cwd=None):
+            if _is_metadata_lookup(cmd):
+                return _NO_PARENT_METADATA
             self.calls.append(list(cmd))
             return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
         return run
@@ -1066,6 +1084,8 @@ class CodexReviewHardening(unittest.TestCase):
         state_ = {"n": 0}
 
         def run(cmd, capture_output=False, text=False, cwd=None):
+            if _is_metadata_lookup(cmd):
+                return _NO_PARENT_METADATA
             state_["n"] += 1
             if state_["n"] == 2:
                 raise RuntimeError("something nobody predicted")
@@ -1340,6 +1360,8 @@ class CodexRound4(unittest.TestCase):
         calls = {"n": 0}
 
         def run(cmd, capture_output=False, text=False, cwd=None):
+            if _is_metadata_lookup(cmd):
+                return _NO_PARENT_METADATA
             calls["n"] += 1
             if calls["n"] == 2:
                 return SimpleNamespace(returncode=1, stdout="", stderr="gh: HTTP 403")
@@ -1400,6 +1422,8 @@ class TheWholeChainUnmocked(unittest.TestCase):
     def _fake_gh(self, numbers):
         def run(cmd, capture_output=False, text=False, cwd=None):
             assert isinstance(cmd, list) and capture_output is True and text is True
+            if _is_metadata_lookup(cmd):
+                return _NO_PARENT_METADATA
             self.calls.append(list(cmd))
             n = numbers[len(self.calls) - 1]
             return SimpleNamespace(
@@ -1455,6 +1479,8 @@ class TheWholeChainUnmocked(unittest.TestCase):
     def test_a_gh_failure_midway_names_the_issue_it_already_filed(self) -> None:
         """The partial-failure path, also never run unmocked."""
         def run(cmd, capture_output=False, text=False, cwd=None):
+            if _is_metadata_lookup(cmd):
+                return _NO_PARENT_METADATA
             self.calls.append(list(cmd))
             if len(self.calls) == 2:
                 return SimpleNamespace(returncode=1, stdout="", stderr="gh: HTTP 403")
@@ -1673,6 +1699,8 @@ class IrreversibleStateIsNeverLost(unittest.TestCase):
         """`gh` succeeded; only its number is unreadable. Telling the operator to file
         that child by hand invites a duplicate against a tracker that can undo neither."""
         def run(cmd, capture_output=False, text=False, cwd=None):
+            if _is_metadata_lookup(cmd):
+                return _NO_PARENT_METADATA
             self.n += 1
             if self.n == 2:
                 return SimpleNamespace(returncode=0, stdout="created ok\n", stderr="")
@@ -1692,6 +1720,8 @@ class IrreversibleStateIsNeverLost(unittest.TestCase):
         """The complement: a call that genuinely failed filed nothing, and hedging there
         would stop an operator from retrying something that is safe to retry."""
         def run(cmd, capture_output=False, text=False, cwd=None):
+            if _is_metadata_lookup(cmd):
+                return _NO_PARENT_METADATA
             self.n += 1
             if self.n == 2:
                 return SimpleNamespace(returncode=1, stdout="", stderr="gh: HTTP 403")
@@ -1713,6 +1743,8 @@ class IrreversibleStateIsNeverLost(unittest.TestCase):
         """`KeyboardInterrupt` is not an `Exception`, so it walked past the handler and
         the irreversible numbers vanished with nothing on screen naming them."""
         def run(cmd, capture_output=False, text=False, cwd=None):
+            if _is_metadata_lookup(cmd):
+                return _NO_PARENT_METADATA
             self.n += 1
             if self.n == 2:
                 raise KeyboardInterrupt
@@ -1732,6 +1764,11 @@ class IrreversibleStateIsNeverLost(unittest.TestCase):
         """Reported, then re-raised unchanged: converting it to a SplitError would make
         Ctrl-C look like an ordinary error the caller might handle and continue past."""
         def run(cmd, capture_output=False, text=False, cwd=None):
+            # The parent-metadata lookup (#467) is answered, so the interrupt still lands
+            # on the first `gh issue create`, inside the filing loop's handler — raised
+            # from the lookup instead, it would escape before that handler ever ran.
+            if _is_metadata_lookup(cmd):
+                return _NO_PARENT_METADATA
             raise KeyboardInterrupt
 
         with self._with(run), redirect_stderr(io.StringIO()):
