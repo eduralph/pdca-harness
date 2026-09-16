@@ -1044,7 +1044,8 @@ class PublisherGuard(unittest.TestCase):
         with mock.patch.object(leaves, "_invoke",
                                side_effect=lambda *a, **k: captured.update(env=k.get("env"))), \
              mock.patch.object(leaves, "_publish_prompt", return_value="PROMPT"), \
-             mock.patch.object(leaves.guard, "shim_env", return_value={"PATH": "SHIMMED"}):
+             mock.patch.object(leaves.guard, "shim_env", return_value={"PATH": "SHIMMED"}), \
+             redirect_stderr(io.StringIO()):  # the reap report, no artifacts (#534)
             leaves.run_publish(self.cfg.bundle("X"), self.cfg)
         return captured["env"]
 

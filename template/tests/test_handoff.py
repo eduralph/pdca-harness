@@ -1,5 +1,5 @@
-"""The interactive leaves' checked exit contract — /handoff + Stop hook + session
-carry-forward capture (issue #331; stdlib unittest, offline, no Claude/TTY).
+"""The interactive leaves' checked exit contract — /handoff + the session-end verdict +
+session carry-forward capture (issue #331; stdlib unittest, offline, no Claude/TTY).
 
 Covers, against the #331 success criterion:
   (a) the rendered `/handoff` command exists and the per-leaf contract checks hold —
@@ -7,8 +7,11 @@ Covers, against the #331 success criterion:
       signoff (VALID_DECISIONS token + rationale for iterate-*/discontinue),
       publisher (both artifacts + the instance's deterministic T4 lint, reused),
       act (the session NAMES the entry it wrote, against the driver's baseline);
-  (b) the Stop hook ships, is registered, blocks a malformed/missing contract
-      artifact and honours the deliberate-abandon escape hatch;
+  (b) the hook script ships as the session's CLI (`--check` / `--abandon`) and is NOT
+      registered as a Stop hook (#534: a turn end must hand control to the human; the
+      contract is reported when the driver reaps the session, tests/test_handoff_reap);
+      `stop_problems` flags a malformed/missing contract artifact, and a deliberate
+      abandon hides none of it (#534: it explains the gap, it does not clear it);
   (c) ids are REQUIRED — no scan mode, and no argument-hint advertises one;
   (d) the gate's verdict is exit status + report — nothing is written into the bundle;
   (e) the session carry-forward channel: flow captures the FULL sign-off rationale
@@ -130,15 +133,17 @@ class RenderedArtifacts(unittest.TestCase):
         self.assertIn("$1", text)  # the id is actually passed through
         self.assertIn("handoff_guard.py", text)  # single-sourced with the hook
 
-    def test_stop_hook_ships_and_is_registered(self) -> None:
-        # (b): the hook file exists and settings.json registers it on Stop, so the
-        # check is non-optional — a slash command cannot terminate its own session.
+    def test_hook_ships_and_is_not_registered_on_stop(self) -> None:
+        # (b): the hook file ships (it is the /handoff and --abandon CLI), and
+        # settings.json does NOT register it on Stop: Stop fires at every turn end and
+        # its exit 2 feeds the model, so a leaf could never hand a question to the
+        # human (#534). The contract is judged when the driver reaps the session.
         self.assertTrue(HOOK.is_file(), f"missing {HOOK}")
         settings = json.loads(SETTINGS.read_text(encoding="utf-8"))
-        stops = settings.get("hooks", {}).get("Stop", [])
+        stops = (settings.get("hooks") or {}).get("Stop") or []
         cmds = [h.get("command", "") for entry in stops for h in entry.get("hooks", [])]
-        self.assertTrue(any("handoff_guard.py" in c for c in cmds),
-                        "settings.json must register handoff_guard.py as a Stop hook")
+        self.assertFalse(any("handoff_guard.py" in c for c in cmds),
+                         "settings.json must not register handoff_guard.py on Stop")
 
     def test_hook_module_imports_offline(self) -> None:
         spec = importlib.util.spec_from_file_location("handoff_guard", HOOK)
@@ -298,13 +303,16 @@ class ActContract(Base):
 class SessionRegistration(Base):
     def test_session_registers_env_and_cleans_up(self) -> None:
         d = self.bundle()
-        with handoff.session(self.cfg, "signoff", [d]) as env:
-            self.assertEqual(env[handoff.ENV_ROLE], "signoff")
-            spath = Path(env[handoff.ENV_STATE])
-            self.assertTrue(spath.name.startswith(handoff.STATE_PREFIX))
-            self.assertEqual(spath.parent, self.tmp)  # project root, NOT the bundle
-            data = json.loads(spath.read_text(encoding="utf-8"))
-            self.assertEqual(data["bundles"], [str(d)])
+        # The bundle has no decision, so the reap reports it (#534): keep that report
+        # off the real stderr.
+        with redirect_stderr(io.StringIO()):
+            with handoff.session(self.cfg, "signoff", [d]) as env:
+                self.assertEqual(env[handoff.ENV_ROLE], "signoff")
+                spath = Path(env[handoff.ENV_STATE])
+                self.assertTrue(spath.name.startswith(handoff.STATE_PREFIX))
+                self.assertEqual(spath.parent, self.tmp)  # project root, NOT the bundle
+                data = json.loads(spath.read_text(encoding="utf-8"))
+                self.assertEqual(data["bundles"], [str(d)])
         self.assertFalse(spath.exists())  # reaped by the driver
 
     def test_non_interactive_leaf_gets_no_contract_env(self) -> None:
@@ -315,10 +323,13 @@ class SessionRegistration(Base):
     def test_act_session_carries_the_baseline(self) -> None:
         self.cfg.process_dir.mkdir(parents=True, exist_ok=True)
         (self.cfg.process_dir / "act-log.md").write_text("# Act log\n", encoding="utf-8")
-        with handoff.session(self.cfg, "act") as env:
-            data = json.loads(Path(env[handoff.ENV_STATE]).read_text(encoding="utf-8"))
-            self.assertEqual(data["baseline"]["act_log_len"], len("# Act log\n"))
-            self.assertIn("act_log_sha", data["baseline"])
+        # No entry is named, so the reap reports it (#534): keep that off real stderr.
+        with redirect_stderr(io.StringIO()):
+            with handoff.session(self.cfg, "act") as env:
+                data = json.loads(
+                    Path(env[handoff.ENV_STATE]).read_text(encoding="utf-8"))
+                self.assertEqual(data["baseline"]["act_log_len"], len("# Act log\n"))
+                self.assertIn("act_log_sha", data["baseline"])
 
     def test_abandon_reason_is_reported_when_the_driver_reaps(self) -> None:
         err = io.StringIO()
@@ -338,10 +349,15 @@ class StopVerdict(Base):
             "iterate-do\nwhy: symptom-guard\n", encoding="utf-8")
         self.assertEqual(handoff.stop_problems(self.cfg, "signoff", st), [])
 
-    def test_abandon_is_the_escape_hatch(self) -> None:
+    def test_an_abandon_does_not_clear_the_verdict(self) -> None:
+        # #534: nothing blocks at the session end, so an abandon only explains the gap.
+        # The reap prints the typed reason AND this list (tests/test_handoff_reap.py).
         d = self.bundle()
-        st = {"role": "signoff", "bundles": [str(d)], "abandoned": "deliberate"}
-        self.assertEqual(handoff.stop_problems(self.cfg, "signoff", st), [])
+        st = {"role": "signoff", "bundles": [str(d)]}
+        problems = handoff.stop_problems(self.cfg, "signoff", st)
+        self.assertTrue(problems)
+        self.assertEqual(handoff.stop_problems(
+            self.cfg, "signoff", {**st, "abandoned": "deliberate"}), problems)
 
     def test_unknown_work_set_requires_a_named_pass(self) -> None:
         # CSV-batch planner / act: the driver could not register bundles at spawn, so

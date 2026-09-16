@@ -174,12 +174,21 @@ reviewer) run unattended.
 
 Every interactive session also has a **checked exit** (issue #331): before you
 end it, run `/handoff <issue-id>` — it verifies the session's expected artifact
-exists and is well-formed, and reports PASS or FAIL with the items to fix. The
-same contract is enforced mechanically at session end by a Stop hook, so a
-session can't silently close with its artifact missing or malformed; a
-deliberate walk-away is recorded with
-`python3 .claude/hooks/handoff_guard.py --abandon "<why>"` rather than by
-ignoring the guard. Each agent's role prompt lives in a canonical,
+exists and is well-formed, and reports PASS or FAIL with the items to fix. When
+the session ends, the driver checks again and prints what it finds to your
+terminal. It re-reads the artifacts of every bundle it registered for the
+session: the bundle of a Plan, sign-off or publish session, and each bundle of
+an id-seeded batch Plan or a batch sign-off. Where it could not register a
+bundle set — a CSV or default batch Plan, which picks its issues mid-session,
+and Act — it checks that the session named its work through a passing
+`/handoff` instead, and does not re-read what that session wrote. The
+end-of-session check only reports: it never keeps the session open and never
+changes the bundle. Nothing checks the contract at the end of each turn, so the
+leaf can always hand a question back to you (issue #534). A deliberate
+walk-away is recorded with
+`python3 .claude/hooks/handoff_guard.py --abandon "<why>"`; the driver then
+prints your reason first and still lists everything its check found, so an
+abandon never hides what is missing. Each agent's role prompt lives in a canonical,
 vendor-neutral body at `agents/<name>.md`; Claude leaves additionally get
 `.claude/agents/<name>.md` (a frontmatter wrapper that includes that body, so
 `--agent` resolves), materialized only when the leaf's family is `claude`.
