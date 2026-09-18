@@ -11,9 +11,10 @@ hand-deleting check-gates.json, re-paying the entire gate run (observed for real
 wyrd issue_635). These tests build the interrupted states ON DISK — exactly what a
 resumed driver sees — and assert `advance`:
 
-* runs a NEVER-RAN reviewer/advisory leaf (artifact AND error log both absent — the
-  #138 failed-leaf discriminator) before assembling, preserving the paid gate record;
-* does NOT re-run a leaf that RAN AND FAILED (error log present) — today's behaviour;
+* runs a NEVER-RAN reviewer/advisory leaf (no artifact and no SETTLED error log —
+  `state.leaf_ran_and_failed`, the #138 failed-leaf discriminator) before assembling,
+  preserving the paid gate record;
+* does NOT re-run a leaf that RAN AND FAILED (a settled error log) — today's behaviour;
 * words §6 so a skipped reviewer never reads like a failed one;
 * is a strict no-op on an uninterrupted bundle (artifacts byte-identical).
 """
@@ -102,13 +103,20 @@ class NeverRanReviewerIsRecovered(CheckResumeBase):
 
 
 class RanAndFailedIsNotRerun(CheckResumeBase):
-    """Success criterion (b): an error log (#138) means the leaf RAN and FAILED —
-    today's degrade-to-§6 behaviour is unchanged, no silent re-run."""
+    """Success criterion (b): a SETTLED error log (#138) means the leaf RAN and FAILED —
+    today's degrade-to-§6 behaviour is unchanged, no silent re-run.
+
+    The fixtures are what the leaf wrapper actually leaves when the attempts are spent
+    (`state.settled_record`, #540), not a hand-written stand-in: since a failed attempt's
+    record now reaches disk BEFORE the next attempt, only the harness's own settlement
+    closes the account, and a record it never closed re-runs the leaf instead of retiring
+    it."""
 
     def test_failed_reviewer_is_not_rerun(self) -> None:
         self._trapdoor()
         (self.d / state.REVIEW_ERROR_LOG).write_text(
-            "----- attempt 1 — exit 1 -----\nboom\n", encoding="utf-8")
+            state.settled_record("----- attempt 1 — exit 1 -----\nboom\n"),
+            encoding="utf-8")
         driver.advance(self.d, self.cfg)
         # The stub reviewer would have written a verdict table; it must not have run.
         self.assertFalse((self.d / "check-review.md").exists(),
@@ -119,7 +127,8 @@ class RanAndFailedIsNotRerun(CheckResumeBase):
         self._trapdoor()
         (self.d / "check-review.md").write_text("# real review\n", encoding="utf-8")
         (self.d / "check-advisory-code-review.error.log").write_text(
-            "----- attempt 1 — exit 1 -----\nboom\n", encoding="utf-8")
+            state.settled_record("----- attempt 1 — exit 1 -----\nboom\n"),
+            encoding="utf-8")
         driver.advance(self.d, self.cfg)
         self.assertFalse((self.d / "check-advisory-code-review.md").exists(),
                          "a ran-and-failed advisory leaf was re-run")
@@ -140,7 +149,8 @@ class Section6DistinguishesSkippedFromFailed(CheckResumeBase):
 
     def test_ran_and_failed_wording_points_at_the_error_log(self) -> None:
         self._trapdoor()
-        (self.d / state.REVIEW_ERROR_LOG).write_text("boom\n", encoding="utf-8")
+        (self.d / state.REVIEW_ERROR_LOG).write_text(
+            state.settled_record("boom\n"), encoding="utf-8")
         assemble.assemble_summary(self.d, self.cfg)
         summary = (self.d / "SUMMARY.md").read_text(encoding="utf-8")
         self.assertIn("RAN AND FAILED", summary)
