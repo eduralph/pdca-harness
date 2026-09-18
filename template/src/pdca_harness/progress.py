@@ -55,7 +55,8 @@ def run_with_heartbeat(
     stdout+stderr when ``capture`` is True (so a gate can keep its evidence line);
     the bounded **stderr tail** when ``stream_json`` or ``tee_stderr`` is set (so a
     failed leaf's real error — usage/rate limit, 5xx, auth — survives in the bundle
-    instead of scrolling past on a console nobody is watching); ``""`` otherwise.
+    instead of scrolling past on a console nobody is watching), **plus the leaf's own
+    terminal error report** when the stream carried one (below); ``""`` otherwise.
     ``produced`` is whether the child emitted a **substantive** stream event — an
     ``assistant`` / ``user`` / ``result`` event, i.e. a session that did real work.
     Claude emits a ``system``/``init`` event (and ``system``/``api_retry`` on a
@@ -63,6 +64,38 @@ def run_with_heartbeat(
     exit with ``produced is False`` is the transient-infra signal (the child died
     at/near invocation — usage/rate limit, 5xx, auth — before any real output).
     ``input_text``, if given, is written to stdin.
+
+    **The leaf's own account of its death is kept** (issue #506). The CLI *marks* the
+    message it synthesises for an API error, and that report arrives as a stream event
+    on stdout — which this function already reads, parsed for a tool label and then
+    dropped. So the marked report is retained (:func:`_terminal_error`) and appended to
+    ``output``, reaching a caller's ``*.error.log`` by the same route the stderr tail
+    takes — the one existing precedent being the #420 memory post-mortem, which appends
+    to the same string. An 18-minute leaf whose API connection dropped mid-response used
+    to file ``(no output captured)``, with the cause legible only in the CLI's session
+    transcript under ``~/.claude/projects/`` — a post-mortem artifact that explains
+    nothing. Retention only: **nothing here is classified**. ``produced``, and therefore
+    every retry decision made from it, is byte-identical to before for every input.
+
+    Three properties this retention is held to:
+
+    * it is **unconditional** — every marked report is kept whatever its cause, including
+      one the session then recovered from and one the vendor marked permanent, because a
+      harness that is holding the text must never file ``(no output captured)``;
+    * a report the CLI forwarded for a **sub-agent** (the Task's ``parent_tool_use_id``,
+      ``isSidechain`` in the persisted-transcript spelling) is kept **labelled as such**
+      (:data:`_SUBAGENT_NOTE`) — a log that confidently names the wrong death is worse
+      than the silence it replaces;
+    * where a stream carries several candidate records, the one **nearest the leaf's own
+      death** wins and a farther one — a ``result`` wrap-up naming only the effect, a
+      sub-agent's report — cannot bury it, in either arrival order
+      (:func:`_note_terminal`).
+
+    The append is skipped under ``capture``: there ``output`` is the raw stdout the
+    caller asked to keep verbatim (JSONL for a stream family, a gate's evidence line),
+    and the report is already in those bytes. Families whose stream this module has no
+    observed error shape for (codex) and stream-less families degrade to today's
+    behaviour rather than guessing at a vendor's error text.
 
     ``timeout``, if given, is the wall-clock bound in seconds (issue #368): on expiry
     the child's whole process GROUP is terminated (SIGTERM, then SIGKILL after a
@@ -142,6 +175,11 @@ def run_with_heartbeat(
     chunks: list[str] = []
     err_tail: deque[str] = deque(maxlen=200)  # bounded stderr tail for a failed leaf
     produced = {"session": False}  # did a substantive stream event arrive (real work)?
+    # The leaf's OWN account of a terminal death (#506), kept for the caller's error log.
+    # ``shape`` keeps the marked records apart by how near each is to the leaf's own
+    # death, so neither the session's wrap-up nor a sub-agent's report can overwrite the
+    # main session's own account of the cause (:func:`_note_terminal`).
+    terminal = {"text": "", "shape": ""}
     latest_tool = {"label": ""}  # most recent tool-use, updated by the drain thread
     readers: list[threading.Thread] = []
     if capture_out:
@@ -151,9 +189,18 @@ def run_with_heartbeat(
                 if capture:
                     chunks.append(line)
                 if stream_json:
-                    if _is_session_event(line, stream_format):
+                    # Decoded ONCE per line, then classified three ways. This is a hot
+                    # loop — a long session streams thousands of lines — and each
+                    # classifier below used to re-parse the same bytes for itself. A
+                    # line that is no JSON object decodes to ``{}``, which every
+                    # classifier answers exactly as it answered the raw line before.
+                    ev = _stream_event(line)
+                    if _is_session_event(ev, stream_format):
                         produced["session"] = True  # a startup/init line does NOT count
-                    lbl = _stream_tool_label(line, stream_format)
+                    text, shape = _terminal_error(ev, stream_format)
+                    if shape:  # the CLI's own marked report — keep it, whatever its cause
+                        _note_terminal(terminal, text, shape)
+                    lbl = _stream_tool_label(ev, stream_format)
                     if lbl:
                         latest_tool["label"] = lbl
         t = threading.Thread(target=_drain, daemon=True)
@@ -253,7 +300,18 @@ def run_with_heartbeat(
         if stream is not None:
             stream.close()
     output = "".join(chunks) if capture else ("".join(err_tail) if tee_err else "")
+    if terminal["text"] and not capture:
+        # The diagnostic the incident had to be dug out of ~/.claude/projects/ rides
+        # `output` into the caller's `*.error.log` by the same route the stderr tail
+        # does, so no reader downstream needs a special case for it (#506) — appended
+        # after the tail, exactly as the #420 memory post-mortem is. NOT under
+        # `capture`: that output is the child's raw stdout, which a gate keeps as its
+        # evidence line and a stream family emits as JSONL — the report is in it already.
+        sep = "" if not output or output.endswith("\n") else "\n"
+        output = f"{output}{sep}{_TERMINAL_REPORT_HEADER}\n{terminal['text']}\n"
     rc = TIMEOUT_RC if timed_out else proc.returncode
+    # `produced` is returned exactly as before: this change RETAINS evidence and
+    # classifies nothing, so every retry decision downstream is unchanged (#506).
     return rc, output, produced["session"]
 
 
@@ -362,30 +420,250 @@ _SESSION_EVENT_TYPES = frozenset({"assistant", "user", "result"})
 _CODEX_SESSION_TYPES = frozenset({"item.started", "item.completed", "turn.completed"})
 
 
-def _is_session_event(line: str, fmt: str = "claude-stream-json") -> bool:
-    """True iff a stream line is **substantive work** — not a startup/init event the CLI
-    emits before doing anything. A non-zero exit having produced no such event is the
-    transient-infra signal a retry should target (#138). Best-effort: non-JSON → False."""
+def _stream_event(line: str | dict) -> dict:
+    """One drained stream line decoded **once**: the record, or ``{}`` when the line is
+    no JSON object (a non-JSON line, a bare scalar, an empty read).
+
+    The drain reads a line and classifies it three ways — did real work happen
+    (:func:`_is_session_event`), did the leaf report its own death
+    (:func:`_terminal_error`), what tool is it running (:func:`_stream_tool_label`).
+    Each parsed the same bytes for itself, so the drain paid one ``json.loads`` per
+    classifier on every line of what is a hot loop (two before retention was a
+    question, three with it) and carried a copy of the same "is it an object" guard in
+    each, free to drift apart. They share this one decode now, and each still accepts a
+    raw line — an already-decoded record passes straight through — so a caller holding
+    only the text is unaffected.
+
+    ``{}`` rather than ``None`` for "not a record": every classifier reads the record
+    with ``.get``, so the empty one answers each of them exactly as the unparseable line
+    it came from did, with no separate not-a-record branch to keep in step.
+    """
+    if isinstance(line, dict):
+        return line
     try:
         ev = json.loads(line)
     except (ValueError, TypeError):
-        return False
-    if not isinstance(ev, dict):
-        return False
+        return {}
+    return ev if isinstance(ev, dict) else {}
+
+
+def _is_session_event(line: str | dict, fmt: str = "claude-stream-json") -> bool:
+    """True iff a stream line is **substantive work** — not a startup/init event the CLI
+    emits before doing anything. A non-zero exit having produced no such event is the
+    transient-infra signal a retry should target (#138). Best-effort: non-JSON → False."""
+    ev = _stream_event(line)
     if fmt == "codex-stream-json":
         return ev.get("type") in _CODEX_SESSION_TYPES
     return ev.get("type") in _SESSION_EVENT_TYPES
 
 
-def _stream_tool_label(line: str, fmt: str = "claude-stream-json") -> str:
+# ----------------------------------------------------------------------------
+# The leaf's own account of a TERMINAL failure (issue #506) — RETENTION ONLY.
+#
+# The incident: an escalated builder ran ~18 minutes, the API connection dropped
+# mid-response, the CLI exited 1, and `build.error.log` read "(no output captured)" —
+# "a post-mortem artifact that explains nothing" by the harness's own written rule. The
+# cause was legible only in the CLI's session transcript under ~/.claude/projects/,
+# which no post-mortem reads. The stream carried it the whole time: the drain parsed
+# each line for a tool label and dropped it.
+#
+# The discriminator is NOT the prose. The CLI *marks* the message it synthesises for an
+# API error, so a leaf that merely writes about an API error — a builder fixing this very
+# defect, quoting the incident line — is never mistaken for one dying of it, whatever its
+# wording. Nothing here reads a cause, a kind or a status: this module keeps the text and
+# says whose it is, and every retry decision stays exactly where it was.
+#
+# WHICH field lives on WHICH event is read out of the shipped binary (claude-code
+# 2.1.234), not assumed: a rule keyed on a field the CLI never emits is a branch that
+# looks like coverage and is not. The main loop's stream emitter is
+# `{type:"assistant", …, session_id, parent_tool_use_id: null, uuid, timestamp,
+# error: r.error, …r.isApiErrorMessage===!0 && {is_api_error_message:!0}}`; the
+# persisted transcript spells the same mark `isApiErrorMessage`. The session's `result`
+# wrap-up is built as `{subtype:"success", api_error_status: …, result: <its text>,
+# is_error: …}` or, when the turn threw, `{subtype:"error_during_execution",
+# errors:[…]}`.
+#
+# WHOSE death it is, is read out of the same binary: the mark is forwarded to a SUBAGENT's
+# messages too (the `agent_progress` branch yields `{type:"assistant",
+# parent_tool_use_id: e.parentToolUseID, …, …i.isApiErrorMessage===!0 &&
+# {is_api_error_message:!0}}`), and the CLI recovers from those itself. So a sub-agent's
+# report is kept LABELLED — never presented as the leaf's own death, and never allowed to
+# bury the main session's own report. Both spellings of the scope (the stream's
+# `parent_tool_use_id`, the transcript's `isSidechain`) are answered by one predicate,
+# `_is_subagent_event`, so they cannot drift apart.
+# (template/tests/fixtures/README.md pins the observed records and marks every claim
+# above observed or derived.)
+# ----------------------------------------------------------------------------
+#: A marked API-error message the MAIN session emitted: the CLI's own report of the
+#: failure it is giving up on — the record nearest the leaf's own death.
+_REPORT = "report"
+#: The same marked message emitted for a SUBAGENT (:func:`_is_subagent_event`). Kept as
+#: evidence, prefixed :data:`_SUBAGENT_NOTE` so the log never passes it off as the leaf's
+#: own death: the CLI has its own recovery for a subagent's API-error termination, so
+#: "a Task hit a 529" is not "the leaf died of a 529".
+_SUBAGENT_REPORT = "subagent-report"
+#: The session's ``result`` wrap-up: it records the EFFECT (the session ended, in error)
+#: — never the cause.
+_WRAPUP = "wrapup"
+#: How near each record is to the leaf's OWN death — the order :func:`_note_terminal`
+#: keeps, so a farther record cannot overwrite a nearer one, in either arrival order.
+_TERMINAL_PRECEDENCE = {_SUBAGENT_REPORT: 1, _WRAPUP: 2, _REPORT: 3}
+#: Prefix for a retained sub-agent report, so a post-mortem reader sees what it is. A log
+#: that confidently names the wrong death is worse than the "(no output captured)" this
+#: change replaces.
+_SUBAGENT_NOTE = "[sub-agent report, not the leaf's own death] "
+#: Banner for the retained report in ``output``, so a reader of the error log can tell
+#: the leaf's own stream report from the stderr tail it is appended to (the #420 memory
+#: post-mortem announces itself the same way).
+_TERMINAL_REPORT_HEADER = "----- leaf stream report -----"
+#: One line of post-mortem, not a transcript — the same bounded retention the stderr tail
+#: already gets (``err_tail``). Every observed API-error report is far shorter (the
+#: incident's was 78 characters); the bound is there for the ``result`` wrap-up, which can
+#: restate a whole final message.
+_TERMINAL_ERROR_MAX = 500
+#: Marks a report the bound above cut, so the artifact never presents a fragment as the
+#: leaf's whole account of its death — the reader is told there is more, and where the
+#: rest is (the session transcript this retention exists to stop being the only copy).
+_TRUNCATED_NOTE = f" … [report truncated at {_TERMINAL_ERROR_MAX} chars]"
+
+
+def _terminal_error(line: str | dict, fmt: str = "claude-stream-json") -> tuple[str, str]:
+    """The leaf's own report of a terminal failure in one stream line: its text, and
+    which marked record it is (:data:`_REPORT` / :data:`_SUBAGENT_REPORT` /
+    :data:`_WRAPUP`). ``("", "")`` when the line is not such a record (#506).
+
+    The retention companion to :func:`_is_session_event`, in the same shape: dispatch on
+    the family's ``stream_format``, the drain's shared best-effort decode
+    (:func:`_stream_event`), and a **degrade-to-today** default. Only the claude format
+    has an observed error shape, so codex — and every stream-less family — answers
+    ``("", "")`` and keeps exactly today's behaviour instead of guessing at a vendor's
+    error text.
+
+    Two event shapes carry it, both marked by the CLI itself:
+
+    * an ``assistant`` event flagged ``is_api_error_message`` (the stream spelling) /
+      ``isApiErrorMessage`` (the persisted transcript's), whose text is the failure the
+      CLI is giving up on. **Whose** failure it was decides which record it is
+      (:func:`_is_subagent_event`): the main loop's own emitter hard-codes
+      ``parent_tool_use_id: null`` (:data:`_REPORT`), while the ``agent_progress`` branch
+      forwards the same mark for a sub-agent with the Task's ``parent_tool_use_id`` —
+      ``isSidechain`` in the transcript spelling (:data:`_SUBAGENT_REPORT`);
+    * a ``result`` event with ``is_error`` — the session's wrap-up (:data:`_WRAPUP`),
+      which names the effect and, in the ``error_*`` variants, whatever else ended the
+      turn. Kept when it is all there is, outranked by the report that names the cause.
+
+    The text is returned for **any** such record: retention is unconditional, because the
+    cause the vendor reported is not this function's to judge, and a permanent failure
+    must explain itself in the bundle just as loudly as a transient one. Nothing here
+    feeds a retry decision — the classification half is issue #506's second child.
+    """
+    if fmt != "claude-stream-json":
+        return "", ""
+    ev = _stream_event(line)
+    if ev.get("type") == "assistant" and (ev.get("is_api_error_message")
+                                          or ev.get("isApiErrorMessage")):
+        kind = ev.get("error")
+        kind = kind.strip() if isinstance(kind, str) and kind.strip() else ""
+        text = (_report_line(_claude_message_texts(ev.get("message")))
+                or f"API error ({kind or 'no kind reported'}) reported by the leaf")
+        if _is_subagent_event(ev):
+            return f"{_SUBAGENT_NOTE}{text}", _SUBAGENT_REPORT
+        return text, _REPORT
+    if ev.get("type") == "result" and ev.get("is_error"):
+        text = _report_line(_claude_result_texts(ev))
+        # An error record with nothing to say is not evidence: keep today's silence
+        # rather than file a banner over an empty line.
+        return (text, _WRAPUP) if text else ("", "")
+    return "", ""
+
+
+def _note_terminal(terminal: dict, text: str, shape: str) -> None:
+    """Record one marked terminal record into the drain's ``terminal`` state: newest wins
+    **within a shape**, but a record farther from the leaf's own death never overwrites a
+    nearer one (:data:`_TERMINAL_PRECEDENCE`).
+
+    An api-error death does not end the stream. Two kinds of record keep arriving after
+    the report that named the cause, and read newest-wins either buries it:
+
+    * the session's ``result`` wrap-up, which names no cause — it restates the dead
+      message, or (when the turn threw or was aborted) carries only a diagnostic about
+      the turn. Let it win and the artifact records the effect while the cause, which the
+      harness was holding, is dropped again;
+    * a **sub-agent's** report — chatter from a Task that was still draining when the
+      session died. Let it win and the error log names the wrong death: a permanent
+      main-session failure reported as some Task's blip.
+
+    Precedence is by shape, not "any later record disagrees": a SECOND main-session report
+    is the leaf's newer account of its own death and wins outright. Symmetrically, a
+    farther record arriving FIRST cannot pre-empt the report — so the nearest record wins
+    in either arrival order.
+    """
+    if _TERMINAL_PRECEDENCE[shape] < _TERMINAL_PRECEDENCE.get(terminal["shape"], 0):
+        return
+    terminal.update(text=text, shape=shape)
+
+
+def _is_subagent_event(ev: dict) -> bool:
+    """Was this record emitted for a **sub-agent** (a Task), rather than by the main
+    session itself? One predicate for both spellings of the same scope, so they can never
+    drift apart.
+
+    The stream says it with ``parent_tool_use_id`` — the ``agent_progress`` branch
+    forwards the Task's tool_use id, while the main loop's own emitters hard-code
+    ``null``; the persisted transcript says it with ``isSidechain``, and carries no
+    ``parent_tool_use_id`` at all (so ``.get()`` returning ``None`` there must not be read
+    as "the main session"). Absent both, the record is the main session's own — which is
+    what every observed main-session record looks like in either spelling.
+    """
+    return ev.get("parent_tool_use_id") is not None or ev.get("isSidechain") is True
+
+
+def _claude_message_texts(message) -> Iterable[str]:
+    """The human-readable text blocks of a claude ``assistant`` event's message — where
+    the CLI puts the API failure it is giving up on."""
+    content = message.get("content") if isinstance(message, dict) else None
+    for block in content if isinstance(content, list) else []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            yield str(block.get("text") or "")
+
+
+def _claude_result_texts(ev: dict) -> Iterable[str]:
+    """The error strings a claude ``result`` event carries: its ``errors`` list (the
+    ``error_*`` variants) or its ``result`` string (the ``success`` variant, where an
+    API-error ending puts the dead message's own text); a plain ``error`` key is read too,
+    as a fallback for a shape neither of those covers."""
+    errors = ev.get("errors")
+    for item in errors if isinstance(errors, list) else []:
+        if isinstance(item, str) and item.strip():
+            yield item
+    for key in ("result", "error"):
+        val = ev.get(key)
+        if isinstance(val, str) and val.strip():
+            yield val
+
+
+def _report_line(texts: Iterable[str]) -> str:
+    """The first non-empty report, whitespace-flattened and bounded — a diagnostic line
+    for the error log, not a transcript.
+
+    A line that WAS cut says so (:data:`_TRUNCATED_NOTE`). The bound keeps one death from
+    filling an error log, but a silently-cut report reads as the leaf's whole account of
+    its death, and a reader would never know to go looking for the rest.
+    """
+    for text in texts:
+        flat = " ".join(text.split())
+        if not flat:
+            continue
+        if len(flat) <= _TERMINAL_ERROR_MAX:
+            return flat
+        return flat[:_TERMINAL_ERROR_MAX] + _TRUNCATED_NOTE
+    return ""
+
+
+def _stream_tool_label(line: str | dict, fmt: str = "claude-stream-json") -> str:
     """A human label for the tool-use in one stream line, or "" if none.
     Best-effort: a non-JSON / non-tool line yields ""."""
-    try:
-        ev = json.loads(line)
-    except (ValueError, TypeError):
-        return ""
-    if not isinstance(ev, dict):
-        return ""
+    ev = _stream_event(line)
     if fmt == "codex-stream-json":
         return _codex_item_label(ev)
     # claude: an ``assistant`` event's message content can hold ``tool_use`` blocks;
