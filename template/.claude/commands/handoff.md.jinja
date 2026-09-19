@@ -10,7 +10,10 @@ act-log entry this session wrote. There is no scan mode: every invocation names 
 one id. The check writes nothing into the bundle — its verdict is the exit status plus
 the report below.
 
-!`python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/handoff_guard.py" --check "$1"`
+Using your Bash tool, run this now from the project root — no `!` pre-execution block:
+the permission checker cannot match one that carries a shell expansion, so this call is
+yours to make directly, the same as the `--abandon` call below:
+`python3 .claude/hooks/handoff_guard.py --check $1`
 
 Relay the PASS/FAIL verdict above to the human verbatim. On FAIL, fix the listed items
 (write or repair the named contract artifact — never a stand-in), then run `/handoff $1`
