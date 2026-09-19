@@ -299,6 +299,108 @@ class ActContract(Base):
         self._log("# Act log\n")
         self.assertTrue(handoff.check_act(self.cfg, "2026-08-01", {}))
 
+    # -- issue #528: append-only is the ONE rule, and the check enforces it against a
+    # REAL session baseline (handoff.session), verdict read through handoff.run_check —
+    # exactly how the driver's own `/handoff` command drives this (peers:
+    # test_named_entry_must_postdate_the_baseline for (b)/(e),
+    # test_act_session_carries_the_baseline for driving the baseline through
+    # handoff.session).
+
+    _OLD = "# Act log\n\n# Act review — 2026-07-01 — cycles considered: 1\n"
+
+    def _run(self, env: dict, date: str) -> tuple[int, str]:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = handoff.run_check(self.cfg, date, role="act", environ=env)
+        return rc, out.getvalue()
+
+    def test_append_at_the_end_passes(self) -> None:
+        # (b): a session that appends a new dated entry at the end and names its
+        # date passes.
+        self._log(self._OLD)
+        with redirect_stderr(io.StringIO()):
+            with handoff.session(self.cfg, "act") as env:
+                self._log(self._OLD +
+                           "\n# Act review — 2026-08-15 — cycles considered: 2\n")
+                rc, _ = self._run(env, "2026-08-15")
+        self.assertEqual(rc, 0)
+
+    def test_prepended_entry_fails_whichever_date_is_named(self) -> None:
+        # (c): the wrong rule the OLD header told every session to follow — put the
+        # new entry above the old one. On origin/main this is exactly the shape that
+        # falsely PASSES when the older date is named (repro in brief.md); here both
+        # the new entry's own date and the older entry's date must FAIL, and the
+        # message must say entries belong at the end.
+        self._log(self._OLD)
+        with redirect_stderr(io.StringIO()):
+            with handoff.session(self.cfg, "act") as env:
+                self._log("# Act log\n\n"
+                           "# Act review — 2026-08-15 — cycles considered: 2\n"
+                           "# Act review — 2026-07-01 — cycles considered: 1\n")
+                rc_new, out_new = self._run(env, "2026-08-15")
+                rc_old, out_old = self._run(env, "2026-07-01")
+        self.assertEqual(rc_new, 1)
+        self.assertIn("appended at the end", out_new)
+        self.assertEqual(rc_old, 1)
+        self.assertIn("appended at the end", out_old)
+
+    def test_entry_inserted_between_existing_entries_fails(self) -> None:
+        # (c), the other shape it names: spliced in between two entries that were
+        # both present at session start, rather than prepended above all of them.
+        base = ("# Act log\n\n"
+                "# Act review — 2026-06-01 — cycles considered: 1\n"
+                "# Act review — 2026-07-01 — cycles considered: 2\n")
+        self._log(base)
+        with redirect_stderr(io.StringIO()):
+            with handoff.session(self.cfg, "act") as env:
+                self._log("# Act log\n\n"
+                           "# Act review — 2026-06-01 — cycles considered: 1\n"
+                           "# Act review — 2026-08-15 — cycles considered: 3\n"
+                           "# Act review — 2026-07-01 — cycles considered: 2\n")
+                rc, out = self._run(env, "2026-08-15")
+        self.assertEqual(rc, 1)
+        self.assertIn("appended at the end", out)
+
+    def test_editing_existing_text_fails_even_with_a_correct_append(self) -> None:
+        # (d): the log's own "Append-only" — a session that also changes or removes
+        # text present at session start fails, EVEN THOUGH the new entry itself is
+        # genuinely appended at the end. The message must name the append-only rule,
+        # not "appended at the end" (that check_act path is for (c), a different
+        # defect: nothing existing was touched there).
+        self._log(self._OLD)
+        with redirect_stderr(io.StringIO()):
+            with handoff.session(self.cfg, "act") as env:
+                self._log(
+                    "# Act log\n\n# Act review — 2026-07-01 — cycles considered: 9\n"
+                    "\n# Act review — 2026-08-15 — cycles considered: 2\n")
+                rc, out = self._run(env, "2026-08-15")
+        self.assertEqual(rc, 1)
+        self.assertIn("append-only", out)
+        self.assertNotIn("appended at the end", out)
+
+    def test_older_entry_named_after_a_correct_append_still_fails(self) -> None:
+        # (e), kept: appending correctly but naming the OLDER entry's date is still
+        # a problem — this time proven through a real session baseline + run_check,
+        # not just check_act directly (test_named_entry_must_postdate_the_baseline
+        # covers the direct-baseline shape).
+        self._log(self._OLD)
+        with redirect_stderr(io.StringIO()):
+            with handoff.session(self.cfg, "act") as env:
+                self._log(self._OLD +
+                           "\n# Act review — 2026-08-15 — cycles considered: 2\n")
+                rc, _ = self._run(env, "2026-07-01")
+        self.assertEqual(rc, 1)
+
+    def test_unchanged_log_and_absent_date_both_fail(self) -> None:
+        # (f), kept: an unchanged log fails, and a date absent from the log fails.
+        self._log(self._OLD)
+        with redirect_stderr(io.StringIO()):
+            with handoff.session(self.cfg, "act") as env:
+                rc_unchanged, _ = self._run(env, "2026-07-01")
+                rc_absent, _ = self._run(env, "2099-01-01")
+        self.assertEqual(rc_unchanged, 1)
+        self.assertEqual(rc_absent, 1)
+
 
 class SessionRegistration(Base):
     def test_session_registers_env_and_cleans_up(self) -> None:
