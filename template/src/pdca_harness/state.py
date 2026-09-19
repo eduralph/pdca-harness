@@ -9,6 +9,7 @@ and inspectable (``ls`` answers the question).
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from . import brief, signoff
@@ -298,16 +299,56 @@ def has_cycle_evidence(d: Path) -> bool:
     return next(d.glob("iteration-v*"), None) is not None
 
 
+#: `iteration-v<N>` — the directory `driver._archive_iteration` moves an attempt into.
+_ITERATION_DIR = re.compile(r"^iteration-v(\d+)$")
+
+
+def iteration_archives(d: Path) -> list[tuple[int, Path]]:
+    """``(N, d / "iteration-v<N>")`` for each attempt archive, oldest first.
+
+    The one place an archive's name is parsed for its N (#481 review):
+    `size_signal.iteration_rounds` and `split` both read the archives here and through
+    :func:`replan_archives`, because a private copy in each could drift apart unnoticed.
+    Ordered by N as a NUMBER — as text, ``iteration-v10`` sorts before ``iteration-v2`` —
+    and only a directory counts: a stray file with an archive's name is not one.
+    """
+    found = []
+    for a in d.glob("iteration-v*"):
+        m = _ITERATION_DIR.match(a.name)
+        if m and a.is_dir():
+            found.append((int(m.group(1)), a))
+    return sorted(found)
+
+
+def replan_archives(d: Path) -> list[tuple[int, Path]]:
+    """The archives an iterate-to-Plan wrote — those holding a ``brief.md`` — oldest first.
+
+    An iterate-to-Do archives the attempt and keeps the brief; an iterate-to-Plan archives
+    the brief with it (``driver._archive_iteration(include_brief=True)``). So each of these
+    marks a re-plan, and the LAST one holds the brief the bundle was last planned from:
+    the boundary `size_signal.iteration_rounds` counts rounds after, and the brief `split`
+    rebuilds a briefless parent's Plan artifact from (#481).
+    """
+    return [(n, a) for n, a in iteration_archives(d) if (a / "brief.md").is_file()]
+
+
 def state(d: Path) -> str:
     """Return the bundle's state from the files present (docs 03 §state)."""
     bp = d / "brief.md"
-    if not bp.exists():
-        # No brief ever authored — pending Plan, unless the tracker itself settled the
-        # question (a notes-only bundle with a `resolved` record is terminal, #302).
-        return RESOLVED if is_resolved(d) else UNPLANNED
     # Do is done when there's a patch — OR, on the close-disposition fast path, the
     # close marker that stands in for it (a close bundle never builds a patch.diff).
+    #
+    # Asked BEFORE the brief is looked at (issue #481). A bundle carrying either artifact
+    # is past Do (the CLOSE_MARKER contract above), and a missing brief.md cannot move it
+    # back before Plan: briefless is not "never planned" (#334 — `is_resolved` reads cycle
+    # evidence the same way). Asked the other way round, a split parent whose brief an
+    # iterate-to-Plan had archived read UNPLANNED while already terminal, and every flow
+    # reopened a Plan session with nothing left to decide.
     if not (d / "patch.diff").exists() and not (d / CLOSE_MARKER).exists():
+        if not bp.exists():
+            # No brief ever authored — pending Plan, unless the tracker itself settled
+            # the question (a notes-only bundle with a `resolved` record is terminal, #302).
+            return RESOLVED if is_resolved(d) else UNPLANNED
         # Pre-Do only: a brief that's still an unfilled template (Slug missing / a `<…>`
         # placeholder) means the planner never authored it, so treat it as UNPLANNED and
         # let the Plan beat re-plan it instead of being skipped (issue #113). Scoped to
