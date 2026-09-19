@@ -3707,7 +3707,8 @@ def run_plan_advisory_batch(cfg: Config, bundles: list[Path]) -> None:
         # must not fail an otherwise completed Plan beat (or skip the benefit records
         # below). The original briefs are untouched on failure → revised stays False.
         try:
-            _invoke(cfg.planner, cfg.root, _plan_revision_prompt(cfg, with_findings), cfg=cfg)
+            _invoke(cfg.planner, cfg.root, _plan_revision_prompt(cfg, with_findings), cfg=cfg,
+                    extra_argv=_bundle_grant(with_findings, cfg, cfg.profile(cfg.planner)))
         except Exception as exc:  # noqa: BLE001 — advisory: never crash the Plan beat
             print(f"leaves: plan-advisory revision pass failed ({type(exc).__name__}: "
                   f"{exc}); briefs left as authored — findings stay open in §6",
