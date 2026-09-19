@@ -319,6 +319,10 @@ def preflight(parent: Path, children: list[Child], cfg) -> None:
             "second acceptance would create a duplicate set of children and leave the "
             "first orphaned from the parent's breadcrumb. Reopen it first if that is what "
             "you want")
+    # Whether accept can leave the parent a Plan artifact (issue #481). It needs no ids, so
+    # it is asked HERE too: `accept` refusing it alone would come after the CLI had filed
+    # the children as real tracker issues.
+    _parent_plan(parent, cfg)
     _validate_ordering(children)
     _emit_convergence_report(parent, children, cfg)
 
@@ -749,6 +753,107 @@ def _rollback(created: list[Path]) -> None:
                    "will refuse them as existing bundles.")
 
 
+def _parent_plan(parent: Path, cfg) -> tuple[str, str, str] | None:
+    """What :func:`accept` rebuilds a briefless parent's Plan artifact from (issue #481).
+
+    ``None`` when the parent has its own ``brief.md``: accept never opens it. Otherwise
+    ``(the archived brief's path relative to the parent, its Slug, its Repo + branch
+    target)``.
+
+    A split parent is terminal, and a terminal bundle must have a Plan artifact:
+    `state.state` reads the close marker as "past Do". The realistic briefless parent is one
+    an iterate-to-Plan sent back BEFORE anyone split it — its brief was archived
+    (``driver.py:140``), not lost — so the fields that identify the slice are copied from
+    that archive rather than invented: the brief of the LATEST re-plan
+    (:func:`state.replan_archives`, the same reader `size_signal` draws its re-plan
+    boundary from). The archive is held to the Plan exit contract's fields
+    (``handoff.check_planner``: slug, success criterion, repo + branch target), because an
+    unfilled field in the source would be copied straight into the result.
+
+    Raises :class:`SplitError` when nothing authored can be rebuilt from. Both callers
+    refuse while refusing is still free: :func:`preflight` before the CLI files a single
+    tracker issue, :func:`accept` before its first write.
+    """
+    if (parent / "brief.md").exists():
+        return None
+    remedy = (f"Write {parent.name}/brief.md (slug, success criterion, repo + branch "
+              "target), then re-run: a parent with its own brief.md keeps it as it is")
+    replans = state.replan_archives(parent)
+    if not replans:
+        raise SplitError(
+            f"{parent.name} has no brief.md and no iterate-to-Plan archive "
+            "(iteration-v<N>/brief.md) to rebuild one from — refusing to split. A split "
+            f"parent is terminal, and a terminal bundle needs a Plan artifact. {remedy}")
+    source = replans[-1][1] / "brief.md"
+    rel = source.relative_to(parent).as_posix()
+    from . import brief as _brief, handoff   # lazy, like `validate`'s
+    try:
+        # The fields only, not the dependency clause: the rebuilt brief declares no
+        # external dependency (:func:`_split_parent_brief`), so the archive's declarations
+        # never reach it — one this host no longer registers or provides must not refuse
+        # the split.
+        problems = handoff.check_planner(source.parent, cfg, dependencies=False)
+        slug = _brief.whole_field(source, "slug")
+        target = _brief.whole_field(source, "repo + branch target")
+    except (OSError, ValueError) as exc:   # ValueError: bytes that are not UTF-8
+        raise SplitError(
+            f"{parent.name} has no brief.md, and {rel} cannot be read to rebuild one "
+            f"({exc}) — refusing to split. {remedy}") from exc
+    if problems:
+        raise SplitError(
+            f"{parent.name} has no brief.md, and {rel}, the brief it would be rebuilt "
+            f"from, is incomplete: {'; '.join(problems)} — refusing to split. {remedy}")
+    return rel, slug, target
+
+
+def _field(label: str, value: str) -> str:
+    """One ``- **Label:** value`` bullet with its continuation lines indented under it, so
+    `brief.whole_field` reads ``value`` back unchanged."""
+    first, *rest = value.split("\n")
+    return f"- **{label}:** {first}\n" + "".join(
+        f"  {line}\n" if line.strip() else "\n" for line in rest)
+
+
+def _split_parent_brief(parent: Path, plan: tuple[str, str, str],
+                        children: list[str]) -> str:
+    """The Plan artifact :func:`accept` writes for a parent that has none (issue #481).
+
+    It describes the split — why the slice was decomposed, which child bundles carry
+    it — and nothing else. Slug and Repo + branch target are the archived original's
+    (:func:`_parent_plan`); the original defect and scope stay in that archive, which the
+    brief names. No test, dependency or ordering field: this bundle builds nothing, and a
+    `Depends on` here would hold a parent that only goes to sign-off. `Disposition hint`
+    is read by SUMMARY §2 alone — routing follows the close marker
+    (`driver._close_class`), and `split` is deliberately not a close class (config.py).
+    """
+    rel, slug, target = plan
+    title = slug.split("\n")[0]
+    kids = ", ".join(children)
+    return (
+        f"# Brief — issue {_bundle_id(parent)} / {title} (split parent)\n\n"
+        "> The Plan artifact (docs 02 §PLAN), written by `split --accept` (issue #481):\n"
+        "> this bundle had no brief.md when its split was accepted — an iterate-to-Plan\n"
+        f"> had archived it to `{rel}`.\n\n"
+        + _field("Slug", slug)
+        + _field("Defect", (
+            "decomposed instead of built as one cycle: the slice was judged to be more\n"
+            f"than one shippable outcome. The seams are set out in `{PROPOSAL}`; the\n"
+            f"original defect and scope are in `{rel}`."))
+        + _field("Success criterion", (
+            "the slice is decomposed, not built here — the child bundles\n"
+            f"{kids} each carry their own brief, and together they cover\n"
+            f"the goal of `{rel}`. No patch lands in this bundle; each child is verified\n"
+            "by its own cycle."))
+        + _field("Repo + branch target", target)
+        + _field("Scope", (
+            "decomposition only: no patch, test or gate run belongs to this bundle. / out\n"
+            "of scope: building any part of the original slice here — the child bundles\n"
+            "carry that work."))
+        + _field("External dependencies", "none")
+        + _field("Disposition hint", "split")
+    )
+
+
 def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
     """Materialise a parent's proposal into child bundles. Returns the created dirs.
 
@@ -795,6 +900,15 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
             "record this run cannot read is one it cannot restore if the accept fails, so "
             "the parent could be left describing children that were rolled back. Fix or "
             "remove it, then re-run") from exc
+
+    # The parent's Plan artifact, settled in the same pre-write phase (issue #481). A
+    # parent with no brief.md — the realistic one, whose brief an iterate-to-Plan archived
+    # before the slice was split — gets one rebuilt from that archive, as text, now: a
+    # source that cannot supply it refuses the accept here, before anything is staged.
+    # `None` means the parent keeps its own brief.md, and nothing below opens it.
+    plan = _parent_plan(parent, cfg)
+    new_brief = (None if plan is None else
+                 _split_parent_brief(parent, plan, [cfg.bundle(i).name for i in ids]))
 
     staging = parent / ".split-staging"
     shutil.rmtree(staging, ignore_errors=True)
@@ -859,6 +973,10 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
             "The human confirms the split at sign-off; reopening to a fix path (iterate-to-Do) "
             "archives this marker and re-enables the full Do+Check band.\n",
             encoding="utf-8")
+        # The parent's Plan artifact, when it had none (issue #481): the LAST write before
+        # the marker, so the parent can only turn terminal with a brief already beside it.
+        if new_brief is not None:
+            (parent / "brief.md").write_text(new_brief, encoding="utf-8")
         (parent / state.CLOSE_MARKER).write_text("split\n", encoding="utf-8")
     except Exception:
         _rollback(created)
@@ -874,6 +992,22 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
             (parent / state.CLOSE_MARKER).unlink(missing_ok=True)
         except OSError:
             pass
+        # Then the brief this run set out to write, whichever write failed. The parent had
+        # none when the accept began, so anything at that path now is this run's — whole,
+        # or torn by the very write that raised. Hence NOT gated on that write having
+        # returned: a write can create the file and then raise (a full disk), and a torn
+        # brief left behind would be kept by the retry as the parent's own (#481 review).
+        # After the marker, so the parent is never terminal without a brief, not even
+        # mid-rollback.
+        if new_brief is not None:
+            brief_path = parent / "brief.md"
+            try:
+                brief_path.unlink(missing_ok=True)
+            except OSError as exc:
+                advisory(f"split: could not remove {brief_path} while rolling back ({exc}). "
+                         "Delete it by hand before retrying: a retry keeps an existing "
+                         "brief.md as the parent's own, and this one names children that "
+                         "were rolled back.")
         raise
     return created
 

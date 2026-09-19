@@ -98,7 +98,6 @@ _FIELD_START = re.compile(r"^\s*-\s*\*{0,2}([^:*]+?)\*{0,2}:\*{0,2}\s*(.*?)\s*$"
 # A markdown heading needs the space: a continuation line may legitimately open with an issue
 # reference like ``#318``, which a bare ``^#`` test would mistake for a section break.
 _HEADING = re.compile(r"^\s*#{1,6}\s")
-_ITERATION_DIR = re.compile(r"^iteration-v(\d+)$")
 # Clause separators that suggest a field enumerates several independent things rather than
 # stating one. Deliberately crude — the correlation decides whether it carries signal.
 _CLAUSE_SEP = re.compile(r";|\band\b|\bplus\b|\bas well as\b", re.IGNORECASE)

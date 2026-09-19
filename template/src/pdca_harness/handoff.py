@@ -110,10 +110,12 @@ def check_planner(d: Path, cfg: Config, *, allow_absent: bool = False,
     session-end check (:func:`stop_problems`, reported when the driver reaps the
     session) passes a wholly-absent brief — a brief that EXISTS malformed never does.
 
-    ``dependencies=False`` skips the dependency clause and nothing else. Only the reap
-    passes it, when the ``[[doctor.checks]]`` table the clause reads cannot be read
-    (:func:`stop_problems` reports that once for the session); ``/handoff`` always
-    checks the whole contract.
+    ``dependencies=False`` skips the dependency clause and nothing else. Two callers pass
+    it. The reap does, when the ``[[doctor.checks]]`` table the clause reads cannot be read
+    (:func:`stop_problems` reports that once for the session). ``split._parent_plan`` does,
+    because it checks an ARCHIVED brief only for the fields it copies into a split
+    parent's new brief, and that brief declares no dependency of its own (#481).
+    ``/handoff`` always checks the whole contract.
     """
     from . import brief as _brief  # local: keep this module import-light for the hook
     from . import doctor as _doctor

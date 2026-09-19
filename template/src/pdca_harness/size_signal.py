@@ -58,16 +58,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import re
-
-from . import waves
+from . import state, waves
 
 #: Written at Check, read by `assemble.collect_needs_human`. A file rather than a
 #: recomputation so §6 and any later audit see the same numbers the decision was made on.
 SIGNAL_FILE = "size-signal.json"
-
-#: `iteration-v<N>` — the archive directory `driver._archive_iteration` writes.
-_ITERATION_DIR = re.compile(r"^iteration-v(\d+)$")
 
 #: Calibrated against 86 settled bundles (see the module docstring for recall/precision of
 #: each). In ``[driver.size_signal]`` so an instance retunes against its own corpus — the
@@ -144,14 +139,12 @@ def iteration_rounds(d: Path) -> tuple[int, int]:
     calibrated on THIS definition, so a runtime counting anything else is measuring a
     different quantity from the one the numbers describe.
     """
-    archives = []
-    for a in d.glob("iteration-v*"):
-        m = _ITERATION_DIR.match(a.name)
-        if m and a.is_dir():
-            archives.append((int(m.group(1)), a))
-    replans = [n for n, a in archives if (a / "brief.md").is_file()]
-    boundary = max(replans, default=0)
-    counted = [a for n, a in archives if n > boundary]
+    # Which archives exist, and which of them are re-plans, is read by `state` — one
+    # reader, shared with `split` (#481 review), so the two cannot disagree about which
+    # archive holds the brief the bundle was last planned from.
+    replans = state.replan_archives(d)
+    boundary = replans[-1][0] if replans else 0
+    counted = [a for n, a in state.iteration_archives(d) if n > boundary]
     return sum(1 for a in counted if not _environment_attributed(a)), len(replans)
 
 

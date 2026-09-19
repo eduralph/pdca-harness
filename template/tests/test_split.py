@@ -11,6 +11,7 @@ human's call at sign-off.**
 
 from __future__ import annotations
 
+import errno
 import shutil
 import tempfile
 import unittest
@@ -20,7 +21,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from pdca_harness import cli, driver, leaves, split, state, waves
+from pdca_harness import (brief, cli, driver, handoff, leaves, size_signal, split, state,
+                          waves)
 from pdca_harness.config import Config, LeafConfig
 
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
@@ -1774,6 +1776,307 @@ class IrreversibleStateIsNeverLost(unittest.TestCase):
         with self._with(run), redirect_stderr(io.StringIO()):
             with self.assertRaises(KeyboardInterrupt):
                 split.file_children(self.parent, self.children, self.cfg)
+
+
+class SplitParentKeepsAPlanArtifact(unittest.TestCase):
+    """Issue #481: a split parent is never left terminal with no Plan artifact.
+
+    The realistic split parent failed an attempt and was sent back to Plan BEFORE anyone
+    split it: iterate-to-Plan archived its brief to `iteration-v1/` (`driver.py:140`), and
+    the Plan session then split the slice — so `split.accept` ran with no top-level
+    brief.md. It wrote the close marker and no brief, and `state.state`, which looked for a
+    brief before it looked for the marker, read the terminal parent as UNPLANNED: every
+    flow reopened a Plan session with nothing to decide, and the parent never reached
+    sign-off.
+
+    Only pre-existing API is driven (`split.accept`, `state.state`, `handoff.check_planner`,
+    `driver._archive_iteration`, `cli._split`), so with the fix reverted the module still
+    imports and each test fails on its own assertion.
+    """
+
+    #: A COMPLETE authored brief: slug, success criterion, repo + branch target. Not the
+    #: bare `- **Slug:** parent` the classes above seed — `check_planner` rightly rejects
+    #: that, and the parent's rebuilt Plan artifact must pass it.
+    _AUTHORED = (
+        "# Brief — issue 500 / widget-overflow\n\n"
+        "- **Slug:** widget-overflow\n"
+        "- **Defect:** the widget overflows its container on narrow screens\n"
+        "- **Success criterion:** the widget never exceeds its container's width at any\n"
+        "  viewport down to 320px\n"
+        "- **Repo + branch target:** acme/widgets @ main\n"
+        "- **External dependencies:** none\n"
+    )
+    _NO_TARGET = _AUTHORED.replace("acme/widgets @ main", "<owner/repo> @ <branch>")
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            root=self.tmp, bundle_root=self.tmp / "results",
+            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
+            default_branch="main", tracker_system="github", tracker_url="",
+            issue_id_example="#1",
+            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+        self.parent = self.cfg.bundle("500")
+        self.parent.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _iterated(self, parent: Path | None = None, text: str = _AUTHORED) -> None:
+        """The realistic parent: an authored brief archived by the driver's OWN
+        iterate-to-Plan call, never hand-placed — so this follows `_archive_iteration`."""
+        parent = parent or self.parent
+        (parent / "brief.md").write_text(text, encoding="utf-8")
+        driver._archive_iteration(parent, 1, include_brief=True)
+        # The fixture has to BE the shape, or everything asserted on it proves nothing.
+        self.assertFalse((parent / "brief.md").exists())
+        self.assertTrue((parent / "iteration-v1" / "brief.md").is_file())
+
+    def _accept(self, parent: Path | None = None,
+                ids: tuple[str, ...] = ("601", "602")) -> list[Path]:
+        parent = parent or self.parent
+        (parent / split.PROPOSAL).write_text(_proposal(_ONE, _TWO_DEP), encoding="utf-8")
+        return split.accept(parent, list(ids), self.cfg)
+
+    def _bundle(self, iid: str, files: dict[str, str]) -> Path:
+        d = self.cfg.bundle(iid)
+        for rel, text in files.items():
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / rel).write_text(text, encoding="utf-8")
+        return d
+
+    def _assert_nothing_written(self) -> None:
+        """A refused accept leaves the parent exactly as it found it."""
+        for iid in ("601", "602"):
+            self.assertFalse(self.cfg.bundle(iid).exists(), f"child {iid} was created")
+        for name in (state.CLOSE_MARKER, "brief.md", "build-notes.md", split.LINEAGE):
+            self.assertFalse((self.parent / name).exists(), f"{name} was written")
+
+    # -- (a)-(d): the realistic parent, after the accept ------------------------------
+
+    def test_a_the_iterated_parent_is_not_placed_before_plan(self) -> None:
+        self._iterated()
+        self._accept()
+        self.assertNotIn(state.state(self.parent), (state.UNPLANNED, state.RESOLVED),
+                         "a terminal split parent reads as never planned")
+
+    def test_b_the_iterated_parent_gets_a_complete_plan_artifact(self) -> None:
+        self._iterated()
+        self._accept()
+        bp = self.parent / "brief.md"
+        self.assertTrue(bp.is_file(), "the split left the parent with no brief.md")
+        self.assertFalse(brief.is_placeholder(bp))
+        self.assertEqual(handoff.check_planner(self.parent, self.cfg), [])
+        # The slice keeps the identity a human authored — nothing re-derived or invented.
+        self.assertEqual(brief.whole_field(bp, "slug"), "widget-overflow")
+        self.assertEqual(brief.repo_target(bp), ("acme/widgets", "main"))
+
+    def test_c_the_new_brief_names_every_child_the_accept_created(self) -> None:
+        self._iterated()
+        created = self._accept()
+        bp = self.parent / "brief.md"
+        self.assertTrue(bp.is_file(), "the split left the parent with no brief.md")
+        criterion = brief.whole_field(bp, "success criterion")
+        self.assertEqual(len(created), 2)
+        for d in created:
+            self.assertIn(d.name, criterion,
+                          f"the parent's success criterion does not name {d.name}")
+
+    def test_d_build_notes_still_name_the_children(self) -> None:
+        self._iterated()
+        created = self._accept()
+        notes = (self.parent / "build-notes.md").read_text(encoding="utf-8")
+        for d in created:
+            self.assertIn(d.name, notes)
+
+    def test_the_source_is_the_latest_re_plan_not_the_first_archive(self) -> None:
+        """Ten rounds, re-planned twice: iterate-to-Plan archived `plan-a` at round 2 and
+        `plan-b` at round 10, iterate-to-Do rounds in between. The parent was last planned
+        from `plan-b` — and `iteration-v10` sorts BEFORE `iteration-v2` as text.
+
+        The size backstop reads the same boundary (#481 review: one reader of the archive
+        numbering): two re-plans, and no round charged after the latest one."""
+        slug = "plan-a"
+        for n in range(1, 11):
+            if not (self.parent / "brief.md").exists():
+                (self.parent / "brief.md").write_text(
+                    self._AUTHORED.replace("widget-overflow", slug), encoding="utf-8")
+            (self.parent / "patch.diff").write_text(f"round {n}\n", encoding="utf-8")
+            driver._archive_iteration(self.parent, n, include_brief=n in (2, 10))
+            slug = "plan-b" if n >= 2 else slug
+        self.assertEqual(size_signal.iteration_rounds(self.parent), (0, 2))
+        self._accept()
+        bp = self.parent / "brief.md"
+        self.assertTrue(bp.is_file(), "the split left the parent with no brief.md")
+        self.assertEqual(brief.whole_field(bp, "slug"), "plan-b")
+        self.assertIn("iteration-v10/brief.md", bp.read_text(encoding="utf-8"))
+
+    def test_the_iterated_parent_is_driven_to_sign_off_not_back_to_plan(self) -> None:
+        """The end the defect denied: the parent reaches a SUMMARY and a human, with the
+        split as its spec. Driven, with both model leaves wired to fail the test — a split
+        parent takes the close path whatever its history."""
+        self._iterated()
+        created = self._accept()
+
+        def must_not_run(*a, **k):
+            raise AssertionError("a model leaf ran on a split parent")
+
+        with mock.patch.object(driver.leaves, "do_build", must_not_run), \
+             mock.patch.object(driver.leaves, "run_review", must_not_run), \
+             redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            final = driver.run_issue(self.parent, self.cfg)
+        self.assertEqual(final, state.AWAITING_SIGNOFF)
+        summary = (self.parent / "SUMMARY.md").read_text(encoding="utf-8")
+        for d in created:
+            self.assertIn(d.name, summary, "SUMMARY §1 does not describe the split")
+
+    # -- (e): the state derivation, whatever route led to the shape --------------------
+
+    def test_e_a_briefless_bundle_past_do_is_never_placed_before_plan(self) -> None:
+        """Built directly, not through `split.accept`. The close marker is the Do
+        artifact (the CLOSE_MARKER contract in `state.py`), so each shape must derive
+        exactly what its twin WITH an authored brief derives — a missing brief cannot
+        move a bundle past Do back before Plan."""
+        shapes = {
+            "the close marker alone": {state.CLOSE_MARKER: "split\n"},
+            "the stuck split parent": {
+                state.CLOSE_MARKER: "split\n",
+                "build-notes.md": "# Build notes — NO PATCH (split)\n",
+                split.LINEAGE: '{"version": 1, "id": "900", "children": ["901"]}\n',
+                split.PROPOSAL: _proposal(_ONE),
+                "iteration-v1/brief.md": self._AUTHORED,
+            },
+            "a tracker resolution on record": {
+                state.CLOSE_MARKER: "duplicate\n",
+                "notes.json": '{"resolved": {"state_reason": "duplicate"}}\n',
+            },
+            "close gates recorded": {state.CLOSE_MARKER: "split\n",
+                                     "check-gates.json": "{}\n"},
+            "summary assembled": {state.CLOSE_MARKER: "split\n",
+                                  "check-gates.json": "{}\n",
+                                  "SUMMARY.md": "# Result\n"},
+            "a patch.diff, the marker's twin": {"patch.diff": "--- a\n+++ b\n"},
+        }
+        for n, (name, files) in enumerate(shapes.items()):
+            with self.subTest(shape=name):
+                briefless = self._bundle(f"9{n}0", files)
+                twin = self._bundle(f"9{n}1", {**files, "brief.md": self._AUTHORED})
+                got = state.state(briefless)
+                self.assertNotIn(got, (state.UNPLANNED, state.RESOLVED))
+                self.assertEqual(got, state.state(twin))
+
+    # -- (f): a parent that still has its own brief ------------------------------------
+
+    def test_f_a_parent_with_its_own_brief_keeps_it_byte_for_byte(self) -> None:
+        """Including an iterated parent the Plan session RE-briefed before splitting: its
+        archive is not a source when a brief is on disk. The bare brief is incomplete on
+        purpose — accept never judges, and never rewrites, a brief it did not write."""
+        cases = (("first attempt, bare brief", "500", False, "- **Slug:** parent\n"),
+                 ("iterated, then re-briefed", "510", True, self._AUTHORED))
+        for n, (name, iid, iterated, text) in enumerate(cases):
+            with self.subTest(case=name):
+                parent = self.cfg.bundle(iid)
+                parent.mkdir(parents=True, exist_ok=True)
+                if iterated:
+                    self._iterated(parent, self._NO_TARGET)
+                (parent / "brief.md").write_text(text, encoding="utf-8")
+                before = (parent / "brief.md").read_bytes()
+                self._accept(parent, (f"6{n}1", f"6{n}2"))
+                self.assertEqual((parent / "brief.md").read_bytes(), before)
+
+    # -- the accept stays transactional (#481 review) ---------------------------------
+
+    def test_a_torn_brief_write_is_rolled_back_and_the_retry_completes(self) -> None:
+        """A write can create the file, land part of it and THEN raise (a full disk). Left
+        behind, that torn brief is read by the retry as the parent's OWN, kept byte for
+        byte, and the parent ends terminal with a brief that fails the Plan exit
+        contract. The rollback has to remove it however far the write got."""
+        self._iterated()
+        target = self.parent / "brief.md"
+        real = Path.write_text
+
+        def torn(self_, data, *a, **kw):
+            if self_ == target:
+                real(self_, data[:40], *a, **kw)                        # part lands…
+                raise OSError(errno.ENOSPC, "No space left on device")  # …then the disk fills
+            return real(self_, data, *a, **kw)
+
+        with mock.patch.object(Path, "write_text", torn):
+            with self.assertRaises(OSError):
+                self._accept()
+        self.assertFalse(target.exists(), "the torn brief survived the rollback")
+        self.assertFalse((self.parent / state.CLOSE_MARKER).exists())
+        self.assertFalse(self.cfg.bundle("601").exists())
+        self.assertFalse(self.cfg.bundle("602").exists())
+
+        self._accept()                                  # the retry the operator is told to run
+        self.assertEqual(handoff.check_planner(self.parent, self.cfg), [])
+        self.assertNotIn(state.state(self.parent), (state.UNPLANNED, state.RESOLVED))
+
+    def test_a_failure_after_the_brief_landed_takes_it_back_out(self) -> None:
+        """Here the MARKER is the write that fails, after the whole brief landed. The
+        parent goes back to the briefless shape it was found in, its archived original
+        intact — the retry's only source."""
+        self._iterated()
+        marker = self.parent / state.CLOSE_MARKER
+        real = Path.write_text
+
+        def failing(self_, *a, **kw):
+            if self_ == marker:
+                real(self_, *a, **kw)           # it lands, and the write still fails
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(self_, *a, **kw)
+
+        with mock.patch.object(Path, "write_text", failing):
+            with self.assertRaises(OSError):
+                self._accept()
+        self.assertFalse((self.parent / "brief.md").exists())
+        self.assertFalse(marker.exists())
+        self.assertTrue((self.parent / "iteration-v1" / "brief.md").is_file())
+
+        self._accept()
+        self.assertEqual(handoff.check_planner(self.parent, self.cfg), [])
+
+    # -- nothing authored to rebuild from: refused while refusing is free --------------
+
+    def test_an_archived_brief_with_an_unfilled_field_is_refused_before_any_write(
+            self) -> None:
+        """#481 review: the rebuilt brief copies the archive's Slug and Repo + branch
+        target, so an archive whose target is still the template placeholder would be
+        copied into a terminal parent's brief that fails the Plan exit contract."""
+        self._iterated(text=self._NO_TARGET)
+        with self.assertRaises(split.SplitError) as caught:
+            self._accept()
+        self.assertIn("field 'repo + branch target'", str(caught.exception),
+                      "the refusal does not name the unfilled field")
+        self._assert_nothing_written()
+
+    def test_a_parent_never_briefed_at_all_is_refused_before_any_write(self) -> None:
+        """No brief.md and no archive: nothing authored to rebuild from, and inventing a
+        slug and a target is worse than asking — `leaves.do_split` refuses this bundle
+        for the same reason."""
+        with self.assertRaises(split.SplitError) as caught:
+            self._accept()
+        self.assertIn("brief.md", str(caught.exception))
+        self._assert_nothing_written()
+
+    def test_the_cli_refuses_before_filing_a_single_tracker_issue(self) -> None:
+        """The refusal needs no ids, so `preflight` asks it too. From `accept` alone it
+        would come after `file_children` had filed the children as real tracker issues,
+        which cannot be withdrawn."""
+        self._iterated(text=self._NO_TARGET)
+        (self.parent / split.PROPOSAL).write_text(_proposal(_ONE, _TWO_DEP),
+                                                  encoding="utf-8")
+        filed: list[object] = []
+        err = io.StringIO()
+        with mock.patch("pdca_harness.split.file_children",
+                        lambda *a, **kw: filed.append(a) or ["601", "602"]), \
+             redirect_stderr(err), redirect_stdout(io.StringIO()):
+            rc = cli._split(self.cfg, SimpleNamespace(issue_id="500", accept=True, ids=""))
+        self.assertEqual(rc, 1)
+        self.assertEqual(filed, [], "tracker issues were filed for a split accept refuses")
+        self.assertIn("field 'repo + branch target'", err.getvalue())
+        self._assert_nothing_written()
 
 
 if __name__ == "__main__":
