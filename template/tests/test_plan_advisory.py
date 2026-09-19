@@ -9,8 +9,12 @@ SUMMARY §10 (always) and §6 (only when findings were left unrevised).
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import os
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,6 +28,32 @@ _REVIEWER = {
     "mode": "stub",
     "role": "refute the brief: wrong root cause, untestable criterion, hidden scope",
 }
+
+_FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+# A stand-in `claude` for issue #526: a Python interpreter in the leaf's own argv that
+# replays PINNED vendor bytes — what the real CLI printed on a host whose sandbox could not
+# start (tests/fixtures/README.md) — so each run goes through the production spawn, stream
+# drain and classification, and nothing the fix adds is mocked. `_invoke` appends the
+# stream and confinement flags (ignored here) and feeds the prompt on stdin. $FAKE_STDOUT /
+# $FAKE_STDERR name the files to replay, $FAKE_RC is the exit code, and $FAKE_WRITES names
+# a review the stand-in delivers into its cwd, as the Write tool would.
+_FAKE_CLAUDE = (
+    "import os,pathlib,sys\n"
+    "sys.stdin.read()\n"
+    "e=os.environ\n"
+    "if e.get('FAKE_WRITES'):\n"
+    "    pathlib.Path('plan-advisory-plan-reviewer.md').write_bytes(\n"
+    "        pathlib.Path(e['FAKE_WRITES']).read_bytes())\n"
+    "sys.stdout.buffer.write(pathlib.Path(e['FAKE_STDOUT']).read_bytes())\n"
+    "sys.stderr.buffer.write(pathlib.Path(e['FAKE_STDERR']).read_bytes())\n"
+    "sys.exit(int(e['FAKE_RC']))\n"
+)
+
+
+def _fixture_lines(name: str) -> list[str]:
+    """A pinned stream, one vendor event per line (tests/fixtures/README.md)."""
+    return (_FIXTURES / name).read_text(encoding="utf-8").splitlines(keepends=True)
 
 
 def _cfg(root: Path, *, plan_advisory=None, selection=None, planner=None) -> Config:
@@ -201,6 +231,173 @@ class PlanAdvisory(unittest.TestCase):
         benefit = json.loads((d / "plan-advisory-benefit.json").read_text(encoding="utf-8"))
         self.assertTrue(benefit["revised"])
         self.assertNotEqual(benefit["before_sha"], benefit["after_sha"])
+
+    # -- #526: a host where the vendor sandbox cannot start ---------------------------
+    def _run_stand_in(self, iid: str, *, stdout: list[str], stderr: str = "",
+                      rc: int = 0, writes: str = "") -> tuple[Path, str, dict]:
+        """The plan-advisory pass over a fresh bundle, its one claude leaf played by the
+        `_FAKE_CLAUDE` stand-in. Returns the bundle, its artifact and benefit record."""
+        files = {}
+        for name, body in (("stdout", "".join(stdout)), ("stderr", stderr),
+                           ("writes", writes)):
+            files[name] = self.tmp / f"{iid}.{name}"
+            files[name].write_text(body, encoding="utf-8")
+        reviewer = {"id": "plan-reviewer", "mode": "command", "family": "claude",
+                    "argv": [sys.executable, "-c", _FAKE_CLAUDE]}
+        cfg = _cfg(self.tmp, plan_advisory=[reviewer])
+        d = _brief(cfg, iid)
+        env = {"FAKE_STDOUT": str(files["stdout"]), "FAKE_STDERR": str(files["stderr"]),
+               "FAKE_RC": str(rc), "FAKE_WRITES": str(files["writes"]) if writes else ""}
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stderr(io.StringIO()):
+            leaves.run_plan_advisory(d, cfg)
+        text = leaves.plan_advisory_artifact(d, "plan-reviewer").read_text(encoding="utf-8")
+        benefit = json.loads((d / "plan-advisory-benefit.json").read_text(encoding="utf-8"))
+        return d, text, benefit
+
+    def test_a_sandbox_that_cannot_start_is_filed_as_sandbox_infra(self) -> None:
+        # #526 (a)+(b). The seeded fail-closed sandbox cannot start on a host that denies
+        # unprivileged user namespaces: the CLI exits 0, writes nothing, and every Bash
+        # call dies in the sandbox's own startup (pinned vendor bytes). That was filed
+        # `human-empty` ("do not assume an infra blip") and recorded as `findings: 0,
+        # revised: false` — the record of a review that ran and found nothing.
+        d, text, benefit = self._run_stand_in(
+            "SBX", stdout=_fixture_lines("claude_sandbox_cannot_start.stream.jsonl"))
+        self.assertIn("<!-- pdca:leaf-status sandbox-empty -->", text)  # (a) infra marker
+        self.assertEqual(assemble.leaf_status(text), "sandbox-empty")
+        self.assertIn("the vendor sandbox could not start", text)        # (a) the cause,
+        self.assertIn("apply-seccomp: write /proc/self/setgroups", text)  # its evidence
+        item, = assemble._items_from_artifact(text)                      # what §6 shows
+        self.assertIn("could not start on this host — fix the host", item.text)
+        self.assertNotIn("needs a human", item.text)
+        self.assertIs(benefit.get("completed"), False)                   # (b) not a clean 0
+        self.assertEqual(benefit.get("not_completed"), {"plan-reviewer": "sandbox-empty"})
+        self.assertEqual((benefit["findings"], benefit["revised"]), (0, False))
+        line, = assemble._plan_advisory_act_lines(d)                     # (b) what act reads
+        self.assertTrue(line.startswith("- Plan advisory NOT completed (sandbox-empty)"),
+                        line)
+
+    def test_a_cli_that_refuses_to_start_without_its_sandbox_is_sandbox_infra(self) -> None:
+        # #526: `failIfUnavailable` doing its job on a host missing bubblewrap — the CLI
+        # refuses to start at all (exit 1, pinned vendor bytes). The same environment
+        # fault, said by the CLI itself; it was filed `human-empty` as well.
+        stderr = (_FIXTURES / "claude_sandbox_refused.stderr.txt").read_text(encoding="utf-8")
+        d, text, benefit = self._run_stand_in(
+            "REFUSED", stdout=_fixture_lines("claude_sandbox_refused.stream.jsonl"),
+            stderr=stderr, rc=1)
+        self.assertIn("<!-- pdca:leaf-status sandbox-empty -->", text)
+        self.assertIn("sandbox required but unavailable", text)
+        self.assertEqual(benefit.get("not_completed"), {"plan-reviewer": "sandbox-empty"})
+
+    def test_a_review_delivered_without_bash_is_kept_and_says_so(self) -> None:
+        # #526 (c): the findings still reach the bundle while Bash is dead, by the Write
+        # route (the stand-in writes its review into its cwd, as Write does, while
+        # replaying the dead-Bash stream). The artifact is the leaf's real review, and it
+        # states that Bash was unavailable although this review never says so — the
+        # harness does, on the vendor's evidence, rather than trusting the leaf to.
+        review = ("# Plan advisory - plan-reviewer\n\n"
+                  "- NEEDS-HUMAN - the success criterion is unverifiable (brief.md:3)\n")
+        d, text, benefit = self._run_stand_in(
+            "WRITE", stdout=_fixture_lines("claude_sandbox_cannot_start.stream.jsonl"),
+            writes=review)
+        self.assertTrue(text.startswith(review), text)                 # the leaf's review
+        self.assertEqual(assemble.leaf_status(text), "")               # not a placeholder
+        self.assertIn("Bash was unavailable to this reviewer", text)   # …and says so
+        self.assertIs(benefit.get("completed"), True)
+        self.assertEqual(benefit.get("not_completed"), {})
+        self.assertEqual(benefit["findings"], 1)                       # the note is none
+
+    def test_a_working_sandbox_that_delivers_nothing_keeps_todays_class(self) -> None:
+        # #526 (e): the fix narrows the substantive class; it does not relabel every
+        # empty result. The leaf's own words are never the evidence — so a run whose Bash
+        # WORKED and whose closing text says "The sandbox is working normally" (pinned
+        # bytes) is classified exactly as before, and so is a run whose Bash failures
+        # carry no sandbox-startup error, or where one call failed that way but one ran.
+        ran = _fixture_lines("claude_bash_ran.stream.jsonl")        # echo ok, false, text
+        dead = _fixture_lines("claude_sandbox_cannot_start.stream.jsonl")
+        cases = {
+            "bash ran; 'the sandbox is working normally'": ran,
+            "every failure is the command's own": ran[2:],
+            "one call hit the sandbox helper, another ran": dead[:2] + ran[:2] + ran[4:],
+        }
+        for n, (case, stdout) in enumerate(cases.items()):
+            with self.subTest(case):
+                self.assertIn("The sandbox is working normally", stdout[-1])
+                _d, text, benefit = self._run_stand_in(f"OK{n}", stdout=stdout)
+                self.assertEqual(assemble.leaf_status(text), "human-empty")
+                self.assertNotIn("could not start", text)
+                self.assertEqual(benefit.get("not_completed"),
+                                 {"plan-reviewer": "human-empty"})
+
+    def test_the_seeded_policy_keeps_the_target_and_the_bundle_read_only(self) -> None:
+        # #526 (d): the fail-closed block is unchanged, and the leaf's file tools — Write
+        # is how it delivers when Bash is dead — are denied on the pinned target and on
+        # the bundle. Without the rules, acceptEdits let Write overwrite a file in the
+        # `--add-dir` target (observed live, see build notes); the target stays readable.
+        reviewer = {"id": "claude-lens", "mode": "command", "family": "claude",
+                    "argv": ["claude"]}
+        cfg = _cfg(self.tmp, plan_advisory=[reviewer])
+        d = _brief(cfg, "RO")
+        target = self.tmp / "pinned-target"
+        target.mkdir()
+        seen: dict = {}
+
+        @contextlib.contextmanager
+        def pinned(_d, _cfg):
+            yield target
+
+        def fake(leaf, cwd, prompt, **kw):
+            seen["extra"] = list(kw.get("extra_argv") or [])
+            seen["settings"] = json.loads(
+                (Path(cwd) / ".claude" / "settings.json").read_text(encoding="utf-8"))
+            return None
+
+        with mock.patch.object(leaves, "_pinned_plan_target", pinned), \
+                mock.patch.object(leaves, "_invoke_leaf_resilient", side_effect=fake), \
+                contextlib.redirect_stderr(io.StringIO()):
+            leaves.run_plan_advisory(d, cfg)
+        self.assertEqual(seen["settings"]["sandbox"],
+                         {"enabled": True, "allowUnsandboxedCommands": False,
+                          "failIfUnavailable": True})             # the boundary, unchanged
+        permissions = seen["settings"].get("permissions", {})
+        for read_only in (target, d):
+            self.assertIn(f"Edit(/{read_only.resolve()}/**)", permissions.get("deny", []))
+        self.assertEqual(set(permissions), {"deny"})              # a deny grants nothing
+        self.assertIn(str(target), seen["extra"])                 # still granted to read
+
+    def test_the_bash_fallback_is_in_the_prompt_the_model_reads(self) -> None:
+        # #526: the fallback, its trigger and the disclosure are prompt TEXT — a
+        # condition kept in a Python comment is invisible to the model — and a healthy
+        # run is not told to claim that Bash was down.
+        prompt = leaves._plan_advisory_prompt(_REVIEWER, "plan-reviewer")
+        self.assertIn("If Bash does not work in this run", prompt)
+        self.assertIn("create plan-advisory-plan-reviewer.md with the Write tool", prompt)
+        self.assertIn("Do not add that line when Bash works.", prompt)
+
+    def test_the_reviewer_agent_has_write_but_the_example_argv_does_not_preapprove_it(
+            self) -> None:
+        # #526 (c)+(d): Write reaches the leaf through its agent's `tools:` line, and
+        # `acceptEdits` approves it only inside the leaf's working directories. Listing
+        # it in --allowedTools would pre-approve it on EVERY path — observed: it then
+        # overwrote a file outside every directory the leaf was granted.
+        root = Path(__file__).resolve().parents[1]
+
+        def shipped(name: str) -> str:
+            # `.jinja` in the template repo; rendered in an instance, where this suite
+            # also runs (the render test re-runs it there).
+            for path in (root / f"{name}.jinja", root / name):
+                if path.is_file():
+                    return path.read_text(encoding="utf-8")
+            self.skipTest(f"no {name}(.jinja) beside the tests")
+            raise AssertionError("unreachable")  # skipTest raises
+
+        agent = shipped(".claude/agents/plan-reviewer.md")
+        tools = next(ln for ln in agent.splitlines() if ln.startswith("tools:"))
+        self.assertEqual([t.strip() for t in tools.removeprefix("tools:").split(",")],
+                         ["Read", "Bash", "Grep", "Glob", "Write"])
+        example = next(ln for ln in shipped("pdca.toml").splitlines()
+                       if '"--agent", "plan-reviewer"' in ln)
+        self.assertTrue(example.endswith('"--allowedTools", "Read,Bash,Grep,Glob"]'),
+                        example)
 
 
 class VendorComplement(unittest.TestCase):

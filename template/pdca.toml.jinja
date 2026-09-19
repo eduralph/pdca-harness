@@ -742,6 +742,13 @@ argv = []
 # is no builder telemetry), so plan validation is cross-vendor automatically; no
 # different-family leaf ⇒ same-vendor fallback + a decorrelation note. Advisory — never
 # gates; off (commented) by default.
+#
+# `--allowedTools` below deliberately leaves out `Write`, though the plan-reviewer agent has
+# it (issue #526): Write is how it still delivers its review on a host where the sandbox
+# cannot start and every Bash call fails. `acceptEdits` already lets it write in its own
+# working directory, and the harness denies file edits on the pinned target and on the
+# bundle. Listing `Write` here would pre-approve it for EVERY path — observed: it then
+# overwrote a file outside all of the leaf's granted directories.
 # [[leaves.plan_advisory]]
 # id = "plan-reviewer"
 # role = "refute the brief: wrong root cause, untestable success criterion, hidden scope"

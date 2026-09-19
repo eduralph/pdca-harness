@@ -48,6 +48,7 @@ def run_with_heartbeat(
     label: str = "",
     status: Callable[[], str] | None = None,
     telemetry: Callable[[int], str] | None = None,
+    on_event: Callable[[dict], None] | None = None,
 ) -> tuple[int, str, bool]:
     """Run ``cmd``, printing ``… still working (NmSSs elapsed)`` every ``interval`` s.
 
@@ -146,6 +147,15 @@ def run_with_heartbeat(
     tick is the one moment the harness is already awake while the child works. The same
     best-effort contract as ``status``: any exception it raises is swallowed — an
     observer can never break the run it observes.
+
+    ``on_event``, if given, is called with every decoded ``stream_json`` event, in
+    arrival order, from the drain thread (issue #526). The stream is otherwise read here
+    and dropped, and on a **clean exit** nothing of it reaches the caller: a leaf that
+    exits 0 without doing its job — every command it tried refused by a sandbox that
+    could not start — leaves no trace of why. This hook is how a caller keeps what it
+    needs from the stream without this function learning the caller's question. Called
+    only on the stream path, and only for a line that decodes to a JSON object. The
+    same best-effort contract as ``telemetry``: any exception it raises is swallowed.
     """
     tee_err = (stream_json or tee_stderr) and not capture
     capture_out = capture or stream_json
@@ -203,6 +213,11 @@ def run_with_heartbeat(
                     lbl = _stream_tool_label(ev, stream_format)
                     if lbl:
                         latest_tool["label"] = lbl
+                    if on_event is not None and ev:
+                        try:
+                            on_event(ev)
+                        except Exception:  # an observer must never break the run
+                            pass
         t = threading.Thread(target=_drain, daemon=True)
         t.start()
         readers.append(t)

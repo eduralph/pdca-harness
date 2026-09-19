@@ -39,6 +39,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -575,6 +576,7 @@ def _invoke(
     extra_argv: list[str] | None = None,
     cfg: Config | None = None,
     memory_log: Path | None = None,
+    on_event=None,
 ) -> None:
     """Run the leaf's configured command in ``workdir``, feeding it ``prompt``.
 
@@ -603,6 +605,11 @@ def _invoke(
     suffix, and a failing leaf's :class:`LeafError` carries a memory post-mortem in
     its ``output``. Unbounded or interactive spawns ignore it — without a scope
     there is nothing attributable to sample.
+
+    ``on_event`` is handed to :func:`progress.run_with_heartbeat` (issue #526): it sees
+    every decoded event of the leaf's stream, a successful run's included — the only
+    view a caller gets of what happened inside a run that exited 0. Ignored when the
+    run has no stream (``stream_json`` off, a stream-less family, an interactive leaf).
     """
     profile = families.resolve(leaf.family, cfg.families if cfg else None)
     role_argv, prompt_prefix = _role_injection(cfg, leaf, profile)
@@ -657,7 +664,7 @@ def _invoke(
     rc, output, produced = progress.run_with_heartbeat(
         argv, cwd=workdir, input_text=prompt, label=label, status=status,
         stream_json=use_stream, tee_stderr=True, stream_format=profile.stream_format,
-        env=run_env, telemetry=telemetry.tick if telemetry else None)
+        env=run_env, telemetry=telemetry.tick if telemetry else None, on_event=on_event)
     if rc != 0:
         if telemetry is not None:
             # The death explained next to the death reported: the post-mortem rides
@@ -2653,7 +2660,8 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path,
     return True
 
 
-def _seed_plan_sandbox_settings(sandbox: Path, profile: families.FamilyProfile) -> bool:
+def _seed_plan_sandbox_settings(sandbox: Path, profile: families.FamilyProfile, *,
+                                read_only: tuple[Path, ...] = ()) -> bool:
     """A MINIMAL fail-closed sandbox policy for the plan reviewer (#301 review round 8).
 
     Withholding :func:`_seed_sandbox_settings` from plan reviews (round 6 — the Check
@@ -2672,17 +2680,31 @@ def _seed_plan_sandbox_settings(sandbox: Path, profile: families.FamilyProfile) 
     the seeded file exists; on a failed write the flag is withheld and the leaf
     keeps the operator's ambient sandbox (degrade the feature, never the boundary).
     Families without a settings mechanism (codex: its default workspace-write
-    sandbox is its own, argv-configured) need no seed: False."""
+    sandbox is its own, argv-configured) need no seed: False.
+
+    ``read_only`` (issue #526) names directories the leaf may read but must never
+    write: the pinned target it grounds on and the bundle it reviews. Each becomes an
+    ``Edit`` deny rule, which Claude Code applies to every file-editing tool. The
+    plan-reviewer agent carries ``Write`` as the way to deliver its review when this
+    very sandbox cannot start and Bash is dead — and ``acceptEdits`` approves a write
+    anywhere in the leaf's working directories, the ``--add-dir`` target included
+    (observed: without these rules Write overwrote a file in the pinned target). A deny
+    rule only takes away; the three keys above are unchanged. Both the given and the
+    resolved spelling are denied, so a symlinked temp dir cannot slip past."""
     if not profile.settings_scope_argv:
         return False
+    policy: dict = {"sandbox": {"enabled": True,
+                                "allowUnsandboxedCommands": False,
+                                "failIfUnavailable": True}}
+    # `Edit(//abs/**)` is the absolute-path form of a Claude Code path rule.
+    deny = sorted({f"Edit(/{p}/**)" for d in read_only
+                   for p in (str(d.absolute()), str(d.resolve()))})
+    if deny:
+        policy["permissions"] = {"deny": deny}
     try:
         dest = sandbox / ".claude"
         dest.mkdir(parents=True, exist_ok=True)
-        (dest / "settings.json").write_text(
-            json.dumps({"sandbox": {"enabled": True,
-                                    "allowUnsandboxedCommands": False,
-                                    "failIfUnavailable": True}}, indent=2),
-            encoding="utf-8")
+        (dest / "settings.json").write_text(json.dumps(policy, indent=2), encoding="utf-8")
         return True
     except OSError as exc:
         print(f"leaves: could not seed the plan-review sandbox into {sandbox} ({exc}); "
@@ -2766,6 +2788,12 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
 _FAIL_TRANSIENT = "transient"      # ran, exited non-zero with no output; retries exhausted
 _FAIL_STARTUP = "startup"          # never ran at all — the command could not be launched
 _FAIL_SUBSTANTIVE = "substantive"  # ran and produced output, but no usable verdict
+# Launched, but the vendor sandbox the harness seeded it with could not start on this host
+# (#526), so nothing it tried ran. Never inferred from an exception alone, as the others
+# are: only the vendor's own evidence of the sandbox failing sets it
+# (:class:`_BashSandboxProbe`, :func:`_sandbox_refusal`), so an ordinary empty result
+# stays substantive.
+_FAIL_SANDBOX = "sandbox"
 
 
 def _failure_class(exc: Exception | None) -> str:
@@ -2817,13 +2845,15 @@ def _unavailable_classification(failure: str, error_log: Path | None) -> str:
     adversarial pass and the operator has to hand-annotate "infra, not substance". `assemble`
     reads the marker and labels the §6 row accordingly.
 
-    Both infra shapes (transient, startup) carry the INFRA marker — nothing reviewed the diff
-    either way — but their prose differs, because the operator's next action does: a transient
-    blip is safe to re-run as-is; a leaf that never started will fail the same way until its
-    command is fixed."""
+    Every infra shape (transient, startup, sandbox) carries an infra marker — nothing
+    reviewed the diff either way — but their prose differs, because the operator's next action
+    does: a transient blip is safe to re-run as-is; a leaf that never started will fail the
+    same way until its command is fixed; a leaf whose seeded sandbox could not start (#526)
+    will fail the same way until the HOST can start it."""
     status = {
         _FAIL_TRANSIENT: assemble.LEAF_STATUS_INFRA,
         _FAIL_STARTUP: assemble.LEAF_STATUS_STARTUP,
+        _FAIL_SANDBOX: assemble.LEAF_STATUS_SANDBOX,
     }.get(failure, assemble.LEAF_STATUS_HUMAN)
     marker = f"<!-- pdca:leaf-status {status} -->\n\n"
     if failure == _FAIL_TRANSIENT:
@@ -2838,6 +2868,15 @@ def _unavailable_classification(failure: str, error_log: Path | None) -> str:
                 "reviewed the diff — this is NOT an empty verdict. A plain re-run will fail "
                 "the same way: fix the leaf's `argv` / PATH first (`pdca doctor` checks each "
                 "command leaf's CLI), then re-run.")
+    elif failure == _FAIL_SANDBOX:
+        kind = ("**sandbox infra — the vendor sandbox could not start on this host.** The "
+                "harness runs this leaf under a sandbox that must refuse rather than run "
+                "unconfined (`failIfUnavailable`); on this host that sandbox could not start, "
+                "so no command the leaf tried ever ran, and it delivered no review — this is "
+                "NOT a reviewed-and-found-nothing result. A plain re-run will fail the same "
+                "way: the HOST has to be able to start the sandbox (bubblewrap + socat "
+                "installed, and unprivileged user namespaces allowed — on Ubuntu, "
+                "`kernel.apparmor_restrict_unprivileged_userns=1` denies them), then re-run.")
     else:
         kind = ("**substantive — needs a human.** The leaf ran but did not yield a usable "
                 "verdict; do not assume an infra blip.")
@@ -3155,7 +3194,17 @@ def _plan_advisory_prompt(spec: dict, leaf_id: str) -> str:
         "bullet prefixed '- NEEDS-HUMAN — ' with the evidence (a brief line, a thread "
         "quote, a path:line). You are ADVISORY — you never gate, and you never edit "
         "brief.md yourself. \"Could not fault the brief after a real attempt\" is an "
-        "acceptable strong answer — say so explicitly."
+        "acceptable strong answer — say so explicitly. "
+        # #526: the fallback, its trigger and the disclosure are all prompt TEXT — a
+        # condition the model cannot see cannot gate anything, and a healthy run must
+        # never be told to claim Bash was down.
+        "Write the file into your current directory; the Write tool works even when Bash "
+        "does not. If Bash does not work in this run — every command fails before it "
+        "starts, e.g. with an `apply-seccomp:` or `bwrap:` error, because the sandbox "
+        "cannot start on this host — do not stop: finish the review with Read, Grep and "
+        f"Glob, create plan-advisory-{leaf_id}.md with the Write tool, and make its first "
+        "line say that Bash was unavailable in this run. Do not add that line when Bash "
+        "works."
     )
 
 
@@ -3213,16 +3262,37 @@ def _plan_findings(d: Path) -> int:
     ``findings: 1`` telemetry) over a missing CLI or transient outage. Placeholders
     carry the machine-readable leaf-status marker (#278), the same signal §6 uses;
     they still fold into §6 for the human, they just never drive the revision pass."""
-    count = 0
+    return sum(sum(1 for line in text.splitlines()
+                   if line.lstrip().startswith("- NEEDS-HUMAN"))
+               for _leaf, status, text in _plan_advisory_outcomes(d)
+               if not status)  # a placeholder, not a review
+
+
+def _plan_not_completed(d: Path) -> dict[str, str]:
+    """``{leaf id: leaf status}`` for each plan-advisory leaf of this bundle that did NOT
+    deliver a review — its artifact is a placeholder (#526).
+
+    ``findings: 0`` reads the same whether a leaf reviewed the brief and found nothing,
+    or never reviewed it at all: a placeholder's NEEDS-HUMAN line is excluded from the
+    count. This is what tells them apart, and the status says why — ``sandbox-empty``
+    is the environment, ``human-empty`` is the leaf."""
+    return {leaf: status for leaf, status, _text in _plan_advisory_outcomes(d) if status}
+
+
+def _plan_advisory_outcomes(d: Path):
+    """Each plan-advisory leaf's artifact in this bundle, as ``(leaf id, leaf status,
+    text)`` — the status is ``""`` for a delivered review (#278).
+
+    The one walk :func:`_plan_findings` and :func:`_plan_not_completed` share, so what
+    counts as a leaf's artifact (the decorrelation note is a selection lapse, not a leaf
+    outcome) and what counts as a placeholder cannot drift between the finding count
+    and the completion record."""
     for p in sorted(d.glob("plan-advisory-*.md")):
         if p.name == "plan-advisory-decorrelation.md":
             continue
         text = p.read_text(encoding="utf-8")
-        if assemble.leaf_status(text):
-            continue  # a placeholder, not a review
-        count += sum(1 for line in text.splitlines()
-                     if line.lstrip().startswith("- NEEDS-HUMAN"))
-    return count
+        yield (p.name.removeprefix("plan-advisory-").removesuffix(".md"),
+               assemble.leaf_status(text), text)
 
 
 def _run_plan_advisory_leaves(d: Path, cfg: Config) -> list[str]:
@@ -3341,11 +3411,108 @@ def _pinned_plan_target(d: Path, cfg: Config):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# The vendor sandbox's OWN startup errors (issue #526), keyed on the prefix its helper
+# programs print — never on what the leaf says about them. Observed (claude-code 2.1.277,
+# a host with `kernel.apparmor_restrict_unprivileged_userns = 1`): the CLI exits 0 and
+# every Bash tool_result reads `Exit code 1\napply-seccomp: write /proc/self/setgroups
+# (nested userns is capability-restricted; caller must provide CAP_SYS_ADMIN): Permission
+# denied` — the command itself never started. `apply-seccomp:` is the sandbox's
+# seccomp/userns helper (the binary carries `apply-seccomp: write /proc/self/uid_map`,
+# `…: unshare(CLONE_NEWUSER)`, `…: prctl(PR_SET_SECCOMP)` and kin); `bwrap:` is
+# bubblewrap's own prefix for the same failure one layer out. Anchored at a line start, so
+# a command that merely PRINTS one of these words (a grep hit, a cat of this very file)
+# is not the sandbox failing. (template/tests/fixtures/README.md pins the observed bytes.)
+_SANDBOX_HELPER_ERROR_RE = re.compile(r"^(?:apply-seccomp|bwrap): .+$", re.MULTILINE)
+# The CLI's own refusal to start, the other face of `failIfUnavailable` (#526). Observed
+# (2.1.277, bubblewrap absent): exit 1, stderr `Error: sandbox required but unavailable:
+# sandbox is enabled but dependencies are missing: bubblewrap (bwrap) not installed · …`,
+# and a `result` event whose `errors` say `Sandbox required but unavailable: …`. `Sandbox
+# Error:` is its message when the sandbox fails to initialise at startup (read out of the
+# binary: `❌ Sandbox Error: ${…}` then exit 1 — not observed on a host).
+_SANDBOX_REFUSAL_RE = re.compile(
+    r"^.*(?:[Ss]andbox required but unavailable|Sandbox Error:).*$", re.MULTILINE)
+_EVIDENCE_MAX = 300  # one line of evidence in a placeholder, not a transcript
+
+
+def _evidence_line(text: str) -> str:
+    """One vendor error line, fit to quote inside a placeholder or a note: whitespace
+    flattened, bounded, and unable to pose as markup the harness reads back (a
+    ``<!--`` marker, a closing backtick)."""
+    flat = " ".join(text.split()).replace("`", "'").replace("<!--", "<! --")
+    return flat if len(flat) <= _EVIDENCE_MAX else flat[:_EVIDENCE_MAX] + " …"
+
+
+def _tool_result_text(content) -> str:
+    """The text of a claude ``tool_result`` block: a plain string, or text blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(str(b.get("text") or "") for b in content
+                         if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+class _BashSandboxProbe:
+    """Watches a claude leaf's stream (the ``on_event`` hook of :func:`_invoke`) for one
+    fact (issue #526): did any Bash call the leaf made actually run, or did every one
+    fail inside the vendor sandbox's own startup?
+
+    On a host that denies what the sandbox needs, the CLI exits 0 and says nothing
+    anywhere a caller looks; the leaf's closing text is only its own paraphrase. The
+    tool results are the vendor's evidence, so they are what is read. Each result is
+    matched to its call by the ``tool_use`` id, so a Read or Grep result never counts
+    as a Bash one."""
+
+    def __init__(self) -> None:
+        self._bash_ids: set[str] = set()
+        self.ran = 0                 # Bash results that were NOT errors
+        self.errors: list[str] = []  # the text of every Bash result that was one
+
+    def __call__(self, ev: dict) -> None:
+        message = ev.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            if (ev.get("type") == "assistant" and block.get("type") == "tool_use"
+                    and block.get("name") == "Bash" and isinstance(block.get("id"), str)):
+                self._bash_ids.add(block["id"])
+            elif (ev.get("type") == "user" and block.get("type") == "tool_result"
+                    and block.get("tool_use_id") in self._bash_ids):
+                if block.get("is_error"):
+                    self.errors.append(_tool_result_text(block.get("content")))
+                else:
+                    self.ran += 1
+
+    def sandbox_start_failure(self) -> str:
+        """The vendor's startup error, iff the leaf made Bash calls and EVERY one failed
+        with it; else ``""``. One call that ran means the sandbox started; one failure
+        without the vendor's prefix means something else went wrong. Either way this is
+        not a sandbox that could not start, and the run keeps the class it has today."""
+        if self.ran or not self.errors:
+            return ""
+        hits = [_SANDBOX_HELPER_ERROR_RE.search(text) for text in self.errors]
+        return _evidence_line(hits[0].group(0)) if all(hits) else ""
+
+
+def _sandbox_refusal(output: str) -> str:
+    """The CLI's own "sandbox required but unavailable" line in a failed leaf's captured
+    output (its stderr tail, plus the stream report #506 retains), or ``""``."""
+    m = _SANDBOX_REFUSAL_RE.search(output or "")
+    return _evidence_line(m.group(0)) if m else ""
+
+
 def _run_plan_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict,
                                  leaf_id: str) -> None:
     """One plan-advisory leaf in a temp dir holding ONLY the plan inputs (the reviewer
     independence sandbox, minus patch/gates), grounding on $PDCA_TARGET — a checkout
-    pinned to the brief's resolved base (#301 review round 2)."""
+    pinned to the brief's resolved base (#301 review round 2).
+
+    The outcome it files must be what happened to the leaf (#526). A vendor sandbox that
+    could not start on this host — the CLI refusing outright, or every Bash call dying
+    in the sandbox's own startup while the CLI exits 0 — is filed as ``sandbox-empty``
+    infra, on the vendor's own evidence, never as a substantive empty result. A review
+    the leaf still delivered without Bash is kept, with a note that Bash was down."""
     with tempfile.TemporaryDirectory(prefix="pdca-plan-advisory-") as tmp, \
             _pinned_plan_target(d, cfg) as target:
         sandbox = Path(tmp)
@@ -3369,8 +3536,11 @@ def _run_plan_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: d
         # instead (#301 review round 8): _seed_plan_sandbox_settings turns the vendor
         # sandbox ON with none of those grants (claude's sandbox.enabled defaults
         # FALSE, so seeding nothing left a Bash-capable reviewer unconfined), and the
-        # confinement flag rides exactly iff the seed landed (#290).
-        seeded = _seed_plan_sandbox_settings(sandbox, profile)
+        # confinement flag rides exactly iff the seed landed (#290). The pinned target
+        # and this bundle are read-only to the leaf's file tools (#526): Write is its
+        # way to deliver when Bash is dead, and must not become a way to edit either.
+        seeded = _seed_plan_sandbox_settings(
+            sandbox, profile, read_only=(d,) + ((target,) if target else ()))
         env = {"PDCA_TARGET": str(target)} if target else None
         extra = ([profile.grounding_flag, str(target)]
                  if target and profile.grounding_flag else [])
@@ -3378,20 +3548,51 @@ def _run_plan_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: d
             extra += list(profile.settings_scope_argv)
         out = sandbox / f"plan-advisory-{leaf_id}.md"
         error_log = d / f"plan-advisory-{leaf_id}.error.log"
+        bash = _BashSandboxProbe()
         err = _invoke_leaf_resilient(
             leaf, sandbox, _plan_advisory_prompt(spec, leaf_id),
             error_log=error_log,
             label=f"Plan advisory {leaf_id} {d.name}",
             status=lambda: progress.bundle_activity(sandbox, (out.name,)),
-            stream_json=True, env=env, extra_argv=extra, cfg=cfg)
+            stream_json=True, env=env, extra_argv=extra, cfg=cfg, on_event=bash)
         if err is not None:  # advisory must never crash Plan
-            _plan_advisory_unavailable(d, leaf_id, f"leaf failed: {err}",
-                                       failure=_failure_class(err), error_log=error_log)
+            failure = _failure_class(err)
+            refusal = (_sandbox_refusal(getattr(err, "output", ""))
+                       if failure != _FAIL_STARTUP else "")
+            if refusal:  # the CLI refused to start without its sandbox (#526)
+                _plan_advisory_unavailable(
+                    d, leaf_id, "the vendor sandbox could not start, so the CLI refused to "
+                    f"run: {refusal}", failure=_FAIL_SANDBOX, error_log=error_log)
+            else:
+                _plan_advisory_unavailable(d, leaf_id, f"leaf failed: {err}",
+                                           failure=failure, error_log=error_log)
             return
+        dead = bash.sandbox_start_failure()
         if out.exists():
             shutil.copy2(out, plan_advisory_artifact(d, leaf_id))
+            if dead:  # delivered without Bash (#526): say so, whatever the leaf said
+                _note_bash_unavailable(plan_advisory_artifact(d, leaf_id), dead)
+        elif dead:
+            _plan_advisory_unavailable(
+                d, leaf_id, "produced no artifact; every Bash call it made failed before "
+                f"running, because the vendor sandbox could not start: {dead}",
+                failure=_FAIL_SANDBOX)
         else:
             _plan_advisory_unavailable(d, leaf_id, "produced no artifact")
+
+
+def _note_bash_unavailable(artifact: Path, evidence: str) -> None:
+    """Append the harness's own account to a review the leaf delivered while Bash was
+    dead (#526). The prompt asks the leaf to disclose it; this does not depend on the
+    leaf remembering to. A blockquote, not a bullet: it is not a finding, so it never
+    counts toward ``findings`` or triggers the revision pass."""
+    text = artifact.read_text(encoding="utf-8")
+    artifact.write_text(
+        text + ("" if text.endswith("\n") else "\n")
+        + "\n> **pdca:** Bash was unavailable to this reviewer. The vendor sandbox could "
+        "not start on this host, so every Bash call it made failed before running "
+        f"(`{evidence}`) and it ran no commands; this review was delivered without Bash.\n",
+        encoding="utf-8")
 
 
 def _stub_plan_advisory(d: Path, spec: dict, leaf_id: str) -> None:
@@ -3409,11 +3610,13 @@ def _plan_advisory_unavailable(d: Path, leaf_id: str, reason: str, *,
                                error_log: Path | None = None) -> None:
     print(f"leaves: {d.name} — plan advisory '{leaf_id}' unavailable ({reason})",
           file=sys.stderr)
+    action = ("make the host able to start the sandbox, then re-run it"  # #526
+              if failure == _FAIL_SANDBOX else "re-run it")
     plan_advisory_artifact(d, leaf_id).write_text(
         f"# Plan advisory — {leaf_id} — NOT COMPLETED\n\n"
         + _unavailable_classification(failure, error_log)
         + f"- NEEDS-HUMAN — plan-advisory leaf '{leaf_id}' did not produce findings "
-        f"({reason}); re-run it or adjudicate by hand.\n",
+        f"({reason}); {action} or adjudicate by hand.\n",
         encoding="utf-8")
 
 
@@ -3511,11 +3714,19 @@ def run_plan_advisory_batch(cfg: Config, bundles: list[Path]) -> None:
                   file=sys.stderr)
     for d, ids in ran.items():
         after = _brief_sha(d)
+        not_completed = _plan_not_completed(d)
         (d / PLAN_ADVISORY_BENEFIT).write_text(json.dumps({
             "before_sha": before[d],
             "after_sha": after,
             "revised": after != before[d],
             "findings": _plan_findings(d),
+            # #526: without these, a leaf that never reviewed the brief records the same
+            # `findings: 0, revised: false` as one that reviewed it and found nothing —
+            # and a run of those would convict plan review at Act for an environment
+            # fault. `completed` is false iff some leaf left a placeholder; `not_completed`
+            # names each such leaf with its leaf status (why: `sandbox-empty` = the host).
+            "completed": not not_completed,
+            "not_completed": not_completed,
             "leaves": ids,
         }, indent=2) + "\n", encoding="utf-8")
 

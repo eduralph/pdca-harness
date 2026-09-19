@@ -83,3 +83,60 @@ production reader is written to **degrade to today's behaviour** on anything it 
 recognise — an unmarked message, another family's stream, an unparseable line — rather
 than guess; re-running the greps above is how a maintainer checks whether the two shapes
 it does know are still emitted.
+
+## A vendor sandbox that cannot start (issue #526)
+
+The claims `leaves._BashSandboxProbe` and `leaves._sandbox_refusal` depend on: how a
+claude leaf reports that the sandbox the harness seeded (`_seed_plan_sandbox_settings`:
+`enabled`, `allowUnsandboxedCommands: false`, `failIfUnavailable: true`) could not start.
+All four files were written by claude-code **2.1.277** on a host where
+`sysctl kernel.apparmor_restrict_unprivileged_userns` is `1` and `unshare -Ur true` fails
+(`write failed /proc/self/uid_map: Operation not permitted`), run as
+`claude -p --model haiku --permission-mode acceptEdits --allowedTools Read,Bash,Grep,Glob
+--setting-sources project --output-format stream-json --verbose` from a directory holding
+the seeded `.claude/settings.json`.
+
+| file | spelling | provenance |
+| --- | --- | --- |
+| `claude_sandbox_cannot_start.stream.jsonl` | `--output-format stream-json` | **observed** — verbatim lines |
+| `claude_bash_ran.stream.jsonl` | `--output-format stream-json` | **observed** — verbatim lines |
+| `claude_sandbox_refused.stream.jsonl` | `--output-format stream-json` | **observed** — verbatim |
+| `claude_sandbox_refused.stderr.txt` | stderr | **observed** — verbatim, bar one line |
+
+* `claude_sandbox_cannot_start.stream.jsonl` — the defect itself. Asked to run `echo hello`,
+  the CLI **exited 0** with nothing on stderr; the Bash `tool_result` is `is_error: true`
+  with `Exit code 1\napply-seccomp: write /proc/self/setgroups (nested userns is
+  capability-restricted; caller must provide CAP_SYS_ADMIN): Permission denied` — the
+  command never started. Kept: the Bash `tool_use`, its `tool_result` and the closing
+  `assistant` text (the model's own paraphrase, which the harness does not read). Dropped:
+  the `system` lines (`init` lists the account's own connectors), `rate_limit_event`, the
+  empty `thinking` block and the `result` wrap-up — none is read by the probe.
+* `claude_bash_ran.stream.jsonl` — Bash working, for the "a working sandbox keeps today's
+  class" cases: `echo hello` → `content: "hello", is_error: false`, then `false` →
+  `content: "Exit code 1", is_error: true`, then the closing text `The sandbox is working
+  normally. I reviewed the brief and found no issues.` (asked for verbatim). This host
+  cannot start a sandbox, so this one run had `sandbox.enabled: false`; a `tool_result`'s
+  shape does not depend on the sandbox, only its content does. Same lines kept, same
+  lines dropped.
+* `claude_sandbox_refused.*` — `failIfUnavailable` doing its job: the same command with
+  `bwrap` hidden from `PATH`. **Exit 1** before any API call; stdout is one `result`
+  (`subtype: error_during_execution`, `is_error: true`, `errors: ["Sandbox required but
+  unavailable: …"]`), stderr is `Error: sandbox required but unavailable: sandbox is
+  enabled but dependencies are missing: bubblewrap (bwrap) not installed · …`. The stderr
+  file drops only the capture's final blank line, so the patch passes `git diff --check`.
+
+Derived, not observed: `apply-seccomp:` is the prefix of every error the sandbox's helper
+prints (`…: write /proc/self/uid_map`, `…: unshare(CLONE_NEWUSER)`,
+`…: prctl(PR_SET_SECCOMP)` and more), and `❌ Sandbox Error: …` then exit 1 is what the
+CLI prints when the sandbox fails to initialise at startup. `bwrap:` is bubblewrap's own
+message prefix. Re-verify against the installed binary:
+
+```sh
+B="$(readlink -f "$(command -v claude)")"
+grep -aoE 'apply-seccomp: [a-z]+' "$B" | sort -u   # execvp, fork, mount, prctl, unshare, write, …
+grep -ao 'Sandbox required but unavailable\|Sandbox Error: ' "$B" | sort -u
+```
+
+As with the section above, the reader degrades to today's behaviour on anything it does not
+recognise: a Bash failure without one of these prefixes, or a single Bash call that ran,
+leaves the run in the class it had before #526.

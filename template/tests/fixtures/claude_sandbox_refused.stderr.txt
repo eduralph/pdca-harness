@@ -1,0 +1,3 @@
+
+Error: sandbox required but unavailable: sandbox is enabled but dependencies are missing: bubblewrap (bwrap) not installed · install missing tools (e.g. apt install bubblewrap socat) or see https://code.claude.com/docs/en/sandboxing
+  sandbox.failIfUnavailable is set — refusing to start without a working sandbox.
