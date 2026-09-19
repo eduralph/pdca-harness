@@ -29,7 +29,9 @@ gets one revision pass over your findings; the human adjudicates anything left a
 
 `{brief.md, notes.json, sources/}` only — no patch, no gates exist yet. Ground every claim
 about the code on the **target source at `$PDCA_TARGET`** (read-only; the driver resolves
-and adds it); do not search other checkouts. You have **no Write/Edit**.
+and adds it); do not search other checkouts. You have **no Edit**, and **Write** only to
+deliver your output file into your cwd — the harness denies it on `$PDCA_TARGET` and on the
+bundle.
 
 ## Filesystem — the harness owns it, you don't
 
@@ -51,3 +53,9 @@ evidence (a brief line, a thread quote, a `path:line`). Concrete faults, not sty
 a finding the planner cannot act on by revising the brief is noise. If you genuinely
 cannot fault the brief after a real attempt, say so explicitly: "attempted to fault the
 root cause, criterion and scope; could not" is a strong signal, not a non-answer.
+
+**If Bash does not work in this run** — every command fails before it starts, e.g. with an
+`apply-seccomp:` or `bwrap:` error, because the sandbox cannot start on this host — do not
+stop. Finish the review with Read, Grep and Glob, create the file with **Write**, and make
+its first line say that Bash was unavailable in this run. Do not add that line when Bash
+works.

@@ -96,14 +96,21 @@ _CANONICAL_LABELS = frozenset(label.strip().casefold()
 # the §6 row must not conflate them: a transient blip is safe to re-run as-is, while a leaf
 # whose command could never be launched will fail identically until that command is fixed —
 # telling the operator "safe to re-run" there would be a false instruction (PR #285 review).
+# A third infra shape (issue #526): the leaf's command launched, but the vendor sandbox the
+# harness seeded it with could not start on this host, so no command the leaf tried ever ran.
+# Its action differs from both others — neither a re-run nor a config fix helps until the HOST
+# can start that sandbox — so it gets its own marker rather than borrowing one's instruction.
 LEAF_STATUS_INFRA = "infra-empty"      # ran, died with no output — a transient blip
 LEAF_STATUS_STARTUP = "startup-empty"  # never launched — binary absent / not executable
+LEAF_STATUS_SANDBOX = "sandbox-empty"  # launched, but its seeded sandbox could not start
 LEAF_STATUS_HUMAN = "human-empty"      # ran, but yielded no usable verdict
 _LEAF_STATUS_RE = re.compile(r"<!--\s*pdca:leaf-status\s+(\S+)\s*-->")
 _LEAF_STATUS_LABEL = {
     LEAF_STATUS_INFRA: "leaf did not run (transient infra — safe to re-run)",
     LEAF_STATUS_STARTUP: ("leaf did not run (its command could not be launched — fix the "
                           "leaf's config, then re-run)"),
+    LEAF_STATUS_SANDBOX: ("leaf could not work (the vendor sandbox it was seeded with could "
+                          "not start on this host — fix the host, then re-run)"),
     LEAF_STATUS_HUMAN: "leaf produced no usable verdict (needs a human)",
 }
 
@@ -364,8 +371,20 @@ def _plan_advisory_act_lines(d: Path) -> list[str]:
     benefit = _plan_advisory_benefit(d)
     if not benefit:
         return []
-    return [f"- Plan advisory: {benefit.get('findings', 0)} finding(s); brief revised: "
-            f"{'yes' if benefit.get('revised') else 'no'} (plan-advisory-*.md)"]
+    counts = (f"{benefit.get('findings', 0)} finding(s); brief revised: "
+              f"{'yes' if benefit.get('revised') else 'no'}")
+    missing = benefit.get("not_completed")
+    if benefit.get("completed") is False and isinstance(missing, dict) and missing:
+        # #526: a review that never completed must not read as "ran, found nothing" — its
+        # counts measure the run, not the brief. The status leads the line because
+        # `act` groups §10 lines by their first words: a recurring environment fault then
+        # collects under one key instead of hiding among real zero-finding reviews.
+        statuses = ", ".join(sorted({str(s) for s in missing.values()}))
+        why = "; ".join(f"{leaf} — {_LEAF_STATUS_LABEL.get(str(s), str(s))}"
+                        for leaf, s in missing.items())
+        return [f"- Plan advisory NOT completed ({statuses}): {why}. Its counts ({counts}) "
+                "say nothing about the brief (plan-advisory-*.md)"]
+    return [f"- Plan advisory: {counts} (plan-advisory-*.md)"]
 
 
 def _gate_lines(gates: dict, *, prefix: str) -> str:
