@@ -178,10 +178,13 @@ exists and is well-formed, and reports PASS or FAIL with the items to fix. When
 the session ends, the driver checks again and prints what it finds to your
 terminal. It re-reads the artifacts of every bundle it registered for the
 session: the bundle of a Plan, sign-off or publish session, and each bundle of
-an id-seeded batch Plan or a batch sign-off. Where it could not register a
-bundle set — a CSV or default batch Plan, which picks its issues mid-session,
-and Act — it checks that the session named its work through a passing
-`/handoff` instead, and does not re-read what that session wrote. The
+an id-seeded batch Plan or a batch sign-off. A CSV or default batch Plan picks
+its issues mid-session, so the driver has no bundle set to register for it;
+instead it re-reads every brief the session created or changed, found by
+comparing each brief with how it was when the session started. A brief that
+predates the session and is unchanged is not re-read. Where there is nothing
+to re-read — Act, or a batch Plan that changed no brief — it checks that the
+session named its work through a passing `/handoff` instead. The
 end-of-session check only reports: it never keeps the session open and never
 changes the bundle. Nothing checks the contract at the end of each turn, so the
 leaf can always hand a question back to you (issue #534). A deliberate

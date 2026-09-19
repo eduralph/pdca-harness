@@ -16,7 +16,8 @@ Covers, against the #534 success criterion:
       update` merge that kept it) cannot deadlock either;
   (b) the contract is reported when the driver reaps the leaf (`handoff.session`): what
       `stop_problems()` finds goes to stderr naming the role and each bundle, and a
-      discharged contract prints nothing;
+      discharged contract prints nothing; a Plan with no registered bundle set has
+      every brief it created or changed re-read (issue #549);
   (c) report only: nothing under the project root changes, and nothing raises out of
       the context manager — not a check that fails, not a scratch file the session
       broke; the leaf's own exception passes through untouched;
@@ -376,6 +377,220 @@ class ReportedAtReap(Base):
             '[[doctor.checks]]\nid = "frobnicator"\ncmd = "true"\nhint = "install it"\n',
             encoding="utf-8")
         self.assertEqual(self.reap("planner", [d]), "")
+
+
+class UnregisteredPlanRereadsWhatItWrote(Base):
+    """(b) for a Plan the driver registered no bundle set for (issue #549).
+
+    The CSV/default batch Plan picks its issues mid-session, so `do_plan_batch` hands
+    the session no bundles. Its reap re-reads every brief the session created or
+    changed since spawn, whether or not a `/handoff` passed.
+
+    RED on a tree without the fix: the reap only asks whether a `/handoff` passed, so
+    one passed for issue_7 hides the malformed brief the same session wrote for
+    issue_8, and a session whose new briefs all pass but that ran no `/handoff` is told
+    it verified none.
+    """
+
+    EMPTY_CRITERION = ("brief.md field 'success criterion' is empty or an unfilled "
+                       "placeholder")
+    EMPTY_TARGET = ("brief.md field 'repo + branch target' is empty or an unfilled "
+                    "placeholder")
+    VERIFIED_NONE = ("the planner session registered no bundle set at spawn and verified "
+                     "none — run `/handoff issue_<id>` for each bundle this session "
+                     "worked")
+
+    def make_unreadable(self, bp: Path, how: str) -> None:
+        """Leave a brief at ``bp`` that exists but cannot be read."""
+        if how == "no read permission":
+            bp.write_text(_AUTHORED_BRIEF, encoding="utf-8")
+            bp.chmod(0)
+            self.addCleanup(bp.chmod, 0o644)
+        else:  # "a directory in its place"
+            bp.mkdir()
+
+    def check_error(self, d: Path) -> str:
+        """The error the planner check of ``d`` raises. Skips the subtest when it
+        raises none, i.e. when this user can read a file without read permission
+        (root), so a fixture that broke nothing is never counted as a pass."""
+        try:
+            handoff.check_bundle("planner", d, self.cfg)
+        except Exception as exc:  # the fixture must make the check raise
+            return type(exc).__name__
+        self.skipTest(f"{d / 'brief.md'} is readable here (root?)")
+        raise AssertionError("unreachable")  # skipTest raises; keeps this a total function
+
+    # (i)
+    def test_a_handoff_for_one_issue_does_not_hide_a_brief_written_for_another(
+            self) -> None:
+        # `/handoff issue_7` passed; then the same session wrote issue_8's brief with
+        # an empty Success criterion, and rewrote issue_9's, which predates the
+        # session, with an empty Repo + branch target.
+        rewritten = self.bundle("9")
+        (rewritten / "brief.md").write_text(_AUTHORED_BRIEF, encoding="utf-8")
+
+        def during(env: dict) -> None:
+            (self.bundle("7") / "brief.md").write_text(_AUTHORED_BRIEF, encoding="utf-8")
+            handoff.record_pass(Path(env[handoff.ENV_STATE]), "issue_7")
+            (self.bundle("8") / "brief.md").write_text(_brief_text(criterion=""),
+                                                       encoding="utf-8")
+            (rewritten / "brief.md").write_text(_brief_text(target=""), encoding="utf-8")
+
+        err = self.reap("planner", None, during=during)
+        self.assertTrue(err.startswith("handoff: the planner session ended"), err)
+        self.assertEqual([item.split(" — ")[0] for item in _items(err)],
+                         [f"issue_8: {self.EMPTY_CRITERION}",
+                          f"issue_9: {self.EMPTY_TARGET}"])
+
+    def test_a_session_cannot_blank_its_own_spawn_snapshot(self) -> None:
+        # The session can rewrite its scratch file. The snapshot the reap diffs
+        # against is the one the driver registered, so blanking it there does not
+        # hide the brief the session wrote behind a passed `/handoff`.
+        def during(env: dict) -> None:
+            (self.bundle("8") / "brief.md").write_text(_brief_text(criterion=""),
+                                                       encoding="utf-8")
+            Path(env[handoff.ENV_STATE]).write_text(
+                json.dumps({"passed": ["issue_8"], "baseline": {}}), encoding="utf-8")
+
+        err = self.reap("planner", None, during=during)
+        self.assertEqual([item.split(" — ")[0] for item in _items(err)],
+                         [f"issue_8: {self.EMPTY_CRITERION}"])
+
+    # (ii) and (iii)
+    def test_a_session_that_changed_no_brief_is_judged_as_before(self) -> None:
+        # A brief that predates the session and is left as it was is not this
+        # session's work, however malformed: it is not re-read. So the session is
+        # judged exactly as before #549: a passed `/handoff` reports nothing, and no
+        # pass reports the one "verified none" item. Each step adds one more such
+        # brief to the bundle root and reaps both ways.
+        def named_its_work(env: dict) -> None:
+            handoff.record_pass(Path(env[handoff.ENV_STATE]), "issue_1")
+
+        written = {"an authored brief": _AUTHORED_BRIEF,
+                   "an empty Success criterion": _brief_text(criterion="")}
+        unreadable = ("no read permission", "a directory in its place")
+        steps = ("no bundle", "a bundle with no brief", *written,
+                 "an unfilled template copy", *unreadable)
+        for i, brief in enumerate(steps):
+            with self.subTest(brief_before_the_session=brief):
+                d = self.bundle(str(10 + i)) if brief != "no bundle" else None
+                if brief in written:
+                    (d / "brief.md").write_text(written[brief], encoding="utf-8")
+                elif brief == "an unfilled template copy":
+                    # `leaves._brief_snapshot` leaves placeholders out of its before
+                    # picture; a reap that did the same would call this copy new.
+                    shutil.copyfile(TEMPLATES / "brief.md.tpl", d / "brief.md")
+                elif brief in unreadable:
+                    self.make_unreadable(d / "brief.md", brief)
+                    self.check_error(d)
+                self.assertEqual(self.reap("planner", None, during=named_its_work), "")
+                err = self.reap("planner", None)
+                self.assertTrue(err.startswith("handoff: the planner session ended"),
+                                err)
+                self.assertEqual(_items(err), [self.VERIFIED_NONE])
+
+    # (iv)
+    def test_changed_briefs_that_all_pass_report_nothing_without_a_handoff(
+            self) -> None:
+        rewritten = self.bundle("8")
+        (rewritten / "brief.md").write_text(_AUTHORED_BRIEF, encoding="utf-8")
+
+        def during(env: dict) -> None:
+            (self.bundle("7") / "brief.md").write_text(_AUTHORED_BRIEF, encoding="utf-8")
+            (rewritten / "brief.md").write_text(
+                _brief_text(criterion="another observable condition."),
+                encoding="utf-8")
+
+        self.assertEqual(self.reap("planner", None, during=during), "")
+
+    # (v)
+    def test_a_broken_doctor_table_is_one_item_and_the_briefs_are_still_checked(
+            self) -> None:
+        # The table is read once for the session; the briefs it wrote are then checked
+        # without the dependency clause, exactly like registered bundles.
+        (self.tmp / "pdca.toml").write_bytes(_BROKEN_TABLES[0][1])
+
+        def during(env: dict) -> None:
+            (self.bundle("8") / "brief.md").write_text(
+                _brief_text(criterion="", deps="`frobnicator` (build)"),
+                encoding="utf-8")
+
+        err = self.reap("planner", None, during=during)
+        items = _items(err)
+        self.assertEqual(len(items), 2, err)
+        self.assertIn("[[doctor.checks]] table could not be read", items[0])
+        self.assertIn("dependency clause was not checked", items[0])
+        self.assertTrue(items[1].startswith(f"issue_8: {self.EMPTY_CRITERION}"), err)
+        self.assertNotIn("frobnicator", err)
+        self.assertNotIn("could not check", err)
+
+    # (v): one brief's failure never hides another's, when the reap finds the briefs
+    # the session wrote (it reads every brief to compare it) or when it checks them.
+    # An unreadable brief that predates the session: see the (ii)/(iii) test above.
+    def test_a_brief_that_cannot_be_read_is_its_own_item_and_hides_no_other(
+            self) -> None:
+        for i, how in enumerate(("a directory in its place", "no read permission")):
+            with self.subTest(unreadable_brief=how):
+                broken, other = self.bundle(f"{10 * i + 7}"), self.bundle(f"{10 * i + 8}")
+
+                def during(env: dict, broken: Path = broken, other: Path = other,
+                           how: str = how) -> None:
+                    self.make_unreadable(broken / "brief.md", how)
+                    (other / "brief.md").write_text(_brief_text(criterion=""),
+                                                    encoding="utf-8")
+
+                err = self.reap("planner", None, during=during)
+                error = self.check_error(broken)
+                items = _items(err)
+                self.assertEqual(len(items), 2, err)
+                self.assertTrue(items[0].startswith(
+                    f"{broken.name}: could not check ({error}: "), err)
+                self.assertTrue(items[1].startswith(
+                    f"{other.name}: {self.EMPTY_CRITERION}"), err)
+                self.assertNotIn("could not check the", err)  # not the whole check
+
+    # (vi)
+    def test_an_unreadable_brief_elsewhere_does_not_disable_a_registered_plan(
+            self) -> None:
+        # Only a planner with NO registered bundle set takes the spawn snapshot. A
+        # single or id-seeded batch Plan reads no other brief at spawn, so an
+        # unreadable one elsewhere cannot cost it its exit contract, and its own
+        # bundle is still reported.
+        self.make_unreadable(self.bundle("7") / "brief.md", "no read permission")
+        planned, unplanned = self.bundle("8"), self.bundle("9")
+        (planned / "brief.md").write_text(_brief_text(criterion=""), encoding="utf-8")
+        baselines: list[dict] = []
+
+        def during(env: dict) -> None:
+            baselines.append(handoff.load_state(env).get("baseline"))
+
+        sessions = (("a single Plan", [planned], {}),
+                    ("an id-seeded batch Plan", [planned, unplanned],
+                     {"require_artifact": False}))
+        for label, bundles, kw in sessions:
+            with self.subTest(session=label):
+                baselines.clear()
+                err = self.reap("planner", bundles, during=during, **kw)
+                self.assertEqual(baselines, [{}], "a registered Plan took a snapshot")
+                self.assertEqual([item.split(" — ")[0] for item in _items(err)],
+                                 [f"{planned.name}: {self.EMPTY_CRITERION}"])
+
+    # (vi)
+    def test_the_reread_changes_nothing(self) -> None:
+        # Re-reading is reading: the reap writes, moves or deletes nothing under the
+        # project root. (The scratch file is the driver's, removed at the reap.)
+        during_tree: list[dict] = []
+
+        def during(env: dict) -> None:
+            (self.bundle("8") / "brief.md").write_text(_brief_text(criterion=""),
+                                                       encoding="utf-8")
+            during_tree.append({k: v for k, v in _tree(self.tmp).items()
+                                if not k.startswith(handoff.STATE_PREFIX)})
+
+        err = self.reap("planner", None, during=during)
+        self.assertIn(f"issue_8: {self.EMPTY_CRITERION}", err)
+        self.assertEqual(_tree(self.tmp), during_tree[0],
+                         "the reap wrote, moved or deleted a file")
 
 
 # ----------------------------------------------------------------------------
