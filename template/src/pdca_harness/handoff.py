@@ -180,13 +180,43 @@ def check_publisher(d: Path, cfg: Config) -> list[str]:
     return problems
 
 
+def _is_pure_insertion(baseline: str, text: str) -> bool:
+    """True when ``text`` can be produced from ``baseline`` by inserting ONE
+    contiguous block somewhere — every character ``baseline`` had is still present,
+    unmodified, just not (only) trailing it. Distinguishes "the new entry landed
+    somewhere other than the end" (prepended, or spliced between existing entries)
+    from "text that was in the log at session start was itself changed or removed" —
+    the append-only rule ``check_act`` enforces (issue #528).
+
+    Computed as the longest common prefix plus the longest common suffix of the two
+    strings (the suffix comparison bounded to the part of ``baseline`` the prefix
+    didn't already cover, so the two never double-count the same character): if
+    together they account for the whole of ``baseline``, nothing inside it was
+    touched — whatever changed is new material inserted between the matched prefix
+    and suffix.
+    """
+    if len(text) < len(baseline):
+        return False
+    lcp = 0
+    while lcp < len(baseline) and baseline[lcp] == text[lcp]:
+        lcp += 1
+    remaining = len(baseline) - lcp
+    lcs = 0
+    while lcs < remaining and baseline[len(baseline) - 1 - lcs] == text[len(text) - 1 - lcs]:
+        lcs += 1
+    return lcp + lcs >= len(baseline)
+
+
 def check_act(cfg: Config, entry: str, baseline: dict) -> list[str]:
-    """The Act exit contract: the session NAMES the act-log entry it wrote.
+    """The Act exit contract: the log is append-only, and the session NAMES the
+    entry it appended.
 
     ``entry`` is the id the session hands ``/handoff`` (the entry's date). ``baseline``
     is the driver's session-start snapshot of ``process/act-log.md`` — supplied by the
     driver because an end-of-session command structurally cannot take one — and is what
-    distinguishes an entry THIS session wrote from one that predates it.
+    distinguishes text THIS session wrote from text that predates it. A session passes
+    only when the baseline text is unchanged and the named entry is in what the session
+    added AFTER it (i.e. appended at the end, never prepended or spliced in between).
     """
     if not entry.strip():
         return ["an entry id is required — run `/handoff <entry-date>` naming the "
@@ -199,7 +229,13 @@ def check_act(cfg: Config, entry: str, baseline: dict) -> list[str]:
     if entry not in text:
         return [f"process/act-log.md has no entry containing '{entry}' — append the "
                 "dated entry (even a 'no delta warranted' one) and name it here"]
-    if baseline:
+    if not baseline:
+        return []
+    prev_text = baseline.get("act_log_text")
+    if prev_text is None:
+        # A baseline built from length + sha alone (e.g. a caller that predates the
+        # full-text capture, or constructs the dict by hand): the cheaper unchanged /
+        # stale-suffix checks this replaced, kept for that shape.
         if _sha(text) == baseline.get("act_log_sha"):
             return ["process/act-log.md is unchanged since this session started — the "
                     f"entry '{entry}' predates the session; append THIS session's entry"]
@@ -208,7 +244,22 @@ def check_act(cfg: Config, entry: str, baseline: dict) -> list[str]:
                 and entry not in text[prev_len:]:
             return [f"'{entry}' appears only in act-log text that predates this session "
                     "— name the entry THIS session appended"]
-    return []
+        return []
+    if text == prev_text:
+        return ["process/act-log.md is unchanged since this session started — the "
+                f"entry '{entry}' predates the session; append THIS session's entry"]
+    if text.startswith(prev_text):
+        if entry not in text[len(prev_text):]:
+            return [f"'{entry}' appears only in act-log text that predates this session "
+                    "— name the entry THIS session appended"]
+        return []
+    if _is_pure_insertion(prev_text, text):
+        return ["process/act-log.md was not appended at the end — the log is "
+                "append-only: entries must be appended at the end of the log, never "
+                "prepended or inserted between existing entries"]
+    return ["process/act-log.md's text from before this session started was changed "
+            "or removed — the log is append-only: existing entries must not be "
+            "edited or deleted, only appended to"]
 
 
 _BUNDLE_CONTRACTS = {
@@ -374,7 +425,13 @@ def session(cfg: Config, role: str, bundles: list[Path] | None = None, *,
         if role == "act":
             log = cfg.process_dir / "act-log.md"
             text = log.read_text(encoding="utf-8") if log.exists() else ""
-            baseline = {"act_log_len": len(text), "act_log_sha": _sha(text)}
+            # `act_log_text` carries the FULL session-start text (not just its length
+            # and hash): the append-only check needs the actual content to tell "the
+            # new entry landed somewhere other than the end" apart from "existing text
+            # was edited or removed" (issue #528). `act_log_len`/`act_log_sha` stay for
+            # callers that only need the cheap unchanged/changed signal.
+            baseline = {"act_log_len": len(text), "act_log_sha": _sha(text),
+                        "act_log_text": text}
         registered = {
             "role": role,
             "bundles": [str(b) for b in (bundles or [])],

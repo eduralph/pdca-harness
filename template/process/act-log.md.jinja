@@ -4,7 +4,8 @@
 > bundles an Act review considered, what their records exposed, the concrete
 > process deltas applied (each located by a path / rule ID / template field), and
 > how the next review will judge whether the delta worked. Act never re-decides a
-> contribution's disposition. Newest entries on top.
+> contribution's disposition. New entries are appended at the end of this file —
+> never prepended, never inserted between existing entries.
 
 <!-- Template for a new entry:
 
