@@ -339,8 +339,26 @@ that becomes unschedulable before its wave arrives is dropped back out of the
 run, and its adoption announcement retracted by name, so "held" always reads the
 same way. A parent marked `split` with no readable record is reported and skipped;
 both holds degrade to the old remedy, the `pdca flow <child-ids>` command
-`--accept` still prints, which remains the right answer for whatever a run
-could not adopt.
+`--accept` prints — but only when nothing can guarantee more. While a live run
+holds the split parent right now (driving it, or holding it as a recovery seed,
+from this session or another shell entirely) — or a live CSV batch has not yet
+swept its in-flight bundles, which reaches this parent too — `--accept` prints a
+*condition* instead: that a running flow drives the children *if it reaches
+them*, and names any it did not when it ends, with the same `pdca flow
+<child-ids>` command for use after that run has ended. It never says "will
+drive". Otherwise — standalone, once the run that held the parent has ended, or
+for a child a run already let go — the line is unchanged. And right before ANY
+run ends, it re-checks every split anywhere in its own drive set — including one
+accepted from another shell on a bundle the run has already walked away from
+un-terminal (`_warn_abandoned` above) — and names every child still IN FLIGHT
+there too, so a split's children are never left silently orphaned once the run
+that could have reached them is gone. In flight, not merely un-driven: a child an
+earlier run already carried to COMPLETE (or that was discontinued or resolved) is
+finished work, so it is passed over in silence rather than handed back with a
+`pdca flow` that would re-open something already done. A child that is itself a
+split is passed over too — but the walk continues THROUGH it, since a split
+parent is terminal by design and the generation below it may still be sitting
+where an earlier run left it.
 
 One more thing changes at the reporting end, because adoption puts bundles you
 never typed into the run's results map and the exit code is derived from all of

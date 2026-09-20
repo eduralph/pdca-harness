@@ -52,7 +52,8 @@ import contextlib
 import errno
 import hashlib
 import os
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -95,6 +96,30 @@ def _claim_file(cfg: Config, d: Path) -> Path:
 
 def _contended(exc: OSError) -> bool:
     return isinstance(exc, BlockingIOError) or exc.errno in _CONTENDED
+
+
+#: How many times `Run.take` retries a CONTENDED lock before it reports the bundle held by
+#: another run (#566). `held`, below, answers "is a live run driving this bundle right now"
+#: for a report that must promise nothing (`cli._split`'s closing line) by taking and
+#: instantly releasing the very SAME lock `take` does — there is no peek-without-acquiring
+#: primitive under `flock` / `LK_NBLCK`. A `take` that lands in that instant must not read a
+#: peek's microsecond hold as a live run's: a real holder keeps the lock for its run's whole
+#: life, a peek releases long before a second attempt, so a small bounded number of
+#: immediate retries rides past it without turning `take` into a blocking wait — it is still
+#: non-blocking on every individual attempt, and the total added latency on a GENUINE hold
+#: is a few retries' worth of `_retry_wait`, not a wait for that run to finish.
+_PEEK_RETRIES = 5
+
+
+def _default_retry_wait(attempt: int) -> None:
+    time.sleep(0.001 * (attempt + 1))
+
+
+#: Run between two retry attempts in `Run.take` — a real (tiny) sleep in production.
+#: `test_split_hint_live_run.py` overrides this to release a FORCED collision on its own
+#: schedule instead of trusting wall-clock timing to outlast whatever is holding the lock —
+#: the deterministic pin the collision needs.
+_retry_wait: Callable[[int], None] = _default_retry_wait
 
 
 def _stamp_of(path: Path) -> list[str]:
@@ -145,7 +170,15 @@ class Run:
     def take(self, d: Path) -> Refusal | None:
         """Claim bundle ``d`` for this run: ``None`` once this run holds it — or already
         did, which is what keeps a run from ever refusing itself. Otherwise why it may not
-        drive ``d``. Non-blocking, and it never raises."""
+        drive ``d``. Non-blocking on every attempt, and it never raises.
+
+        Retries a CONTENDED lock up to :data:`_PEEK_RETRIES` times (#566) before reporting
+        the bundle held: :func:`held` answers "is a live run driving this" by taking and
+        releasing this SAME lock for an instant, and a `take` that lands in that instant
+        must not read the peek as a live run's hold — the false refusal the peek must never
+        cause. A lock this cannot open, or one contended on every retry, is unchanged from
+        before: reported exactly as today.
+        """
         path = _claim_file(self.cfg, d)
         if path in self._held:
             return None
@@ -155,13 +188,24 @@ class Run:
             fh = path.open("a+", encoding="utf-8")
         except OSError as exc:
             return self._unrecorded(path, exc)
-        try:
-            act._lock_exclusive(fh, wait=False)
-        except OSError as exc:
+        last: OSError | None = None
+        for attempt in range(_PEEK_RETRIES):
+            try:
+                act._lock_exclusive(fh, wait=False)
+            except OSError as exc:
+                last = exc
+                if not _contended(exc):
+                    with contextlib.suppress(OSError):
+                        fh.close()
+                    return self._unrecorded(path, exc)
+                if attempt + 1 < _PEEK_RETRIES:
+                    _retry_wait(attempt)
+                continue
+            last = None
+            break
+        if last is not None:
             with contextlib.suppress(OSError):
                 fh.close()
-            if not _contended(exc):
-                return self._unrecorded(path, exc)
             pid = _stamp_of(path)[:1]
             return Refusal(True, "held by another live `flow` run"
                            + (f" (pid {pid[0]})" if pid and pid[0].isdigit() else ""),
@@ -205,3 +249,49 @@ def run(cfg: Config) -> Iterator[Run]:
         yield claims
     finally:
         claims.close()
+
+
+def held(cfg: Config, d: Path) -> bool:
+    """True iff some OTHER live run currently holds ``d``'s drive claim, right now (#566).
+
+    A read-only snapshot for a report that must promise nothing — never a refusal, and
+    never a second lock mechanism: it takes and releases the very same lock :meth:`Run.take`
+    does (there is no peek-without-acquiring primitive under ``flock`` / ``LK_NBLCK``),
+    which is exactly why ``take`` retries past the instant this holds it
+    (:data:`_PEEK_RETRIES`) rather than mistake a peek for a hold.
+
+    Fails closed the OPPOSITE way from ``take``: a claim file this cannot even open or lock
+    reads as NOT held. ``held`` only ever WORDS a report (``cli._split``'s closing line,
+    #566); an environment that cannot record claims at all must not make that wording claim
+    a hold that was never really taken — the honest answer there is "no live run is known to
+    hold it", which is what printing today's unconditional line already says.
+    """
+    path = _claim_file(cfg, d)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fh = path.open("a+", encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        act._lock_exclusive(fh, wait=False)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            fh.close()
+        return _contended(exc)
+    with contextlib.suppress(OSError):
+        act._unlock(fh)
+    fh.close()
+    return False
+
+
+def sweep_marker(cfg: Config) -> Path:
+    """A bundle-shaped path claimed for the SPAN of a CSV batch's own sweep (#566): from
+    :func:`flow.flow_batch` starting to it finishing every claim its sweep will take, so
+    :func:`held` can answer "has a live CSV batch not yet swept?" without knowing which
+    bundle that sweep will reach — the batch sweeps EVERY in-flight bundle in the instance,
+    so any parent freshly split while it plans qualifies. Never a real bundle:
+    ``cfg.bundle_root`` only ever holds ``issue_<id>`` directories, so this can never
+    collide with one. Claimed and released through the SAME :meth:`Run.take` /
+    :meth:`Run.release` a bundle claim uses — no second lock.
+    """
+    return cfg.process_dir / ".csv-batch-sweep-marker"

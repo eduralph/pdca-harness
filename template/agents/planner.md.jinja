@@ -152,7 +152,9 @@ When the answer is "yes, this is several slices":
                              # …read it with the human, edit it if it is wrong…
 {{ cli_name }} split <id> --accept     # files one tracker issue per child as a SUB-ISSUE of this
                              # one, materialises a bundle per child, marks this parent
-                             # split, and prints the `{{ cli_name }} flow …` command for them
+                             # split, and prints a `{{ cli_name }} flow …` line: a CONDITION
+                             # ("drives them if it reaches them") while a live flow still
+                             # holds this parent, today's plain instruction otherwise
 ```
 
 You do **not** leave the session to file issues by hand. `--accept` does it (pass `--ids`
@@ -179,8 +181,20 @@ What happens next no longer depends on how this run was started:
   accepted the split ended before its children were driven, `{{ cli_name }} flow <parent-id>`
   picks them up — the parent is still skipped as finished, its children (and theirs, through
   a generation that already closed) are adopted into that run.
-- **`--accept` still prints the `{{ cli_name }} flow <child-ids>` command.** That is the remedy
-  for whatever a run could not adopt, and for a child that was held.
+- **`--accept` never promises more than a live run can guarantee.** While a run holds this
+  parent — driving it, or holding it as a recovery seed, in this very session or from
+  another shell — the line says the run drives the children *if it reaches them*, and that
+  it lists any it did not when it ends. It never says "will drive" and it prints today's
+  plain `{{ cli_name }} flow <child-ids>` instruction the rest of the time: standalone, once
+  that run has ended, or for a child a run already let go.
+- **A run names every split child it leaves IN FLIGHT, when it ends.** Not just the one this
+  `--accept` just produced: any split anywhere in the run's own drive set — including one
+  accepted from another shell on a bundle the run has already walked away from — is
+  checked again right before the run stops, and every child still unfinished is named there
+  with the `{{ cli_name }} flow <child-ids>` command that resumes it. A child an earlier run
+  already finished is passed over in silence (the list is work nothing will drive, not work
+  nobody needs to); a child that is itself a split is passed over too, but the walk goes
+  THROUGH it to the generation below.
 
 Either way the `Depends on:` / `Conflicts with:` fields between children are what makes the
 scheduling work, which is why they are the part to get right.
