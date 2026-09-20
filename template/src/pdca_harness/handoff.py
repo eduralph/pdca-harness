@@ -13,19 +13,22 @@ cause. This module gives each interactive leaf a *checked* boundary:
 * :func:`stop_problems` — the session-end verdict, judged when the driver REAPS the
   leaf's process (:func:`session`) and reported to the human on stderr
   (:func:`report_at_reap`). It re-reads the artifacts of every bundle the driver
-  registered; where the driver registered none (the CSV/default batch planner, Act) it
-  requires a passing ``/handoff`` instead. The report never blocks, never reopens the
-  session and never changes bundle state; a deliberate abandon (:func:`record_abandon`)
-  is printed first and hides nothing. It is not a turn-end check (issue #534): #331 ran
-  it as a Claude Code ``Stop`` hook, but Stop fires every time the agent finishes a
-  TURN, and a Stop hook's exit 2 sends its text back to the model instead of handing
-  the turn to the human, so a leaf that asked the human a question could never reach
-  them.
+  registered. A planner session the driver registered none for (the CSV/default batch
+  Plan, which picks its issues mid-session) has every brief it created or changed since
+  spawn re-read instead (issue #549). Where that leaves nothing to re-read (Act, or a
+  batch Plan that changed no brief) it requires a passing ``/handoff``. The report
+  never blocks, never reopens the session and never changes bundle state; a deliberate
+  abandon (:func:`record_abandon`) is printed first and hides nothing. It is not a
+  turn-end check (issue #534): #331 ran it as a Claude Code ``Stop`` hook, but Stop
+  fires every time the agent finishes a TURN, and a Stop hook's exit 2 sends its text
+  back to the model instead of handing the turn to the human, so a leaf that asked the
+  human a question could never reach them.
 * :func:`session` — the driver-side registration: env for the spawned leaf naming its
   role and a session-state scratch file (the act-log baseline where authorship must be
-  distinguished, the abandon channel, the record of passed ``/handoff`` runs). The
-  scratch file lives OUTSIDE the bundle: the gate's verdict is exit status + report,
-  never a bundle artifact (prototype finding — no ``handoff.json``).
+  distinguished, the spawn-time brief fingerprints of a planner session with no
+  registered bundle set, the abandon channel, the record of passed ``/handoff`` runs).
+  The scratch file lives OUTSIDE the bundle: the gate's verdict is exit status +
+  report, never a bundle artifact (prototype finding — no ``handoff.json``).
 
 Which contract applies is derived from the RENDER — the ``interactive = true`` leaves
 and their ``agent`` names in ``pdca.toml`` (:func:`contracts`) — not from a hardcoded
@@ -287,6 +290,47 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _brief_fingerprints(cfg: Config) -> dict[str, str]:
+    """``{bundle name: fingerprint}`` for every ``issue_*`` bundle under
+    ``cfg.bundle_root`` whose ``brief.md`` exists (issue #549).
+
+    The fingerprint is the sha256 of the brief's bytes: the content-hash rule
+    ``leaves._fresh_plan_briefs`` uses (matched, not imported — this module is kept
+    import-light for the hook). A brief that exists but cannot be read (no read
+    permission, a directory in its place) is fingerprinted by its read error instead,
+    so one such brief never stops the others from being fingerprinted. Never raises
+    for any one brief.
+    """
+    out: dict[str, str] = {}
+    for d in cfg.bundle_root.glob("issue_*"):
+        bp = d / "brief.md"
+        try:
+            if bp.exists():
+                out[d.name] = hashlib.sha256(bp.read_bytes()).hexdigest()
+        except Exception as exc:  # noqa: BLE001 — one brief must not hide the rest
+            out[d.name] = f"unreadable ({_error_text(exc)})"
+    return out
+
+
+def _changed_briefs(cfg: Config, baseline: object) -> list[Path]:
+    """The bundles whose ``brief.md`` a planner session created or changed: every
+    brief whose fingerprint now (:func:`_brief_fingerprints`) differs from the one
+    :func:`session` recorded at spawn, or that had none then (issue #549).
+
+    A brief that predates the session and is byte-unchanged is not this session's
+    work, even if malformed, and is left out. So is one that fails to read the same way
+    it did at spawn: its bytes cannot be compared, and nothing shows the session
+    touched it. With no spawn snapshot in ``baseline`` there is nothing to diff
+    against, so the result is empty: this never turns into a scan of every bundle.
+    """
+    before = baseline.get("briefs") if isinstance(baseline, dict) else None
+    if not isinstance(before, dict):
+        return []
+    return [cfg.bundle_root / name
+            for name, now in sorted(_brief_fingerprints(cfg).items())
+            if now != before.get(name)]
+
+
 def _read_json(path: Path | None) -> dict:
     if path is None:
         return {}
@@ -410,9 +454,17 @@ def session(cfg: Config, role: str, bundles: list[Path] | None = None, *,
 
     Yields the env to merge into the spawn: the role and a session-state scratch file
     (created in ``cfg.root`` with the gitignored :data:`STATE_PREFIX`, removed on exit).
-    Captures the session-start act-log baseline for the act role. Yields ``{}`` — no
-    contract — when the render does not mark the leaf interactive (criterion f), and on
-    ANY setup failure (a checked exit contract must never break the leaf it checks).
+    Captures the session-start act-log baseline for the act role. For a planner session
+    with NO registered bundle set (the CSV/default batch Plan, issue #549), it records a
+    fingerprint of every existing ``issue_*/brief.md`` (:func:`_brief_fingerprints`),
+    which the reap diffs to find the briefs the session created or changed. Every brief
+    is fingerprinted, placeholder or not. That differs from ``leaves._brief_snapshot``,
+    which leaves placeholders out of its before picture: here a brief the session did
+    not touch is never re-read, whatever it holds. A brief that cannot be read is
+    fingerprinted by its read error, so it does not fail the setup. A planner session
+    with registered bundles takes no snapshot. Yields ``{}`` — no contract — when the
+    render does not mark the leaf interactive (criterion f), and on ANY setup failure
+    (a checked exit contract must never break the leaf it checks).
 
     On exit, which is the driver reaping the leaf's process, the contract is judged and
     the verdict reported to the human (:func:`report_at_reap`, issue #534).
@@ -434,6 +486,12 @@ def session(cfg: Config, role: str, bundles: list[Path] | None = None, *,
             # callers that only need the cheap unchanged/changed signal.
             baseline = {"act_log_len": len(text), "act_log_sha": _sha(text),
                         "act_log_text": text}
+        elif role == "planner" and not bundles:
+            # No bundle set to register: the CSV/default batch Plan picks its issues
+            # mid-session (#549). What every brief looked like at spawn, so the reap
+            # can re-read exactly the briefs this session created or changed. A
+            # registered planner takes no snapshot: its reap re-reads its bundles.
+            baseline = {"briefs": _brief_fingerprints(cfg)}
         registered = {
             "role": role,
             "bundles": [str(b) for b in (bundles or [])],
@@ -481,10 +539,11 @@ def report_at_reap(cfg: Config, role: str, state: dict) -> None:
     ⇒ nothing printed.
 
     It covers what :func:`stop_problems` covers and no more: the artifacts of every
-    bundle the driver registered for the session; where the driver registered none (the
-    CSV/default batch planner, Act), whether the session named its work through a
-    passing ``/handoff`` — the artifacts such a session wrote are not re-read; and, for
-    a planner session, whether the ``[[doctor.checks]]`` table can be read.
+    bundle the driver registered for the session; where the driver registered none, the
+    briefs a planner session created or changed (the CSV/default batch Plan, #549), and,
+    when that leaves nothing to re-read (Act, or a batch Plan that changed no brief),
+    whether the session named its work through a passing ``/handoff``; and, for a
+    planner session, whether the ``[[doctor.checks]]`` table can be read.
 
     Every printed line goes through :func:`_printable`, because the reason and many
     items quote text the session wrote, and a raw terminal escape in it could hide the
@@ -583,9 +642,15 @@ def stop_problems(cfg: Config, role: str, state: dict) -> list[str]:
       check raises (a decision file that is not UTF-8, a directory where a file should
       be) is listed as ``<bundle>: could not check (<error>)`` and every other bundle is
       still checked.
-    * **No registered bundle set** (the CSV/default batch planner, which picks its
-      issues mid-session; Act): the session must have named its work through a passing
-      ``/handoff``. The artifacts such a session wrote are not re-read here.
+    * **A planner session with no registered bundle set** (the CSV/default batch Plan,
+      which picks its issues mid-session, #549): every brief under ``cfg.bundle_root``
+      it created or changed since spawn (:func:`_changed_briefs`) is re-read and
+      reported the same way, whether or not a ``/handoff`` passed. A brief that
+      predates the session and is unchanged is not re-read, even if malformed. When
+      the session changed no brief, the next rule applies.
+    * **No registered bundle set and nothing re-read** (Act, which has no brief to
+      re-read; a batch Plan that changed no brief): the session must have named its
+      work through a passing ``/handoff``.
     * **Every planner session**, bundles registered or not, briefs present or not: the
       ``[[doctor.checks]]`` table the dependency clause reads is read first
       (:func:`_doctor_table_problem`). If it cannot be read, that is ONE item for the
@@ -607,11 +672,16 @@ def stop_problems(cfg: Config, role: str, state: dict) -> list[str]:
     if table_problem:
         out.append(table_problem)
     bundles = [Path(b) for b in (state.get("bundles") or [])]
+    kw: dict = {}
+    if role == "planner":
+        kw = {"allow_absent": not state.get("require_artifact", True),
+              "dependencies": not table_problem}
+        if not bundles:
+            # No registered bundle set: the CSV/default batch Plan (#549). Its work set
+            # is every brief it created or changed since spawn, re-read like a
+            # registered bundle's whether or not a `/handoff` passed.
+            bundles = _changed_briefs(cfg, state.get("baseline"))
     if bundles:
-        kw: dict = {}
-        if role == "planner":
-            kw = {"allow_absent": not state.get("require_artifact", True),
-                  "dependencies": not table_problem}
         for d in bundles:
             try:
                 found = check_bundle(role, d, cfg, **kw)
