@@ -461,6 +461,30 @@ checkout) or two lanes collide. Override per-run without touching `pdca.toml`:
 processes can also share one workspace this way — each auto-claims a free lane
 via a lockfile, or is pinned explicitly with `PDCA_LANE=k`.
 
+Those processes never *drive* the same bundle at once: **one live driver per
+bundle**. A `pdca flow` run claims each bundle before it drives it — the ids you
+name, each bundle its CSV sweep picks up, each child it adopts from a split —
+with a lock the OS drops when the run ends, however it ends (a return, an
+exception, `SIGKILL`). It keeps the claim for the rest of the run, except on a
+bundle it then decides not to drive (a named id it skips, a swept bundle held on
+an unresolved dependency, a child the reschedule holds), which it lets go at
+once. A second run whose *named* ids include a bundle a live run holds is
+refused before it touches anything, naming that bundle; a bundle it would only
+have reached *implicitly* (the sweep, an adopted child) is named and left to the
+run that holds it, and the rest of the run goes on. A claim the run cannot
+record at all — an unwritable `process/`, a filesystem without file locks — is
+treated the same way: the bundle is never driven unclaimed. The claim files
+live under `process/.drive-claims/`, outside every bundle, and are gitignored.
+It is also why a run that walks away from a bundle mid-flight says to resume it
+"once this run has ended": the command is right, its time is after the run that
+printed it.
+
+The claim covers *driving*, not every write to a bundle, and there is one known
+gap in that: a CSV batch's Plan session runs **before** the batch claims
+anything, so the planner in it — or a `pdca split --accept` it runs — can still
+rewrite the brief of, or split, a bundle another live run holds. Single-step
+verbs (`pdca run`, `signoff`, `publish`) take no claim either.
+
 Each cycle's Do+Check runs in a dedicated git worktree off the target's base
 (`[driver].worktree`, default `true`) so the primary checkout is never mutated
 in place — exposed as `$PDCA_WORKTREE`, and gate commands should target that,

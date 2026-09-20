@@ -37,6 +37,11 @@ results/issue_selftest/
 .act-reviewed.tmp.*
 .act-session.lock
 
+# One live driver per bundle (issue #565) — the per-bundle claim files a running `flow`
+# holds a lock on ({{ process_dir }}/.drive-claims/). Runtime-only, never a bundle
+# artifact; keep the pattern in step with `drive_claim.CLAIMS_DIR`.
+.drive-claims/
+
 # Per-cycle Do/Check worktrees (issue #94) — created next to the target checkout;
 # ignored in case a checkout lives inside the project tree.
 *.pdca-wt/
