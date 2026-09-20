@@ -14,6 +14,11 @@ the target checkout. So the human was asked to approve the same out-of-workspace
 every session, and could not make the approval stick: the grant would live in the
 operator's untracked ``.claude/settings.local.json``, which a lane worktree never
 materializes and ``--setting-sources project`` (families.py:100-102) drops by design.
+A seventh interactive spawn — the plan-advisory revision pass inside
+``run_plan_advisory_batch``, entered from ``do_plan``/``do_plan_batch`` when
+``[[leaves.plan_advisory]]`` findings trigger it — had the same defect and is covered
+below by the bundle-scoped rule (i), not Plan's known-target fallback (ii): the revision
+already knows the bundles it is about (issue #550).
 
 This module asserts the whole contract over the argv the driver produces — which is the
 whole of what the harness controls:
@@ -55,6 +60,14 @@ _GENERIC = LeafConfig(mode="command", family="", argv=["true"], interactive=True
 
 _ALL_SIX = ("planner", "planner", "signoff", "signoff", "act", "publisher")
 
+# The stub plan-advisory leaf (the `_REVIEWER` shape, test_plan_advisory.py:26-30): its
+# artifact always writes a NEEDS-HUMAN line (leaves._stub_plan_advisory), which counts as
+# a finding and — with a command-mode planner — triggers the revision pass this module's
+# seventh-spawn tests drive.
+_PLAN_REVIEWER = {"id": "plan-reviewer", "mode": "stub",
+                  "role": "refute the brief: wrong root cause, untestable criterion, "
+                          "hidden scope"}
+
 
 class LeafWorkspaceAdmission(unittest.TestCase):
     def setUp(self) -> None:
@@ -75,7 +88,7 @@ class LeafWorkspaceAdmission(unittest.TestCase):
 
         def fake_invoke(leaf, workdir, prompt, **kw):
             self.captured.append({"workdir": workdir, "extra_argv": kw.get("extra_argv"),
-                                  "env": kw.get("env")})
+                                  "env": kw.get("env"), "prompt": prompt})
 
         leaves._invoke = fake_invoke
 
@@ -217,6 +230,49 @@ class LeafWorkspaceAdmission(unittest.TestCase):
             leaves.run_act(cfg, "2026-08-16")
         self.assertEqual(len(self.captured), 1)
         self.assertEqual(self._admitted(), [str(self.target), str(self.other)])
+
+    # -- (vii) the plan-advisory revision pass, a seventh bundle-scoped spawn (#550) ----
+    def test_plan_revision_admits_the_bundles_checkouts(self) -> None:
+        cfg = self._cfg(planner=_CLAUDE, plan_advisory_leaves=[_PLAN_REVIEWER])
+        d = self._bundle(cfg, "50")                     # default target → self.target
+        with self._quiet():
+            leaves.run_plan_advisory_batch(cfg, [d])
+        self.assertEqual(len(self.captured), 1, "one revision spawn over the reviewed bundle")
+        self.assertEqual(self._admitted(), [str(self.target)])
+        self.assertEqual(self.captured[0]["workdir"], cfg.root)          # (vi) cwd unmoved
+        # (vi) the prompt itself must not move — only the admission argv is new.
+        self.assertEqual(self.captured[0]["prompt"], leaves._plan_revision_prompt(cfg, [d]))
+
+    def test_plan_revision_admits_nothing_when_its_bundles_checkout_is_absent(self) -> None:
+        # Mirrors test_a_bundle_scoped_session_never_widens_to_the_known_targets: the
+        # fixture's known-target set is proven non-empty first (through the one leaf that
+        # may use it, Plan), so the revision's negative means something rather than passing
+        # for the wrong reason — the revision session already has a bundle and must never
+        # fall back to `[publisher.checkouts]` / other briefs' targets (leaves.py:830-841).
+        cfg = self._cfg(planner=_CLAUDE, plan_advisory_leaves=[_PLAN_REVIEWER],
+                        checkouts={"org/repo": str(self.target)})
+        with self._quiet():
+            leaves.do_plan(self._unplanned(cfg, "51"), cfg)
+        self.assertEqual(self._admitted(0), [str(self.target)],
+                         "fixture check: this instance HAS a known target, so a leaf "
+                         "falling back would visibly admit it")
+        d = self._bundle(cfg, "52", "org/absent @ main")   # named, but not checked out here
+        with self._quiet():
+            leaves.run_plan_advisory_batch(cfg, [d])
+        self.assertEqual(len(self.captured), 2)
+        self._admits_nothing(
+            1, "the revision spawn admitted the instance's known targets for a bundle "
+               "whose own checkout is absent — a session that already has a bundle must "
+               "never widen to the instance's other targets")
+
+    def test_plan_revision_generic_family_planner_spawns_with_no_admission(self) -> None:
+        cfg = self._cfg(planner=_GENERIC, plan_advisory_leaves=[_PLAN_REVIEWER])
+        d = self._bundle(cfg, "53")
+        with self._quiet():
+            leaves.run_plan_advisory_batch(cfg, [d])
+        self._admits_nothing(
+            0, "spawn faked a grant for a family that has no grounding flag")
+        self.assertEqual(self.captured[0]["workdir"], cfg.root)
 
     # -- (ii) the pre-brief fallback: PLAN's, and only Plan's --------------------
     def test_plan_admits_the_instances_known_targets(self) -> None:
