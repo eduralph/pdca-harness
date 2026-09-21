@@ -487,7 +487,8 @@ class AdoptRecovery(unittest.TestCase):
             "→ issue_602: Do — builder writing patch.diff + test…",
             "flow: issue_602 — build/check failed (RuntimeError: builder leaf failed for "
             "issue_602); skipping this bundle (left PLANNED)",
-            "flow:   issue_602 [PLANNED] — resume with `pdca flow 602`"])
+            "flow:   issue_602 [PLANNED] — resume with `pdca flow 602` once this run has "
+            "ended (it still holds this bundle)"])
         self.assertEqual(seen["mid-run"][2], [self._line("500", state.COMPLETE),
                                               self._line("601", state.COMPLETE),
                                               self._line("602", state.PLANNED)])

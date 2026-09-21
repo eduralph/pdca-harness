@@ -339,8 +339,26 @@ that becomes unschedulable before its wave arrives is dropped back out of the
 run, and its adoption announcement retracted by name, so "held" always reads the
 same way. A parent marked `split` with no readable record is reported and skipped;
 both holds degrade to the old remedy, the `pdca flow <child-ids>` command
-`--accept` still prints, which remains the right answer for whatever a run
-could not adopt.
+`--accept` prints — but only when nothing can guarantee more. While a live run
+holds the split parent right now (driving it, or holding it as a recovery seed,
+from this session or another shell entirely) — or a live CSV batch has not yet
+swept its in-flight bundles, which reaches this parent too — `--accept` prints a
+*condition* instead: that a running flow drives the children *if it reaches
+them*, and names any it did not when it ends, with the same `pdca flow
+<child-ids>` command for use after that run has ended. It never says "will
+drive". Otherwise — standalone, once the run that held the parent has ended, or
+for a child a run already let go — the line is unchanged. And right before ANY
+run ends, it re-checks every split anywhere in its own drive set — including one
+accepted from another shell on a bundle the run has already walked away from
+un-terminal (`_warn_abandoned` above) — and names every child still IN FLIGHT
+there too, so a split's children are never left silently orphaned once the run
+that could have reached them is gone. In flight, not merely un-driven: a child an
+earlier run already carried to COMPLETE (or that was discontinued or resolved) is
+finished work, so it is passed over in silence rather than handed back with a
+`pdca flow` that would re-open something already done. A child that is itself a
+split is passed over too — but the walk continues THROUGH it, since a split
+parent is terminal by design and the generation below it may still be sitting
+where an earlier run left it.
 
 One more thing changes at the reporting end, because adoption puts bundles you
 never typed into the run's results map and the exit code is derived from all of
@@ -460,6 +478,30 @@ checkout) or two lanes collide. Override per-run without touching `pdca.toml`:
 `PDCA_LANES=N` or `--lanes N` on `pdca flow`. Several standalone `pdca flow <id>`
 processes can also share one workspace this way — each auto-claims a free lane
 via a lockfile, or is pinned explicitly with `PDCA_LANE=k`.
+
+Those processes never *drive* the same bundle at once: **one live driver per
+bundle**. A `pdca flow` run claims each bundle before it drives it — the ids you
+name, each bundle its CSV sweep picks up, each child it adopts from a split —
+with a lock the OS drops when the run ends, however it ends (a return, an
+exception, `SIGKILL`). It keeps the claim for the rest of the run, except on a
+bundle it then decides not to drive (a named id it skips, a swept bundle held on
+an unresolved dependency, a child the reschedule holds), which it lets go at
+once. A second run whose *named* ids include a bundle a live run holds is
+refused before it touches anything, naming that bundle; a bundle it would only
+have reached *implicitly* (the sweep, an adopted child) is named and left to the
+run that holds it, and the rest of the run goes on. A claim the run cannot
+record at all — an unwritable `process/`, a filesystem without file locks — is
+treated the same way: the bundle is never driven unclaimed. The claim files
+live under `process/.drive-claims/`, outside every bundle, and are gitignored.
+It is also why a run that walks away from a bundle mid-flight says to resume it
+"once this run has ended": the command is right, its time is after the run that
+printed it.
+
+The claim covers *driving*, not every write to a bundle, and there is one known
+gap in that: a CSV batch's Plan session runs **before** the batch claims
+anything, so the planner in it — or a `pdca split --accept` it runs — can still
+rewrite the brief of, or split, a bundle another live run holds. Single-step
+verbs (`pdca run`, `signoff`, `publish`) take no claim either.
 
 Each cycle's Do+Check runs in a dedicated git worktree off the target's base
 (`[driver].worktree`, default `true`) so the primary checkout is never mutated

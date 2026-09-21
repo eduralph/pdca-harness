@@ -19,9 +19,9 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, leaves, manual_test,
-               merged, publish, queue, record, registry, revalidate, revert, signoff, sizing,
-               split, state, sweep, triage, waves, worktree)
+from . import (act, brief, cleanup, doctor, drift, drive_claim, driver, flow, gates, leaves,
+               manual_test, merged, publish, queue, record, registry, revalidate, revert,
+               signoff, sizing, split, state, sweep, triage, waves, worktree)
 from .config import Config
 
 
@@ -565,7 +565,19 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
     therefore runs a one-bundle wave (Plan→Do→Check→sign-off→publish→Act), not a second,
     parallel implementation of the same cycle. Unbriefed ids are auto-planned (one shared
     interactive Plan session) — no --plan flag. Act runs by default (--no-act to skip).
+
+    One live driver per bundle (#565): the whole run is ONE claim scope
+    (:func:`drive_claim.run`), entered here — in the process that drives, after the
+    keep-awake re-exec in :func:`main` — and released when the run ends, however it ends.
     """
+    with drive_claim.run(cfg) as claims:
+        return _flow_claimed(cfg, args, claims)
+
+
+def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run) -> int:
+    """:func:`_flow`'s body, inside its run's claim scope (#565). The NAMED ids are claimed
+    first, before anything writes; every bundle the run reaches implicitly — the CSV batch's
+    in-flight sweep, a split's children — is claimed where it is reached (:mod:`flow`)."""
     if getattr(args, "lanes", None) is not None:
         cfg.lanes = max(1, args.lanes)
     if getattr(args, "max_passes", None) is not None:
@@ -573,6 +585,30 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
     if getattr(args, "auto_iterate", False):
         cfg.auto_iterate = True                    # issue #264 (flag only opts IN)
     ids = list(args.issue_ids)
+
+    # Claim every NAMED id before anything below can touch the disk — the --from-briefs
+    # seeding, `flow_ids`' RESOLVED revalidation and its Plan pre-pass all write bundles
+    # (#565). One the operator named that this run may not drive refuses THIS run, whole:
+    # they asked for that bundle by name, so quietly driving the rest would answer a
+    # question they did not ask. That covers a claim this run could not RECORD as much as
+    # one another run holds — a bundle driven unclaimed has nothing keeping a second driver
+    # off it. Sorted, so two runs over overlapping ids contend on the same bundle first
+    # rather than each taking half; the claims taken before a refusal are released by the
+    # scope `_flow` holds.
+    for iid in sorted(ids):
+        d = cfg.bundle(iid)
+        why = claims.take(d)
+        if why is None:
+            continue
+        if why.held:
+            print(f"flow: {d.name} is {why.reason} — refusing to start a second driver over "
+                  f"it; no bundle was touched. Let that run finish (or stop it), or leave "
+                  f"{iid} out of this one.", file=sys.stderr)
+        else:
+            print(f"flow: {d.name} is {why.reason} — refusing to drive it; no bundle was "
+                  f"touched. To drive it, {why.remedy}, or leave {iid} out of this run.",
+                  file=sys.stderr)
+        return 1
 
     # --from-briefs: seed any missing bundle from DIR/<id>.md before driving.
     if args.from_briefs:
@@ -596,7 +632,8 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
             return 2
         try:
             return _report_batch(flow.flow_batch(
-                cfg, csv=args.from_csv, do_publish=do_publish, do_act=do_act, by=args.by))
+                cfg, csv=args.from_csv, do_publish=do_publish, do_act=do_act, by=args.by,
+                claims=claims))
         except flow.PreflightError as exc:
             print(f"flow: {exc}", file=sys.stderr)
             return 1
@@ -612,7 +649,8 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
     # from, live in exactly one place.
     try:
         results = flow.flow_ids(cfg, ids, plan_missing=True, csv=args.from_csv,
-                                do_publish=do_publish, do_act=do_act, by=args.by)
+                                do_publish=do_publish, do_act=do_act, by=args.by,
+                                claims=claims)
     except flow.PreflightError as exc:
         print(f"flow: {exc}", file=sys.stderr)
         return 1
@@ -840,8 +878,26 @@ def _split(cfg: Config, args) -> int:
     # streams part-way and, before #459, turned a completed acceptance into a traceback.
     for child in created:
         split.advisory(str(child), file=sys.stdout)
-    split.advisory(f"{d.name} marked split; run `{_prog()} flow {' '.join(ids)}` to drive "
-                   "the children")
+    # The closing line must never promise what a live run cannot guarantee (#566): a run
+    # that HOLDS this parent right now — driving it, or holding it as a recovery seed,
+    # from its own Plan/sign-off session or from another shell entirely — adopts these
+    # children ONLY IF it reaches them, and names any it did not when it ends
+    # (`flow._warn_stranded_split_children`); it is not a promise this call can make. The
+    # same is true the moment a live CSV batch has not yet swept its in-flight bundles
+    # (`drive_claim.sweep_marker`): that sweep reaches EVERY in-flight bundle in the
+    # instance, so a parent split during its own Plan session qualifies too. Otherwise —
+    # standalone, after the run that held this parent has ended, or on a parent a live run
+    # let go (a named id it skipped) — today's line is unchanged, byte for byte.
+    ids_str = " ".join(ids)
+    if drive_claim.held(cfg, d) or drive_claim.held(cfg, drive_claim.sweep_marker(cfg)):
+        split.advisory(
+            f"{d.name} marked split; a running `{_prog()} flow` holds {d.name} and drives "
+            f"its children ({ids_str}) if it reaches them — it lists any it did not drive "
+            f"when it ends. After that run ends, drive any left with `{_prog()} flow "
+            f"{ids_str}`")
+    else:
+        split.advisory(f"{d.name} marked split; run `{_prog()} flow {ids_str}` to drive "
+                       "the children")
     return 0
 
 
