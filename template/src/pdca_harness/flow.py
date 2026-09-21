@@ -1458,6 +1458,116 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
     return used
 
 
+def _split_marked(d: Path) -> bool:
+    """True iff ``d`` carries the ``close-disposition = split`` breadcrumb, REGARDLESS of
+    whether ``state.state(d)`` has caught up to a terminal value (#566) — unlike
+    :func:`_is_split_parent`, which :func:`_adopt_split_children` and
+    :func:`_terminal_hint` both gate on confirmed-terminal ON PURPOSE, because DRIVING a
+    child before the human has confirmed the decomposition at sign-off would spend cycles
+    on work the next sign-off might reopen.
+
+    This predicate schedules and drives nothing, so that guard does not apply to it: a
+    parent split from another shell, while a live run still holds it un-terminal
+    (:func:`_warn_abandoned` — nothing left in THIS run will ever drive that parent's own
+    close-disposition through to a sign-off, since only the run that holds it could, and it
+    has already moved on), never becomes confirmed-terminal this run at all. Its children
+    are materialised on disk the moment :func:`split.accept` returns, well before any
+    confirmation — an orphaned, undriven bundle is exactly what this reports, so it must
+    not wait on a confirmation nothing in this run will ever produce.
+    """
+    try:
+        return (d / state.CLOSE_MARKER).read_text(
+            encoding="utf-8").strip() == SPLIT_DISPOSITION
+    except Exception:  # noqa: BLE001 — a marker that cannot be read is not a split here
+        return False
+
+
+def _warn_stranded_split_children(cfg: Config, bundles: list[Path],
+                                  adopt_seeds: list[Path] | None) -> None:
+    """The end-of-run half of the "never silent" invariant for a split (#566):
+    :func:`_adopt_split_children` only ever examines a bundle in the wave it was driven or
+    recovered in (``k=k`` at ``flow.py:1626-1627``, ``k=-1`` at ``flow.py:1546-1548``), so a
+    parent that reaches ``close-disposition = split`` AFTER its own examination has already
+    run — accepted from another shell while this run has already walked away from it
+    un-terminal (:func:`_warn_abandoned`), or moved on to drive a later, unrelated wave —
+    is never re-examined, and its children would otherwise sit PLANNED with nothing on this
+    run's stderr naming them.
+
+    Read-only: it claims nothing and schedules nothing. It walks through a child that is
+    itself split (:func:`_split_marked`) exactly as :func:`_adopt_split_children`'s own
+    queue walks through one already terminal on a split of its own
+    (``flow.py:1264-1271``), through the same lineage reader (:func:`_lineage_children`) —
+    so a chain abandoned part-way down is named all the way, not just at its first
+    generation.
+
+    Named only if it is IN FLIGHT: a child already terminal (``_TERMINAL`` — COMPLETE,
+    DISCONTINUED, RESOLVED) is finished work, not work this run stranded, so it is skipped
+    exactly as :func:`_adoptable` skips it ("already terminal", ``flow.py:1064-1076``).
+    Without that test the report named a decomposition an earlier run had already carried
+    all the way to COMPLETE as "left in-flight", handing the operator a ``pdca flow`` over
+    work that is done — the opposite of the invariant, which is about children NOTHING will
+    drive. The two tests are in :func:`_adoptable`'s order and for its reason: split FIRST,
+    terminal second, because a split parent is terminal BY DESIGN once its decomposition is
+    confirmed, and a terminal-first skip would stop the walk at exactly the generation whose
+    own children this exists to reach.
+
+    Examined over the run's FINAL drive set (``bundles``, after every splice) plus its
+    adoption seeds (a seed is never added to ``bundles`` — it is terminal, so this run never
+    drives it, only whatever of its children could be adopted): between them these are
+    every bundle the run's own accounting calls its own, so nothing already reflected in
+    ``bundles`` is named twice.
+    """
+    driven = {d.name for d in bundles}
+    candidates: list[Path] = list(bundles)
+    for seed in adopt_seeds or []:
+        if seed.name not in driven and all(seed.name != c.name for c in candidates):
+            candidates.append(seed)
+    reported: set[str] = set()
+    for parent in candidates:
+        if parent.name in reported or not _split_marked(parent):
+            continue
+        reported.add(parent.name)
+        stranded: list[str] = []
+        to_examine = [parent]
+        examined = {parent.name}
+        while to_examine:
+            p = to_examine.pop(0)
+            record = split.read_lineage(p) or {}
+            for cid in _lineage_children(record):
+                if not _PLAIN_ID.fullmatch(cid):
+                    continue
+                cd = cfg.bundle(cid)
+                if cd.name in examined:
+                    continue
+                real = _real(cd)
+                if real is None or not _inside_bundle_root(cfg, cd) or not cd.exists():
+                    continue
+                examined.add(cd.name)
+                if cd.name in driven:
+                    continue
+                if _split_marked(cd):
+                    # Walked through, not named: it has nothing of its own to build — but
+                    # ITS children, an earlier run may have stranded, still might be
+                    # (#473's own recovery walk, mirrored). Tested BEFORE the terminal skip
+                    # below, since a confirmed split parent IS terminal and skipping it
+                    # there would cut the walk off above its own children.
+                    to_examine.append(cd)
+                    continue
+                if state.state(cd) in _TERMINAL:
+                    # Finished, not stranded (`_adoptable`'s "already terminal",
+                    # `flow.py:1064-1076`): naming it would point `pdca flow` at work that
+                    # is already done.
+                    continue
+                stranded.append(cid)
+        if stranded:
+            # "did not drive ALL of its children", not "its children were not driven": the
+            # list is now the in-flight ones only, so the old preamble asserted something
+            # untrue about the finished siblings it no longer names.
+            print(f"flow: {parent.name} split; this run did not drive all of its children "
+                  f"— {', '.join(stranded)} left in-flight; drive them with `pdca flow "
+                  f"{' '.join(stranded)}`", file=sys.stderr)
+
+
 def _drive_and_act(
     cfg: Config,
     bundles: list[Path],
@@ -1715,6 +1825,11 @@ def _drive_and_act(
     if do_act:
         _maybe_run_act(cfg, today,
                        any_complete=any(s == state.COMPLETE for s in results.values()))
+    # Never silent about a split children this run never reached (#566) — the end-of-run
+    # half of the invariant `cli._split`'s conditional line promises: every child a split
+    # produced is either driven by this run or named, with the command that drives it, by
+    # the time it ends.
+    _warn_stranded_split_children(cfg, bundles, adopt_seeds)
     return results
 
 
@@ -1747,50 +1862,67 @@ def flow_batch(
     the batch is driven. One the scheduler then holds is let go again at once, since this
     run will not drive it. The Plan session itself runs BEFORE any of this, and is not
     fenced: see :mod:`drive_claim`.
+
+    ``claims`` also holds :func:`drive_claim.sweep_marker` for the SPAN of this call (#566):
+    from here until every in-flight bundle has been claimed or excluded, so
+    ``cli._split``'s live-holder check can tell "a live CSV batch has not swept yet" — this
+    Plan session (above) can itself run a ``pdca split --accept`` on a bundle nothing has
+    claimed yet, since the sweep pulls in EVERY in-flight bundle, that includes whatever it
+    just split. Best-effort and never gates the batch: a marker this cannot record still
+    leaves the ordinary per-bundle claims to refuse or exclude correctly, exactly as before.
     """
     today = today or datetime.date.today().isoformat()
-
-    leaves.do_plan_batch(cfg, csv)
-    # Resume set: every bundle with a brief that isn't finished. UNPLANNED (skipped /
-    # un-briefed), COMPLETE (done), DISCONTINUED (deliberately abandoned) and RESOLVED
-    # (settled in the tracker, #302) are excluded, so a re-run is idempotent and a
-    # discontinued or resolved bundle stays out of the sweep.
-    bundles = sorted(
-        (cfg.bundle_root / name for name in _bundle_dirs(cfg)
-         if state.state(cfg.bundle_root / name)
-         not in (state.COMPLETE, state.UNPLANNED, state.DISCONTINUED, state.RESOLVED)),
-        key=lambda p: p.name,
-    )
-    if not bundles:
-        print("flow: nothing to do — no in-flight briefs (all COMPLETE or none authored; "
-              "brief new issues to add work).", file=sys.stderr)
-        return {}
+    marker = drive_claim.sweep_marker(cfg) if claims is not None else None
     if claims is not None:
-        bundles = _claim_swept(claims, bundles)
+        claims.take(marker)   # best-effort (#566): informational only, see above.
+    try:
+        leaves.do_plan_batch(cfg, csv)
+        # Resume set: every bundle with a brief that isn't finished. UNPLANNED (skipped /
+        # un-briefed), COMPLETE (done), DISCONTINUED (deliberately abandoned) and RESOLVED
+        # (settled in the tracker, #302) are excluded, so a re-run is idempotent and a
+        # discontinued or resolved bundle stays out of the sweep.
+        bundles = sorted(
+            (cfg.bundle_root / name for name in _bundle_dirs(cfg)
+             if state.state(cfg.bundle_root / name)
+             not in (state.COMPLETE, state.UNPLANNED, state.DISCONTINUED, state.RESOLVED)),
+            key=lambda p: p.name,
+        )
         if not bundles:
-            print("flow: nothing to drive — this run could not claim any in-flight bundle "
-                  "(each is named above).", file=sys.stderr)
+            print("flow: nothing to do — no in-flight briefs (all COMPLETE or none authored; "
+                  "brief new issues to add work).", file=sys.stderr)
             return {}
-    # Resume tolerance (#191): the sweep pulls in EVERY in-flight bundle, so a stale /
-    # misconfigured `Depends on` in an unrelated leftover must not abort the whole run. Hold
-    # (skip this run, leave in-flight) any bundle with an unresolvable dependency or in a
-    # cycle — plus its in-batch dependents — and drive the schedulable remainder.
-    bundles, held = waves.partition_schedulable(cfg, bundles)
-    _report_held(held)  # one report shape, shared with split adoption (#469)
-    if claims is not None:
-        # Claimed to be driven, then held: this run will not drive them after all, and the
-        # line above has just told the operator to resolve it and re-run — which must not be
-        # refused by this run (#565). Let go at once, as adoption lets go of a child it
-        # drops, and BEFORE the "nothing schedulable" return below, which is the same
-        # decision taken over every swept bundle at once.
-        for name in held:
-            claims.release(cfg.bundle_root / name)
-    if not bundles:
-        print("flow: nothing schedulable — every in-flight bundle is held on an unresolved "
-              "dependency or a cycle.", file=sys.stderr)
-        return {}
-    return _drive_and_act(cfg, bundles, do_publish=do_publish, do_act=do_act, by=by,
-                          today=today, max_passes=max_passes, claims=claims)
+        if claims is not None:
+            bundles = _claim_swept(claims, bundles)
+            if not bundles:
+                print("flow: nothing to drive — this run could not claim any in-flight "
+                      "bundle (each is named above).", file=sys.stderr)
+                return {}
+        # Resume tolerance (#191): the sweep pulls in EVERY in-flight bundle, so a stale /
+        # misconfigured `Depends on` in an unrelated leftover must not abort the whole run.
+        # Hold (skip this run, leave in-flight) any bundle with an unresolvable dependency or
+        # in a cycle — plus its in-batch dependents — and drive the schedulable remainder.
+        bundles, held = waves.partition_schedulable(cfg, bundles)
+        _report_held(held)  # one report shape, shared with split adoption (#469)
+        if claims is not None:
+            # Claimed to be driven, then held: this run will not drive them after all, and
+            # the line above has just told the operator to resolve it and re-run — which
+            # must not be refused by this run (#565). Let go at once, as adoption lets go of
+            # a child it drops, and BEFORE the "nothing schedulable" return below, which is
+            # the same decision taken over every swept bundle at once.
+            for name in held:
+                claims.release(cfg.bundle_root / name)
+        if not bundles:
+            print("flow: nothing schedulable — every in-flight bundle is held on an "
+                  "unresolved dependency or a cycle.", file=sys.stderr)
+            return {}
+        return _drive_and_act(cfg, bundles, do_publish=do_publish, do_act=do_act, by=by,
+                              today=today, max_passes=max_passes, claims=claims)
+    finally:
+        # The sweep is fully decided by every return above (and by a raise, which leaves
+        # nothing further for `cli._split` to promise about either) — released here so the
+        # marker's life is exactly "this batch has not yet finished deciding what it drives".
+        if claims is not None:
+            claims.release(marker)
 
 
 def _claim_swept(claims: drive_claim.Run, bundles: list[Path]) -> list[Path]:

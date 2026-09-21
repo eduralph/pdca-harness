@@ -878,8 +878,26 @@ def _split(cfg: Config, args) -> int:
     # streams part-way and, before #459, turned a completed acceptance into a traceback.
     for child in created:
         split.advisory(str(child), file=sys.stdout)
-    split.advisory(f"{d.name} marked split; run `{_prog()} flow {' '.join(ids)}` to drive "
-                   "the children")
+    # The closing line must never promise what a live run cannot guarantee (#566): a run
+    # that HOLDS this parent right now — driving it, or holding it as a recovery seed,
+    # from its own Plan/sign-off session or from another shell entirely — adopts these
+    # children ONLY IF it reaches them, and names any it did not when it ends
+    # (`flow._warn_stranded_split_children`); it is not a promise this call can make. The
+    # same is true the moment a live CSV batch has not yet swept its in-flight bundles
+    # (`drive_claim.sweep_marker`): that sweep reaches EVERY in-flight bundle in the
+    # instance, so a parent split during its own Plan session qualifies too. Otherwise —
+    # standalone, after the run that held this parent has ended, or on a parent a live run
+    # let go (a named id it skipped) — today's line is unchanged, byte for byte.
+    ids_str = " ".join(ids)
+    if drive_claim.held(cfg, d) or drive_claim.held(cfg, drive_claim.sweep_marker(cfg)):
+        split.advisory(
+            f"{d.name} marked split; a running `{_prog()} flow` holds {d.name} and drives "
+            f"its children ({ids_str}) if it reaches them — it lists any it did not drive "
+            f"when it ends. After that run ends, drive any left with `{_prog()} flow "
+            f"{ids_str}`")
+    else:
+        split.advisory(f"{d.name} marked split; run `{_prog()} flow {ids_str}` to drive "
+                       "the children")
     return 0
 
 
