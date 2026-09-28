@@ -100,6 +100,20 @@ _CANONICAL_LABELS = frozenset(label.strip().casefold()
 # harness seeded it with could not start on this host, so no command the leaf tried ever ran.
 # Its action differs from both others — neither a re-run nor a config fix helps until the HOST
 # can start that sandbox — so it gets its own marker rather than borrowing one's instruction.
+#
+# The marker only ever explains WHY an artifact is a placeholder. What decides WHETHER it is
+# one is the completion trailer below (#541) — a positive stamp at a fixed position, so an
+# artifact's classification turns on who closed it, never on what its text happens to mention.
+# The table of statuses is therefore CLOSED, at the four below: a shape needing more detail
+# than a token carries — the un-owned artifact of #541, whose leaf ran and exited 0 while
+# nothing at its artifact path could be attributed to it — reuses `human-empty` (true of it: no
+# usable verdict reached the bundle) and states its specifics in the placeholder's own prose,
+# which is where a human reads them. Rounds 2–4 of #541 each patched the marker instead —
+# labelling unknown tokens, an 8-line header window, a fourth token — and each re-opened the
+# same hole, the last by self-triggering on any artifact that quoted its new token. Grow this
+# table only for a MACHINE consumer that provably has to act on the difference — as
+# `sandbox-empty` does: the plan-advisory benefit record and its §10 line name the host as the
+# cause (#526) — and then say so in that issue.
 LEAF_STATUS_INFRA = "infra-empty"      # ran, died with no output — a transient blip
 LEAF_STATUS_STARTUP = "startup-empty"  # never launched — binary absent / not executable
 LEAF_STATUS_SANDBOX = "sandbox-empty"  # launched, but its seeded sandbox could not start
@@ -113,11 +127,48 @@ _LEAF_STATUS_LABEL = {
                           "not start on this host — fix the host, then re-run)"),
     LEAF_STATUS_HUMAN: "leaf produced no usable verdict (needs a human)",
 }
+# The completion trailer (#541) — what a leaf writes as the very LAST line of an artifact it
+# finished. The harness's own placeholders never carry it: they were written BECAUSE the leaf
+# did not close one. Recognised only as the last non-blank line, whole-line and exact, so a
+# report QUOTING it (or quoting a status marker) inside a fenced block cannot stamp itself
+# complete — the fence's closing line is the last one, not the trailer.
+#
+# Absence classifies nothing. Leaves are arbitrary commands and a third-party one cannot be
+# compelled to emit this, so an artifact without it behaves exactly as it always has: it falls
+# through to the marker search below, unchanged — including that search's old misreading of a
+# report that merely QUOTES a marker, which only the trailer's presence corrects. That is also
+# why the whole back catalogue — no bundle in it carries the trailer — is unaffected on the day
+# this lands.
+LEAF_COMPLETE_TRAILER = "<!-- pdca:leaf-complete -->"
+# Only a status in the table above ever relabels an artifact. An UNRECOGNISED token — a newer
+# harness's bundle, a hand-edited artifact, or an advisory leaf QUOTING a marker while
+# reviewing this harness — leaves the artifact alone, exactly as it always has: for an artifact
+# with no trailer the marker is still matched ANYWHERE in the text, so any rule that labelled an
+# unknown token would have to guess whether the artifact is a placeholder or merely quotes one,
+# and every such guess mislabels a real verdict table in some shape: "leaf produced no verdict"
+# on findings that exist, with their `[impl]` routing (#264) stripped. Nothing is lost by
+# declining: a placeholder's own items are unmarked prose, so they are already HUMAN, and its
+# prose says in words what the marker says in machine terms. What DOES have to hold is that
+# every status `leaves` can write is in the table — asserted in
+# template/tests/test_attempt_harvest.py, which also pins the table's size.
 
 
 def leaf_status(artifact_text: str) -> str:
     """The leaf-status marker a reviewer/advisory placeholder carries, or "" for a real
-    artifact (a leaf that actually produced findings) — issue #278."""
+    artifact (a leaf that actually produced findings) — issue #278.
+
+    An artifact the leaf CLOSED is real whatever it quotes (#541): the completion trailer as
+    the last non-blank line is a positive statement by the writer about the whole file, which
+    a mention of a marker in the body is not, and a dying attempt's half-written report is
+    very unlikely to have made it — it would need to be cut off exactly on a line that quotes
+    the trailer. Checked first, and only there — an anchored test, so the answer no longer
+    depends on where in a report a string appears (an 8-line header window was holed by a
+    fenced block opening at line 5; matching anywhere is holed by any report that quotes a
+    marker, which is every advisory review OF this harness).
+    """
+    closing = next((ln for ln in reversed(artifact_text.splitlines()) if ln.strip()), "")
+    if closing.strip() == LEAF_COMPLETE_TRAILER:
+        return ""
     m = _LEAF_STATUS_RE.search(artifact_text)
     return m.group(1) if m else ""
 
@@ -190,7 +241,9 @@ def _items_from_artifact(text: str, *, allow_standing: bool = False) -> list[Nee
     A placeholder (the leaf could not produce a verdict) has its items prefixed with WHY the
     artifact is empty — infra vs substance — so the human doesn't have to hand-annotate it,
     and forced to HUMAN: there is no finding for a rebuild to fix, so an infra-empty must
-    never be auto-iterated (#264). A real artifact is unaffected."""
+    never be auto-iterated (#264). A real artifact is unaffected — including one that merely
+    QUOTES a marker, recognised or not, and closed itself with the completion trailer
+    (:func:`leaf_status`)."""
     label = _LEAF_STATUS_LABEL.get(leaf_status(text), "")
     items = [_classify_finding(t, standing=allow_standing and is_standing)
              for t, is_standing in _needs_human(text)]
