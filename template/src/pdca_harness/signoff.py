@@ -178,9 +178,21 @@ def record(summary_path: Path, *, action: str, by: str, date: str, delta: str = 
     text = summary_path.read_text(encoding="utf-8")
 
     def set_field(body: str, label: str, value: str) -> tuple[str, int]:
-        """``(body, substitutions)`` — the count matters for ``Outcome``, see below."""
+        """``(body, substitutions)`` — the count matters for ``Outcome``, see below.
+
+        ``value`` is unsanitised human text (a sign-off rationale or a ``--by``), so
+        it MUST NOT be passed to ``re.subn`` as the ``repl`` string — that argument
+        is a replacement TEMPLATE and has its own backslash-escape syntax (``\\g<1>``,
+        ``\\1``, ...), which `re.sub`'s documentation contrasts with a callable `repl`:
+        a callable's return value is used as-is, with no escape processing. A string
+        `repl` raised `re.error` on a value containing e.g. `\\W` and silently expanded
+        a value that happened to spell a valid group reference (#529). A callable
+        closes over `value` and returns it untouched, so every byte the human wrote is
+        recorded literally, whatever it contains.
+        """
         pat = re.compile(rf"^(- {re.escape(label)}:).*?$", re.MULTILINE)
-        repl = rf"\g<1> {value}" if value else r"\g<1>"
+        def repl(m: re.Match[str]) -> str:
+            return f"{m.group(1)} {value}" if value else m.group(1)
         new, n = pat.subn(repl, body, count=1)
         return (new, n) if n else (body, 0)
 
