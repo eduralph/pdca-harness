@@ -18,9 +18,9 @@ What this module holds the harness to:
   spellings of that scope (`parent_tool_use_id`, `isSidechain`);
 * where several candidate records arrive, the one nearest the leaf's own death wins, in
   either arrival order;
-* **nothing is classified**: `LeafError.transient` and the retry counts are what they
-  were, and the guards below assert the invocation counts explicitly so a later change
-  cannot silently move them;
+* **retention classifies nothing**: the retry verdict is issue #539's classification of
+  the record kept here (tests/test_terminal_error_classification.py), and the guards below
+  pin the invocation counts it gives these records, so no later change moves them silently;
 * nothing else changes: `capture` still returns the child's raw stdout unmodified, the
   codex stream format and a stream-less family degrade to today's behaviour, and a leaf
   that exits 0 is spawned and reported exactly as today;
@@ -365,8 +365,10 @@ class NearestRecordWins(_StubLeafCase):
         self.assertNotIn("(no output captured)", log)
 
 
-class NothingIsClassified(_StubLeafCase):
-    """(v) the guard: `transient` and the retry counts are what they were."""
+class RetryCountsArePinned(_StubLeafCase):
+    """(v) the guard: `transient` and the retry counts, pinned. Issue #539 moved them for
+    one record only: a main-session report of a cause the vendor marks transient
+    (`_REPORT` is `server_error`) is now retried, however much work came first."""
 
     def test_a_no_output_death_is_still_transient_and_retried_thrice(self) -> None:
         err = self._run_leaf("", err="overloaded_error 529\n")
@@ -374,25 +376,29 @@ class NothingIsClassified(_StubLeafCase):
         self.assertEqual(self._runs(), 3)
         self.assertIn("overloaded_error 529", self._log())
 
-    def test_a_report_after_real_work_is_still_substantive_and_not_retried(self) -> None:
+    def test_a_transient_report_after_real_work_is_retried_thrice(self) -> None:
         err = self._run_leaf(_stream(_WORK, _REPORT))
-        self.assertFalse(getattr(err, "transient", True))
-        self.assertEqual(self._runs(), 1)
+        self.assertTrue(getattr(err, "transient", None))
+        self.assertEqual(self._runs(), 3)
 
-    def test_a_report_alone_is_still_substantive_and_not_retried(self) -> None:
-        # The marked report IS an `assistant` event, so it has always counted as
-        # "produced" — retaining its text must not move that by a hair.
+    def test_a_transient_report_alone_is_retried_thrice(self) -> None:
+        # The marked report IS an `assistant` event, so it counts as work — but it is the
+        # leaf's own account of its death, and the vendor marked that cause transient.
         err = self._run_leaf(_stream(_REPORT))
-        self.assertFalse(getattr(err, "transient", True))
-        self.assertEqual(self._runs(), 1)
+        self.assertTrue(getattr(err, "transient", None))
+        self.assertEqual(self._runs(), 3)
 
-    def test_produced_is_unmoved_by_a_retained_report(self) -> None:
+    def test_produced_follows_the_verdict_not_the_retained_text(self) -> None:
         _, _, produced = self._heartbeat(_stream(_WORK, _REPORT))
-        self.assertTrue(produced)
+        self.assertFalse(produced)
         _, _, produced_report_only = self._heartbeat(_stream(_REPORT))
-        self.assertTrue(produced_report_only)
+        self.assertFalse(produced_report_only)
         _, _, produced_none = self._heartbeat("", err="overloaded_error 529\n")
         self.assertFalse(produced_none)
+        # Retained just the same, but a cause no retry can clear: `produced` stays True.
+        _, output, produced_permanent = self._heartbeat(_stream(_WORK, _PERMANENT))
+        self.assertTrue(produced_permanent)
+        self.assertIn(_PERMANENT_TEXT, output)
 
 
 class NothingElseChanges(_StubLeafCase):

@@ -92,10 +92,11 @@ _CANONICAL_LABELS = frozenset(label.strip().casefold()
 # reads identically to "the adversary never ran" — and an infra failure then presents as a
 # clean adversarial pass. The status lets §6 say WHY the artifact is empty, and lets a
 # consumer act on it (re-run vs adjudicate) instead of parsing prose.
-# Both INFRA shapes mean "nothing reviewed the diff", but they call for different ACTIONS, so
-# the §6 row must not conflate them: a transient blip is safe to re-run as-is, while a leaf
-# whose command could never be launched will fail identically until that command is fixed —
-# telling the operator "safe to re-run" there would be a false instruction (PR #285 review).
+# Both INFRA shapes mean "no review came back" (a transient one may have worked for minutes
+# first), but they call for different ACTIONS, so the §6 row must not conflate them: a
+# transient blip is safe to re-run as-is, while a leaf whose command could never be launched
+# will fail identically until that command is fixed — telling the operator "safe to re-run"
+# there would be a false instruction (PR #285 review).
 # A third infra shape (issue #526): the leaf's command launched, but the vendor sandbox the
 # harness seeded it with could not start on this host, so no command the leaf tried ever ran.
 # Its action differs from both others — neither a re-run nor a config fix helps until the HOST
@@ -114,13 +115,16 @@ _CANONICAL_LABELS = frozenset(label.strip().casefold()
 # table only for a MACHINE consumer that provably has to act on the difference — as
 # `sandbox-empty` does: the plan-advisory benefit record and its §10 line name the host as the
 # cause (#526) — and then say so in that issue.
-LEAF_STATUS_INFRA = "infra-empty"      # ran, died with no output — a transient blip
+# infra-empty: ran, and died of a transient blip — before emitting any work, or on its own
+# report of a transient API error (a leaf that worked for minutes, then lost the API).
+LEAF_STATUS_INFRA = "infra-empty"
 LEAF_STATUS_STARTUP = "startup-empty"  # never launched — binary absent / not executable
 LEAF_STATUS_SANDBOX = "sandbox-empty"  # launched, but its seeded sandbox could not start
 LEAF_STATUS_HUMAN = "human-empty"      # ran, but yielded no usable verdict
 _LEAF_STATUS_RE = re.compile(r"<!--\s*pdca:leaf-status\s+(\S+)\s*-->")
 _LEAF_STATUS_LABEL = {
-    LEAF_STATUS_INFRA: "leaf did not run (transient infra — safe to re-run)",
+    LEAF_STATUS_INFRA: ("leaf died of transient infra (before emitting any work, or on its "
+                        "own report of a transient API error — safe to re-run)"),
     LEAF_STATUS_STARTUP: ("leaf did not run (its command could not be launched — fix the "
                           "leaf's config, then re-run)"),
     LEAF_STATUS_SANDBOX: ("leaf could not work (the vendor sandbox it was seeded with could "

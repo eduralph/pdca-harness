@@ -1,11 +1,12 @@
 """The Do builder retries like every other leaf, and a failed Do says what it left (#537).
 
 The reviewer and both advisory leaves run under `_invoke_leaf_resilient` (#138): a
-transient death — the child exits non-zero before emitting any work — is retried, bounded,
-with backoff. The builder called plain `_invoke`, so no builder failure was ever retried,
-on the leaf where an attempt costs the most; and a Do whose attempts ran out printed an
-argv and an exit status, while what the operator should do next depends on what is left in
-the bundle — a bundle holding patch.diff reads BUILT, and a plain re-run runs Check on it.
+transient death — the child exits non-zero before emitting any work, or on its own report of
+a transient API error (#539) — is retried, bounded, with backoff. The builder called plain
+`_invoke`, so no builder failure was ever retried, on the leaf where an attempt costs the
+most; and a Do whose attempts ran out printed an argv and an exit status, while what the
+operator should do next depends on what is left in the bundle — a bundle holding patch.diff
+reads BUILT, and a plain re-run runs Check on it.
 
 Every test here drives the real `leaves.do_build` with a stub "leaf" that is a Python
 interpreter (the harness from test_leaf_resilience.py, copied, not imported). The stub
