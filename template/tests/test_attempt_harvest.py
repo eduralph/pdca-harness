@@ -676,7 +676,9 @@ class AttemptHarvest(unittest.TestCase):
         items = assemble._items_from_artifact(
             _probe("- NEEDS-HUMAN [impl] — off-by-one at foo.py:12\n", closed=False))
         self.assertEqual([i.kind for i in items], [assemble.HUMAN])
-        self.assertTrue(items[0].text.startswith("leaf did not run"))
+        # The INFRA label is #539's wording ("died of transient infra"), not the base's
+        # "did not run": what this guard pins is the classification, not the prose.
+        self.assertTrue(items[0].text.startswith("leaf died of transient infra"))
         (d / "check-review.md").write_text(_probe(_CLEAN_TABLE, closed=False),
                                            encoding="utf-8")
         self.assertTrue(size_signal._review_drove_the_iterate(d))
