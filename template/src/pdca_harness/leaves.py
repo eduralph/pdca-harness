@@ -93,13 +93,18 @@ VALID_DECISIONS = frozenset({"accept", "iterate-do", "iterate-plan", "discontinu
 # Subprocess invocation — the one place a leaf command is run.
 # ----------------------------------------------------------------------------
 class LeafError(subprocess.CalledProcessError):
-    """A headless leaf exited non-zero. Carries the captured stderr tail
-    (``output``) so a failed reviewer/advisory leaf leaves recoverable error text
-    in the bundle (#138), and ``produced`` — whether the child emitted a substantive
-    stream event (real work) before exiting, vs only the CLI's ``system``/``init``
-    or ``api_retry`` events. ``produced is False`` is the transient-infra signal: the
-    child died at/near invocation (usage/rate limit, 5xx, auth, network) before doing
-    any work, so a retry is likely to succeed."""
+    """A headless leaf exited non-zero. Carries ``output`` — the captured stderr tail, plus
+    the leaf's own stream report of its death when there was one — so a failed leaf leaves
+    recoverable error text in the bundle (#138, #506), and ``produced`` — whether the
+    child did work that stands as its own (:func:`progress.run_with_heartbeat`).
+    ``produced is False`` covers the two shapes of a transient-infra death: the child died
+    at/near invocation, before emitting any work, where no report says why (a rate limit, a
+    5xx, a network blip); or its main session's last word was the CLI's own report of a
+    cause the vendor marks transient (a lost connection, an overload or 5xx, a passing
+    rate-limit rejection), however much work came first. Either way a retry is likely to
+    succeed — unless a signal ended it (:attr:`transient`). A spent usage limit is neither
+    shape: while the stream says the account's limit is refusing requests (a subscription
+    window that resets hours away), ``produced`` is ``True`` whatever the child did."""
 
     def __init__(self, returncode: int, cmd, output: str = "", produced: bool = False):
         super().__init__(returncode, cmd, output=output)
@@ -107,9 +112,16 @@ class LeafError(subprocess.CalledProcessError):
 
     @property
     def transient(self) -> bool:
-        """A no-output non-zero exit — almost certainly transient infra, not a
-        reviewer that looked at the diff and couldn't decide."""
-        return not self.produced
+        """Worth another attempt: the leaf died of transient infra — before emitting any
+        work, or on its own report of a transient API error — and **not** of a signal
+        (#539). A signal death (the memory cap, the OOM killer, an operator's kill;
+        ``-signum`` or a wrapper's ``128 + signum``) repeats on every attempt, so having
+        said nothing first does not make it transient (#510). The harness's own timeout
+        (:data:`progress.TIMEOUT_RC`) is not a signal spelling and keeps its meaning. Nor is
+        a leaf transient whose stream says its usage limit is refusing requests: a spent
+        subscription window refuses every attempt until it resets, hours away, so
+        ``produced`` is ``True`` for it however the leaf died."""
+        return not self.produced and not progress.is_signal_death(self.returncode)
 
 
 
@@ -674,10 +686,12 @@ def _invoke(
             # The death explained next to the death reported: the post-mortem rides
             # `output` into the same `*.error.log` the stderr tail lands in.
             output = (output or "") + telemetry.post_mortem(rc)
-        # Only the stream path gives a real "did a session start" signal. Without it
-        # (a stream-less family) we cannot tell invocation-death from a substantive
-        # failure, so report produced=True → not transient, not retried — preserving
-        # the prior immediate-placeholder behavior for non-stream leaves.
+        # Only the stream path says how the leaf died — whether a session started, whether
+        # it ended on the vendor's own transient report, and whether its usage limit was
+        # refusing requests (#539). Without it (a stream-less family) we can tell none of
+        # that from a substantive failure, so report produced=True → not transient, not
+        # retried — preserving the prior immediate-placeholder behavior for non-stream
+        # leaves.
         raise LeafError(rc, argv, output=output, produced=produced or not use_stream)
 
 
@@ -704,11 +718,17 @@ def _invoke_leaf_resilient(
 ) -> Exception | None:
     """Run a headless reviewer/advisory leaf with bounded retry + error capture (#138).
 
-    A non-zero exit that produced **no output** is the transient-infra signal — the
-    child died at/near invocation (usage/rate limit, 5xx, auth, network), not a
-    reviewer that read the diff and couldn't decide — so retry it with exponential
-    backoff. A failure that *did* produce output, or a non-LeafError (e.g. command
-    not found), is substantive: do not retry. Each failed attempt's captured stderr
+    A transient-infra death (:attr:`LeafError.transient`) is retried with exponential
+    backoff: a non-zero exit before the leaf emitted any work, where no report says why (a
+    rate limit, a 5xx or a network blip at invocation), or one whose main session ended on
+    the CLI's own report of a cause the vendor marks transient (a lost connection, an
+    overload or 5xx, a passing rate-limit rejection) however much work came first — not a
+    reviewer that read the diff and couldn't decide. Every other failure is substantive and
+    not retried: a leaf that worked and then failed on its own account, one a **signal**
+    killed (#510), one whose stream says the account's usage limit is refusing requests (a
+    spent subscription window, which refuses every attempt until it resets), or a
+    non-LeafError (e.g. command not found). A retry is a fresh re-invoke of the whole leaf,
+    not a resume of its session. Each failed attempt's captured stderr
     tail is written to ``error_log`` AS IT HAPPENS (#540), so the bundle carries
     recoverable error text, not just an exit code, from the moment there is any — and a
     run killed inside the retry loop leaves a post-mortem instead of nothing at all. The
@@ -779,8 +799,9 @@ def _invoke_leaf_resilient(
             _flush_attempt_records(error_log, records)
             delay = backoff * (2 ** (attempt - 1))
             print(f"leaves: {workdir.name} — leaf exited {getattr(exc, 'returncode', '?')} "
-                  f"with no output (transient); retry {attempt}/{attempts - 1} in "
-                  f"{delay:.0f}s", file=sys.stderr)
+                  "on transient infra (before emitting any work, or on its own report of a "
+                  f"transient API error); retry {attempt}/{attempts - 1} in {delay:.0f}s",
+                  file=sys.stderr)
             time.sleep(delay)
     # The attempts are spent: the same records, now SETTLED — which is what makes the log
     # read as "the leaf ran and FAILED" (state.leaf_ran_and_failed). Raises exactly as the
@@ -2547,7 +2568,8 @@ def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None
         return
     if getattr(err, "transient", False):
         print(f"leaves: {d.name} — transient: the builder leaf exited "
-              f"{getattr(err, 'returncode', '?')} without emitting any work, the class of "
+              f"{getattr(err, 'returncode', '?')} on transient infra (before emitting any "
+              "work, or on its own report of a transient API error), the class of "
               "failure the harness retries to absorb; not absorbed after "
               f"{spent} attempt(s).", file=sys.stderr)
     raise err
@@ -3301,8 +3323,9 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
         # the leaf its ambient sandbox, #290); the codex network grant does not (#291).
         extra_argv += _sandbox_argv(cfg, profile, seeded=seeded)
         error_log = d / state.REVIEW_ERROR_LOG
-        # A transient (no-output) reviewer failure is retried with backoff before it
-        # degrades to a §6 placeholder; the failed attempts' stderr lands in error_log.
+        # A transient reviewer death (before emitting any work, or on its own report of a
+        # transient API error) is retried with backoff before it degrades to a §6
+        # placeholder; the failed attempts' stderr and stream report land in error_log.
         # `_LeafHarvest` owns check-review.md across those attempts (#541): a file a dead
         # attempt left in the sandbox is withdrawn into error_log as that attempt dies, so
         # what lands in the bundle is the LIVE attempt's own work or nothing at all.
@@ -3327,11 +3350,16 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
 
 
 # How a reviewer / advisory leaf failed (#138, #278). The split that matters downstream is
-# INFRA (nothing reviewed the diff) vs SUBSTANTIVE (it reviewed, and yielded nothing usable) —
-# but the two infra shapes need different *actions* from the operator, so keep them distinct.
-_FAIL_TRANSIENT = "transient"      # ran, exited non-zero with no output; retries exhausted
+# INFRA (infrastructure stopped it before a review came back) vs SUBSTANTIVE (the leaf itself
+# yielded nothing usable) — but the infra shapes need different *actions* from the operator,
+# so keep them distinct.
+# transient: died of transient infra — before emitting any work, or on its own report of
+#   a transient API error — and retries did not recover it.
+# substantive: ran and failed any other way (a signal death and a spent usage limit
+#   included), no usable verdict.
+_FAIL_TRANSIENT = "transient"
 _FAIL_STARTUP = "startup"          # never ran at all — the command could not be launched
-_FAIL_SUBSTANTIVE = "substantive"  # ran and produced output, but no usable verdict
+_FAIL_SUBSTANTIVE = "substantive"
 # Launched, but the vendor sandbox the harness seeded it with could not start on this host
 # (#526), so nothing it tried ran. Never inferred from an exception alone, as the others
 # are: only the vendor's own evidence of the sandbox failing sets it
@@ -3352,8 +3380,10 @@ _FAIL_UNOWNED = "unowned"
 def _failure_class(exc: Exception | None) -> str:
     """Classify a failed leaf invocation.
 
-    A :class:`LeafError` means the child actually ran: ``transient`` (no output — a rate
-    limit / 5xx / network blip) or substantive. But a **startup** failure never produces a
+    A :class:`LeafError` means the child actually ran: ``transient`` (it died of a rate
+    limit / 5xx / network blip before emitting any work, or on its own report of one after
+    working — :attr:`LeafError.transient`) or substantive (any other way it can fail, a
+    signal death or a spent usage limit included). But a **startup** failure never produces a
     LeafError at all — the spawn raises ``FileNotFoundError`` before one exists, when the
     configured binary is absent or not executable (the canonical ``[Errno 2] … 'codex'``).
     Reading ``.transient`` off such an exception yields ``False``, so it was reported as "the
@@ -3398,8 +3428,8 @@ def _unavailable_classification(failure: str, error_log: Path | None) -> str:
     adversarial pass and the operator has to hand-annotate "infra, not substance". `assemble`
     reads the marker and labels the §6 row accordingly.
 
-    Every infra shape (transient, startup, sandbox) carries an infra marker — nothing
-    reviewed the diff either way — but their prose differs, because the operator's next action
+    Every infra shape (transient, startup, sandbox) carries an infra marker — no review came
+    back either way — but their prose differs, because the operator's next action
     does: a transient blip is safe to re-run as-is; a leaf that never started will fail the
     same way until its command is fixed; a leaf whose seeded sandbox could not start (#526)
     will fail the same way until the HOST can start it.
@@ -3424,11 +3454,12 @@ def _unavailable_classification(failure: str, error_log: Path | None) -> str:
     }.get(failure, assemble.LEAF_STATUS_HUMAN)
     marker = f"<!-- pdca:leaf-status {status} -->\n\n"
     if failure == _FAIL_TRANSIENT:
-        kind = ("**transient infra — safe to re-run.** The leaf exited non-zero with no "
-                "output and retries did not recover, so it almost certainly hit a usage/"
-                "rate limit or a transient API/network error rather than reviewing the "
-                "diff; a sibling advisory leaf of a different family may already have "
-                "covered it.")
+        kind = ("**transient infra — safe to re-run.** The leaf exited non-zero either "
+                "before emitting any work or on its own report of a transient API error "
+                "(a lost connection, an overload or 5xx, a passing rate-limit rejection), "
+                "and retries did not recover it — so it hit a rate limit or a transient "
+                "API/network error rather than finishing its review of the diff; a sibling "
+                "advisory leaf of a different family may already have covered it.")
     elif failure == _FAIL_STARTUP:
         kind = ("**startup infra — the leaf never ran.** Its configured command could not be "
                 "launched at all (the binary is absent, or not executable), so nothing "

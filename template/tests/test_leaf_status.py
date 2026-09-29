@@ -81,7 +81,7 @@ class LeafStatusMarker(unittest.TestCase):
     def test_failure_class_maps_every_shape(self) -> None:
         self.assertEqual(
             leaves._failure_class(leaves.LeafError(1, ["x"], output="", produced=False)),
-            leaves._FAIL_TRANSIENT)                       # ran, no output → retryable blip
+            leaves._FAIL_TRANSIENT)                       # ran, emitted no work → retryable blip
         self.assertEqual(
             leaves._failure_class(leaves.LeafError(1, ["x"], output="verdict?", produced=True)),
             leaves._FAIL_SUBSTANTIVE)                     # ran, produced output → human
@@ -132,8 +132,12 @@ class Section6Labelling(unittest.TestCase):
         self._fail_advisory(d, failure=leaves._FAIL_TRANSIENT)
         items = self._advisory_items(d)
         self.assertEqual(len(items), 1)
-        self.assertTrue(items[0].text.startswith("leaf did not run (transient infra — safe to re-run)"),
-                        items[0].text)
+        # The class covers a leaf that worked for minutes and then lost the API (#539), so
+        # the row must not claim it "did not run" — it names both shapes instead.
+        self.assertTrue(items[0].text.startswith(
+            "leaf died of transient infra (before emitting any work, or on its own "
+            "report of a transient API error — safe to re-run)"), items[0].text)
+        self.assertNotIn("did not run", items[0].text)
         # …and it reaches §6, so the empty adversarial pass can't be accepted as clean.
         self.assertTrue(any("infra" in it for it in
                             signoff.open_needs_human(d / "SUMMARY.md")))
@@ -222,7 +226,7 @@ class Section6Labelling(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             assemble.assemble_summary(d, self.cfg)
         items = [i for i in assemble.collect_needs_human(d, self.cfg)
-                 if "leaf did not run" in i.text]
+                 if i.text.startswith("leaf died of transient infra")]
         self.assertTrue(items, "a transient reviewer failure must be labelled infra in §6")
         self.assertEqual(items[0].kind, assemble.HUMAN)
 

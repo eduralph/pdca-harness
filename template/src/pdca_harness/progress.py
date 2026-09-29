@@ -31,6 +31,33 @@ from pathlib import Path
 # pass/fail verdict the child itself could have expressed.
 TIMEOUT_RC = -1001
 
+#: The highest signal number a POSIX host delivers (``SIGRTMAX``: 64 on Linux, lower on
+#: the BSDs — the wider bound is the safe one, since a hit only ever buys "not transient").
+_MAX_SIGNUM = 64
+#: How a WRAPPER argv reports that ITS child died of a signal: the shell's ``128 + signum``
+#: (137 = SIGKILL, 143 = SIGTERM), as ``sh -c`` and ``docker run`` spell it.
+_SHELL_SIGNAL_BASE = 128
+
+
+def is_signal_death(rc: int) -> bool:
+    """Did a **signal** end this child? Answered for both spellings of the same death,
+    because which one the harness sees depends on nothing but the argv's shape:
+    :mod:`subprocess` reports a direct child's signal death as ``-signum``, while a wrapper
+    argv has already exited normally with the shell's ``128 + signum``. The memory cap
+    (#420) kills with SIGKILL, and a rule that knew only one spelling would retry the same
+    OOM whenever the leaf ran behind a wrapper.
+
+    Why a retry decision asks it (#539): a signal death is not an API failure the vendor
+    reported, and it repeats — the same cap, OOM killer or operator kills the same leaf on
+    every attempt — so it is never "transient" merely because the leaf had said nothing yet
+    (what to do with it instead is issue #510's question). :data:`TIMEOUT_RC` lies outside
+    both ranges by construction, so the harness's own wall-clock kill answers ``False``
+    here and keeps its own meaning.
+    """
+    if rc < 0:
+        return 1 <= -rc <= _MAX_SIGNUM
+    return _SHELL_SIGNAL_BASE < rc <= _SHELL_SIGNAL_BASE + _MAX_SIGNUM
+
 
 def run_with_heartbeat(
     cmd,
@@ -58,13 +85,42 @@ def run_with_heartbeat(
     failed leaf's real error — usage/rate limit, 5xx, auth — survives in the bundle
     instead of scrolling past on a console nobody is watching), **plus the leaf's own
     terminal error report** when the stream carried one (below); ``""`` otherwise.
-    ``produced`` is whether the child emitted a **substantive** stream event — an
-    ``assistant`` / ``user`` / ``result`` event, i.e. a session that did real work.
-    Claude emits a ``system``/``init`` event (and ``system``/``api_retry`` on a
-    retryable API error) *before* doing anything, so those do NOT count: a non-zero
-    exit with ``produced is False`` is the transient-infra signal (the child died
-    at/near invocation — usage/rate limit, 5xx, auth — before any real output).
-    ``input_text``, if given, is written to stdin.
+    ``produced`` is whether the child did work that **stands as its own**: it emitted a
+    substantive stream event — an ``assistant`` / ``user`` / ``result`` event, i.e. a
+    session that did real work — and did not then exit non-zero with its stream ENDED on
+    the vendor's own report of a transient infrastructure failure (below). Claude emits a
+    ``system``/``init`` event (and ``system``/``api_retry`` on a retryable API error)
+    *before* doing anything, so those do NOT count. A non-zero exit with ``produced is
+    False`` is therefore the transient-infra signal in **both** of its shapes: the child
+    died at/near invocation, before emitting any work, where no report says why (a rate
+    limit, a 5xx, a network blip); or its main session's last word was the CLI's marked
+    report of a cause the vendor marks transient. One exception overrides both: a non-zero
+    exit while the stream's newest word on the account's usage limit is that it refuses
+    requests — a spent subscription window, which no fresh attempt clears until it resets —
+    reports ``produced`` as ``True`` whatever the child did, so it never reads as transient
+    (:func:`_usage_limit_refusal`). How the child was killed is the caller's second
+    question, answered from the returncode (:func:`is_signal_death`). ``input_text``, if
+    given, is written to stdin.
+
+    **What a transient death is, decided once** (issue #539). "Did it emit any work?" was
+    only a proxy for "did it die at invocation?", and it failed exactly where an attempt
+    is dearest: an 18-minute leaf whose API connection dropped mid-response did plenty of
+    work and still died of infrastructure it did not cause. The stream already says how the
+    leaf died — the CLI marks the report it synthesises for an API error and stamps its
+    own error kind, and often a typed cause, on it — so that record is classified
+    (:func:`_reports_transient_cause`): when it came from the MAIN session, the vendor
+    marked its cause transient, no main-session work followed it (that would mean the CLI
+    recovered, :func:`_is_main_session_work`), and the child then exited non-zero,
+    ``produced`` is ``False`` however much work came first. The vendor's word decides, the
+    most specific first: a typed cause outranks the kind, no prose promotes a cause the
+    vendor marked or typed as permanent, an unrecognised kind or cause and an unstamped
+    report stay as they were, and a run the harness killed on its own ``timeout`` is not
+    re-labelled by what its stream said last. One record outranks the report: the CLI's
+    account-wide ``rate_limit_event``. A ``rate_limit`` report reads the same for a passing
+    rejection and for a spent subscription window (the 5-hour or a weekly limit), and only
+    that record tells them apart — so while its newest state is a refusal, the death is not
+    transient in either shape, and the operator is never told "safe to re-run" of a limit
+    that holds for hours (:func:`_usage_limit_refusal`).
 
     **The leaf's own account of its death is kept** (issue #506). The CLI *marks* the
     message it synthesises for an API error, and that report arrives as a stream event
@@ -75,8 +131,8 @@ def run_with_heartbeat(
     to the same string. An 18-minute leaf whose API connection dropped mid-response used
     to file ``(no output captured)``, with the cause legible only in the CLI's session
     transcript under ``~/.claude/projects/`` — a post-mortem artifact that explains
-    nothing. Retention only: **nothing here is classified**. ``produced``, and therefore
-    every retry decision made from it, is byte-identical to before for every input.
+    nothing. Retention itself classifies nothing; the verdict above is read off the record
+    it keeps, and clearing that verdict when the session recovers leaves the text kept.
 
     Three properties this retention is held to:
 
@@ -190,6 +246,17 @@ def run_with_heartbeat(
     # death, so neither the session's wrap-up nor a sub-agent's report can overwrite the
     # main session's own account of the cause (:func:`_note_terminal`).
     terminal = {"text": "", "shape": ""}
+    # How the leaf died, by its own account (#539): does the record ``terminal`` keeps name
+    # a cause the vendor marks transient? Main-session work after it means the CLI
+    # recovered, which clears this verdict only — the kept text stays for the error log.
+    # Cleared, it stays cleared until a record at least as near as the kept one names a
+    # death again: a fresh main-session report does; a later ``result`` wrap-up cannot,
+    # being farther (:func:`_note_terminal` does not keep it, so it sets nothing).
+    died_of = {"transient": False}
+    # Is the account's usage limit refusing requests, by the stream's NEWEST word on it
+    # (#539)? A spent subscription window fails every attempt until it resets, hours away,
+    # so it outranks any verdict above (:func:`_usage_limit_refusal`).
+    usage_limit = {"refused": False}
     latest_tool = {"label": ""}  # most recent tool-use, updated by the drain thread
     readers: list[threading.Thread] = []
     if capture_out:
@@ -199,7 +266,7 @@ def run_with_heartbeat(
                 if capture:
                     chunks.append(line)
                 if stream_json:
-                    # Decoded ONCE per line, then classified three ways. This is a hot
+                    # Decoded ONCE per line, then classified by each reader. This is a hot
                     # loop — a long session streams thousands of lines — and each
                     # classifier below used to re-parse the same bytes for itself. A
                     # line that is no JSON object decodes to ``{}``, which every
@@ -209,7 +276,16 @@ def run_with_heartbeat(
                         produced["session"] = True  # a startup/init line does NOT count
                     text, shape = _terminal_error(ev, stream_format)
                     if shape:  # the CLI's own marked report — keep it, whatever its cause
-                        _note_terminal(terminal, text, shape)
+                        if _note_terminal(terminal, text, shape):
+                            # The verdict follows the record kept, so a farther record
+                            # cannot overrule the cause the nearest one reported.
+                            died_of["transient"] = _reports_transient_cause(
+                                ev, stream_format)
+                    elif died_of["transient"] and _is_main_session_work(ev, stream_format):
+                        died_of["transient"] = False  # the CLI recovered: not the death
+                    refused = _usage_limit_refusal(ev, stream_format)
+                    if refused is not None:  # the account's state as it now stands
+                        usage_limit["refused"] = refused
                     lbl = _stream_tool_label(ev, stream_format)
                     if lbl:
                         latest_tool["label"] = lbl
@@ -325,9 +401,17 @@ def run_with_heartbeat(
         sep = "" if not output or output.endswith("\n") else "\n"
         output = f"{output}{sep}{_TERMINAL_REPORT_HEADER}\n{terminal['text']}\n"
     rc = TIMEOUT_RC if timed_out else proc.returncode
-    # `produced` is returned exactly as before: this change RETAINS evidence and
-    # classifies nothing, so every retry decision downstream is unchanged (#506).
-    return rc, output, produced["session"]
+    # The verdicts are applied only to the outcome they describe (#539): a run that ended
+    # non-zero. Exit 0 keeps `produced` as it was, and so does the harness's own timeout —
+    # "the oracle did not answer" is not a death the stream diagnosed. A signal kill is the
+    # caller's question, answered from `rc` (`is_signal_death`), not this stream's.
+    died = rc not in (0, TIMEOUT_RC)
+    ended_on_reported_infra = died and died_of["transient"]
+    # A spent usage window is no transient death in EITHER shape: whatever the leaf did or
+    # reported, a fresh attempt is refused on its first request until the window resets.
+    refused_by_usage_limit = died and usage_limit["refused"]
+    return (rc, output,
+            (produced["session"] and not ended_on_reported_infra) or refused_by_usage_limit)
 
 
 def _terminate_group(proc: subprocess.Popen, grace: float = 2.0) -> None:
@@ -464,8 +548,10 @@ def _stream_event(line: str | dict) -> dict:
 
 def _is_session_event(line: str | dict, fmt: str = "claude-stream-json") -> bool:
     """True iff a stream line is **substantive work** — not a startup/init event the CLI
-    emits before doing anything. A non-zero exit having produced no such event is the
-    transient-infra signal a retry should target (#138). Best-effort: non-JSON → False."""
+    emits before doing anything. A non-zero exit having produced no such event, not ended
+    by a signal and not refused by a spent usage limit, is one of the two transient-infra
+    shapes (#138; the other, #539, is a stream that ends on the vendor's own transient
+    report — :func:`run_with_heartbeat`). Best-effort: non-JSON → False."""
     ev = _stream_event(line)
     if fmt == "codex-stream-json":
         return ev.get("type") in _CODEX_SESSION_TYPES
@@ -485,8 +571,9 @@ def _is_session_event(line: str | dict, fmt: str = "claude-stream-json") -> bool
 # The discriminator is NOT the prose. The CLI *marks* the message it synthesises for an
 # API error, so a leaf that merely writes about an API error — a builder fixing this very
 # defect, quoting the incident line — is never mistaken for one dying of it, whatever its
-# wording. Nothing here reads a cause, a kind or a status: this module keeps the text and
-# says whose it is, and every retry decision stays exactly where it was.
+# wording. Nothing in THIS section reads a cause, a kind or a status: it keeps the text
+# and says whose it is. Whether that cause is worth another attempt is the next
+# section's question (#539), asked of the same marked record.
 #
 # WHICH field lives on WHICH event is read out of the shipped binary (claude-code
 # 2.1.234), not assumed: a rule keyed on a field the CLI never emits is a branch that
@@ -570,7 +657,8 @@ def _terminal_error(line: str | dict, fmt: str = "claude-stream-json") -> tuple[
     The text is returned for **any** such record: retention is unconditional, because the
     cause the vendor reported is not this function's to judge, and a permanent failure
     must explain itself in the bundle just as loudly as a transient one. Nothing here
-    feeds a retry decision — the classification half is issue #506's second child.
+    feeds a retry decision; :func:`_reports_transient_cause` judges the record this keeps
+    (#539).
     """
     if fmt != "claude-stream-json":
         return "", ""
@@ -592,7 +680,7 @@ def _terminal_error(line: str | dict, fmt: str = "claude-stream-json") -> tuple[
     return "", ""
 
 
-def _note_terminal(terminal: dict, text: str, shape: str) -> None:
+def _note_terminal(terminal: dict, text: str, shape: str) -> bool:
     """Record one marked terminal record into the drain's ``terminal`` state: newest wins
     **within a shape**, but a record farther from the leaf's own death never overwrites a
     nearer one (:data:`_TERMINAL_PRECEDENCE`).
@@ -612,10 +700,15 @@ def _note_terminal(terminal: dict, text: str, shape: str) -> None:
     is the leaf's newer account of its own death and wins outright. Symmetrically, a
     farther record arriving FIRST cannot pre-empt the report — so the nearest record wins
     in either arrival order.
+
+    Returns whether the record was kept, so the drain's verdict (#539) follows the kept
+    record: a farther record that cannot bury the cause's text cannot overrule its
+    classification either.
     """
     if _TERMINAL_PRECEDENCE[shape] < _TERMINAL_PRECEDENCE.get(terminal["shape"], 0):
-        return
+        return False
     terminal.update(text=text, shape=shape)
+    return True
 
 
 def _is_subagent_event(ev: dict) -> bool:
@@ -673,6 +766,218 @@ def _report_line(texts: Iterable[str]) -> str:
             return flat
         return flat[:_TERMINAL_ERROR_MAX] + _TRUNCATED_NOTE
     return ""
+
+
+# ----------------------------------------------------------------------------
+# What a transient death IS (issue #539) — the classification of the record kept above.
+#
+# The vendor's own marks decide, the most specific first, and the harness's reading of
+# prose never outranks one. A typed cause is the CLI's most specific word, so it decides
+# whenever the report carries one; otherwise the error kind (`error`) does. A kind outside
+# the transient set — a 400, an auth or billing stop, a kind a later CLI adds — keeps the
+# substantive verdict whatever its text says. The one exception is the kind the CLI uses
+# for "I could not classify this", whose text alone is read: its leading HTTP status when
+# it has one, and otherwise only the wording of a connection that failed. Above all of it
+# sits the account's usage limit: while the stream's newest `rate_limit_event` says the
+# limit refuses requests, no death is transient, whatever the report said
+# (`_usage_limit_refusal`). Every field and set below was re-read out of claude-code
+# 2.1.284 (tests/fixtures/README.md: which claims are observed, which derived, and the
+# greps that re-verify them).
+# ----------------------------------------------------------------------------
+#: The error kinds this harness retries. ``server_error`` and ``overloaded`` are the
+#: vendor's own main-session rule (``apiErrorIsTransient===!0 || error==="overloaded" ||
+#: error==="server_error"``; the flag never reaches the stream), and ``server_error`` is
+#: what the CLI stamps on a 5xx and on a lost connection (``Connection to the API was lost
+#: (<code>)``, ``Connection lost mid-response``). ``rate_limit`` is this PROJECT's policy,
+#: not that rule: a PASSING mid-session rate-limit rejection is the twin of the
+#: invocation-time one #138 already retried. A rejection because a subscription window is
+#: spent is not one — every fresh attempt is refused on its first request until the window
+#: resets — and the stream's own rate-limit record vetoes it (:func:`_usage_limit_refusal`).
+#: The three-kind set is borrowed from the CLI's handling of a SUB-AGENT an API error cut
+#: off (``new Set(["rate_limit","overloaded","server_error"])``: it keeps that Task's
+#: partial output instead of failing it).
+_CLAUDE_TRANSIENT_KINDS = frozenset({"server_error", "overloaded", "rate_limit"})
+#: Where the vendor TYPES a report's cause — stream spelling, then transcript spelling: the
+#: CLI's own typed kind, and the server's gate code for a gate this CLI has no typed kind
+#: for yet. Either one outranks the kind: the usage-credit stops ride ``rate_limit``, a TLS
+#: trust failure rides ``server_error``.
+_CLAUDE_CAUSE_FIELDS = ("api_error", "apiError", "api_error_code", "apiErrorCode")
+#: The one typed cause that names a category this harness retries: no response arrived
+#: before the first-byte deadline, on any attempt — a response that never came, the lost-
+#: connection family. Every other typed cause names a condition a fresh attempt meets
+#: again — a certificate store, a proxy, credentials, an entitlement, the request itself —
+#: and so, for want of a reading, does one this harness has not seen.
+_CLAUDE_TRANSIENT_CAUSES = frozenset({"no_response"})
+#: The kind the CLI's mapper falls back to when it could not classify the failure itself.
+_CLAUDE_UNKNOWN_KIND = "unknown"
+#: HTTP statuses worth another attempt besides 5xx — the API client's own retry rule
+#: (``status===408 || status===409 || status===429 || status>=500``).
+_TRANSIENT_STATUSES = frozenset({408, 409, 429})
+#: The HTTP status an ``unknown`` report LEADS with. The CLI writes an API rejection it did
+#: not classify as ``API Error: <status> <body>``, so the status is read at the head of the
+#: text only: a number further in — a message index (``messages.536…``), a field value, a
+#: count — belongs to the body, not to the answer.
+_UNKNOWN_STATUS_RE = re.compile(r"\s*API\s+Error:\s*(\d{3})\b")
+#: How a connection that FAILED reads — a failure that never got an HTTP answer, so its
+#: report has no status to lead with. Read ONLY in an ``unknown`` report that carries no
+#: typed cause and no leading status: the wording Node, undici, the Anthropic SDK and the
+#: CLI itself use for a lost, dropped, refused or timed-out connection, and the CLI's own
+#: connection-error codes (its ``JF`` and ``J0`` sets). No bare word a request body could
+#: carry by accident — not ``timeout``, not a number.
+_CONNECTION_FAILED_RE = re.compile(r"""
+      \bconnection\s+(?:to\s+the\s+api\s+)?(?:was\s+)?
+         (?:lost|dropped|reset|closed|refused|aborted|interrupted|error|timed\s+out)\b
+    | \brequest\s+timed\s+out\b
+    | \bsocket\s+hang\s+up\b
+    | \bother\s+side\s+closed\b
+    | \bpremature\s+close\b
+    | \bfetch\s+failed\b
+    | \AAPI\s+Error:\s*terminated\W*\Z
+    | \b(?:ECONNRESET|EPIPE|ConnectionClosed|UND_ERR_SOCKET|ETIMEDOUT|ECONNABORTED
+         |ERR_SOCKET_CLOSED|StreamSuspended|StreamTruncated|ECONNREFUSED|ConnectionRefused
+         |ENOTFOUND|ENETUNREACH|ENETDOWN|EHOSTUNREACH|EHOSTDOWN|EAI_AGAIN
+         |FailedToOpenSocket|ERR_PROXY_TUNNEL)\b
+""", re.I | re.X)
+
+
+def _reports_transient_cause(line: str | dict, fmt: str = "claude-stream-json") -> bool:
+    """Does this marked record say the leaf died of a cause the **vendor** marks transient?
+
+    The classification companion to :func:`_terminal_error` (which keeps the record) and
+    :func:`_is_session_event`, in their shape: dispatch on ``stream_format``, the drain's
+    shared decode, and ``False`` for every family and record it does not know — so codex
+    and every stream-less family keep exactly today's verdict. A field of an unexpected
+    type is a ``False`` too, never an exception: this runs in the drain thread.
+
+    * A main-session **report** the vendor left **unstamped** (no ``error`` kind) is not
+      transient — there is no vendor judgement to follow. A **typed cause**
+      (:data:`_CLAUDE_CAUSE_FIELDS`, either spelling) decides next, before the kind: only
+      :data:`_CLAUDE_TRANSIENT_CAUSES` is transient, so a ``rate_limit`` the CLI typed as a
+      usage-credit stop is not, nor a ``server_error`` it typed as a TLS trust failure.
+      Untyped, the kind decides (:data:`_CLAUDE_TRANSIENT_KINDS`). A kind stamped
+      :data:`_CLAUDE_UNKNOWN_KIND` is the vendor saying it could not tell, so its text is
+      read — the only door prose comes in through (:func:`_unclassified_text_is_transient`).
+      Any other kind (the permanent ones, one this harness has not read) is not transient,
+      whatever the text says.
+    * A **sub-agent's** report never is: the CLI handles a Task an API error cut off
+      itself, so the report says nothing about how the session ended.
+    * The ``result`` wrap-up is transient only in its ``success`` variant — the one the CLI
+      builds when the session ended on its own API-error message, and the only one that
+      carries that error's HTTP status — with a status a retry can clear (5xx, or one of
+      :data:`_TRANSIENT_STATUSES`) and no server gate code. An ``error_*`` wrap-up ends on
+      whatever threw, so its status, if any, is not the death's.
+    """
+    if fmt != "claude-stream-json":
+        return False
+    ev = _stream_event(line)
+    if ev.get("type") == "assistant" and (ev.get("is_api_error_message")
+                                          or ev.get("isApiErrorMessage")):
+        if _is_subagent_event(ev):
+            return False
+        kind = ev.get("error")
+        if not isinstance(kind, str):
+            return False  # unstamped: the vendor made no judgement to follow
+        causes = _typed_causes(ev)
+        if causes:  # the vendor typed the cause, and that outranks the kind
+            return all(isinstance(c, str) and c in _CLAUDE_TRANSIENT_CAUSES for c in causes)
+        if kind in _CLAUDE_TRANSIENT_KINDS:
+            return True
+        if kind != _CLAUDE_UNKNOWN_KIND:
+            return False
+        texts = (t for t in _claude_message_texts(ev.get("message")) if t.strip())
+        return _unclassified_text_is_transient(next(texts, ""))
+    if ev.get("type") == "result" and ev.get("is_error"):
+        return (ev.get("subtype") == "success" and not _typed_causes(ev)
+                and _is_transient_status(ev.get("api_error_status")))
+    return False
+
+
+def _typed_causes(ev: dict) -> list:
+    """Every typed cause the vendor put on a record, in either spelling; ``[]`` if none."""
+    return [ev[key] for key in _CLAUDE_CAUSE_FIELDS if ev.get(key) is not None]
+
+
+def _is_transient_status(status) -> bool:
+    """An HTTP status a retry can clear: 5xx, or one of :data:`_TRANSIENT_STATUSES`."""
+    return isinstance(status, int) and (status in _TRANSIENT_STATUSES or 500 <= status <= 599)
+
+
+def _unclassified_text_is_transient(text: str) -> bool:
+    """Read the text of a report the vendor could NOT classify — and only for the
+    categories the harness promises to retry.
+
+    A leading HTTP status decides alone (:data:`_UNKNOWN_STATUS_RE`): what follows it is
+    the API's body, so a 400 is never promoted by a word or a number inside it. Without
+    one, the report is of a failure that got no HTTP answer at all, and only the wording
+    of a connection that failed counts (:data:`_CONNECTION_FAILED_RE`)."""
+    lead = _UNKNOWN_STATUS_RE.match(text)
+    if lead:
+        return _is_transient_status(int(lead.group(1)))
+    return bool(_CONNECTION_FAILED_RE.search(text.strip()))
+
+
+#: The event types that are the session doing turn work. A ``result`` is its wrap-up, so
+#: it is not "the session carried on".
+_WORK_EVENT_TYPES = frozenset({"assistant", "user"})
+
+
+def _is_main_session_work(line: str | dict, fmt: str = "claude-stream-json") -> bool:
+    """Is this line the MAIN session carrying on — so a report before it was not the
+    leaf's death, and whatever fails later is the leaf's own (#539)?
+
+    ``user`` belongs here as much as ``assistant``: a session that recovers and runs a
+    tool answers with a main-session ``tool_result``, emitted as ``type: "user"`` with
+    ``parent_tool_use_id: null``. **Main-session** matters as much: a sub-agent's traffic
+    (:func:`_is_subagent_event`) is a Task still draining, and letting it count would clear
+    the very report that explains the death.
+    """
+    if fmt != "claude-stream-json":
+        return False
+    ev = _stream_event(line)
+    return ev.get("type") in _WORK_EVENT_TYPES and not _is_subagent_event(ev)
+
+
+#: The record in which claude-code reports the account's usage-limit state, emitted
+#: whenever that state changes: ``{type:"rate_limit_event", rate_limit_info:{status,
+#: resetsAt, rateLimitType, isUsingOverage, …}, uuid, session_id}``.
+_RATE_LIMIT_EVENT = "rate_limit_event"
+#: The usage-limit ``status`` in which requests are refused (the others are ``allowed``
+#: and ``allowed_warning``).
+_LIMIT_REFUSED = "rejected"
+
+
+def _usage_limit_refusal(line: str | dict, fmt: str = "claude-stream-json") -> bool | None:
+    """Does this line say the account's **usage limit** is refusing requests — a spent
+    subscription window (the 5-hour or a weekly limit), which fails every request until it
+    resets, hours away? ``None`` when the line is no usage-limit record at all, so the
+    drain keeps the newest state the stream reported (#539).
+
+    claude-code emits a ``rate_limit_event`` whenever the account's usage-limit state
+    changes. Every agent's requests draw on the one account, so the record carries no scope
+    to check. It is the vendor's non-prose word on what a ``rate_limit`` report cannot say
+    by its kind: whether the refusal was a passing rejection or a spent window.
+
+    A refusal is ``status == "rejected"`` naming the window it holds to
+    (``rateLimitType``) — the stream twin of the CLI's own test for a usage-limit 429, the
+    one 429 it does not retry for a subscriber — and not ``isUsingOverage``, the vendor's
+    flag for "past the window, but paid extra usage is serving the requests". A window name
+    alone means nothing: the CLI names the limiting window on an ``allowed`` state too.
+    Every other state (``allowed``, ``allowed_warning``, a ``rejected`` naming no window,
+    which is how a passing 429 leaves it) is not a refusal, and replaces an earlier one. A
+    ``rate_limit_info`` that is no mapping is ignored, as the vendor's own readers drop it.
+    Codex and every stream-less family have no such record and answer ``None``.
+    """
+    if fmt != "claude-stream-json":
+        return None
+    ev = _stream_event(line)
+    if ev.get("type") != _RATE_LIMIT_EVENT:
+        return None
+    info = ev.get("rate_limit_info")
+    if not isinstance(info, dict):
+        return None
+    window = info.get("rateLimitType")
+    return (info.get("status") == _LIMIT_REFUSED and isinstance(window, str)
+            and bool(window) and info.get("isUsingOverage") is not True)
 
 
 def _stream_tool_label(line: str | dict, fmt: str = "claude-stream-json") -> str:
