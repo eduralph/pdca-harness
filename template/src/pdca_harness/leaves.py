@@ -34,6 +34,7 @@ subprocess in the working dir; ``interactive`` leaves inherit the terminal.
 
 from __future__ import annotations
 
+import collections.abc
 import contextlib
 import hashlib
 import io
@@ -680,10 +681,20 @@ def _invoke(
         raise LeafError(rc, argv, output=output, produced=produced or not use_stream)
 
 
+# Two additions for the Do builder (#537), documented here rather than in the docstring
+# below (sibling #533 owns that prose). Both leave a call site that does not use them
+# exactly as it was:
+#   * ``prompt`` may be a callable of the attempt number (1, 2, …), asked for attempt N's
+#     prompt immediately before attempt N is spawned. A retried leaf is re-invoked over
+#     whatever its dead predecessor left, and only the caller knows what that is and how
+#     its leaf should read it. A plain string is sent unchanged on every attempt.
+#   * When the settled record cannot be written, the write's OSError is still raised, now
+#     FROM the leaf's own final failure (``__cause__``), so a caller whose contract is that
+#     the leaf's failure reaches the flow (Do, #286) can still re-raise it.
 def _invoke_leaf_resilient(
     leaf: LeafConfig,
     workdir: Path,
-    prompt: str,
+    prompt: str | collections.abc.Callable[[int], str],
     *,
     error_log: Path,
     attempts: int = 3,
@@ -732,7 +743,7 @@ def _invoke_leaf_resilient(
     last: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
-            _invoke(leaf, workdir, prompt, **kw)
+            _invoke(leaf, workdir, prompt(attempt) if callable(prompt) else prompt, **kw)
             # Success — leave no error log behind, as before (#138). Now that a failed
             # attempt flushes its record as it happens (#540), "no error log" has to be
             # RESTORED on the retry that recovers: an unfinished record left beside a
@@ -775,7 +786,10 @@ def _invoke_leaf_resilient(
     # read as "the leaf ran and FAILED" (state.leaf_ran_and_failed). Raises exactly as the
     # single write it replaces did: a bundle that cannot hold its own error log is not a
     # failure this wrapper may swallow.
-    _replace_record(error_log, state.settled_record("".join(records)))
+    try:
+        _replace_record(error_log, state.settled_record("".join(records)))
+    except OSError as exc:
+        raise exc from last  # the same OSError; the leaf's failure rides along (#537)
     return last
 
 
@@ -2381,19 +2395,74 @@ def do_build(d: Path, cfg: Config) -> None:
             _do_build_command(d, cfg, builder, n)
     except Exception as exc:  # noqa: BLE001 — capture, then re-raise for the caller
         try:
-            error_log.write_text(_format_leaf_attempt(exc, 1), encoding="utf-8")
-            print(f"leaves: {d.name} — Do failed; captured the error tail in "
-                  f"{BUILD_ERROR_LOG}", file=sys.stderr)
+            # The log was cleared above, so one that exists now was written during THIS Do
+            # — by the retry wrapper, attempt by attempt (#540). Overwriting it with one
+            # record would destroy the post-mortem the retries built (#537). What is left
+            # for this capture is a Do that died AROUND the leaf (`worktree.ensure`, the
+            # lane lock), which otherwise has nothing bundle-local at all.
+            if error_log.exists():
+                print(f"leaves: {d.name} — Do failed; the builder's per-attempt record is "
+                      f"in {BUILD_ERROR_LOG}", file=sys.stderr)
+            else:
+                error_log.write_text(_format_leaf_attempt(exc, 1), encoding="utf-8")
+                print(f"leaves: {d.name} — Do failed; captured the error tail in "
+                      f"{BUILD_ERROR_LOG}", file=sys.stderr)
         except OSError:
             pass  # never let error-capture mask the real failure
+        with contextlib.suppress(Exception):  # …nor may the report of what it left
+            _report_failed_do(d)
         raise
 
 
-def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None:
-    """Run Do on a command backend: set up isolation, then invoke the leaf.
+def _do_residue(d: Path) -> list[str]:
+    """The Do artifacts actually in bundle ``d``: patch.diff, build-notes.md and the test
+    file(s) the brief names, those that exist. Read only — nothing here deletes them."""
+    names = ["patch.diff", "build-notes.md"]
+    names += [str(t) for t in brief.test_files(d / "brief.md")]
+    return [n for n in dict.fromkeys(names) if (d / n).is_file()]
 
-    Every failure here — setup or invocation — is captured to `build.error.log` by the
-    caller and re-raised, so `flow._isolate` still contains it and drops just this bundle.
+
+def _report_failed_do(d: Path) -> None:
+    """What a failed Do left in the bundle, and what a plain re-run would do next (#537).
+
+    Printed for EVERY failed Do — transient, substantive or setup — because the honest
+    next action depends on the residue, not on why the builder died. The state is ASKED
+    (:func:`state.state`), never inferred from which files are present: a bundle left
+    holding patch.diff reads BUILT (state.py:347-364), and ``driver.advance`` then runs
+    Check on it, not Do (driver.py:76). Reporting only — nothing here deletes anything.
+    """
+    issue = d.name.removeprefix("issue_")
+    left = _do_residue(d)
+    if left:
+        print(f"leaves: {d.name} — left in the bundle: {', '.join(left)}. That is an "
+              "unfinished attempt's work, not a finished build; nothing deletes it.",
+              file=sys.stderr)
+    else:
+        print(f"leaves: {d.name} — no patch.diff, build-notes.md or brief-named test file "
+              "was left in the bundle.", file=sys.stderr)
+    now = state.state(d)
+    if now == state.BUILT:
+        advice = (f"the bundle now reads {now}, so a plain re-run (`pdca run {issue}`) runs "
+                  "CHECK on that unfinished patch.diff, not Do. To rebuild instead, move "
+                  "patch.diff out of the bundle first.")
+    elif now == state.PLANNED:
+        advice = (f"the bundle still reads {now}, so a plain re-run (`pdca run {issue}`) "
+                  "starts Do again.")
+        if left:
+            advice += (" That builder is NOT told the files above are residue; move them "
+                       "aside first if they should not be built on.")
+    else:
+        advice = f"the bundle reads {now}; `pdca status` shows what a re-run does next."
+    print(f"leaves: {d.name} — next: {advice}", file=sys.stderr)
+
+
+def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None:
+    """Run Do on a command backend: set up isolation, then invoke the leaf resiliently.
+
+    Every failure here — setup or invocation — still reaches `build.error.log` and is still
+    re-raised, so `flow._isolate` contains it and drops just this bundle: an INVOCATION
+    failure is recorded attempt by attempt by `_invoke_leaf_resilient`, a SETUP failure by
+    the caller's capture.
     """
     _record_loop_attempt(d, n, builder, cfg)
     # Isolate Do in a per-cycle worktree off the base (issue #94) so the host's
@@ -2431,19 +2500,64 @@ def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None
         # A family without its own PreToolUse STOP hook gets the driver's `gh`
         # PATH shim — the same builder_guard rules, enforced vendor-neutrally.
         env = guard.shim_env(cfg, env)
-    # Watch the bundle d so the heartbeat shows patch.diff / build-notes.md appearing.
-    _invoke(
-        builder, workdir, _build_prompt(d, cfg, worktree_root=wt),
-        label=f"Do {d.name}",
-        status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
-        stream_json=True,  # Tier 3: show the builder's live tool-use
-        env=env, extra_argv=extra, cfg=cfg,
-        memory_log=d / BUILD_MEMORY_LOG,  # scope telemetry, active only when capped
-    )
+    # The builder runs on the SAME resilient path as the reviewer and both advisories
+    # (#537). It was the one of them still on plain `_invoke`, so no builder failure was
+    # ever retried — on the leaf where an attempt costs the most. The shipped attempt
+    # budget, backoff and transient rule are reused as they are; a substantive failure is
+    # still not retried. `memory_log` is left to the wrapper's `_memory_log_for`
+    # derivation, as at the other three call sites: build.error.log → build.memory.jsonl,
+    # the same file this call used to name explicitly (#420 unchanged).
+    #
+    # Attempt 1 is sent exactly today's prompt, built here as before. A retry is told its
+    # predecessor died mid-flight and that anything it finds is that attempt's residue
+    # (`_build_prompt(dead_attempts=…)`) — `worktree.ensure` ran once, above, so the
+    # worktree and the bundle still hold whatever the dead attempt left. `spent` counts
+    # the attempts actually spawned (the wrapper asks for attempt N's prompt right before
+    # spawning it), which is what the failure report names — not the budget.
+    first = _build_prompt(d, cfg, worktree_root=wt)
+    spent = 0
+
+    def prompt_for(attempt: int) -> str:
+        nonlocal spent
+        spent = attempt
+        if attempt == 1:
+            return first
+        return _build_prompt(d, cfg, worktree_root=wt, dead_attempts=attempt - 1)
+
+    try:
+        # Watch the bundle d so the heartbeat shows patch.diff / build-notes.md appearing.
+        err = _invoke_leaf_resilient(
+            builder, workdir, prompt_for,
+            error_log=d / BUILD_ERROR_LOG,
+            label=f"Do {d.name}",
+            status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
+            stream_json=True,  # Tier 3: show the builder's live tool-use
+            env=env, extra_argv=extra, cfg=cfg,
+        )
+    except OSError as unwritable:
+        # The bundle could not hold the builder's settled record. The wrapper raises that
+        # write's OSError FROM the builder's own failure; Do's contract is that the
+        # builder's failure — not the bookkeeping about it — reaches the flow (#286).
+        err = unwritable.__cause__
+        if err is None:
+            raise
+        print(f"leaves: {d.name} — could not write {BUILD_ERROR_LOG} ({unwritable})",
+              file=sys.stderr)
+    if err is None:
+        return
+    if getattr(err, "transient", False):
+        print(f"leaves: {d.name} — transient: the builder leaf exited "
+              f"{getattr(err, 'returncode', '?')} without emitting any work, the class of "
+              "failure the harness retries to absorb; not absorbed after "
+              f"{spent} attempt(s).", file=sys.stderr)
+    raise err
 
 
 def _build_prompt(d: Path, cfg: Config | None = None, *,
-                  worktree_root: Path | None = None) -> str:
+                  worktree_root: Path | None = None, dead_attempts: int = 0) -> str:
+    # `dead_attempts` (#537) — how many earlier attempts of THIS Do's builder died before
+    # this one was spawned. 0 (every caller but a retry) adds nothing, so the prompt is
+    # byte-identical; otherwise the retry notice sits between the task and the rubric.
     # The target repo's standing rubric (#314), so the builder self-reviews against
     # the same criteria the reviewer will apply — the asymmetry that costs a
     # guaranteed round. "" when unconfigured, so the prompt is byte-identical.
@@ -2494,7 +2608,38 @@ def _build_prompt(d: Path, cfg: Config | None = None, *,
         "runs the target's own hooks (formatter/linters), which no PDCA gate models, so a patch the target's "
         "commit hook would reject is not done even if every gate is green. Do NOT push, "
         "open, or mark any PR ready."
-    ) + rubric
+    ) + (_retry_notice(d, dead_attempts, worktree_root) if dead_attempts else "") + rubric
+
+
+def _retry_notice(d: Path, dead_attempts: int, worktree_root: Path | None) -> str:
+    """What a RETRIED builder is told about the attempt(s) that died before it (#537).
+
+    `worktree.ensure` runs once per Do, before the retry wrapper, so a retry opens the
+    same worktree and bundle its predecessor was working in. Unwarned, it can read a
+    partial patch.diff / build-notes.md / test file there as a finished build and exit 0,
+    and a half-written attempt is then reported as the leaf's success. Every sentence is
+    true of the disk as it is when the retry is spawned: Do only starts from PLANNED
+    (driver.py:69-75), i.e. with no patch.diff (state.py:347), so nothing of this kind in
+    the bundle came from a finished build — though a build-notes.md or test file may be an
+    earlier failed Do's, so the notice does not name WHICH attempt left it; and the pointer
+    at the error log is given only when the per-attempt record (#540) is there to read.
+    """
+    record = d / BUILD_ERROR_LOG
+    log = (f" The harness's record of how it died (exit status and captured stderr tail) "
+           f"is in {record}." if record.is_file() else "")
+    edits = ("any change already in the worktree ($PDCA_WORKTREE) — it is NOT reset "
+             "between attempts" if worktree_root is not None else
+             "any source edit already made in place")
+    before = "attempt" if dead_attempts == 1 else f"{dead_attempts} attempts"
+    return (
+        f"\n\nRETRY NOTICE — this is attempt {dead_attempts + 1} of this Do's builder leaf. "
+        f"The previous {before} died MID-FLIGHT (exited non-zero); the work was NOT "
+        f"finished.{log} Any patch.diff, build-notes.md or test file you find in {d}, and "
+        f"{edits}, is INCOMPLETE RESIDUE of an attempt that did not finish: verify it "
+        "against the brief's Success criterion and complete or replace it. Never treat any "
+        "of it as evidence the work is done, and re-run the test red→green yourself rather "
+        "than trust a result you did not observe."
+    )
 
 
 def _stub_build(d: Path, cfg: Config) -> None:

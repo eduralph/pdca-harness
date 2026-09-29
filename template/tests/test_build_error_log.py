@@ -7,6 +7,10 @@ of a failed batch depended on terminal scrollback. `do_build` now captures the t
 `build.error.log`, symmetric with the review leaves, and still re-raises so the flow's
 `_isolate` drops just that bundle.
 
+Since #537 the builder runs under that same wrapper, so a transient failure here is
+retried. The backoff is recorded rather than slept (`_no_backoff`), which keeps these tests
+as fast as they were without changing the shipped delays they would otherwise wait out.
+
 Offline: no model, no network. Run from the project root:
     PYTHONPATH=src python -m unittest discover -s tests
 """
@@ -18,13 +22,23 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from pdca_harness import driver, leaves, worktree
 from pdca_harness.config import Config, LeafConfig
+
+
+def _no_backoff():
+    """`leaves.time` with a `sleep` that returns at once — the retry wrapper's backoff (4 s,
+    then 8 s) is not waited out; everything else `leaves` reads off `time` is the real one."""
+    clock = SimpleNamespace(**{n: getattr(time, n) for n in dir(time) if not n.startswith("_")})
+    clock.sleep = lambda _seconds: None
+    return mock.patch.object(leaves, "time", clock)
 
 
 def _cfg(root: Path) -> Config:
@@ -55,7 +69,7 @@ class BuildErrorLog(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _run_failing_build(self, exc: Exception) -> None:
-        with mock.patch.object(leaves, "_invoke", side_effect=exc), \
+        with mock.patch.object(leaves, "_invoke", side_effect=exc), _no_backoff(), \
                 redirect_stderr(io.StringIO()):
             with self.assertRaises(type(exc)):      # still propagates — _isolate handles it
                 leaves.do_build(self.d, self.cfg)
@@ -151,7 +165,7 @@ class BuildErrorLog(unittest.TestCase):
         with mock.patch.object(leaves, "_invoke",
                                side_effect=leaves.LeafError(1, ["claude"], output="boom")), \
                 mock.patch.object(Path, "write_text", side_effect=OSError("read-only fs")), \
-                redirect_stderr(io.StringIO()):
+                _no_backoff(), redirect_stderr(io.StringIO()):
             with self.assertRaises(leaves.LeafError):
                 leaves.do_build(self.d, self.cfg)
 
@@ -192,7 +206,7 @@ class StreamlessFamiliesAreDiagnosableToo(unittest.TestCase):
             " sys.exit(3)"])
         # stderr is TEE'd (echoed live AND kept), so send the live echo to /dev/null — the
         # assertion must read the LOG, not the console the tee also wrote to.
-        with mock.patch.dict(os.environ, {"PDCA_TEST_STDERR": self.FATAL}), \
+        with mock.patch.dict(os.environ, {"PDCA_TEST_STDERR": self.FATAL}), _no_backoff(), \
                 open(os.devnull, "w", encoding="utf-8") as null:
             saved = os.dup(2)
             os.dup2(null.fileno(), 2)
