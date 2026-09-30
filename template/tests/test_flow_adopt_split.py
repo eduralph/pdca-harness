@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import io
 import json
+import pathlib
 import shutil
 import tempfile
 import unittest
@@ -36,7 +37,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
-from pdca_harness import cli, flow, leaves, split, state
+from pdca_harness import cli, flow, leaves, split, state, waves
 from pdca_harness.config import Config, LeafConfig
 
 
@@ -1220,6 +1221,122 @@ class AdoptSplitChildren(unittest.TestCase):
         err = self.err.getvalue()
         self.assertNotIn("Traceback", err)
         self.assertNotIn("split adoption failed", err)   # contained IN the probe, not around
+
+    # -- a split never aborts the flow that caused it (#496) -----------------------------
+    #
+    # The rule is `flow.py:1087-1088` (`_reschedule`) and `flow.py:869-873` (`_real`): no
+    # failure INSIDE adoption may end the run or lose the results of what it already drove.
+    # The two tests below pin the two failure paths adoption has; each is killed by a
+    # mutant of the code that holds the rule (replay on a scratch copy, then run
+    # `cd template && PYTHONPATH=src python3 -m unittest tests.test_flow_adopt_split`):
+    #
+    #   M1  flow.py:1286     `if tail is None:` → `if False:`
+    #       → the reschedule test errors: `TypeError: must assign iterable to extended slice`
+    #   M2  flow.py:1098     `except Exception as exc:` → `except ZeroDivisionError as exc:`
+    #       → the reschedule test errors: the injected `RuntimeError` escapes `_reschedule`
+    #   M3  flow.py:876-878  `_real`'s `return None` → `raise`
+    #       → the unresolvable-child test errors: `OSError` escapes
+    #         `_warn_stranded_split_children`
+
+    def test_a_failed_reschedule_after_a_split_never_aborts_the_run(self) -> None:
+        """The levelling of `remaining + children` (`flow._reschedule`) raises, while the
+        run still has a wave to drive after it.
+
+        `pdca flow 500 7 8`: 8 depends on 7, so 500 and 7 share wave 0 and 8 waits in wave
+        1. 500 splits into 601/602 mid-wave, and the post-split reschedule — the only call
+        to `waves.partition_schedulable` on this path (`flow.py:1092`; the starting waves
+        come from `compute_waves`, `flow.py:1649`) — raises `RuntimeError`. The run must
+        say so, leave the children in flight and out of its results, and STILL drive 8 in
+        its own wave: a failed splice keeps the waves the run already had, it does not
+        throw them away. The raise is keyed on a list containing `issue_601`, and records
+        what else was in it, so the test proves 8 was still to do when the failure hit."""
+        self._briefed("500")
+        self._briefed("7")
+        self._briefed("8", "- **Depends on:** 7")
+        self._arm({"500": ["601", "602"]})
+        self._capture_results()
+        real_partition = waves.partition_schedulable
+        raised: list[tuple[list[str], str]] = []   # (the list it was given, 8's state then)
+
+        def failing_partition(cfg, bundles):
+            names = [d.name for d in bundles]
+            if "issue_601" in names:
+                raised.append((names, self._state("8")))
+                raise RuntimeError("levelling blew up")
+            return real_partition(cfg, bundles)
+
+        waves.partition_schedulable = failing_partition
+        self.addCleanup(setattr, waves, "partition_schedulable", real_partition)
+
+        rc = self._cli(["500", "7", "8"])
+
+        # The fault really happened, once, with work still ahead of it.
+        self.assertEqual(len(raised), 1)
+        names, state_of_8 = raised[0]
+        self.assertIn("issue_8", names)
+        self.assertEqual(state_of_8, state.PLANNED)
+        # …and the run carried on and exited as if there had been no split.
+        self.assertEqual(rc, 0)
+        err = self.err.getvalue()
+        self.assertIn("flow: could not re-wave the run after a split (RuntimeError: ", err)
+        self.assertIn("the children of issue_500 could not be scheduled; they are left "
+                      "in-flight", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(self._state("601"), state.PLANNED)   # left in flight…
+        self.assertEqual(self._state("602"), state.PLANNED)
+        self.assertNotIn("601", self.results)                 # …and not claimed as work
+        self.assertNotIn("602", self.results)
+        self.assertEqual(self._state("7"), state.COMPLETE)
+        self.assertEqual(self._state("8"), state.COMPLETE)
+        # 8 still got its own wave AFTER the failure — the run's remaining waves survived.
+        self.assertEqual(len(self.waves_driven), 2)
+        self.assertEqual(sorted(self.waves_driven[0]), ["issue_500", "issue_7"])
+        self.assertEqual(self.waves_driven[1], ["issue_8"])
+        for iid in ("500", "7", "8"):
+            self.assertEqual(self.results.get(iid), state.COMPLETE, iid)
+
+    def test_a_child_whose_path_will_not_resolve_never_aborts_the_run(self) -> None:
+        """Resolving one child's bundle path raises (`OSError` — a permission wall, or a
+        symlink loop on the Pythons whose `resolve()` still raises on one). `flow._real` is
+        the one resolver adoption uses, and its contract is "refuse it; never raise"
+        (`flow.py:869-878`): the child is skipped and named, its sibling is adopted and
+        driven, and the run ends as it would have.
+
+        The failure is injected one level BELOW `_real`, at `pathlib.Path.resolve`, and only
+        for `issue_601`: replacing `flow._real` itself would replace the very handler under
+        test, and the test would pass whatever that handler did. A real symlink loop is not
+        used because on Python >= 3.13 `resolve()` no longer raises on one."""
+        self._briefed("500")
+        real_resolve = pathlib.Path.resolve
+        reached: list[str] = []
+
+        def resolve(path, *a, **kw):
+            if path.name == "issue_601":
+                reached.append(str(path))
+                raise OSError(f"cannot resolve {path}")
+            return real_resolve(path, *a, **kw)
+
+        def break_601(_iid: str) -> None:
+            # Armed only once the split is on disk, so nothing before adoption is touched.
+            pathlib.Path.resolve = resolve
+            self.addCleanup(setattr, pathlib.Path, "resolve", real_resolve)
+
+        self._arm({"500": ["601", "602"]}, bodies={"500": [_CHILD_ONE, _SIBLING_TWO]},
+                  after_split=break_601)
+        self._capture_results()
+
+        rc = self._cli(["500"])
+
+        self.assertTrue(reached, "the injected resolve failure was never reached")
+        self.assertEqual(rc, 0)
+        err = self.err.getvalue()
+        self.assertIn("ignoring child id '601'", err)
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("split adoption failed", err)
+        self.assertEqual(self._state("602"), state.COMPLETE)  # the sibling was adopted
+        self.assertEqual(self._state("601"), state.PLANNED)   # the unresolvable one was not
+        self.assertFalse((self.cfg.bundle("601") / "patch.diff").exists())
+        self.assertNotIn("601", self.results)
 
 
 if __name__ == "__main__":  # pragma: no cover
