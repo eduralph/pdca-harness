@@ -670,6 +670,7 @@ pdca cleanup --apply    # execute the matched actions below
 | `AWAITING_SIGNOFF` | issue CLOSED | records §9 `discontinue` (the same primitive as `pdca signoff --discontinue`) |
 | mid-flight (`PLANNED`/`BUILT`/`CHECKED`/iterating) | issue CLOSED | **report only** — fabricating a §9 for in-flight work isn't auditable |
 | not `COMPLETE` | PR MERGED | **report only, always** — never auto-writes an accept past the C6 guard |
+| `COMPLETE` split parent (`close-disposition` = `split`) | issue OPEN | checked **first**, ahead of the PR rows: **report only** while any child issue is open or its state can't be read (or the lineage record's `children` list is missing, empty, or has an entry that is not an issue number — close it by hand); once every child issue is closed, comments (naming every child) + closes as `completed` if at least one child was completed, else `not planned` |
 | `COMPLETE` with a merged PR | issue OPEN | comments + closes the issue |
 | `COMPLETE` (close/no-fix) or `DISCONTINUED` | issue OPEN | comments + closes the issue |
 | `COMPLETE` with an unmerged PR | issue OPEN | **report only** — stays open until the PR actually merges |

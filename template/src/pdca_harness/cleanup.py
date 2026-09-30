@@ -19,6 +19,13 @@ Reconciliation matrix (local state × remote state):
   discontinue by hand.
 * PR MERGED, bundle not COMPLETE → report only, always: auto-writing an accept
   would forge the human verdict past the C6 guard.
+* issue OPEN, bundle COMPLETE split parent (``close-disposition`` = ``split``) → decided
+  FIRST, ahead of the recorded-PR checks (#545): the parent stays open while any of its
+  children's tracker issues is open or unreadable (report only); once all children are
+  closed it is closed as ``completed`` (at least one child completed) or ``not planned``
+  (none completed), with a comment naming every child. A ``children`` list in its
+  ``split-lineage.json`` that is missing, empty, or has any entry that is not a tracker
+  issue number → report only; close it by hand.
 * issue OPEN, bundle COMPLETE with a merged PR → comment (the bundle's
   ``tracker-comment.md`` if present) + ``gh issue close --reason completed``.
 * issue OPEN, bundle COMPLETE close/no-fix (empty patch) or DISCONTINUED →
@@ -47,7 +54,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import brief, driver, publish, signoff, sources, state
+from . import brief, driver, flow, publish, signoff, sources, split, state
 from .config import Config
 
 _MID_FLIGHT = (state.PLANNED, state.BUILT, state.CHECKED,
@@ -159,7 +166,16 @@ def _discontinue(cfg: Config, d: Path, remote: dict, *, by: str, today: str) -> 
     return True
 
 
-def _close_issue(d: Path, number: str, repo: str, *, reason: str, fallback_body: str) -> bool:
+def _bundle_comment(d: Path) -> str:
+    """The bundle's hand-written ``tracker-comment.md``, stripped, or ``""``."""
+    comment = d / "tracker-comment.md"
+    if comment.is_file():
+        return comment.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def _close_issue(d: Path, number: str, repo: str, *, reason: str, fallback_body: str,
+                 prefer_bundle_comment: bool = True) -> bool:
     """Close the issue with the comment attached, idempotently under retries.
 
     One ``gh issue close --comment`` call (#300 review) — but that is still TWO API
@@ -167,14 +183,12 @@ def _close_issue(d: Path, number: str, repo: str, *, reason: str, fallback_body:
     land and the close still fail transiently. So before closing, probe the issue's
     existing comments for OUR exact body; when it is already there, close WITHOUT the
     comment — a ``--apply`` retry never reposts. The bundle's ``tracker-comment.md`` is
-    preferred as the body, else the fallback. A failing probe degrades to posting (one
-    possible duplicate only in the double-failure case — fail toward completing the
-    close, never toward losing the comment)."""
+    preferred as the body, else the fallback — unless ``prefer_bundle_comment`` is False,
+    when the caller has already built the full body (the split parent's, #545). A failing
+    probe degrades to posting (one possible duplicate only in the double-failure case —
+    fail toward completing the close, never toward losing the comment)."""
     repo_args = ["--repo", repo] if repo else []
-    comment = d / "tracker-comment.md"
-    body = fallback_body
-    if comment.is_file() and comment.read_text(encoding="utf-8").strip():
-        body = comment.read_text(encoding="utf-8").strip()
+    body = (_bundle_comment(d) if prefer_bundle_comment else "") or fallback_body
     already = False
     probe = _gh(["issue", "view", number, *repo_args, "--json", "comments"])
     if probe.returncode == 0:
@@ -216,6 +230,82 @@ def _unresolve(d: Path) -> bool:
         return False
     sources.clear_resolved_marker(d)          # unique set-aside name, kept inspectable
     return not notes.exists()
+
+
+def _split_parent_row(d: Path, st: str, number: str, repo: str) -> _Row:
+    """The row for a COMPLETE split parent whose tracker issue is OPEN (#545).
+
+    The parent stays open while its children are worked on and closes once they are all
+    closed. The children's state is read from the TRACKER, not from local child bundles —
+    a child bundle may be archived, cleaned up, or absent from this checkout, while its
+    issue is what a merged PR closes. Unknown never acts: a missing or damaged ``children``
+    list, a child id that is not a tracker number, or a child whose state cannot be read
+    is report-only. A child that was itself split needs no special case — its issue
+    closes by this same rule, so a chain may take one ``cleanup --apply`` run per level.
+    """
+    by_hand = "no action; close the issue by hand once its children are done"
+    record = split.read_lineage(d)
+    children = flow._lineage_children(record) if record else []
+    # The flow's reader DROPS an entry it cannot use (a null, a number, a blank string) —
+    # right for the flow, which drives the children it can name; wrong here, where the list
+    # decides a close. A dropped entry is a child whose issue this sweep never reads, so
+    # only a list the reader kept WHOLE may close the parent: `["601", null]` with #601
+    # closed must not close it on #601 alone. (The reader returns a non-empty list only
+    # when the record's `children` IS a list, so the second test reads it safely.)
+    if not children or len(children) != len(record["children"]):
+        return _Row(d.name, st, "OPEN",
+                    f"split parent — its children are unknown (the `children` list in "
+                    f"{split.LINEAGE} is missing, empty, or has an entry that is not an "
+                    f"id string: a null, a bare number, a blank) — {by_hand}")
+    not_numbers = [c for c in children if not c.isdigit()]
+    if not_numbers:
+        # The id shape a non-GitHub tracker uses (`MANT-1`) is a valid lineage id, but no
+        # `gh issue view` can ever read it — so this cannot resolve by waiting.
+        return _Row(d.name, st, "OPEN",
+                    "split parent — child id " + ", ".join(f"`{c}`" for c in not_numbers)
+                    + f" in {split.LINEAGE} is not a tracker issue number, so its state "
+                    f"cannot be read — {by_hand}")
+    still_open: list[str] = []
+    unknown: list[str] = []
+    reasons: dict[str, str] = {}
+    for child in children:
+        remote = _issue_state(child, repo)
+        state_ = str((remote or {}).get("state", "") or "")
+        if state_ == "OPEN":
+            still_open.append(child)
+        elif state_ == "CLOSED":
+            # The real gh prints `COMPLETED` / `NOT_PLANNED`; compare without case.
+            reasons[child] = str(remote.get("stateReason", "") or "").upper()
+        else:
+            unknown.append(child)
+    waits = []
+    if still_open:
+        waits.append("waiting on " + ", ".join(f"#{c}" for c in still_open)
+                     + " (still open)")
+    if unknown:
+        waits.append("child state unknown for " + ", ".join(f"#{c}" for c in unknown)
+                     + " (gh failed or gave no usable state; a later run retries)")
+    if waits:
+        return _Row(d.name, st, "OPEN",
+                    "split parent — " + "; ".join(waits) + " — no action; the parent "
+                    "stays open until every child issue is closed")
+    completed = any(r == "COMPLETED" for r in reasons.values())
+    reason = "completed" if completed else "not planned"
+    # Each child's own close reason as gh gives it (`NOT_PLANNED` → "not planned"), so a
+    # child closed as a duplicate is not listed as "not planned".
+    listed = ", ".join(f"#{c} ({reasons[c].replace('_', ' ').lower() or 'closed'})"
+                       for c in children)
+    children_text = (f"This issue was split; all of its child issues are closed: {listed}. "
+                     f"Closing as {reason}.")
+    hand = _bundle_comment(d)
+    body = f"{hand}\n\n{children_text}" if hand else children_text
+    names = ", ".join(f"#{c}" for c in children)
+    return _Row(d.name, st, "OPEN",
+                f"split parent — all children closed ({names}) — comment + close as "
+                f"{reason}",
+                apply=[lambda: _close_issue(d, number, repo, reason=reason,
+                                            fallback_body=body,
+                                            prefer_bundle_comment=False)])
 
 
 def _plan_bundle(cfg: Config, d: Path, *, issue_side: bool, repo: str,
@@ -305,6 +395,12 @@ def _plan_bundle(cfg: Config, d: Path, *, issue_side: bool, repo: str,
         return None                                  # COMPLETE/DISCONTINUED + closed: in sync
 
     if remote.get("state") == "OPEN":
+        if st == state.COMPLETE and flow._is_split_parent(d):
+            # A split parent is decided FIRST (#545), ahead of the recorded-PR checks too:
+            # `split.accept` does not archive `publish.json`, so a parent published before
+            # it was split can still carry a merged `pr_url` — and closing it "Fixed by …"
+            # would close it while its children are still open.
+            return _split_parent_row(d, st, number, repo)
         if st == state.COMPLETE:
             # A recorded MERGED PR is checked FIRST (#300 review round 14): it is
             # definitive evidence a fix shipped, while an absent/blank patch.diff may

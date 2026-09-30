@@ -161,6 +161,19 @@ You do **not** leave the session to file issues by hand. `--accept` does it (pas
 instead only when the issues already exist, or when the tracker is not one the driver can
 reach — it will say so plainly rather than skipping).
 
+The parent's tracker issue **stays open** while its children are worked on: `--accept`
+neither closes nor labels it. Once the parent's bundle is COMPLETE and every child issue
+is closed, `{{ cli_name }} cleanup --apply` closes it with a comment naming every child —
+as completed if at least one child was completed, else as not planned. Only a COMPLETE
+parent waits for its children: one whose bundle ends DISCONTINUED is closed as not planned
+like any other discontinued bundle.
+
+`--accept` refuses a bundle that is already two splits deep (its lineage record says
+depth 2 or more): a slice that deep is meant to be built or dropped, not split again.
+`--force` overrides that refusal, and it is the human's decision, not yours. Do not pass
+`--force` unless the human has asked for it in so many words; when the refusal appears,
+show it to the human and stop there.
+
 What happens next no longer depends on how this run was started:
 
 - **The run you are in adopts them.** A bundle that reaches `close-disposition = split`
