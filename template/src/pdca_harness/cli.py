@@ -194,6 +194,10 @@ def main(argv: list[str] | None = None) -> int:
                          help="comma-separated tracker ids, one per child, IN PROPOSAL "
                               "ORDER. Omit to have the child issues filed for you, each as "
                               "a sub-issue of the parent")
+    p_split.add_argument("--force", action="store_true",
+                         help="with --accept: split even a bundle already two or more "
+                              "splits deep (refused by default, #545). The human's call; "
+                              "overrides only the depth refusal")
 
     p_status = sub.add_parser("status", help="list bundle states (cheap-first queue)")
     p_status.add_argument("issue_id", nargs="?")
@@ -805,7 +809,9 @@ def _split(cfg: Config, args) -> int:
     try:
         proposal_text = (d / split.PROPOSAL).read_text(encoding="utf-8")
         children = split.parse(proposal_text)
-        split.preflight(d, children, cfg)
+        # `force` is read with a default: callers that build a bare namespace without it
+        # (tests, scripts) keep today's behaviour — the depth refusal applies (#545).
+        split.preflight(d, children, cfg, force=bool(getattr(args, "force", False)))
     except OSError:
         split.advisory(f"split: {d.name} has no {split.PROPOSAL} — run "
                        f"`{_prog()} split {args.issue_id}` first")

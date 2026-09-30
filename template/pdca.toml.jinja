@@ -510,6 +510,12 @@ argv = []
 # as a SUB-ISSUE of the parent, materializes a bundle each, and the run continues into waves
 # by itself (#358). Pass `--ids 640,641` instead when the issues already exist — or when the
 # tracker is not a GitHub one this can reach, in which case it says so rather than skipping.
+# The parent's tracker issue stays open until its children are done (#545): once the
+# parent's bundle is COMPLETE and every child issue is closed, `{{ cli_name }} cleanup
+# --apply` closes it with a comment naming every child — as completed if at least one child
+# was completed, else as not planned. (A parent whose bundle ends DISCONTINUED is not held
+# open: cleanup closes it as not planned.) A bundle already two splits deep (lineage depth
+# 2 or more) is not split again unless the human passes `--force` to `--accept`.
 [leaves.splitter]
 mode = "{{ leaves_mode }}"
 family = "{{ interactive_family }}"

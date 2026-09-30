@@ -291,7 +291,32 @@ def advisory(text: str, *, file=None) -> None:
         pass
 
 
-def preflight(parent: Path, children: list[Child], cfg) -> None:
+#: The recorded lineage ``depth`` at which `pdca split <id> --accept` refuses by default
+#: (issue #545). A child of an unsplit parent is depth 1, so 2 allows original → children →
+#: grandchildren and refuses to split a grandchild. Kept in one place so a change of
+#: threshold is a one-line edit.
+MAX_SPLIT_DEPTH = 2
+
+
+def check_depth(parent: Path, *, force: bool = False) -> None:
+    """Refuse to split a bundle already ``MAX_SPLIT_DEPTH`` or more splits deep (#545).
+
+    Splitting takes minutes and building a wave takes hours, so an unbounded chain opens
+    issues faster than the cycle closes them. ``force`` is the human's override and lifts
+    only this refusal. The depth is read through the tolerant pair
+    :func:`read_lineage` / :func:`_recorded_depth`: a damaged record counts as depth 0 and
+    is never refused — a damaged hint never blocks the run.
+    """
+    depth = _recorded_depth(read_lineage(parent))
+    if depth >= MAX_SPLIT_DEPTH and not force:
+        raise SplitError(
+            f"{parent.name} is already {depth} splits deep (recorded depth {depth} in its "
+            f"{LINEAGE}) — a slice this deep is meant to be built or dropped, not split "
+            "again. Nothing was filed or written. Pass --force only if the human has "
+            "decided to split it anyway")
+
+
+def preflight(parent: Path, children: list[Child], cfg, *, force: bool = False) -> None:
     """Every reason acceptance would fail that does NOT depend on the ids.
 
     Split out of :func:`validate` because filing happens BEFORE the ids exist, and a
@@ -319,6 +344,9 @@ def preflight(parent: Path, children: list[Child], cfg) -> None:
             "second acceptance would create a duplicate set of children and leave the "
             "first orphaned from the parent's breadcrumb. Reopen it first if that is what "
             "you want")
+    # The depth bound (issue #545): ids-independent, so it refuses here, before any
+    # tracker issue is filed and before anything is written. `force` lifts only this one.
+    check_depth(parent, force=force)
     # Whether accept can leave the parent a Plan artifact (issue #481). It needs no ids, so
     # it is asked HERE too: `accept` refusing it alone would come after the CLI had filed
     # the children as real tracker issues.
