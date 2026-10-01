@@ -158,16 +158,20 @@ DOWNSTREAM_GLOBS = ("check-advisory-*.md", "*.error.log", "*.memory.jsonl")
 # and "what proves a cycle ran" deliberately differ, so it is deliberately NOT read by
 # `_archive_iteration`.
 #
-# Both files accumulate ACROSS rebuilds by design, and archiving either breaks the
+# Each file accumulates ACROSS rebuilds by design, and archiving any of them breaks the
 # feature that depends on the accumulation:
-#   auto-iterate.json   — the round budget; archive it and the count resets every
-#                         iterate, so auto-iterate never terminates.
-#   loop-telemetry.json — `leaves._record_loop_attempt`: "The file persists across
-#                         iterations (it is not archived), so it accumulates."
-# Yet a bundle cannot hold either without having run a cycle, so both are unambiguous
+#   auto-iterate.json      — the round budget; archive it and the count resets every
+#                            iterate, so auto-iterate never terminates.
+#   loop-telemetry.json    — `leaves._record_loop_attempt`: "The file persists across
+#                            iterations (it is not archived), so it accumulates."
+#   deferred-findings.json — `autoiterate.DEFERRED_FILE` (#409): the HUMAN findings an
+#                            auto-iterate round iterated past. Archive it and every one of
+#                            them leaves the live bundle with the SUMMARY that carried it,
+#                            so the handover §6 would never show it to the human.
+# Yet a bundle cannot hold any of them without having run a cycle, so each is unambiguous
 # evidence. Adding them to DOWNSTREAM_OF_BRIEF instead would fix the misclassification
 # below and break termination, which is the worse bug.
-CYCLE_EVIDENCE_ONLY = ("auto-iterate.json", "loop-telemetry.json")
+CYCLE_EVIDENCE_ONLY = ("auto-iterate.json", "loop-telemetry.json", "deferred-findings.json")
 
 # §9 outcome token → bundle state. state owns the state names, so the mapping
 # lives here; signoff knows only the tokens (no import cycle).

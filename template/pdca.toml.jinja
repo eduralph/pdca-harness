@@ -50,25 +50,28 @@ lanes = 1
 # this rather than editing source. `PDCA_MAX_PASSES` overrides for one run; `--max-passes`
 # overrides both.
 max_passes = 20
-# Auto-iterate on implementation-only Check findings (issue #264). A big Do typically lands
-# with implementation defects the reviewer or the adversary catches — a logic slip, a weak
-# test, a red gate. Each of those parks the bundle at AWAITING_SIGNOFF and asks you to press
-# "iterate-do", which is the decision the driver could have made itself. With this on, when
-# the reviewer has found implementation defects and NOTHING you must see first, the driver
-# records `iterate-do` and rebuilds, unattended — so Do→Check iterates while the reviewer keeps
-# finding things only Do can fix, and hands over once they are gone. Your judgment is still
-# required — and the bundle still halts — for anything architectural: a REAL concern on a
-# judgment cell (C5 causal adequacy, T5 judgment), a gate that could not run, an external
-# dependency, an unmarked advisory finding, or a §6 item it cannot classify.
+# Auto-iterate while Check still finds implementation work (issues #264, #409). A big Do
+# typically lands with implementation defects the reviewer or the adversary catches — a logic
+# slip, a weak test, a red gate. Each of those parks the bundle at AWAITING_SIGNOFF and asks
+# you to press "iterate-do", which is the decision the driver could have made itself. With
+# this on, while the reviewer keeps finding implementation defects the driver records
+# `iterate-do` and rebuilds, unattended — so Do→Check iterates while there is work only Do can
+# do, and hands over once it is gone.
 #
-# One exception, and it is why this works at all: the reviewer's `Validation —
-# fitness-to-purpose` row is emitted NEEDS-HUMAN on EVERY cycle by design (validation is your
-# call, always), so it is a constant and carries no signal. It does not veto a rebuild — but it
-# is still rendered in §6 and you must still clear it to accept. Treating it as an ordinary
-# blocker is what made this feature never fire at all before v0.54.0 (#293).
+# Your judgment is still required for anything architectural: a REAL concern on a judgment
+# cell (C5 causal adequacy, T5 judgment), an external dependency, an unmarked advisory
+# finding, or a §6 item it cannot classify. Beside an implementation defect those no longer
+# halt the bundle — they are DEFERRED: held in the bundle's `deferred-findings.json` and put
+# back into §6 at handover, where you must clear each one before accepting. With no
+# implementation defect beside them, the bundle halts at once. A review or gate that gave no
+# verdict (a gate that could not run, a review that came back empty) is not held: the next
+# Check runs it again, so §6 shows it only while it still fails. The reviewer's
+# `Validation — fitness-to-purpose` row is emitted NEEDS-HUMAN on EVERY cycle by design, so
+# it is a constant, never deferred — but still in §6 for you to clear (#293).
 #
-# It NEVER auto-accepts and never ticks a §6 box.
-# Bounded by `max_auto_iters` rounds per bundle (clamped below max_passes); on exhaustion the
+# It NEVER auto-accepts and never ticks a §6 box. Two things stop the loop: the size backstop
+# (the empirical size thresholds further down, whose `rounds` rule fires before this cap on
+# purpose) and `max_auto_iters` rounds per bundle (clamped below max_passes). On either the
 # bundle halts for you as before. `PDCA_AUTO_ITERATE=1` / `--auto-iterate` override.
 auto_iterate = false
 max_auto_iters = 3
@@ -286,7 +289,7 @@ size_guard = "off"
 # written — and much better at it: against "did this bundle churn >=3 rounds" over the same
 # 86 settled bundles, patch >=100 KB scores 71% precision and >=20 files 86%, where the
 # a-priori score peaks at 62%. Crossing a threshold raises a §6 NEEDS-HUMAN item (which
-# disqualifies auto-iterate) recommending `iterate-plan`; it never blocks — at 70% precision
+# stops auto-iterate) recommending `iterate-plan`; it never blocks — at 70% precision
 # for the union, roughly three firings in ten are a coherent large change.
 #
 # `rounds` fires at 2 while max_auto_iters above defaults to 3, so it deliberately stops the

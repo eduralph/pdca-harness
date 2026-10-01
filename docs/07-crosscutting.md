@@ -431,19 +431,71 @@ spend the pool stops there and says so, naming what it walked away from.
 Every implementation defect the reviewer catches — a logic slip, a weak test, a
 red gate — parks a bundle at `AWAITING_SIGNOFF` and asks a human to press
 `iterate-do`, which is a decision the driver is often positioned to make itself.
-`[driver].auto_iterate` (default `false` — opt in) lets it: when Check's §6 has
-**at least one mechanically-checkable ("IMPL") finding and nothing else you'd
-need to see first**, the driver writes `iterate-do` and rebuilds, unattended.
+`[driver].auto_iterate` (default `false` — opt in) lets it: while Check's §6
+has **at least one mechanically-checkable ("IMPL") finding**, the driver writes
+`iterate-do` and rebuilds, unattended.
 
-The eligibility split rides on the same `input | gate | judgment` tag every §6
-item already carries: the `gate` cells (C2 reproduction, C4 verification,
-T1–T4 conformance) are IMPL — a rebuild can plausibly fix them; the `judgment`
-cells (C5 causal adequacy, T5, the validation act) and the `input` cells (C1
-spec, C3 change) stay HUMAN. One exception makes this fire at all in practice:
-the reviewer's `Validation — fitness-to-purpose` row is hard-coded to
-NEEDS-HUMAN on *every* cycle by design, so it's a constant, carries no signal,
-and doesn't veto a rebuild — though it's still rendered in §6 and you still have
-to clear it to accept.
+The split rides on the same `input | gate | judgment` tag every §6 item already
+carries: the `gate` cells (C2 reproduction, C4 verification, T1–T4
+conformance) are IMPL — a rebuild can plausibly fix them; the `judgment` cells
+(C5 causal adequacy, T5, the validation act) and the `input` cells (C1 spec, C3
+change) stay HUMAN, as do a gate that couldn't run, an external dependency, an
+unmarked advisory finding, and anything it can't classify.
+
+A HUMAN finding next to an IMPL one **does not stop the rebuild — it's
+deferred to you.** The driver records it in the bundle's
+`deferred-findings.json` and merges it back into §6 at every assembly, so it's
+waiting for you as an open `- [ ]` item when the loop hands the bundle over,
+even if no later round's reviewer raises it again. (A single HUMAN row used to
+veto the rebuild; auto-iterate then fired on only 31 of 230 attempts, and
+bundles you'd have called broken spent zero rounds.) A §6 with *no* IMPL
+item — HUMAN findings only, or nothing at all — halts straight away, since
+there's nothing for a rebuild to do. The reviewer's `Validation —
+fitness-to-purpose` row is neither: it's hard-coded to NEEDS-HUMAN on *every*
+cycle, so it's a constant that carries no signal. It isn't deferred, but it's
+still in every fresh §6 and you still clear it to accept.
+
+One kind of HUMAN row isn't deferred either: a review or a gate that gave *no
+verdict* that round — the review missing or left as a placeholder, an advisory
+leaf's placeholder, a gate that couldn't run. That row is about the Check's own
+run, not the patch, and every Check runs the review and the gates again, so §6
+shows it exactly while the problem lasts. Once a later round's review or gate
+comes back, the row is gone, and you never clear a failure that has already
+recovered.
+
+The ledger is only emptied by you. If you tick a deferred finding in §6 and
+then choose `iterate-do` or `iterate-plan` for some other reason, that entry
+leaves the ledger before the attempt is archived; an entry you left unticked
+(or only edited) stays. So does one whose tick the driver can't pin on that
+finding alone: a tick on a finding this round's Check raised itself clears only
+that finding, and an edited row that could be either of two findings clears
+neither. A row you edited and left open also keeps every deferred finding it
+could be an edit of, even one you ticked; a row you left open exactly as the
+driver wrote it keeps only itself. Such an entry comes back unticked next
+round, so tick it again then. Only the §6 the driver assembled counts — a
+checkbox a reviewer quoted in §5 is not yours, for a tick here or for an
+accept. If the ledger file exists but can't be read, §6 says so as its own
+`- [ ]` item, and an accept is refused until you clear it.
+
+**Exactly two things stop the loop while there's still implementation work:**
+
+- **The size backstop** — the early stop. At Check the driver measures what the
+  patch actually came to and how many rounds this brief has already spent; past
+  a threshold it raises a `size backstop —` item recommending `iterate-plan`.
+  That's the one HUMAN item that stops the loop rather than riding along: it
+  says further rebuilds are the wrong move, so it ends the loop, and the flow
+  names it on stderr. By
+  default it fires at 2 rounds, below the hard cap, on purpose — most bundles
+  that reach a second round go on to a third, and a slice that needs splitting
+  produces implementation-shaped findings every round. The thresholds live
+  once, in `pdca.toml`'s `[driver.size_signal]` block (set one to `0` to
+  switch that rule off).
+- **The hard cap** — `[driver].max_auto_iters` (default `3`) automatic rounds
+  per bundle, tracked in `auto-iterate.json`. It's the ceiling that still
+  holds when the backstop is off or hasn't fired.
+
+There's no third, softer budget. Either way the bundle halts at
+`AWAITING_SIGNOFF` for you, with every deferred finding in §6 — never dropped.
 
 Three guarantees hold by construction, worth knowing before you flip it on:
 
@@ -452,12 +504,11 @@ Three guarantees hold by construction, worth knowing before you flip it on:
   C6-guarded decision path either way.
 - **It never ticks a §6 box.** An auto-iterate archives the whole SUMMARY,
   unticked, into `iteration-v<N>/`; the rebuild produces a fresh §6 from
-  scratch.
-- **It's bounded.** `[driver].max_auto_iters` (default `3`) automatic rounds per
-  bundle, tracked in `auto-iterate.json` — deliberately *not* archived, so the
-  count survives across rebuilds instead of resetting every iterate. On
-  exhaustion the bundle halts at `AWAITING_SIGNOFF` for you, same as always,
-  never dropped.
+  scratch, plus the deferred findings.
+- **It never archives what it counts or holds.** `auto-iterate.json` and
+  `deferred-findings.json` are deliberately *not* archived, so the round count
+  and the deferred findings survive across rebuilds instead of resetting every
+  iterate.
 
 gramps runs `auto_iterate = true` with the default `max_auto_iters = 3`.
 

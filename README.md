@@ -158,13 +158,14 @@ isolated bundle root.
   cheap-first burn-down. A run's pass budget is `[driver].max_passes` (`PDCA_MAX_PASSES` /
   `pdca flow --max-passes N`); a bundle still iterating when it runs out is named with a
   `pdca flow <id>` resume hint, never silently dropped.
-- **Auto-iterate on implementation-only findings** — `[driver].auto_iterate`
+- **Auto-iterate on implementation findings** — `[driver].auto_iterate`
   (`PDCA_AUTO_ITERATE` / `pdca flow --auto-iterate`, **off by default**) lets the driver
-  record `iterate-do` and rebuild unattended when *every* open §6 item is a `gate` cell of
-  the 5/5/1 (C2/C4/T1–T4) — the bugs a builder can fix. A judgment cell (C5 causal
-  adequacy, T5, validation), a gate that couldn't run, an external dependency, or anything
-  it can't classify still stops for you. It never auto-accepts, and it's bounded by
-  `[driver].max_auto_iters` rounds per bundle (doc 06).
+  record `iterate-do` and rebuild unattended while §6 still carries a `gate` cell of the
+  5/5/1 (C2/C4/T1–T4) — the bugs a builder can fix. A judgment cell (C5 causal adequacy,
+  T5, validation), an external dependency, or anything it can't classify is held for you
+  and put back into §6 at handover; a gate that couldn't run or a review that came back
+  empty shows up again only while it still fails. It never auto-accepts, and the size
+  backstop or `[driver].max_auto_iters` stops it (doc 07).
 - **In-driver lane concurrency** — `[driver].lanes = N` (`PDCA_LANES` /
   `pdca flow --lanes N`) fans the unattended Do + Check band across N workers in
   one workspace; each gate sees its worker slot as `$PDCA_LANE` to keep checkouts /

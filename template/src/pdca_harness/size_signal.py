@@ -38,9 +38,10 @@ item** and the human decides — the same disposition #321 reached, on better ev
 
 ## The tag is the mechanism, and getting it wrong inverts the feature
 
-The item is **HUMAN**, never IMPL. ``autoiterate.eligible()`` requires every item to be
-IMPL or STANDING, so a HUMAN item **disqualifies auto-iterate** — which is precisely what
-should happen to a bundle that is behaving oversized. Tagged IMPL it would instead *count
+The item is **HUMAN**, never IMPL. ``autoiterate.eligible()`` defers every other HUMAN item
+to handover (#409) but stops on a HUMAN item :func:`is_size_item` recognises, so this item
+**ends auto-iterate** — which is precisely what should happen to a bundle that is behaving
+oversized. Tagged IMPL it would instead *count
 as a reason to rebuild*, turning the backstop into an accelerator for the failure it exists
 to stop: more rounds burned re-implementing a slice that needs splitting.
 

@@ -36,7 +36,8 @@ _DELTA_RE = re.compile(r"^- Iteration delta \(if iterating\):[ \t]*(.*?)[ \t]*$"
 #: section is not a sign-off, #327), so a typo in one copy would reopen the fail-open.
 SIGNOFF_HEADING = "9. Check sign-off"
 
-#: The §6 heading. Its ABSENCE is load-bearing too — see :func:`unrecordable`.
+#: The §6 heading. Its ABSENCE is load-bearing too — see :func:`unrecordable`. Every §6
+#: reader takes the LAST such heading (:func:`_needs_human_section` says why).
 NEEDS_HUMAN_HEADING = "6. NEEDS-HUMAN"
 
 
@@ -99,6 +100,25 @@ def iteration_delta(summary_path: Path) -> str:
     return (m.group(1).strip() if m else "")
 
 
+def _needs_human_section(text: str, *, whole_on_missing: bool) -> str:
+    """§6 as ``assemble`` wrote it: the section under the LAST ``## 6. NEEDS-HUMAN`` heading.
+
+    Every §6 reader goes through here — the C6 accept-guard (:func:`open_needs_human`), the
+    tick reader (:func:`cleared_needs_human`), the row writer (:func:`ensure_needs_human_item`)
+    — so they cannot disagree about which §6 is the real one. The first heading can belong to
+    a leaf: an artifact can quote a whole ``## 6. NEEDS-HUMAN`` block, and ``assemble`` pastes
+    review and advisory text into §5 verbatim, ABOVE the §6 it writes itself. Read there, a
+    quoted block of ticked rows let C6 pass an accept while the real §6 still had open rows,
+    and a row added for the human landed inside the quote. Nothing after the assembled §6 is
+    a leaf's multi-line text — §6's own rows are one line each, and §9 holds only the
+    sign-off record, whose iteration delta the flow flattens to one line — so the last §6
+    heading is the one ``assemble`` wrote, and the one the human ticks.
+
+    ``whole_on_missing`` is the caller's fail-safe direction, as for :func:`_section`.
+    """
+    return _section(text, NEEDS_HUMAN_HEADING, whole_on_missing=whole_on_missing, last=True)
+
+
 def open_needs_human(summary_path: Path) -> list[str]:
     """Unchecked ``- [ ]`` items under §6 NEEDS-HUMAN (must be empty before accept).
 
@@ -108,16 +128,83 @@ def open_needs_human(summary_path: Path) -> list[str]:
     Deliberately the LENIENT side of :func:`_section`, unlike §9: with no §6 heading this
     scans the whole document, which can only find more ``- [ ]`` items and so blocks accept
     harder. Tightening it in sympathy with the §9 fix (#327) would turn a fail-safe into a
-    fail-open — a malformed summary would report zero open items."""
+    fail-open — a malformed summary would report zero open items.
+
+    The §6 it reads is the one ``assemble`` wrote, never a block a leaf quoted into §5
+    (:func:`_needs_human_section`)."""
     if not summary_path.exists():
         return []
-    section = _section(summary_path.read_text(encoding="utf-8"), "6. NEEDS-HUMAN",
-                       whole_on_missing=True)
+    section = _needs_human_section(summary_path.read_text(encoding="utf-8"),
+                                   whole_on_missing=True)
     return [
         line.strip()
         for line in section.splitlines()
         if line.lstrip().startswith("- [ ]")
     ]
+
+
+def cleared_needs_human(summary_path: Path) -> list[str]:
+    """Ticked ``- [x]`` items under §6 NEEDS-HUMAN — what the human positively cleared.
+
+    The STRICT side of :func:`_section`, the opposite of :func:`open_needs_human`, because
+    the failure directions are opposite. A tick RETIRES a deferred finding
+    (``autoiterate.retire_cleared``), so leniency here fails open: with no §6 heading a
+    whole-document scan would read a ``- [x]`` quoted in §5's review text — which
+    ``assemble`` pastes in verbatim — as the human's clearance. With no §6 there are no
+    ticks. Absent ``SUMMARY.md`` is "no ticks" for the same reason. A §6 block a leaf quoted
+    is not read either (:func:`_needs_human_section`): read there, a quoted tick emptied the
+    ledger on an auto-iterate round nobody watched.
+    """
+    if not summary_path.exists():
+        return []
+    section = _needs_human_section(summary_path.read_text(encoding="utf-8"),
+                                   whole_on_missing=False)
+    return [
+        line.strip()
+        for line in section.splitlines()
+        if line.lstrip().startswith(("- [x]", "- [X]"))
+    ]
+
+
+def ensure_needs_human_item(summary_path: Path, item: str) -> bool:
+    """Make sure §6 carries ``item`` as a checkbox row; add it UNTICKED if it is missing.
+
+    Returns True iff a row was added. A row already there — open, or ticked by the human —
+    is left alone: a tick is the human's clearance, and C6 honours it for every other row.
+    The ``- (none — …)`` placeholder an empty §6 renders is dropped, since it would now be
+    false. A summary with no §6 section is not touched (returns False); callers settle
+    :func:`unrecordable` first, which refuses exactly that shape.
+
+    It reads and writes the §6 C6 reads (:func:`_needs_human_section`): a row written
+    anywhere else would be one C6 cannot see, and a copy ``assemble`` already rendered there
+    would be missed and the row added twice. The new row is spliced in by line position,
+    not by finding the section's text — a leaf can quote a §6 block that is byte-for-byte
+    the real one, and the first match of that text is the quote.
+    """
+    if not summary_path.exists():
+        return False
+    lines = summary_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    span = _section_span(lines, NEEDS_HUMAN_HEADING, last=True)
+    if span is None:
+        return False
+    start, end = span
+    want = " ".join(item.split()).casefold()
+    rows = lines[start + 1:end]
+    for line in rows:
+        body = line.strip()
+        for box in ("- [ ]", "- [x]", "- [X]"):
+            if body.startswith(box) and " ".join(body[len(box):].split()).casefold() == want:
+                return False
+    body = [ln for ln in rows if not ln.strip().startswith("- (none")]
+    cut = len(body)
+    while cut and not body[cut - 1].strip():
+        cut -= 1
+    head = [lines[start]] + body[:cut]
+    if not head[-1].endswith("\n"):
+        head[-1] += "\n"
+    lines[start:end] = head + [f"- [ ] {item}\n"] + body[cut:]
+    summary_path.write_text("".join(lines), encoding="utf-8")
+    return True
 
 
 def unrecordable(summary_path: Path) -> str:
@@ -151,7 +238,7 @@ def unrecordable(summary_path: Path) -> str:
         return f"no '## {SIGNOFF_HEADING}' section"
     if not _OUTCOME_RE.search(section):
         return f"'## {SIGNOFF_HEADING}' has no '- Outcome:' field to record into"
-    if not _section(text, NEEDS_HUMAN_HEADING, whole_on_missing=False):
+    if not _needs_human_section(text, whole_on_missing=False):
         return (f"no '## {NEEDS_HUMAN_HEADING}' section — C6 cannot be evaluated, and an "
                 "empty scan is not evidence the human cleared it")
     return ""
@@ -228,7 +315,8 @@ def record(summary_path: Path, *, action: str, by: str, date: str, delta: str = 
     summary_path.write_text(text.replace(section, updated, 1), encoding="utf-8")
 
 
-def _section(text: str, heading_substr: str, *, whole_on_missing: bool) -> str:
+def _section(text: str, heading_substr: str, *, whole_on_missing: bool,
+             last: bool = False) -> str:
     """Return the body of the ``## ...`` section whose heading starts with the substr.
 
     ``whole_on_missing`` says what an ABSENT heading means. It has no default because the
@@ -249,18 +337,34 @@ def _section(text: str, heading_substr: str, *, whole_on_missing: bool) -> str:
 
     Which headings count is :func:`heading_is` — a prefix plus a boundary, so a lookalike
     cannot pose as the section.
+
+    When the heading occurs more than once, the FIRST wins — unless ``last``, which takes the
+    last one. The §6 readers pass it (:func:`_needs_human_section` says why); every other
+    caller keeps the first.
     """
     lines = text.splitlines(keepends=True)
+    span = _section_span(lines, heading_substr, last=last)
+    if span is None:
+        return text if whole_on_missing else ""
+    return "".join(lines[span[0]:span[1]])
+
+
+def _section_span(lines: list[str], heading_substr: str, *,
+                  last: bool) -> tuple[int, int] | None:
+    """``(start, end)`` line indices of the section :func:`_section` returns, or ``None`` when
+    no heading names it — for a caller that must write back into that section, at that
+    position."""
     start = None
     for i, line in enumerate(lines):
         if line.startswith("## ") and heading_is(line[3:].lstrip(), heading_substr):
             start = i
-            break
+            if not last:
+                break
     if start is None:
-        return text if whole_on_missing else ""
+        return None
     end = len(lines)
     for j in range(start + 1, len(lines)):
         if lines[j].startswith("## "):
             end = j
             break
-    return "".join(lines[start:end])
+    return start, end
