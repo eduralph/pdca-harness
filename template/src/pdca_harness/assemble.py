@@ -11,6 +11,7 @@ from __future__ import annotations
 import functools
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
@@ -32,7 +33,9 @@ HUMAN = "human"
 # and `eligible()` demanded that EVERY item be IMPL, so the feature never once fired (#293).
 #
 # It still renders in §6 as a `- [ ]` the human must clear, and the C6 accept-guard still
-# blocks on it. The ONLY thing it no longer does is veto a rebuild.
+# blocks on it. Since #409 no HUMAN item vetoes a rebuild either — a HUMAN finding is deferred
+# to the handover §6 — so what still sets this row apart is that it is never deferred: every
+# Check re-emits it, and the handover §6 carries it anyway (`autoiterate.defer`).
 STANDING = "standing"
 
 
@@ -41,6 +44,13 @@ class NeedsHumanItem(NamedTuple):
 
     text: str
     kind: str
+    # True for a row the harness writes itself because a review or a gate gave NO verdict
+    # this round — the review missing or a placeholder, an advisory leaf's placeholder, a gate
+    # that could not run. It is about this Check's own run, not the patch, and every Check
+    # runs the review and the gates again, so the next Check's §6 carries the row exactly
+    # while the problem lasts. That is why auto-iterate never defers one (#409): held for the
+    # handover, it would ask the human to clear a failure that had long since recovered.
+    no_verdict: bool = False
 
 
 # The implementation/architectural split is NOT a new taxonomy — it is the `kind` already
@@ -156,6 +166,35 @@ LEAF_COMPLETE_TRAILER = "<!-- pdca:leaf-complete -->"
 # every status `leaves` can write is in the table — asserted in
 # template/tests/test_attempt_harvest.py, which also pins the table's size.
 
+# What a harness placeholder states in its one NEEDS-HUMAN bullet when a review leaf returned
+# no verdict: the reviewer's (`leaves._review_unavailable`) and an advisory leaf's
+# (`leaves._advisory_unavailable`). `leaves` writes them from here, so `collect_needs_human` can
+# tell that row from a finding by its text (#409). An artifact can READ as a placeholder and
+# still carry its leaf's real findings — a report that quoted a status marker and never closed
+# itself (`leaf_status`) — and those stay findings; only this exact row is the no-verdict one.
+REVIEW_UNAVAILABLE_FINDING = ("re-run the Check reviewer; this bundle has no advisory review "
+                              "and must not be accepted until one exists.")
+ADVISORY_UNAVAILABLE_FINDING = ("advisory leaf '{leaf}' did not produce findings ({reason}); "
+                                "re-run it or adjudicate by hand.")
+
+
+def _is_advisory_unavailable(text: str, leaf: str) -> bool:
+    """Is ``text`` the placeholder row :data:`ADVISORY_UNAVAILABLE_FINDING` renders for the
+    advisory leaf ``leaf``, whatever its reason?"""
+    head, tail = ADVISORY_UNAVAILABLE_FINDING.format(leaf=leaf, reason="\0").split("\0")
+    return (len(text) >= len(head) + len(tail)
+            and text.startswith(head) and text.endswith(tail))
+
+
+# Every label this module renders IN FRONT of a finding, as `<label> — <text>`: a verdict-table
+# row's canonical 5/5/1 Item cell (`_needs_human`) and a placeholder's leaf-status label
+# (`_items_from_artifact`). A label says where a finding came from — its element, or why its
+# leaf returned no verdict — not what the finding says, so two §6 rows that share one are not
+# thereby the same finding. `autoiterate._same_finding` compares rows past the labels they
+# share (#409).
+FINDING_LABELS = (tuple(label for _e, label, _kind, _oracle in canonical_elements())
+                  + tuple(_LEAF_STATUS_LABEL.values()))
+
 
 def leaf_status(artifact_text: str) -> str:
     """The leaf-status marker a reviewer/advisory placeholder carries, or "" for a real
@@ -222,8 +261,10 @@ def _classify_finding(text: str, *, standing: bool = False) -> NeedsHumanItem:
     Fail safe throughout: an item we cannot map to a gate element — an unmarked advisory bullet,
     a reviewer row whose Item cell doesn't start with a canonical id, the missing-review
     placeholder — is HUMAN. Auto-iterate only ever fires on findings we positively know a
-    rebuild can address, and STANDING is never one of them: it does not *cause* a rebuild, it
-    merely declines to veto one.
+    rebuild can address, and neither HUMAN nor STANDING is one of them: neither ever *causes*
+    a rebuild. Beside an IMPL item, a HUMAN finding is deferred to the handover §6 (#409);
+    STANDING is not even deferred, since every Check re-emits it — and neither is a
+    ``no_verdict`` row (:class:`NeedsHumanItem`), for the same reason.
     """
     stripped = _IMPL_MARKER_RE.sub("", text, count=1)
     if stripped != text:
@@ -236,7 +277,9 @@ def _classify_finding(text: str, *, standing: bool = False) -> NeedsHumanItem:
     return NeedsHumanItem(text, HUMAN)
 
 
-def _items_from_artifact(text: str, *, allow_standing: bool = False) -> list[NeedsHumanItem]:
+def _items_from_artifact(text: str, *, allow_standing: bool = False,
+                         no_verdict: Callable[[str], bool] = lambda _t: False,
+                         ) -> list[NeedsHumanItem]:
     """§6 items from one reviewer / advisory artifact, labelled by its leaf status (#278).
 
     ``allow_standing`` is passed only for the PRIMARY review (#294 review) — see
@@ -244,16 +287,21 @@ def _items_from_artifact(text: str, *, allow_standing: bool = False) -> list[Nee
 
     A placeholder (the leaf could not produce a verdict) has its items prefixed with WHY the
     artifact is empty — infra vs substance — so the human doesn't have to hand-annotate it,
-    and forced to HUMAN: there is no finding for a rebuild to fix, so an infra-empty must
-    never be auto-iterated (#264). A real artifact is unaffected — including one that merely
-    QUOTES a marker, recognised or not, and closed itself with the completion trailer
+    and forced to HUMAN: there is no finding for a rebuild to fix, so a placeholder never
+    causes an auto-iterate round (#264). Beside real implementation work it does not stop
+    one either. The placeholder's own row — the one ``no_verdict`` recognises — is marked
+    ``no_verdict``: the next Check runs the leaf again, so auto-iterate does not defer it
+    (#409). Any other row of an artifact that merely reads as a placeholder is that leaf's
+    finding, deferred like any HUMAN item. A real artifact is unaffected — including one that
+    merely QUOTES a marker, recognised or not, and closed itself with the completion trailer
     (:func:`leaf_status`)."""
     label = _LEAF_STATUS_LABEL.get(leaf_status(text), "")
     items = [_classify_finding(t, standing=allow_standing and is_standing)
              for t, is_standing in _needs_human(text)]
     if not label:
         return items
-    return [NeedsHumanItem(f"{label} — {it.text}", HUMAN) for it in items]
+    return [NeedsHumanItem(f"{label} — {it.text}", HUMAN, no_verdict=no_verdict(it.text))
+            for it in items]
 
 
 def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
@@ -266,18 +314,25 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
     review_path = d / "check-review.md"
     review_text = (review_path.read_text(encoding="utf-8")
                    if review_path.exists() else _missing_review_text(d))
-    advisory_texts = [p.read_text(encoding="utf-8")
-                      for p in sorted(d.glob("check-advisory-*.md"))]
 
     # Only the PRIMARY review may carry a STANDING row: it is the one artifact whose prompt
     # mandates the Validation row unconditionally, which is the entire basis for treating it as
     # signal-free. An advisory leaf raising fitness-to-purpose means it FOUND something.
-    items = _items_from_artifact(review_text, allow_standing=True)
-    for atext in advisory_texts:
-        items += _items_from_artifact(atext)
-    # A gate that COULD NOT RUN is not builder-fixable — rebuilding would spin against the
-    # same missing mechanic — so it is HUMAN regardless of its (gate-kind) element.
-    items += [NeedsHumanItem(t, HUMAN) for t in _unverifiable_items(gates_json)]
+    items = _items_from_artifact(review_text, allow_standing=True,
+                                 no_verdict=lambda t: t == REVIEW_UNAVAILABLE_FINDING)
+    if not review_path.exists():
+        # The missing-review placeholder: its one row says no review exists — no verdict.
+        items = [it._replace(no_verdict=True) for it in items]
+    for p in sorted(d.glob("check-advisory-*.md")):
+        leaf = p.stem.removeprefix("check-advisory-")
+        items += _items_from_artifact(
+            p.read_text(encoding="utf-8"),
+            no_verdict=lambda t, leaf=leaf: _is_advisory_unavailable(t, leaf))
+    # A gate that COULD NOT RUN is not builder-fixable — a rebuild cannot supply the missing
+    # mechanic — so it is HUMAN regardless of its (gate-kind) element: it never causes an
+    # auto-iterate round. It is no verdict either, so it is not deferred (#409): every Check
+    # runs the gates again, and the next §6 carries it exactly while it still cannot run.
+    items += [NeedsHumanItem(t, HUMAN, no_verdict=True) for t in _unverifiable_items(gates_json)]
     items += _failed_gating_items(gates_json)
     build_notes = d / "build-notes.md"
     if build_notes.exists():
@@ -299,16 +354,18 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
     # the human dispositions it at sign-off: a bundle-wide "was the brief revised?" bit
     # cannot say WHICH findings the revision addressed, so it must never suppress them
     # (one cosmetic edit would have hidden every remaining objection from C6). All
-    # HUMAN-kind by construction (the plan prompt emits no [impl] markers), so
-    # auto-iterate correctly declines (#264).
+    # HUMAN-kind by construction (the plan prompt emits no [impl] markers), so they never
+    # cause an auto-iterate round (#264); beside real implementation work they are deferred
+    # to the handover §6 like any HUMAN item (#409).
     for ptext in [p.read_text(encoding="utf-8")
                   for p in sorted(d.glob("plan-advisory-*.md"))]:
         items += _items_from_artifact(ptext)
-    # The empirical size backstop (#324). HUMAN, never IMPL — and that tag is the whole
-    # mechanism: `autoiterate.eligible()` requires every item be IMPL or STANDING, so this
-    # DISQUALIFIES auto-iterate, which is what should happen to a bundle behaving
-    # oversized. Tagged IMPL it would instead count as a reason to rebuild, turning the
-    # backstop into an accelerator for the very failure it exists to stop.
+    # The empirical size backstop (#324). HUMAN, never IMPL — the tag and the text
+    # together are the mechanism: `autoiterate.eligible()` rebuilds past every other HUMAN
+    # item (#409) but STOPS the rebuild loop on a HUMAN item `size_signal.is_size_item`
+    # recognises, which is what should happen to a bundle behaving oversized. Tagged IMPL
+    # it would instead count as a reason to rebuild, turning the backstop into an
+    # accelerator for the very failure it exists to stop.
     # `current`, not `read`: the recorded file wins, but its ABSENCE must not read as
     # "measured and small". A failed write would otherwise delete the backstop.
     size_reasons = size_signal.oversize_reasons(size_signal.current(d, cfg), cfg)
@@ -355,6 +412,9 @@ def assemble_summary(d: Path, cfg: Config) -> None:
     # the C6 guard makes the human clear before accept. `collect_needs_human` is the single
     # source (it also tags each item IMPL/HUMAN for the auto-iterate decision, #264).
     needs_human = [it.text for it in collect_needs_human(d, cfg)]
+    # …plus every HUMAN finding an auto-iterate round deferred (#409), which lives only in
+    # the ledger once its round's SUMMARY is archived.
+    needs_human += _deferred_needs_human(d, needs_human)
 
     advisory_block = "\n".join(
         f"\n### Advisory — {p.stem.removeprefix('check-advisory-')}\n\n{t.strip()}"
@@ -420,6 +480,36 @@ def assemble_summary(d: Path, cfg: Config) -> None:
         ]
     )
     (d / "SUMMARY.md").write_text(out, encoding="utf-8")
+
+
+def _deferred_needs_human(d: Path, fresh: list[str]) -> list[str]:
+    """The deferred-findings ledger's entries not already among this Check's §6 items (#409).
+
+    Deduplicated on the normalised text, so a finding the reviewer raised again this round
+    renders once. Never deduplicated fuzzily: a near-twin of a fresh finding is a different
+    finding until the human says otherwise, and hiding it behind its neighbour would drop it.
+    The normalisation is ``autoiterate._norm``, the one ``retire_cleared`` rebuilds this list
+    with — were the two to differ, a re-raised finding would render twice, and a tick on it
+    would match two rows and retire nothing.
+
+    A ledger that exists but cannot be read becomes one fixed §6 row
+    (``autoiterate.UNREADABLE_LEDGER_ITEM``), which blocks accept until the human clears it.
+    Local import: ``autoiterate`` imports this module at its top level.
+    """
+    from . import autoiterate
+
+    try:
+        ledger = autoiterate.deferred(d)
+    except autoiterate.DeferredLedgerUnreadable:
+        return [autoiterate.UNREADABLE_LEDGER_ITEM]
+    seen = {autoiterate._norm(t) for t in fresh}
+    out: list[str] = []
+    for text in ledger:
+        key = autoiterate._norm(text)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(text)
+    return out
 
 
 def _plan_advisory_act_lines(d: Path) -> list[str]:

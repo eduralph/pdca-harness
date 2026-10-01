@@ -216,7 +216,10 @@ class TheOverrideAnnouncesItself(unittest.TestCase):
         """The whole point of re-enabling this rule rather than leaving it off: the
         override is fine, the SILENCE was not."""
         from pdca_harness import flow
+        # An ordinary HUMAN finding rides along (#409): it would only be deferred, so it is
+        # the size item — by its kind — that declines the round, and the one that is named.
         items = [NeedsHumanItem("a real defect", IMPL),
+                 NeedsHumanItem("C5 Causal adequacy — a real concern", HUMAN),
                  NeedsHumanItem(size_signal.needs_human_text(
                      ["2 round(s) already spent (threshold 2)"]), HUMAN)]
         err = io.StringIO()
@@ -236,10 +239,12 @@ class TheOverrideAnnouncesItself(unittest.TestCase):
 
     def test_an_ordinary_human_finding_declines_without_the_extra_line(self) -> None:
         """Every other decline is a §6 item the human is about to read anyway; narrating
-        those too would bury the one message that carries new information."""
+        those too would bury the one message that carries new information.
+
+        HUMAN-only since #409: beside an IMPL item an ordinary HUMAN finding no longer
+        declines the round at all — it is deferred and the rebuild fires."""
         from pdca_harness import flow
-        items = [NeedsHumanItem("a real defect", IMPL),
-                 NeedsHumanItem("C5 Causal adequacy — a real concern", HUMAN)]
+        items = [NeedsHumanItem("C5 Causal adequacy — a real concern", HUMAN)]
         err = io.StringIO()
         with mock.patch.object(flow.assemble, "collect_needs_human",
                                lambda d, cfg: items), \
