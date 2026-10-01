@@ -448,6 +448,21 @@ Three properties every row has, learned from rows that lacked them:
   surface only after the draft PR opened red. Declare them in `[gates].host_ci`
   and they run against the patched tree at Check like any other row — and
   again right before publish pushes, where a failure refuses the push.
+- **A red is confirmed once** (issue #371). A gating row is one sample, and a
+  single transient red used to park a bundle as if the patch were broken. At
+  Check, a gating row that fails with a real exit code is re-run once with the
+  same command, environment and timeout. Fail then pass records `pass` with
+  `flaky = true` and lands in §6 as a human item naming both outcomes, so you
+  still see the red sample before accepting. Fail then fail records `fail` with
+  the second run's evidence. If the second run gives no clean answer (timeout,
+  unverifiable, deferred, or the command could not start), the first `fail`
+  stands. The row's `attempts` lists both outcomes and its log holds both runs.
+  Only Check confirms: the publish host-CI gate and the integration and
+  working-tree re-gates run a failing row once, as before. Turn it off for the
+  project with `[gates] confirm_gating_fail = false`, or for one row with
+  `confirm_fail = false` on its `[[gates.checks]]` or `host_ci` entry — do that
+  for a model-backed row, where a second run is a fresh sample rather than a
+  re-check.
 
 ### Reviewer — the decorrelated second opinion
 

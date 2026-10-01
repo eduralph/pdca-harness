@@ -1002,6 +1002,20 @@ argv = []
 # did not answer, which is not a pass/fail verdict. `timeout_secs = 0` on a row opts
 # that row out of the fallback; nothing configured ⇒ unbounded, exactly as before.
 #
+# CONFIRM-ONCE (issue #371). At Check, a GATING row that fails with a real exit code is
+# re-run once (same command, env, cwd and timeout) before it is recorded. Fail→pass is
+# recorded `pass` + `flaky = true` and becomes a HUMAN item in SUMMARY §6 naming both
+# outcomes, so C6 still makes you look at the red sample; fail→fail stays `fail` (with the
+# second run's evidence); a second run that times out / is unverifiable / deferred /
+# cannot start leaves the first `fail` standing. The row's `attempts` and its
+# gate-logs/<id>.log record both runs. Only Check confirms — publish's host-CI gate and the
+# integration / working-tree re-gates still run a failing row once. On by default:
+#   [gates]
+#   confirm_gating_fail = false   # turn it off for every row
+# or per row, on a `checks` entry or a `host_ci` table entry: `confirm_fail = false`.
+# UPGRADE NOTE: a model-backed gate row (e.g. a whole-diff model review) SHOULD set
+# `confirm_fail = false` — a second run is a fresh sample, not a re-check of the first.
+#
 # DELEGATED GATES (issue #67). If your project already single-sources its gates in its
 # own runner, point `runner` at it and give each check a bare `subcmd` instead of a full
 # `cmd`; PDCA runs `<runner> <subcmd>` and treats the host runner as the source of truth
