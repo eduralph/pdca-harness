@@ -3412,8 +3412,8 @@ def _review_unavailable(d: Path, reason: str, *, failure: str = _FAIL_SUBSTANTIV
         "# Advisory review — NOT COMPLETED\n\n"
         f"The reviewer did not produce a verdict table ({reason}).\n\n"
         + _unavailable_classification(failure, error_log)
-        + "- NEEDS-HUMAN — re-run the Check reviewer; this bundle has no advisory review "
-        "and must not be accepted until one exists.\n",
+        # Defined in `assemble`, which recognises this exact row as no verdict (#409).
+        + f"- NEEDS-HUMAN — {assemble.REVIEW_UNAVAILABLE_FINDING}\n",
         encoding="utf-8",
     )
 
@@ -3762,8 +3762,9 @@ def _advisory_unavailable(d: Path, leaf_id: str, reason: str, *,
     advisory_artifact(d, leaf_id).write_text(
         f"# Advisory review — {leaf_id} — NOT COMPLETED\n\n"
         + _unavailable_classification(failure, error_log)
-        + f"- NEEDS-HUMAN — advisory leaf '{leaf_id}' did not produce findings ({reason}); "
-        "re-run it or adjudicate by hand.\n",
+        # Defined in `assemble`, which recognises this exact row as no verdict (#409).
+        + "- NEEDS-HUMAN — "
+        + assemble.ADVISORY_UNAVAILABLE_FINDING.format(leaf=leaf_id, reason=reason) + "\n",
         encoding="utf-8")
 
 

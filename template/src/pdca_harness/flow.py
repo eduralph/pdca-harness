@@ -173,7 +173,7 @@ def _apply_decision(
     problem = signoff.unrecordable(d / "SUMMARY.md")
     if problem:
         return _repair_unsignable(d, action=action, today=today, why=problem)
-    if action == "accept" and signoff.open_needs_human(d / "SUMMARY.md"):
+    if action == "accept" and accept_blockers(d):
         print(f"flow: {d.name} — cannot accept, §6 NEEDS-HUMAN still open (C6)", file=sys.stderr)
         return "blocked"
     # The iterate rationale ("why rejected / what to change") rides §9 → the driver
@@ -209,6 +209,32 @@ def _apply_decision(
     if apply_now or action == "iterate-plan":
         driver.run_issue(d, cfg)  # COMPLETE | ITERATE_* → re-loop (iterate-plan: archive → UNPLANNED)
     return action
+
+
+def accept_blockers(d: Path) -> list[str]:
+    """The open §6 rows that refuse an accept (C6) — read the same way on every accept path.
+
+    There are two, and both take their C6 check from here: :func:`_apply_decision` (every
+    ``flow`` sign-off — single, batch, a decision already recorded in the bundle) and
+    ``cli._signoff`` (``pdca signoff <id> --accept``). While the CLI ran a check of its own,
+    the ledger rule below held on one path and not the other.
+
+    Before reading §6 it puts an unreadable deferred-findings ledger (#409) into §6 as an open
+    row. Assembly already renders that row when the ledger is unreadable at assembly time;
+    this covers a ledger that became unreadable AFTER the SUMMARY was assembled, whose
+    findings the SUMMARY on disk may not carry — whether or not auto-iterate is on, since a
+    ledger written by an earlier run outlives the setting that wrote it. A row the human has
+    already ticked is their clearance and is left alone, as C6 honours every other tick.
+
+    The row is written to, and C6 read from, the same §6: the one ``assemble`` wrote, never a
+    ``## 6. NEEDS-HUMAN`` block a leaf quoted into §5 (``signoff._needs_human_section``).
+    Read from the quote, a block of ticked rows passed an accept over open rows below it.
+    """
+    problem = autoiterate.ledger_problem(d)
+    if problem and signoff.ensure_needs_human_item(d / "SUMMARY.md",
+                                                  autoiterate.UNREADABLE_LEDGER_ITEM):
+        print(f"{d.name} — {problem}; added it to §6 NEEDS-HUMAN", file=sys.stderr)
+    return signoff.open_needs_human(d / "SUMMARY.md")
 
 
 #: :func:`_apply_recorded_decision` outcome meaning "the bundle carries no decision, so it
@@ -276,12 +302,16 @@ def _signoff_and_apply(
 def _maybe_auto_iterate(
     cfg: Config, d: Path, *, by: str, today: str, apply_now: bool
 ) -> bool:
-    """Rebuild without asking, when Check found only implementation defects (issue #264).
+    """Rebuild without asking while Check still finds implementation work (#264, #409).
 
-    Returns True iff the bundle was routed to ITERATE_DO. Every other outcome — auto-iterate
-    off, the bundle not halted at AWAITING_SIGNOFF, a decision already recorded in the bundle
-    and not yet consumed, an empty §6, any HUMAN-kind finding, or the per-bundle budget
-    spent — returns False and leaves the bundle exactly where it was, for the human.
+    Returns True iff the bundle was routed to ITERATE_DO. HUMAN findings beside the IMPL ones
+    do not stop it: ``autoiterate.write_decision`` defers them to the ledger, and assembly
+    returns them to §6 at handover — all but a review or gate that gave no verdict, which the
+    next Check runs again (``autoiterate.defer``). Every other outcome — auto-iterate off,
+    the bundle not halted at AWAITING_SIGNOFF, a decision already recorded in the bundle and
+    not yet consumed, a §6 with no IMPL item (empty, or HUMAN only), the size backstop's
+    item, the per-bundle budget spent, or a deferred ledger it cannot read — returns False
+    and leaves the bundle exactly where it was, for the human.
 
     Deliberately routed through the existing ``_apply_decision`` rather than calling
     ``signoff.record`` directly: §9 then stays authored solely by ``signoff.record``, and the
@@ -316,12 +346,13 @@ def _maybe_auto_iterate(
               f"not auto-iterating", file=sys.stderr)
         return False
     if not autoiterate.eligible(items):
-        # Say WHY when it was the size backstop (#324). This rule fires at 2 rounds while
-        # `max_auto_iters` defaults to 3, so it deliberately stops the loop with a round
-        # still nominally available — and an operator who set that number and sees the
-        # loop halt early has to be able to read the reason, or their setting simply
-        # appears not to work. Every other decline is an ordinary HUMAN finding the human
-        # is about to read in §6 anyway.
+        # The loop has exactly two stops while implementation work remains (#409): the size
+        # backstop here and the hard cap below. Say WHY when it was the size backstop
+        # (#324). It fires at 2 rounds while `max_auto_iters` defaults to 3, so it
+        # deliberately stops the loop with a round still nominally available — and an
+        # operator who set that number and sees the loop halt early has to be able to read
+        # the reason, or their setting simply appears not to work. Every other decline is a
+        # §6 with no implementation work at all, which the human is about to read anyway.
         for item in items:
             if size_signal.is_size_item(item.text):
                 print(f"flow: {d.name} — not auto-iterating: {item.text}",
@@ -333,10 +364,24 @@ def _maybe_auto_iterate(
         print(f"flow: {d.name} — auto-iterate budget spent ({spent}/{cfg.max_auto_iters}); "
               f"handing the implementation findings to the human", file=sys.stderr)
         return False
-    autoiterate.write_decision(d, items)
-    print(f"flow: {d.name} — auto-iterate {spent + 1}/{cfg.max_auto_iters}: "
-          f"{len(items)} implementation-level finding(s), no human judgment needed",
-          file=sys.stderr)
+    try:
+        autoiterate.write_decision(d, items)
+    except autoiterate.DeferredLedgerUnreadable as exc:
+        # Raised before any budget is spent or decision written. Rebuilding now would
+        # archive this SUMMARY while the ledger could not record its HUMAN findings, so hand
+        # over instead. The unreadable-ledger row blocks accept: assembly renders it, and
+        # `accept_blockers` adds it if the ledger broke after assembly.
+        print(f"flow: {d.name} — not auto-iterating: {exc}", file=sys.stderr)
+        return False
+    impl = sum(1 for item in items if item.kind == assemble.IMPL)
+    held = len(autoiterate.deferrable(items))
+    rerun = sum(1 for item in items if item.no_verdict)
+    deferred = (f"; {held} finding(s) needing human judgment deferred to handover "
+                f"({autoiterate.DEFERRED_FILE})" if held else "")
+    rechecked = (f"; {rerun} review/gate row(s) with no verdict left for the next Check to "
+                 "re-run" if rerun else "")
+    print(f"flow: {d.name} — auto-iterate {spent + 1}/{cfg.max_auto_iters}: rebuilding for "
+          f"{impl} implementation-level finding(s){deferred}{rechecked}", file=sys.stderr)
     return _apply_decision(cfg, d, by="auto-iterate", today=today,
                            apply_now=apply_now) == "iterate-do"
 
