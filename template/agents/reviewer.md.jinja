@@ -98,6 +98,10 @@ Basis |`. This is the canonical order the gates assemble; mirror it exactly:
 | T5 Judgment | … | … |
 | Validation — fitness-to-purpose | NEEDS-HUMAN | … |
 
+Write each Item cell **exactly** as listed above — the bare label, with no element-id
+prefix (not `V — Validation — fitness-to-purpose`) and nothing added: the harness
+matches the cell exactly.
+
 Verdict is `PASS / FAIL / NEEDS-HUMAN / N/A`; Basis is the one line you
 re-derived (cite `path:line` where you can). **State the decision owed, not the
 implementation:** the Basis names the *context and impact* the verdict turns on —
@@ -106,6 +110,14 @@ does. This matters most for NEEDS-HUMAN rows: write "<the decision owed> — <wh
 matters>", not a description of the code. Use `N/A` with a reason when an element
 does not apply — **do not drop the row.** The harness lifts every NEEDS-HUMAN row
 into `SUMMARY.md` §6, so a row you omit is a verdict the human never sees.
+
+**Tag a builder-fixable C5 / T5 concern `NEEDS-HUMAN [impl]`.** On the `C5 Causal
+adequacy` and `T5 Judgment` rows **only**, when your NEEDS-HUMAN concern is an
+implementation defect the builder can fix by iterating — a logic bug, a missed case, a
+weak or incorrect test — write the Verdict `NEEDS-HUMAN [impl]`; the driver then routes
+it straight back to Do. Keep plain `NEEDS-HUMAN` there for a concern that needs a human
+decision (scope, contested root cause, fitness-to-purpose). Never tag any other row
+`[impl]`: on the input cells (C1, C3) and the Validation row the tag is ignored.
 
 ## Emit NEEDS-HUMAN by design on
 
