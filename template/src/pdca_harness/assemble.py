@@ -333,6 +333,12 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
     # auto-iterate round. It is no verdict either, so it is not deferred (#409): every Check
     # runs the gates again, and the next §6 carries it exactly while it still cannot run.
     items += [NeedsHumanItem(t, HUMAN, no_verdict=True) for t in _unverifiable_items(gates_json)]
+    # A gating row that failed and then passed its one confirm re-run (#371) is recorded
+    # `pass` + `flaky`: it counts as the pass it recorded, but the red sample is not
+    # dropped — the human acknowledges it. HUMAN whatever its element, because a rebuild
+    # cannot fix an intermittent environment; NOT no_verdict, because both samples are
+    # verdicts on this round's tree, so auto-iterate may defer it (#409).
+    items += [NeedsHumanItem(t, HUMAN) for t in _flaky_items(gates_json)]
     items += _failed_gating_items(gates_json)
     build_notes = d / "build-notes.md"
     if build_notes.exists():
@@ -563,6 +569,33 @@ def _unverifiable_items(gates: dict) -> list[str]:
         for r in gates["rows"]
         if r.get("result") == "unverifiable"
     ]
+
+
+def _flaky_items(gates: dict) -> list[str]:
+    """Gate rows recorded ``pass`` only after a confirm re-run (truthy ``flaky``, issue
+    #371) → §6 items naming the check and both outcomes.
+
+    ``gates._run_one`` re-runs a failed gating row once at Check; a fail→pass records
+    ``pass`` so one transient red no longer parks the bundle. A pass that needed a second
+    sample is still not a clean green: lifting it here makes C6 hold accept until the human
+    has read the red sample (its output is in ``gate-logs/<rule_id>.log``)."""
+    out = []
+    for r in gates["rows"]:
+        if not r.get("flaky"):
+            continue
+        # The samples exactly as the recorder wrote them — never a made-up history.
+        attempts = [str(a) for a in r.get("attempts") or []]
+        if len(attempts) >= 2:
+            runs = (f"first run {attempts[0]}, confirm re-run {attempts[-1]} "
+                    f"(attempts: {' → '.join(attempts)})")
+        else:
+            runs = "attempts not recorded"
+        where = f" (both runs in {r['log']})" if r.get("log") else ""
+        out.append(
+            f"{r['check']} FLAKY — {runs}; recorded {r.get('result')}{where}. "
+            "Confirm the red sample was environmental, not the patch — "
+            f"{r['path_line'] or r['oracle'] or 'no evidence line'}")
+    return out
 
 
 def _failed_gating_items(gates: dict) -> list[NeedsHumanItem]:

@@ -272,6 +272,12 @@ class Config:
     # out is recorded ``unverifiable`` (→ SUMMARY §6 NEEDS-HUMAN), never pass/fail.
     # ``None`` (unset / 0) ⇒ unbounded — today's behaviour, unchanged.
     gates_default_timeout_secs: int | None = None
+    # Confirm-once for a failed gating row (issue #371): ``[gates] confirm_gating_fail``.
+    # On (the default), a gating row that FAILS at Check is re-run once; fail→pass is
+    # recorded ``pass`` + ``flaky`` and routed to SUMMARY §6 as a HUMAN item. A row opts out
+    # alone with ``confirm_fail = false``. Only a literal ``false`` (or any non-boolean)
+    # turns it off — off is today's one-run behaviour.
+    gates_confirm_gating_fail: bool = True
     # Delegated gates (issue #67): a host runner that single-sources its own gates
     # (e.g. "cargo xtask"). A check's bare ``subcmd`` is run as ``<runner> <subcmd>``, so
     # PDCA orchestrates the host runner instead of re-declaring the gates. "" ⇒ inline only.
@@ -573,6 +579,13 @@ class Config:
             gates_default_timeout_secs = None
         if gates_default_timeout_secs is not None and gates_default_timeout_secs < 0:
             gates_default_timeout_secs = None
+        # Confirm-once (issue #371): absent ⇒ on; a non-boolean fails toward OFF (today's
+        # one-run behaviour), loudly — the dependency_halt lesson (PR #292).
+        gates_confirm_gating_fail = gates.get("confirm_gating_fail", True)
+        if not isinstance(gates_confirm_gating_fail, bool):
+            print(f"config: [gates] confirm_gating_fail = {gates_confirm_gating_fail!r} is "
+                  "not a boolean — treating it as false (no confirm re-run)", file=sys.stderr)
+            gates_confirm_gating_fail = False
         registry_consistency = dict(gates.get("registry_consistency", {}))
         install_extra_bootstrap = data.get("install", {}).get("extra_bootstrap", "")
         # `pdca try <id>` launch command (project-specific); "" ⇒ the command errors with a hint.
@@ -823,6 +836,7 @@ class Config:
             builder_variants=builder_variants,
             gates_runner=gates_runner,
             gates_default_timeout_secs=gates_default_timeout_secs,
+            gates_confirm_gating_fail=gates_confirm_gating_fail,
             lanes=lanes,
             max_passes=max_passes,
             auto_iterate=auto_iterate,
@@ -865,7 +879,8 @@ def _normalize_host_ci(entries: list) -> list[dict]:
     (the CI-parity slot the issue names — the contribution as the host's CI will see
     it), ``scope = "bundle"`` (they need the patched tree), and an ``id``/``label``
     derived from the command so a failure always names what ran. Explicit id / label /
-    tier keys on a table row win over those defaults — but ``gating`` is FORCED true,
+    tier keys on a table row win over those defaults (as does any other row key, e.g.
+    ``confirm_fail``, issue #371) — but ``gating`` is FORCED true,
     a contract rather than a default: the host's CI will fail the PR on every declared
     command regardless of what an advisory row believed, and the #311 criterion is
     literal — a command that exits non-zero blocks publish. A declared
