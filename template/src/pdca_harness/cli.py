@@ -177,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     p_flow.add_argument("--by", default="", help="who signed off (recorded in §9)")
     p_flow.add_argument("--lanes", type=int, help="unattended Do+Check worker-pool size (docs 09; overrides [driver].lanes / PDCA_LANES)")
     p_flow.add_argument("--max-passes", type=int, help="sign-off pass budget before the driver stops driving a bundle (#260; overrides [driver].max_passes / PDCA_MAX_PASSES)")
-    p_flow.add_argument("--auto-iterate", action="store_true", help="rebuild without stopping when every Check finding is implementation-level; a judgment finding still halts (#264; overrides [driver].auto_iterate / PDCA_AUTO_ITERATE)")
+    p_flow.add_argument("--auto-iterate", action="store_true", help="rebuild without stopping while Check finds implementation-level work; findings needing human judgment are deferred to the handover §6, and the loop stops at [driver].max_auto_iters or the size backstop (#264, #409; overrides [driver].auto_iterate / PDCA_AUTO_ITERATE)")
     p_flow.add_argument("--no-inhibit", action="store_true", help="don't hold a suspend inhibitor for the run (also PDCA_NO_INHIBIT=1) — for CI/containers where it's unavailable or unwanted (#244)")
 
     p_size = sub.add_parser("size",
@@ -1445,7 +1445,9 @@ def _signoff(cfg: Config, args: argparse.Namespace) -> int:
 
     if args.accept:
         action = "accept"
-        open_items = signoff.open_needs_human(summary)
+        # The C6 read every accept path shares — it also puts an unreadable deferred-findings
+        # ledger into §6 first (#409), which a check of this path's own would skip.
+        open_items = flow.accept_blockers(d)
         if open_items:
             print("cannot accept — §6 NEEDS-HUMAN still open (C6):", file=sys.stderr)
             for it in open_items:

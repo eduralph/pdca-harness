@@ -16,8 +16,8 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import (assemble, brief, dependency_halt, gates, leaves, plan_policy, signoff,
-               size_signal, state)
+from . import (assemble, autoiterate, brief, dependency_halt, gates, leaves, plan_policy,
+               signoff, size_signal, state)
 from .config import Config
 
 
@@ -132,11 +132,13 @@ def advance(d: Path, cfg: Config) -> None:
         n = _next_iteration_no(d)
         _say(f"→ {d.name}: iterate-to-Do — archiving the attempt to iteration-v{n}/, rebuilding…")
         _carry_forward_into_brief(d, n)  # fold prior insight into the surviving brief
+        _retire_cleared_deferrals(d, cfg)  # read the human's §6 ticks before SUMMARY moves
         _archive_iteration(d, n, include_brief=False)  # rebuild against the annotated brief
     elif s == state.ITERATE_PLAN:
         n = _next_iteration_no(d)
         _say(f"→ {d.name}: iterate-to-Plan — archiving the attempt to iteration-v{n}/, re-planning…")
         _carry_forward_into_brief(d, n)  # appended to the brief, archived with it
+        _retire_cleared_deferrals(d, cfg)  # read the human's §6 ticks before SUMMARY moves
         _archive_iteration(d, n, include_brief=True)  # brief archived too → UNPLANNED
     # UNPLANNED / AWAITING_SIGNOFF / COMPLETE / DISCONTINUED: nothing for the driver to do.
 
@@ -310,6 +312,32 @@ def _size_backstop(d: Path, cfg: Config) -> None:
     if reasons:
         _say(f"→ {d.name}: size backstop — {'; '.join(reasons)}. "
              "Raising a §6 NEEDS-HUMAN item; auto-iterate will decline.")
+
+
+def _retire_cleared_deferrals(d: Path, cfg: Config) -> None:
+    """Retire the deferred findings (#409) the human ticked in this SUMMARY's §6 (#335).
+
+    Runs at the iterate transition, after the carry-forward and before
+    :func:`_archive_iteration` moves ``SUMMARY.md`` — the last moment the ticks are at the
+    top level, and the Check artifacts with them. Those give the rest of what §6 rendered:
+    this Check's own findings, from the single source assembly rendered them from
+    (``assemble.collect_needs_human``). A tick on one of them clears that finding, never a
+    deferred one (``autoiterate.retire_cleared``). Without this step a finding the human
+    adjudicated returns to §6 unticked at the next assembly and blocks accept again, every
+    round. Best-effort like the carry-forward: a failure here must not break the transition,
+    and it fails in the safe direction — the entry stays in the ledger, visible, rather than
+    being dropped.
+    """
+    try:
+        if not autoiterate.deferred(d):
+            return                    # nothing deferred, so nothing to retire
+        fresh = [item.text for item in assemble.collect_needs_human(d, cfg)]
+        autoiterate.retire_cleared(d, d / "SUMMARY.md", fresh=fresh)
+    except autoiterate.DeferredLedgerUnreadable:
+        return                        # left as it is: §6 already carries a row for it
+    except Exception as exc:  # noqa: BLE001 — never break the iterate on a ledger write
+        _say(f"⚠ {d.name}: could not retire cleared deferred findings "
+             f"({type(exc).__name__}: {exc}); they stay in {autoiterate.DEFERRED_FILE}")
 
 
 def _next_iteration_no(d: Path) -> int:

@@ -403,10 +403,11 @@ not Check's work), a **gate** (`C2`, `C4`, `T1`–`T4` — deterministic,
 mechanical, blocks accept on fail), or **judgment** (`C5`, `T5`, validation —
 always routes to the reviewer first and you last, never gates). That
 three-way split is the same one [auto-iterate](07-crosscutting.md#auto-iterate-the-driver-deciding-for-itself)
-reads to decide whether it's safe to rebuild without asking you: only a §6
-item tagged `gate` is eligible — the driver can plausibly fix a `C2`/`C4`/`T1`–`T4`
-finding by rebuilding, but it can never rebuild its way past a `C5`/`T5`/validation
-finding, because those were never mechanical questions to begin with. A gate
+reads to decide whether a rebuild without asking you has anything to do: only
+a §6 item tagged `gate` is work for the builder — the driver can plausibly fix a
+`C2`/`C4`/`T1`–`T4` finding by rebuilding, but it can never settle a
+`C5`/`T5`/validation finding that way, because those were never mechanical
+questions to begin with. Those are held for you instead; step 07 has how. A gate
 can also come back **`unverifiable`** — it genuinely couldn't run its check
 (a missing fixture, a skipped environment) rather than having run and failed —
 which is neither pass nor fail; it routes to §6 like a judgment cell would,
@@ -447,6 +448,21 @@ Three properties every row has, learned from rows that lacked them:
   surface only after the draft PR opened red. Declare them in `[gates].host_ci`
   and they run against the patched tree at Check like any other row — and
   again right before publish pushes, where a failure refuses the push.
+- **A red is confirmed once** (issue #371). A gating row is one sample, and a
+  single transient red used to park a bundle as if the patch were broken. At
+  Check, a gating row that fails with a real exit code is re-run once with the
+  same command, environment and timeout. Fail then pass records `pass` with
+  `flaky = true` and lands in §6 as a human item naming both outcomes, so you
+  still see the red sample before accepting. Fail then fail records `fail` with
+  the second run's evidence. If the second run gives no clean answer (timeout,
+  unverifiable, deferred, or the command could not start), the first `fail`
+  stands. The row's `attempts` lists both outcomes and its log holds both runs.
+  Only Check confirms: the publish host-CI gate and the integration and
+  working-tree re-gates run a failing row once, as before. Turn it off for the
+  project with `[gates] confirm_gating_fail = false`, or for one row with
+  `confirm_fail = false` on its `[[gates.checks]]` or `host_ci` entry — do that
+  for a model-backed row, where a second run is a fresh sample rather than a
+  re-check.
 
 ### Reviewer — the decorrelated second opinion
 
@@ -749,7 +765,10 @@ abandon a bundle with §6 still open.) A **gating** gate that hard-FAILS
 (`overall = fail`, not just an advisory row) also lands in §6 (issue #166), so
 the guard blocks accept on a red gate too — you clear it with a conscious
 override, `--iterate`, or `--discontinue`, never by it slipping silently to
-COMPLETE.
+COMPLETE. The guard reads the §6 the driver assembled, the last
+`## 6. NEEDS-HUMAN` heading in the file: a reviewer that quotes a §6 block in
+its report puts that quote in §5, above the real one, and a box ticked in the
+quote doesn't count.
 
 ### The four dispositions, mechanically
 
@@ -771,11 +790,11 @@ you record it:
 > independent of §6.
 
 **Auto-iterate** — `[driver].auto_iterate = true` lets the driver record
-`iterate-do` for you when Check's §6 has implementation-only findings and
-nothing you must see first, so Do→Check keeps iterating while the reviewer
-keeps finding things only Do can fix. It never accepts, never ticks a `- [ ]`,
-and is bounded by `max_auto_iters` rounds — full mechanics, the eligibility
-rule, and its three guarantees are in
+`iterate-do` for you while Check's §6 still has implementation findings, so
+Do→Check keeps iterating while the reviewer keeps finding things only Do can
+fix. Findings that need your judgment are held and handed to you in §6 when it
+stops. It never accepts and never ticks a `- [ ]` — the eligibility rule, the
+deferred findings, what stops the loop, and its guarantees are all in
 [step 07](07-crosscutting.md#auto-iterate-the-driver-deciding-for-itself).
 
 ### Publish's STOP discipline, and batches

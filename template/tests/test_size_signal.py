@@ -216,7 +216,10 @@ class TheOverrideAnnouncesItself(unittest.TestCase):
         """The whole point of re-enabling this rule rather than leaving it off: the
         override is fine, the SILENCE was not."""
         from pdca_harness import flow
+        # An ordinary HUMAN finding rides along (#409): it would only be deferred, so it is
+        # the size item — by its kind — that declines the round, and the one that is named.
         items = [NeedsHumanItem("a real defect", IMPL),
+                 NeedsHumanItem("C5 Causal adequacy — a real concern", HUMAN),
                  NeedsHumanItem(size_signal.needs_human_text(
                      ["2 round(s) already spent (threshold 2)"]), HUMAN)]
         err = io.StringIO()
@@ -236,10 +239,12 @@ class TheOverrideAnnouncesItself(unittest.TestCase):
 
     def test_an_ordinary_human_finding_declines_without_the_extra_line(self) -> None:
         """Every other decline is a §6 item the human is about to read anyway; narrating
-        those too would bury the one message that carries new information."""
+        those too would bury the one message that carries new information.
+
+        HUMAN-only since #409: beside an IMPL item an ordinary HUMAN finding no longer
+        declines the round at all — it is deferred and the rebuild fires."""
         from pdca_harness import flow
-        items = [NeedsHumanItem("a real defect", IMPL),
-                 NeedsHumanItem("C5 Causal adequacy — a real concern", HUMAN)]
+        items = [NeedsHumanItem("C5 Causal adequacy — a real concern", HUMAN)]
         err = io.StringIO()
         with mock.patch.object(flow.assemble, "collect_needs_human",
                                lambda d, cfg: items), \
@@ -569,20 +574,25 @@ class RoundsAreAttributedToTheSliceNotTheEnvironment(unittest.TestCase):
                 "gating": gating, "element": "C4", **extra}
 
     def _archive(self, d: Path, n: int, *, gates_text: str | None,
-                 review: str | None) -> Path:
+                 review: str | None, advisory: str | None = None) -> Path:
         arch = d / f"iteration-v{n}"
         arch.mkdir()
         if gates_text is not None:
             (arch / "check-gates.json").write_text(gates_text, encoding="utf-8")
         if review is not None:
             (arch / "check-review.md").write_text(review, encoding="utf-8")
+        if advisory is not None:
+            # The name `state.DOWNSTREAM_GLOBS` archives an advisory leaf's artifact under.
+            (arch / "check-advisory-adversary.md").write_text(advisory, encoding="utf-8")
         return arch
 
     def _two_round_bundle(self, v1_rows: list[dict],
-                          v1_review: str | None = CLEAN_REVIEW) -> Path:
+                          v1_review: str | None = CLEAN_REVIEW,
+                          v1_advisory: str | None = None) -> Path:
         """v1 as specified, v2 an ordinary plain-fail round — the brief's repro shape."""
         d = _bundle(patch="x")
-        self._archive(d, 1, gates_text=self._gates(v1_rows), review=v1_review)
+        self._archive(d, 1, gates_text=self._gates(v1_rows), review=v1_review,
+                      advisory=v1_advisory)
         self._archive(d, 2, gates_text=self._gates([self._row("fail")]),
                       review=self.CLEAN_REVIEW)
         return d
@@ -700,6 +710,212 @@ class RoundsAreAttributedToTheSliceNotTheEnvironment(unittest.TestCase):
         self._archive(d, 2, gates_text=self._gates([self._row("unverifiable")]),
                       review=self.CLEAN_REVIEW)
         self.assertEqual(size_signal.iteration_rounds(d), (0, 1))
+
+    # --- Issue #477: a reviewer finding on a gate the harness DEFERRED is not slice churn.
+    # The deferred row is the Check-time T4 contribution gate (`gates` records `deferred`
+    # when the artifacts it audits are drafted later, at publish); the review row uses the
+    # Item-cell form the reviewer writes, starting with the element id.
+
+    T4_FINDING = ("| T4 Contribution | NEEDS-HUMAN | "
+                  "commit-msg / PR description are withheld from the reviewer |\n")
+    IMPL_ADVISORY = "# Adversary\n\n- NEEDS-HUMAN [impl] — off-by-one at size_signal.py:12\n"
+    PLAIN_ADVISORY = "# Adversary\n\n- NEEDS-HUMAN — is this slice the right shape?\n"
+
+    def _t4(self, result="deferred", *, gating: bool = True, **extra) -> dict:
+        """A T4 row — by default the deferred Check-time contribution gate."""
+        return self._row(result, gating=gating, **{
+            "element": "T4", "check": "T4 Contribution", "rule_id": "T4-contribution",
+            **extra})
+
+    @staticmethod
+    def _without(row: dict, key: str) -> dict:
+        return {k: v for k, v in row.items() if k != key}
+
+    def _deferred_round(self, *, extra_rows: tuple = (), review_extra: str = "",
+                        advisory: str | None = None, gating: bool = True) -> Path:
+        """v1: every gating row passes except the deferred T4 row, and the review raises
+        NEEDS-HUMAN on T4 (plus the standing Validation row) — and whatever else a case
+        adds. v2 is the ordinary plain-fail round."""
+        return self._two_round_bundle(
+            [self._row("pass"), self._t4(gating=gating), *extra_rows],
+            v1_review=self.CLEAN_REVIEW + self.T4_FINDING + review_extra,
+            v1_advisory=advisory)
+
+    def test_a_finding_on_a_deferred_gate_is_not_charged_to_the_slice(self) -> None:
+        """Clause 1: all gating rows pass bar a `deferred` T4 row, and the review's only
+        NEEDS-HUMAN items are T4 and Validation. No rebuild can supply artifacts that are
+        drafted at publish, so the round is noise, not slice churn."""
+        d = self._deferred_round()
+        self.assertEqual(size_signal.iteration_rounds(d), (1, 0))
+
+    def test_the_discounted_round_keeps_the_rounds_rule_from_firing(self) -> None:
+        """Clause 1 end to end through `measure` / `oversize_reasons` at the default
+        threshold of 2."""
+        sig = size_signal.measure(self._deferred_round())
+        self.assertEqual(sig["rounds"], 1)
+        self.assertEqual(size_signal.oversize_reasons(sig, _CFG), [])
+
+    def test_a_non_gating_deferred_row_still_discounts(self) -> None:
+        """The deferred-element set is read from ALL archived gate rows: a withheld
+        subject is withheld whether or not the instance made its row gating."""
+        d = self._deferred_round(gating=False)
+        self.assertEqual(size_signal.iteration_rounds(d), (1, 0))
+
+    def test_a_finding_with_no_leading_element_id_still_counts(self) -> None:
+        """The match is by the item's leading element id only. A row whose Item cell has
+        none cannot be tied to the deferred gate, so it stays slice evidence."""
+        d = self._two_round_bundle(
+            [self._row("pass"), self._t4()],
+            v1_review=self.CLEAN_REVIEW
+            + "| Contribution | NEEDS-HUMAN | commit-msg withheld |\n")
+        self.assertEqual(size_signal.iteration_rounds(d), (2, 0))
+
+    def test_builder_actionable_or_ambiguous_evidence_still_counts(self) -> None:
+        """Clause 2: every one of these keeps the deferred-gate round charged."""
+        placeholder = ("# Advisory review — NOT COMPLETED\n\n"
+                       f"<!-- pdca:leaf-status {assemble.LEAF_STATUS_INFRA} -->\n"
+                       f"- NEEDS-HUMAN — {assemble.REVIEW_UNAVAILABLE_FINDING}\n")
+        advisory_placeholder = (
+            "# Advisory review — adversary — NOT COMPLETED\n\n"
+            f"<!-- pdca:leaf-status {assemble.LEAF_STATUS_INFRA} -->\n"
+            "- NEEDS-HUMAN — " + assemble.ADVISORY_UNAVAILABLE_FINDING.format(
+                leaf="adversary", reason="timed out") + "\n")
+        cases = {
+            "plain gating fail": dict(extra_rows=(self._row("fail"),)),
+            "T3 finding (gate not deferred)": dict(
+                review_extra="| T3 Runtime | NEEDS-HUMAN | copier not on PATH |\n"),
+            "C5 finding": dict(
+                review_extra="| C5 Causal adequacy | NEEDS-HUMAN | patches a symptom |\n"),
+            "T5 finding": dict(
+                review_extra="| T5 Judgment | NEEDS-HUMAN | naming is unclear |\n"),
+            "FAIL verdict cell": dict(
+                review_extra="| C4 Verification (red→green) | FAIL | test is vacuous |\n"),
+            "advisory IMPL finding": dict(advisory=self.IMPL_ADVISORY),
+            "advisory placeholder": dict(advisory=advisory_placeholder),
+        }
+        for label, kw in cases.items():
+            with self.subTest(case=label):
+                self.assertEqual(size_signal.iteration_rounds(self._deferred_round(**kw)),
+                                 (2, 0), "slice evidence was discounted as deferred noise")
+        rows = [self._row("pass"), self._t4()]
+        review = self.CLEAN_REVIEW + self.T4_FINDING
+        evidence = {
+            "placeholder review": (self._gates(rows), placeholder),
+            "missing review": (self._gates(rows), None),
+            "missing gate record": (None, review),
+            "malformed gate record": ("{not json", review),
+        }
+        for label, (gates_text, rev) in evidence.items():
+            with self.subTest(case=label):
+                d = _bundle(patch="x")
+                self._archive(d, 1, gates_text=gates_text, review=rev)
+                self.assertEqual(size_signal.iteration_rounds(d), (1, 0),
+                                 "ambiguous evidence must charge the round to the slice")
+
+    def test_a_validation_only_round_still_counts_even_beside_a_deferred_row(self) -> None:
+        """The decided Open question: with no environment row and no finding on the
+        deferred gate, nothing recorded explains the iterate — V is a constant, not a
+        driver — so the round counts, deferred row or not."""
+        d = self._two_round_bundle([self._row("pass"), self._t4()])
+        self.assertEqual(size_signal.iteration_rounds(d), (2, 0))
+
+    def test_a_plain_advisory_bullet_does_not_charge_the_deferred_round(self) -> None:
+        """A plain `- NEEDS-HUMAN — …` advisory bullet is HUMAN: advisory prompts use it
+        for anything a human must judge, so charging on it would cancel the discount."""
+        d = self._deferred_round(advisory=self.PLAIN_ADVISORY)
+        self.assertEqual(size_signal.iteration_rounds(d), (1, 0))
+
+    def test_an_advisory_impl_finding_charges_an_environment_round_too(self) -> None:
+        """Clause 3, one rule: a solely-`unverifiable` gating red with a clean primary
+        review was discounted because only `check-review.md` was read. An archived
+        advisory `[impl]` finding is a rebuild-addressable driver, so the round counts."""
+        d = self._two_round_bundle([self._row("unverifiable"), self._row("pass")],
+                                   v1_advisory=self.IMPL_ADVISORY)
+        self.assertEqual(size_signal.iteration_rounds(d), (2, 0))
+
+    def test_a_plain_advisory_bullet_keeps_the_environment_discount(self) -> None:
+        """…and a HUMAN-kind advisory bullet does not, so #446 keeps working on an
+        instance that configures advisories."""
+        d = self._two_round_bundle([self._row("unverifiable"), self._row("pass")],
+                                   v1_advisory=self.PLAIN_ADVISORY)
+        self.assertEqual(size_signal.iteration_rounds(d), (1, 0))
+
+    def test_a_gating_row_with_a_malformed_result_counts_the_round(self) -> None:
+        """The fail-safe covers the rows, not just the file. A gating row whose `result`
+        is missing, `null`, or anything the writer never records says nothing about what
+        drove the round, so neither a deferred-gate finding nor an environment row may
+        discount it. Only `pass` / `deferred` / `unverifiable`, or a `fail` flagged
+        `flaky`, read as "not a verdict on the patch"."""
+        malformed = {
+            "result missing": self._without(self._row("pass"), "result"),
+            "result null": self._row(None),
+            "result an unknown string": self._row("skipped"),
+            "result `none` on a gating row": self._row("none"),
+            "result not a string": self._row(["pass"]),
+        }
+        for label, row in malformed.items():
+            with self.subTest(case=label, path="deferred-gate finding"):
+                d = self._deferred_round(extra_rows=(row,))
+                self.assertEqual(size_signal.iteration_rounds(d), (2, 0),
+                                 "a malformed gate row let a deferred finding discount it")
+            with self.subTest(case=label, path="environment (#446)"):
+                d = self._two_round_bundle([self._row("unverifiable"), row])
+                self.assertEqual(size_signal.iteration_rounds(d), (2, 0),
+                                 "a malformed gate row let an environment row discount it")
+
+    def test_a_row_whose_gating_flag_is_not_a_bool_counts_the_round(self) -> None:
+        """`gates._row` always writes `gating` as a bool. Without one, a row may or may not
+        have gated the round, so its `fail` cannot be set aside as non-gating."""
+        failing = self._row("fail")
+        cases = {
+            "gating missing": self._without(failing, "gating"),
+            "gating null": {**failing, "gating": None},
+            "gating a string": {**failing, "gating": "false"},
+        }
+        for label, row in cases.items():
+            with self.subTest(case=label):
+                d = self._deferred_round(extra_rows=(row,))
+                self.assertEqual(size_signal.iteration_rounds(d), (2, 0))
+
+    def test_a_deferred_row_does_not_shelter_a_live_sibling(self) -> None:
+        """One element can carry several rows (pdca-pdca's T2 has `T2-docs` and
+        `host-ci-docs`), and a finding names the element, not the row. A sibling that
+        failed, could not answer, or is malformed — gating or not — may be what the
+        reviewer flagged, so its element stays live and the T4 finding counts. A failing
+        row whose element cannot be read could be anyone's sibling, so it defers nothing."""
+        live = {
+            "non-gating fail": self._t4("fail", gating=False, rule_id="T4-host"),
+            "non-gating unverifiable": self._t4("unverifiable", gating=False,
+                                                rule_id="T4-host"),
+            "gating fail flagged flaky": self._t4("fail", flaky=True, rule_id="T4-host"),
+            "gating pass flagged flaky": self._t4("pass", flaky=True, rule_id="T4-host"),
+            "non-gating, result null": self._t4(None, gating=False, rule_id="T4-host"),
+            "non-gating, result missing": self._without(
+                self._t4("pass", gating=False, rule_id="T4-host"), "result"),
+            "failing row with no element": self._without(
+                self._row("fail", gating=False), "element"),
+        }
+        for label, sibling in live.items():
+            with self.subTest(case=label):
+                d = self._deferred_round(extra_rows=(sibling,))
+                self.assertEqual(size_signal.iteration_rounds(d), (2, 0),
+                                 "a deferred row sheltered a live sibling of its element")
+
+    def test_a_passing_sibling_leaves_the_element_deferred(self) -> None:
+        """The complement: a sibling that passed gives no reason to doubt the deferral."""
+        d = self._deferred_round(extra_rows=(self._t4("pass", rule_id="T4-host"),))
+        self.assertEqual(size_signal.iteration_rounds(d), (1, 0))
+
+    def test_an_impl_tagged_review_finding_on_a_deferred_element_counts(self) -> None:
+        """An `[impl]` tag is the reviewer saying a rebuild CAN fix it, as on the advisory
+        path. Classification strips the tag and a T4 row is IMPL without one, so the tag
+        must be read before classification. The same bullet untagged is the deferred-gate
+        noise this rule discounts."""
+        bullet = "\n- NEEDS-HUMAN {tag}— T4 the PR description omits the tracker id\n"
+        tagged = self._deferred_round(review_extra=bullet.format(tag="[impl] "))
+        self.assertEqual(size_signal.iteration_rounds(tagged), (2, 0))
+        untagged = self._deferred_round(review_extra=bullet.format(tag=""))
+        self.assertEqual(size_signal.iteration_rounds(untagged), (1, 0))
 
 
 if __name__ == "__main__":
