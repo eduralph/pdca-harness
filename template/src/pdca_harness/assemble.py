@@ -60,12 +60,38 @@ class NeedsHumanItem(NamedTuple):
 _GATE_ELEMENTS = frozenset(e for e, _label, kind, _oracle in canonical_elements()
                            if kind == "gate")
 
+# The judgment cells the REVIEWER may hand back to Do by tagging its verdict
+# `NEEDS-HUMAN [impl]` (#408): C5 causal adequacy and T5 judgment, whose substance is often a
+# plain build defect. Not V — the reviewer emits that row NEEDS-HUMAN on every cycle, so it can
+# never name something a rebuild fixes — and not the `input` cells C1/C3: a defect in the spec
+# or the change's scope survives any rebuild against the same brief. Derived from the taxonomy,
+# like `_GATE_ELEMENTS`, so it cannot drift from the matrix.
+_PROMOTABLE_ELEMENTS = frozenset(e for e, _label, kind, _oracle in canonical_elements()
+                                 if kind == "judgment" and e != "V")
+
 # A §6 item's leading 5/5/1 element id, when the reviewer's table row carries one.
 _ELEMENT_RE = re.compile(r"^(C[1-5]|T[1-5]|V)\b")
 
 # An advisory leaf tags a builder-fixable finding `- NEEDS-HUMAN [impl] — …`. Unmarked
 # findings stay HUMAN, so a legacy advisory file can never trigger an auto-iteration.
 _IMPL_MARKER_RE = re.compile(r"^\[impl\]\s*[—:-]*\s*", re.IGNORECASE)
+# Either routing tag a leaf may lead a finding with (#408): `[impl]` (a rebuild can fix it) or
+# `[human]` (it cannot). Both are stripped from the §6 text; `[human]` always means HUMAN.
+_TAG_MARKER_RE = re.compile(r"^\[(impl|human)\]\s*[—:-]*\s*", re.IGNORECASE)
+# The reviewer's own tag: a verdict table row whose Verdict cell IS `NEEDS-HUMAN [impl]`,
+# emphasis aside — matched against the WHOLE cell. A cell that only mentions it, such as
+# `PASS (was NEEDS-HUMAN [impl])`, states another verdict, and promoting it would buy a
+# needless rebuild.
+_VERDICT_IMPL_RE = re.compile(r"[*_`\s]*needs-human[*_`\s]*\[impl\][*_`\s]*", re.IGNORECASE)
+
+# How `_classify_finding` treats a leading `[impl]` tag, by the artifact the finding came from.
+# FREE — a Check advisory bullet: honoured on any finding (advisory bullets carry no reliable
+# element id to bound it by). BOUNDED — the primary review: honoured only when the finding's
+# element is in `_PROMOTABLE_ELEMENTS`, otherwise ignored. IGNORED — a plan advisory: it
+# reviews the brief, which no rebuild changes, so the tag is stripped and the item is HUMAN.
+TAGS_FREE = "free"
+TAGS_BOUNDED = "bounded"
+TAGS_IGNORED = "ignored"
 
 # Where a `- NEEDS-HUMAN` bullet's continuation ENDS (issue #527), mirroring the
 # membership rule `brief._block_for` already uses for a wrapped field value
@@ -95,6 +121,28 @@ _V_LABEL = next(label for e, label, _kind, _oracle in canonical_elements() if e 
 # never enough (PR #294 review, local pass): a "## Concerns" table can carry the exact same label.
 _CANONICAL_LABELS = frozenset(label.strip().casefold()
                               for _e, label, _kind, _oracle in canonical_elements())
+# Which element each canonical label belongs to — for `_normalized_item_label`'s prefix rule.
+_ELEMENT_OF_LABEL = {label.strip().casefold(): e
+                     for e, label, _kind, _oracle in canonical_elements()}
+_ITEM_PREFIX_RE = re.compile(r"^(C[1-5]|T[1-5]|V)\s*—\s*(.+)$")
+
+
+def _normalized_item_label(cell: str) -> str:
+    """A verdict table's Item cell in the form the 5/5/1 spells it (#408).
+
+    Reviewers write the cell three ways: the bare label, the label behind its element id
+    (`V — Validation — fitness-to-purpose`, which an older reviewer prompt listed), and with
+    ASCII `--` for the em dash. This folds `--` to `—`, collapses whitespace, and drops a
+    leading `<element-id> —` ONLY when the label after it is that element's own label. A
+    mismatched prefix is kept (`C5 — Validation — fitness-to-purpose` stays as written), so
+    such a cell never equals a canonical label. The caller still compares the result EXACTLY:
+    nothing here matches on a prefix of free text (the #294 rule).
+    """
+    s = " ".join(cell.replace("--", "—").split())
+    m = _ITEM_PREFIX_RE.match(s)
+    if m and _ELEMENT_OF_LABEL.get(m.group(2).casefold()) == m.group(1):
+        return m.group(2)
+    return s
 
 # Leaf-status marker (issue #278). When a reviewer / advisory leaf could not produce a
 # verdict, `leaves` writes a placeholder carrying one of these as a machine-readable comment.
@@ -245,8 +293,9 @@ def _item(value: str) -> str:
     return "\n".join([first] + [f"  {line}" if line else "" for line in rest])
 
 
-def _classify_finding(text: str, *, standing: bool = False) -> NeedsHumanItem:
-    """Classify one reviewer / advisory §6 item, stripping any `[impl]` marker.
+def _classify_finding(text: str, *, standing: bool = False, verdict_impl: bool = False,
+                      verdict_other: bool = False, tags: str = TAGS_FREE) -> NeedsHumanItem:
+    """Classify one reviewer / advisory §6 item, stripping any `[impl]` / `[human]` marker.
 
     Three kinds. IMPL — a rebuild can address it. STANDING — the reviewer's `Validation` row,
     which its prompt emits NEEDS-HUMAN on every cycle whatever it finds, so its presence proves
@@ -265,25 +314,52 @@ def _classify_finding(text: str, *, standing: bool = False) -> NeedsHumanItem:
     a rebuild. Beside an IMPL item, a HUMAN finding is deferred to the handover §6 (#409);
     STANDING is not even deferred, since every Check re-emits it — and neither is a
     ``no_verdict`` row (:class:`NeedsHumanItem`), for the same reason.
+
+    The finding's own builder-fixability statement (#408) is honoured AFTER the STANDING check,
+    so a tag can never lift the constant V row. ``verdict_impl`` is the reviewer's
+    `NEEDS-HUMAN [impl]` Verdict cell on a verdict table row, decided by the caller; it
+    promotes the row only on a `_PROMOTABLE_ELEMENTS` cell (C5/T5). A leading `[impl]` in the
+    text is weighed by ``tags`` (see `TAGS_FREE`): free for a Check advisory bullet, bounded
+    to C5/T5 for the primary review, ignored for a plan advisory. A tag that is not honoured
+    is dropped and the item classifies as if untagged. A leading `[human]` is stripped and
+    the item is HUMAN.
+
+    ``verdict_other`` is a verdict table row whose Verdict cell holds some other verdict
+    (PASS / FAIL / N/A) while another of its cells mentions NEEDS-HUMAN, decided by the
+    caller. The row contradicts itself, so it is HUMAN whatever its element: it still reaches
+    the human, and never buys a rebuild — not even on a gate cell (#408 sign-off).
     """
-    stripped = _IMPL_MARKER_RE.sub("", text, count=1)
-    if stripped != text:
-        return NeedsHumanItem(stripped.strip(), IMPL)
     if standing:
         return NeedsHumanItem(text, STANDING)   # emitted every cycle ⇒ carries no signal (#293)
+    tag = ""
+    m = _TAG_MARKER_RE.match(text)
+    if m:
+        tag = m.group(1).lower()
+        text = text[m.end():].strip()
+    if tag == "human" or tags == TAGS_IGNORED or verdict_other:
+        return NeedsHumanItem(text, HUMAN)
     m = _ELEMENT_RE.match(text)
-    if m and m.group(1) in _GATE_ELEMENTS:
+    element = m.group(1) if m else ""
+    if verdict_impl and element in _PROMOTABLE_ELEMENTS:
+        return NeedsHumanItem(text, IMPL)
+    if tag == "impl" and (tags == TAGS_FREE or element in _PROMOTABLE_ELEMENTS):
+        return NeedsHumanItem(text, IMPL)
+    if element in _GATE_ELEMENTS:
         return NeedsHumanItem(text, IMPL)
     return NeedsHumanItem(text, HUMAN)
 
 
 def _items_from_artifact(text: str, *, allow_standing: bool = False,
+                         plan_advisory: bool = False,
                          no_verdict: Callable[[str], bool] = lambda _t: False,
                          ) -> list[NeedsHumanItem]:
     """§6 items from one reviewer / advisory artifact, labelled by its leaf status (#278).
 
     ``allow_standing`` is passed only for the PRIMARY review (#294 review) — see
-    :func:`_classify_finding`. An advisory leaf's free-form bullets never earn STANDING.
+    :func:`_classify_finding`. An advisory leaf's free-form bullets never earn STANDING. It
+    also marks the artifact whose `[impl]` tags are bounded to C5/T5 and whose Verdict-cell
+    `NEEDS-HUMAN [impl]` is read (#408). ``plan_advisory`` marks a plan advisory, whose tags
+    are ignored: every item it yields is HUMAN.
 
     A placeholder (the leaf could not produce a verdict) has its items prefixed with WHY the
     artifact is empty — infra vs substance — so the human doesn't have to hand-annotate it,
@@ -296,8 +372,11 @@ def _items_from_artifact(text: str, *, allow_standing: bool = False,
     merely QUOTES a marker, recognised or not, and closed itself with the completion trailer
     (:func:`leaf_status`)."""
     label = _LEAF_STATUS_LABEL.get(leaf_status(text), "")
-    items = [_classify_finding(t, standing=allow_standing and is_standing)
-             for t, is_standing in _needs_human(text)]
+    tags = TAGS_IGNORED if plan_advisory else TAGS_BOUNDED if allow_standing else TAGS_FREE
+    items = [_classify_finding(row.text, standing=allow_standing and row.standing,
+                               verdict_impl=allow_standing and row.impl,
+                               verdict_other=row.other, tags=tags)
+             for row in _needs_human_rows(text)]
     if not label:
         return items
     return [NeedsHumanItem(f"{label} — {it.text}", HUMAN, no_verdict=no_verdict(it.text))
@@ -360,12 +439,13 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
     # the human dispositions it at sign-off: a bundle-wide "was the brief revised?" bit
     # cannot say WHICH findings the revision addressed, so it must never suppress them
     # (one cosmetic edit would have hidden every remaining objection from C6). All
-    # HUMAN-kind by construction (the plan prompt emits no [impl] markers), so they never
-    # cause an auto-iterate round (#264); beside real implementation work they are deferred
-    # to the handover §6 like any HUMAN item (#409).
+    # HUMAN-kind by construction — parsed with any `[impl]` tag stripped and ignored (#408), so
+    # a plan advisory can never cause an auto-iterate round (#264), whatever its prompt says;
+    # beside real implementation work they are deferred to the handover §6 like any HUMAN
+    # item (#409).
     for ptext in [p.read_text(encoding="utf-8")
                   for p in sorted(d.glob("plan-advisory-*.md"))]:
-        items += _items_from_artifact(ptext)
+        items += _items_from_artifact(ptext, plan_advisory=True)
     # The empirical size backstop (#324). HUMAN, never IMPL — the tag and the text
     # together are the mechanism: `autoiterate.eligible()` rebuilds past every other HUMAN
     # item (#409) but STOPS the rebuild loop on a HUMAN item `size_signal.is_size_item`
@@ -679,17 +759,71 @@ def _needs_human(review_text: str) -> list[tuple[str, bool]]:
       text's *prefix* let a real objection wear the template's clothes (PR #294 review).
 
     Everything else keeps its signal.
+
+    The Item cell is compared after :func:`_normalized_item_label` (#408), so the three forms
+    reviewers actually write the V row in — bare, behind its `V —` id, with `--` — are all the
+    constant row; the comparison itself stays exact. In the mandated table the Verdict and
+    Basis cells are found by the table's header (:func:`_needs_human_rows`).
     """
-    items: list[tuple[str, bool]] = []
-    seen: set[str] = set()
+    return [(row.text, row.standing) for row in _needs_human_rows(review_text)]
+
+
+class _Row(NamedTuple):
+    """One item as :func:`_needs_human_rows` reads it (#408)."""
+
+    text: str
+    standing: bool   # the mandated table's Validation row — see :func:`_needs_human`
+    impl: bool       # a mandated-table row whose Verdict cell is `NEEDS-HUMAN [impl]`
+    other: bool      # a mandated-table row whose Verdict cell holds another verdict
+
+
+def _needs_human_rows(review_text: str) -> list[_Row]:
+    """:func:`_needs_human`, plus what each row of the MANDATED verdict table says in its
+    Verdict cell (#408).
+
+    In that table the Verdict and Basis columns are found by the table's header
+    (:func:`_table_header`), so a reviewer who orders the columns differently is still read
+    by its own columns; with no `Basis` header, the Basis is the cell after the Verdict.
+    ``impl`` — the Verdict cell IS `NEEDS-HUMAN [impl]` (the whole cell, emphasis aside), the
+    reviewer stating a rebuild can fix it, on a row whose Item cell is a 5/5/1 label (after
+    :func:`_normalized_item_label`). Only that cell carries the tag, and only as the verdict
+    itself: a Basis that QUOTES `NEEDS-HUMAN [impl]` promotes nothing, and neither does a
+    Verdict cell that quotes it under another verdict (`_VERDICT_IMPL_RE`).
+    ``other`` — the Verdict cell holds another verdict (PASS / FAIL / N/A) while another
+    cell mentions NEEDS-HUMAN. That row contradicts itself, so it still reaches the human,
+    but never as IMPL and never as STANDING (#408 sign-off).
+
+    A table whose header names no Verdict column, a row that leaves that cell empty, any
+    other table, and a bullet are read as before: the first cell mentioning NEEDS-HUMAN is
+    the verdict, and no tag is read from it (a bullet's tag stays in its text).
+
+    Rows that read as the same text are one item, and it keeps the fail-safe reading of
+    its copies: ``standing`` and ``impl`` only if EVERY copy has it, ``other`` if ANY copy
+    has it — so no copy can hide behind another, in either order."""
+    items: list[_Row] = []
+    seen: dict[str, int] = {}   # lowercased text → its index in `items`
+    standing_rows = 0           # counted BEFORE the dedup in `add`, for the fail-closed guard
     lines = review_text.splitlines()
     verdict_table = _verdict_table_lines(lines)
 
-    def add(text: str, *, standing: bool) -> None:
+    def add(text: str, *, standing: bool, impl: bool = False, other: bool = False) -> None:
         text = text.strip()
-        if text and text.lower() not in seen:
-            seen.add(text.lower())
-            items.append((text, standing))
+        if not text:
+            return
+        k = seen.get(text.lower())
+        if k is None:
+            seen[text.lower()] = len(items)
+            items.append(_Row(text, standing, impl, other))
+        else:
+            # Two rows on one finding that disagree fail safe to HUMAN, as two STANDING rows
+            # grant neither, whichever copy comes first. A copy that is not the standing row
+            # withdraws STANDING: it is a real objection — a "## Concerns" row, a bullet —
+            # and once the V row's `V —` prefix is normalised away it can carry that row's
+            # exact text (#408 review). A copy that does not state `[impl]` withdraws it, and
+            # a copy whose verdict is not NEEDS-HUMAN marks the item `other`.
+            items[k] = items[k]._replace(standing=items[k].standing and standing,
+                                         impl=items[k].impl and impl,
+                                         other=items[k].other or other)
 
     i = 0
     n = len(lines)
@@ -717,21 +851,48 @@ def _needs_human(review_text: str) -> list[tuple[str, bool]]:
             continue
         elif s.startswith("|") and "needs-human" in s.lower():
             cells = [c.strip() for c in s.strip("|").split("|")]
-            vi = next((k for k, c in enumerate(cells) if "needs-human" in c.lower()), None)
+            in_table = i in verdict_table
+            header = _table_header(lines, i) if in_table else []
+            col = header.index("verdict") if "verdict" in header else None
+            if col is not None and (col >= len(cells) or not cells[col]):
+                col = None   # the row writes no verdict in that column: read it as before
+            if col is None:
+                vi = next((k for k, c in enumerate(cells) if "needs-human" in c.lower()), None)
+            else:
+                vi = col
             if vi is not None:
                 label = cells[0] if cells else ""
-                basis = cells[vi + 1] if vi + 1 < len(cells) else ""
-                add(f"{label} — {basis}" if basis else label,
-                    standing=(i in verdict_table
-                              and label.strip().casefold() == _V_LABEL.casefold()))
+                # A canonical label in the verdict table is rendered without its id prefix and
+                # with `—`, so the bare, prefixed and `--` forms of one row read the same in
+                # §6. Any other table's cell is kept as written: normalised there, a copy of
+                # the V row in a "## Concerns" table could merge into the standing row.
+                norm = _normalized_item_label(label)
+                if in_table and norm.casefold() in _CANONICAL_LABELS:
+                    label = norm
+                bi = header.index("basis") if "basis" in header else vi + 1
+                basis = cells[bi] if bi < len(cells) else ""
+                other = "needs-human" not in cells[vi].lower()
+                is_v = in_table and norm.casefold() == _V_LABEL.casefold()
+                if is_v:
+                    standing_rows += 1
+                # The tag is read only on a row whose Item cell IS a 5/5/1 label, so the element
+                # it would promote is not in doubt: `C5 — Validation — fitness-to-purpose`
+                # names two, and a label with words added is not the label.
+                impl = (col is not None and norm.casefold() in _CANONICAL_LABELS
+                        and bool(_VERDICT_IMPL_RE.fullmatch(cells[vi])))
+                add(f"{label} — {basis}" if basis else label, standing=is_v and not other,
+                    impl=impl, other=other)
         i += 1
 
     # FAIL CLOSED on ambiguity. The template row is a CONSTANT — it occurs exactly once. If two
     # survive (a second verdict-shaped table, a duplicated row), at least one of them is not the
     # constant, and we cannot tell which. Grant STANDING to neither, so the bundle halts for the
-    # human rather than risk archiving a real objection.
-    if sum(1 for _t, standing in items if standing) > 1:
-        return [(t, False) for t, _s in items]
+    # human rather than risk archiving a real objection. Rows are counted before `add` dedups
+    # them: two V rows with the same Basis — written in two forms, or copied — read as ONE
+    # item, and counting items would grant that one STANDING (#408 review). A V row whose
+    # Verdict cell contradicts it counts too: it is a second V row all the same.
+    if standing_rows > 1:
+        return [row._replace(standing=False) for row in items]
     return items
 
 
@@ -760,11 +921,27 @@ def _verdict_table_lines(lines: list[str]) -> set[int]:
         while j < len(lines) and lines[j].strip().startswith("|"):
             j += 1
         block = range(i, j)
-        labels = {lines[k].strip().strip("|").split("|")[0].strip().casefold() for k in block}
+        labels = {_normalized_item_label(lines[k].strip().strip("|").split("|")[0]).casefold()
+                  for k in block}
         if len(labels & _CANONICAL_LABELS) >= 2:
             out.update(block)
         i = j
     return out
+
+
+def _table_header(lines: list[str], i: int) -> list[str]:
+    """The header cells of the ``|``-table holding line ``i`` — its first row — stripped of
+    emphasis and casefolded, so a caller can find a column by name (#408).
+
+    The Verdict and Basis columns are looked up here rather than assumed to be the mandated
+    table's second and third, so a reviewer who orders the columns differently is still read
+    by its own columns: fixed indexes would read a reordered table's Basis as the verdict,
+    miss the real one, and lose the Basis a rebuild needs.
+    """
+    while i > 0 and lines[i - 1].strip().startswith("|"):
+        i -= 1
+    return [c.strip().strip("*_`").strip().casefold()
+            for c in lines[i].strip().strip("|").split("|")]
 
 
 def _declared_external_deps(build_notes_text: str) -> list[str]:

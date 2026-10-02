@@ -1813,5 +1813,484 @@ class ConfigPlumbing(unittest.TestCase):
         self.assertTrue(cfg.auto_iterate)
 
 
+# --- #408: the reviewer states builder-fixability; the V row in every form it is written ---
+
+# The three forms production writes the reviewer's constant Validation row in (#408): the bare
+# label, the label behind its element id (the driver prompt used to list `V — <label>`), and
+# with ASCII `--` for the em dash.
+_STANDING_FORMS = ("Validation — fitness-to-purpose",
+                   "V — Validation — fitness-to-purpose",
+                   "Validation -- fitness-to-purpose")
+
+
+def _full_review(overrides: dict[str, tuple[str, str]] | None = None, *,
+                 item: dict[str, str] | None = None) -> str:
+    """A complete 5/5/1 verdict table as the reviewer writes it: every row PASS except the
+    V row (NEEDS-HUMAN, every cycle), with ``overrides`` mapping an element id to its
+    ``(verdict, basis)`` and ``item`` to the Item cell written for it."""
+    overrides = overrides or {}
+    item = item or {}
+    rows = []
+    for elem, label, _kind, _oracle in gates.canonical_elements():
+        default = (("NEEDS-HUMAN", "fitness is the human's call") if elem == "V"
+                   else ("PASS", "ok"))
+        verdict, basis = overrides.get(elem, default)
+        rows.append(f"| {item.get(elem, label)} | {verdict} | {basis} |")
+    return "# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n" + "\n".join(rows) + "\n"
+
+
+class ReviewerImplTag(_Base):
+    """#408 clause 1/1b/1c/4: the reviewer's own `[impl]` statement, bounded by the taxonomy."""
+
+    def _review_kinds(self, review: str) -> dict[str, str]:
+        """{§6 text: kind} for the primary review, read the way `collect_needs_human` reads it."""
+        return {it.text: it.kind
+                for it in assemble._items_from_artifact(review, allow_standing=True)}
+
+    def test_promotable_set_is_derived_from_the_taxonomy(self) -> None:
+        expected = {e for e, _l, k, _o in gates.canonical_elements() if k == "judgment"} - {"V"}
+        self.assertEqual(assemble._PROMOTABLE_ELEMENTS, expected)
+        self.assertEqual(expected, {"C5", "T5"})
+
+    def test_impl_verdict_on_c5_or_t5_classifies_impl(self) -> None:
+        for elem, label in (("C5", "C5 Causal adequacy"), ("T5", "T5 Judgment")):
+            with self.subTest(elem=elem):
+                kinds = self._review_kinds(_full_review(
+                    {elem: ("NEEDS-HUMAN [impl]", "the test never exercises the empty case")}))
+                self.assertEqual(kinds[f"{label} — the test never exercises the empty case"],
+                                 assemble.IMPL)
+                self.assertEqual(kinds["Validation — fitness-to-purpose — fitness is the "
+                                       "human's call"], assemble.STANDING)
+
+    def test_impl_verdict_on_c5_auto_iterates_end_to_end(self) -> None:
+        d = self._bundle("C5IMPL", review=_full_review(
+            {"C5": ("NEEDS-HUMAN [impl]", "the guard misses the empty case")}))
+        self.assertTrue(self._try(d), "a builder-fixable C5 finding must reach Do")
+        self.assertEqual(state.state(d), state.ITERATE_DO)
+
+    def test_untagged_c5_and_t5_stay_human(self) -> None:
+        for elem, label in (("C5", "C5 Causal adequacy"), ("T5", "T5 Judgment")):
+            with self.subTest(elem=elem):
+                kinds = self._review_kinds(_full_review({elem: ("NEEDS-HUMAN", "a concern")}))
+                self.assertEqual(kinds[f"{label} — a concern"], assemble.HUMAN)
+
+    def test_impl_verdict_on_an_input_cell_or_the_v_row_is_ignored(self) -> None:
+        kinds = self._review_kinds(_full_review({
+            "C1": ("NEEDS-HUMAN [impl]", "the spec is ambiguous"),
+            "C3": ("NEEDS-HUMAN [impl]", "the change is out of scope"),
+            "V": ("NEEDS-HUMAN [impl]", "fitness is the human's call")}))
+        self.assertEqual(kinds["C1 Spec — the spec is ambiguous"], assemble.HUMAN)
+        self.assertEqual(kinds["C3 Change — the change is out of scope"], assemble.HUMAN)
+        # STANDING is checked BEFORE the tag: V can never be lifted.
+        self.assertEqual(kinds["Validation — fitness-to-purpose — fitness is the human's call"],
+                         assemble.STANDING)
+
+    def test_impl_in_the_basis_cell_of_a_c5_row_is_ignored(self) -> None:
+        kinds = self._review_kinds(_full_review({"C5": ("NEEDS-HUMAN", "[impl] off-by-one")}))
+        self.assertEqual(kinds["C5 Causal adequacy — [impl] off-by-one"], assemble.HUMAN)
+
+    def test_primary_review_bullets_promote_only_c5_t5(self) -> None:
+        review = _full_review() + (
+            "\n- NEEDS-HUMAN [impl] — C1 Spec the criterion is unmeasurable\n"
+            "- NEEDS-HUMAN [impl] — Validation — fitness-to-purpose: patches the wrong layer\n"
+            "- NEEDS-HUMAN [impl] — C5 Causal adequacy the guard misses the empty case\n")
+        d = self._bundle("BULLETS", review=review)
+        kinds = {it.text: it.kind for it in assemble.collect_needs_human(d, self.cfg)}
+        self.assertEqual(kinds["C1 Spec the criterion is unmeasurable"], assemble.HUMAN)
+        self.assertEqual(
+            kinds["Validation — fitness-to-purpose: patches the wrong layer"], assemble.HUMAN)
+        self.assertEqual(kinds["C5 Causal adequacy the guard misses the empty case"],
+                         assemble.IMPL)
+
+    def test_plan_advisory_impl_is_never_promoted(self) -> None:
+        d = self._bundle("PLANIMPL", review=_full_review())
+        (d / "plan-advisory-plan-reviewer.md").write_text(
+            "- NEEDS-HUMAN [impl] — the brief's criterion is a proxy\n", encoding="utf-8")
+        found = [it for it in assemble.collect_needs_human(d, self.cfg)
+                 if "criterion is a proxy" in it.text]
+        self.assertEqual([(it.text, it.kind) for it in found],
+                         [("the brief's criterion is a proxy", assemble.HUMAN)])
+
+    def test_human_tag_on_an_advisory_bullet_is_stripped_and_human(self) -> None:
+        d = self._bundle("ADVHUMAN", review=_full_review(),
+                         advisory="- NEEDS-HUMAN [human] — wrong layer at src/x.py:12\n"
+                                  "- NEEDS-HUMAN [impl] — off-by-one at src/x.py:13\n")
+        kinds = {it.text: it.kind for it in assemble.collect_needs_human(d, self.cfg)}
+        self.assertEqual(kinds["wrong layer at src/x.py:12"], assemble.HUMAN)
+        self.assertEqual(kinds["off-by-one at src/x.py:13"], assemble.IMPL)
+        self.assertNotIn("[human]", _section6(d / "SUMMARY.md"))
+
+    # Sign-offs of the first two attempts. Only the Verdict column states the verdict: a row
+    # was read from the first cell mentioning NEEDS-HUMAN, so a Basis QUOTING an old `[impl]`
+    # verdict under PASS became implementation work and would have bought a needless rebuild.
+    # But such a row is not dropped either: it mentions NEEDS-HUMAN under another verdict, so it
+    # contradicts itself, and the human settles it — as a HUMAN item, on any cell.
+
+    def test_a_basis_quoting_an_impl_verdict_under_pass_is_human_never_impl(self) -> None:
+        for elem, label in (("C5", "C5 Causal adequacy"), ("T5", "T5 Judgment")):
+            with self.subTest(elem=elem):
+                items = assemble._items_from_artifact(_full_review(
+                    {elem: ("PASS", "Quoted NEEDS-HUMAN [impl] from an old review")}),
+                    allow_standing=True)
+                self.assertFalse([it for it in items if it.kind == assemble.IMPL])
+                self.assertEqual([(it.text, it.kind) for it in items], [
+                    (f"{label} — Quoted NEEDS-HUMAN [impl] from an old review", assemble.HUMAN),
+                    ("Validation — fitness-to-purpose — fitness is the human's call",
+                     assemble.STANDING)])
+
+    def test_a_basis_quote_under_pass_reaches_section_6_and_does_not_auto_iterate(self) -> None:
+        d = self._bundle("BASISQUOTE", review=_full_review(
+            {"C5": ("PASS", "Quoted NEEDS-HUMAN [impl] from an old review")}))
+        self.assertIn("- [ ] C5 Causal adequacy — Quoted NEEDS-HUMAN [impl] from an old review",
+                      _section6(d / "SUMMARY.md"))
+        self.assertFalse(self._try(d), "a PASS row is not implementation work")
+        self._assert_halted(d)
+
+    def test_only_a_verdict_cell_that_is_the_impl_verdict_promotes(self) -> None:
+        # The same quote, moved into the Verdict cell: the tag was searched for anywhere in it,
+        # so `PASS (was NEEDS-HUMAN [impl])` promoted a passed row. Only a cell that IS
+        # `NEEDS-HUMAN [impl]`, emphasis aside, states the tag; one that mentions it under
+        # another verdict, or doubts it, stays the HUMAN finding it was before #408.
+        quoted = ("PASS (was NEEDS-HUMAN [impl])", "N/A — not NEEDS-HUMAN [impl]",
+                  "NEEDS-HUMAN [impl]? or scope — unsure")
+        stated = ("NEEDS-HUMAN [impl]", "**NEEDS-HUMAN [impl]**", "`NEEDS-HUMAN [impl]`",
+                  "NEEDS-HUMAN **[impl]**", "needs-human [IMPL]")
+        for elem, label in (("C5", "C5 Causal adequacy"), ("T5", "T5 Judgment")):
+            for verdict, kind in ([(v, assemble.HUMAN) for v in quoted]
+                                  + [(v, assemble.IMPL) for v in stated]):
+                with self.subTest(elem=elem, verdict=verdict):
+                    kinds = self._review_kinds(_full_review({elem: (verdict, "a missed case")}))
+                    self.assertEqual(kinds[f"{label} — a missed case"], kind)
+
+    def test_the_impl_verdict_promotes_only_a_row_whose_item_is_the_label(self) -> None:
+        # The element it promotes must not be in doubt. `C5 — Validation — fitness-to-purpose`
+        # names two — the brief's mismatched prefix, which is not the V row either — and a
+        # label with words added, or a bare id, is not the label: HUMAN, as before #408. The
+        # prefixed and `--` forms of the label itself are the label.
+        doubtful = ("C5 — Validation — fitness-to-purpose",
+                    "T5 — Validation — fitness-to-purpose",
+                    "C5 Causal adequacy: the guard", "T5")
+        for item in doubtful:
+            with self.subTest(item=item):
+                kinds = self._review_kinds(_full_review(
+                    {"C5": ("NEEDS-HUMAN [impl]", "a missed case")}, item={"C5": item}))
+                self.assertEqual(kinds.get(f"{item} — a missed case"), assemble.HUMAN)
+        for elem, item, label in (("C5", "C5 — C5 Causal adequacy", "C5 Causal adequacy"),
+                                  ("T5", "T5 -- T5 Judgment", "T5 Judgment")):
+            with self.subTest(item=item):
+                kinds = self._review_kinds(_full_review(
+                    {elem: ("NEEDS-HUMAN [impl]", "a missed case")}, item={elem: item}))
+                self.assertEqual(kinds.get(f"{label} — a missed case"), assemble.IMPL)
+
+    def test_a_verdict_cell_quote_under_pass_does_not_auto_iterate(self) -> None:
+        d = self._bundle("VERDICTQUOTE", review=_full_review(
+            {"C5": ("PASS (was NEEDS-HUMAN [impl])", "fixed in this round")}))
+        self.assertIn("- [ ] C5 Causal adequacy — fixed in this round",
+                      _section6(d / "SUMMARY.md"))
+        self.assertFalse(self._try(d), "a PASS row is not implementation work")
+        self._assert_halted(d)
+
+    def test_a_row_contradicting_its_verdict_is_human_on_every_cell(self) -> None:
+        # `| T5 Judgment | PASS | still NEEDS-HUMAN on scope |` (the sign-off's example) on
+        # every cell but V (below) and under every other verdict. HUMAN on a gate cell too,
+        # where the element rule would otherwise make it IMPL and hand it to Do.
+        for elem, label, _k, _o in gates.canonical_elements():
+            if elem == "V":
+                continue
+            for verdict in ("PASS", "FAIL", "N/A"):
+                with self.subTest(elem=elem, verdict=verdict):
+                    kinds = self._review_kinds(_full_review(
+                        {elem: (verdict, "still NEEDS-HUMAN on scope")}))
+                    self.assertEqual(kinds, {
+                        f"{label} — still NEEDS-HUMAN on scope": assemble.HUMAN,
+                        "Validation — fitness-to-purpose — fitness is the human's call":
+                            assemble.STANDING})
+
+    def test_a_gate_row_contradicting_its_verdict_does_not_auto_iterate(self) -> None:
+        d = self._bundle("C4PASSNH", review=_full_review(
+            {"C4": ("PASS", "still NEEDS-HUMAN: the red leg never ran")}))
+        self.assertIn("- [ ] C4 Verification (red→green) — still NEEDS-HUMAN: the red leg "
+                      "never ran", _section6(d / "SUMMARY.md"))
+        self.assertFalse(self._try(d), "a row the reviewer passed is no rebuild order")
+        self._assert_halted(d)
+
+    def test_a_row_contradicting_its_verdict_is_deferred_beside_real_work(self) -> None:
+        # Beside implementation work the rebuild runs, and the row is held for the handover
+        # §6 like any HUMAN finding — not lost with the round.
+        d = self._bundle("T5PASSNH", review=_full_review({
+            "C4": ("NEEDS-HUMAN", "off-by-one"),
+            "T5": ("PASS", "still NEEDS-HUMAN on scope")}))
+        self.assertTrue(self._try(d))
+        self._assert_deferred(d, ["T5 Judgment — still NEEDS-HUMAN on scope"])
+
+    def test_duplicate_rows_disagreeing_on_the_verdict_are_human(self) -> None:
+        # The same finding twice, once under NEEDS-HUMAN (on C4: IMPL by the element rule) and
+        # once under PASS: whichever comes first, the one item the dedup keeps is HUMAN.
+        label = "C4 Verification (red→green)"
+        rows = [f"| {label} | NEEDS-HUMAN | the NEEDS-HUMAN gate log is cut short |",
+                f"| {label} | PASS | the NEEDS-HUMAN gate log is cut short |"]
+        for order in (rows, rows[::-1]):
+            with self.subTest(first=order[0]):
+                review = _full_review().replace(f"| {label} | PASS | ok |", "\n".join(order))
+                self.assertEqual(self._review_kinds(review), {
+                    f"{label} — the NEEDS-HUMAN gate log is cut short": assemble.HUMAN,
+                    "Validation — fitness-to-purpose — fitness is the human's call":
+                        assemble.STANDING})
+
+    def test_the_verdict_and_basis_columns_are_found_by_the_header(self) -> None:
+        # Sign-off of the second attempt: with the columns reordered the Basis was still read
+        # as the cell after the Verdict, so the promoted finding read `T5 Judgment` alone and
+        # the rebuild had nothing to act on. Reordered, and widened by a column between the
+        # Verdict and the Basis: both read every cell by its header.
+        reordered = ("# Review\n\n| Item | Basis | Verdict |\n|---|---|---|\n"
+                     "| C1 Spec | ok | PASS |\n"
+                     "| C5 Causal adequacy | an old review said NEEDS-HUMAN [impl] | PASS |\n"
+                     "| T5 Judgment | Handle empty input | NEEDS-HUMAN [impl] |\n"
+                     "| Validation — fitness-to-purpose | the human's call | NEEDS-HUMAN |\n")
+        widened = ("# Review\n\n| Item | Verdict | Severity | Basis |\n|---|---|---|---|\n"
+                   "| C1 Spec | PASS | low | ok |\n"
+                   "| C5 Causal adequacy | PASS | low | an old review said NEEDS-HUMAN [impl] |\n"
+                   "| T5 Judgment | NEEDS-HUMAN [impl] | high | Handle empty input |\n"
+                   "| Validation — fitness-to-purpose | NEEDS-HUMAN | none | the human's call |\n")
+        for layout, review in (("reordered", reordered), ("widened", widened)):
+            with self.subTest(layout=layout):
+                items = assemble._items_from_artifact(review, allow_standing=True)
+                self.assertEqual([(it.text, it.kind) for it in items], [
+                    ("C5 Causal adequacy — an old review said NEEDS-HUMAN [impl]",
+                     assemble.HUMAN),
+                    ("T5 Judgment — Handle empty input", assemble.IMPL),
+                    ("Validation — fitness-to-purpose — the human's call", assemble.STANDING)])
+
+    def test_with_no_basis_header_the_basis_is_the_cell_after_the_verdict(self) -> None:
+        review = ("# Review\n\n| Item | Verdict | Reason |\n|---|---|---|\n"
+                  "| C1 Spec | PASS | ok |\n"
+                  "| T5 Judgment | NEEDS-HUMAN [impl] | Handle empty input |\n"
+                  "| C5 Causal adequacy | PASS | still NEEDS-HUMAN on scope |\n"
+                  "| Validation — fitness-to-purpose | NEEDS-HUMAN | the human's call |\n")
+        self.assertEqual(self._review_kinds(review), {
+            "T5 Judgment — Handle empty input": assemble.IMPL,
+            "C5 Causal adequacy — still NEEDS-HUMAN on scope": assemble.HUMAN,
+            "Validation — fitness-to-purpose — the human's call": assemble.STANDING})
+
+    def test_a_header_naming_no_verdict_column_reads_no_tag(self) -> None:
+        # Which cell is the verdict is unknown, so the row is read as before, and HUMAN.
+        review = ("# Review\n\n| Element | Result | Reason |\n|---|---|---|\n"
+                  "| C1 Spec | PASS | ok |\n"
+                  "| C5 Causal adequacy | NEEDS-HUMAN [impl] | the guard misses a case |\n"
+                  "| Validation — fitness-to-purpose | NEEDS-HUMAN | the human's call |\n")
+        self.assertEqual(self._review_kinds(review), {
+            "C5 Causal adequacy — the guard misses a case": assemble.HUMAN,
+            "Validation — fitness-to-purpose — the human's call": assemble.STANDING})
+
+    def test_a_row_with_no_verdict_in_the_column_still_reaches_the_human(self) -> None:
+        # Nothing to read as the verdict, so the row is read as before: a finding, never IMPL.
+        for row in ("| C5 Causal adequacy |  | NEEDS-HUMAN [impl] the guard misses a case |",
+                    "| C5 Causal adequacy NEEDS-HUMAN [impl] the guard misses a case |"):
+            with self.subTest(row=row):
+                review = _full_review().replace("| C5 Causal adequacy | PASS | ok |", row)
+                items = assemble._items_from_artifact(review, allow_standing=True)
+                self.assertTrue([it for it in items if it.kind == assemble.HUMAN
+                                 and it.text.startswith("C5 Causal adequacy")])
+                self.assertFalse([it for it in items if it.kind == assemble.IMPL])
+
+    def test_duplicate_rows_disagreeing_on_the_tag_are_human(self) -> None:
+        # The same finding twice — a copied row, or the same row in its prefixed form — once
+        # with `[impl]` and once without: the dedup keeps one item, and it must not keep the tag.
+        for item in ("C5 Causal adequacy", "C5 — C5 Causal adequacy"):
+            with self.subTest(item=item):
+                review = (_full_review({"C5": ("NEEDS-HUMAN [impl]", "the guard misses a case")})
+                          + f"| {item} | NEEDS-HUMAN | the guard misses a case |\n")
+                items = assemble._items_from_artifact(review, allow_standing=True)
+                self.assertFalse([it for it in items if it.kind == assemble.IMPL])
+                self.assertIn(("C5 Causal adequacy — the guard misses a case", assemble.HUMAN),
+                              [(it.text, it.kind) for it in items])
+
+
+class ValidationRowForms(_Base):
+    """#408 clause 2: the V row is the constant row in all three forms, compared exactly."""
+
+    def test_every_form_of_the_v_row_is_standing(self) -> None:
+        for form in _STANDING_FORMS:
+            with self.subTest(form=form):
+                review = _full_review(item={"V": form})
+                [(_t, standing)] = assemble._needs_human(review)
+                self.assertTrue(standing, form)
+                [item] = assemble._items_from_artifact(review, allow_standing=True)
+                self.assertEqual(item.kind, assemble.STANDING, form)
+
+    def test_every_form_lets_an_impl_only_review_auto_iterate(self) -> None:
+        # The production cost of a missed form: the constant row read as a real objection.
+        for n, form in enumerate(_STANDING_FORMS):
+            with self.subTest(form=form):
+                d = self._bundle(f"VFORM{n}", review=_full_review(
+                    {"C4": ("NEEDS-HUMAN", "off-by-one")}, item={"V": form}))
+                self.assertTrue(self._try(d))
+                self.assertFalse(_ledger(d), "the V row is not a finding to defer")
+
+    def test_a_mismatched_prefix_is_not_the_v_row(self) -> None:
+        for prefix in ("C5", "T5"):
+            with self.subTest(prefix=prefix):
+                review = _full_review(item={"V": f"{prefix} — Validation — fitness-to-purpose"})
+                [(_t, standing)] = assemble._needs_human(review)
+                self.assertFalse(standing)
+                [item] = assemble._items_from_artifact(review, allow_standing=True)
+                self.assertEqual(item.kind, assemble.HUMAN)
+
+    def test_free_text_after_the_label_is_still_an_objection(self) -> None:
+        for form in _STANDING_FORMS:
+            with self.subTest(form=form):
+                review = _full_review(item={"V": f"{form}: patches the wrong layer"})
+                [item] = assemble._items_from_artifact(review, allow_standing=True)
+                self.assertEqual(item.kind, assemble.HUMAN)
+
+    def test_a_table_written_entirely_in_the_prefixed_form_is_the_verdict_table(self) -> None:
+        prefixed = {e: f"{e} — {label}" for e, label, _k, _o in gates.canonical_elements()}
+        for sep in ("—", "--"):
+            with self.subTest(sep=sep):
+                item = {e: cell.replace("—", sep) for e, cell in prefixed.items()}
+                review = _full_review({"C5": ("NEEDS-HUMAN [impl]", "missed case")}, item=item)
+                self.assertTrue(assemble._verdict_table_lines(review.splitlines()))
+                kinds = {it.text: it.kind
+                         for it in assemble._items_from_artifact(review, allow_standing=True)}
+                self.assertEqual(kinds, {
+                    "C5 Causal adequacy — missed case": assemble.IMPL,
+                    "Validation — fitness-to-purpose — fitness is the human's call":
+                        assemble.STANDING})
+
+    def test_two_v_rows_in_different_forms_are_neither_standing(self) -> None:
+        review = (_full_review()
+                  + "| V — Validation — fitness-to-purpose | NEEDS-HUMAN | again |\n")
+        self.assertEqual([s for _t, s in assemble._needs_human(review)], [False, False])
+
+    def test_a_second_v_row_with_the_same_basis_is_neither_standing(self) -> None:
+        # Sign-off of the first attempt: with the IDENTICAL Basis, every form normalises to the
+        # same §6 text, and the dedup used to leave one item — STANDING — before the
+        # fail-closed guard counted. Rows are counted first now; an exact copy counts too.
+        for form in _STANDING_FORMS:
+            with self.subTest(form=form):
+                review = (_full_review()
+                          + f"| {form} | NEEDS-HUMAN | fitness is the human's call |\n")
+                self.assertEqual(assemble._needs_human(review), [
+                    ("Validation — fitness-to-purpose — fitness is the human's call", False)])
+                self.assertEqual(
+                    [it.kind for it in assemble._items_from_artifact(review, allow_standing=True)],
+                    [assemble.HUMAN])
+
+    def test_a_duplicated_v_row_is_held_for_the_human_end_to_end(self) -> None:
+        # Neither copy is the constant, so the row is a HUMAN finding: beside the C4 work it
+        # is deferred to the handover §6, not waved through as the standing row.
+        basis = "fitness is the human's call"
+        d = self._bundle("DUPV", review=(
+            _full_review({"C4": ("NEEDS-HUMAN", "off-by-one")})
+            + f"| V — Validation — fitness-to-purpose | NEEDS-HUMAN | {basis} |\n"))
+        self.assertTrue(self._try(d))
+        self._assert_deferred(d, [f"Validation — fitness-to-purpose — {basis}"])
+
+    def test_a_v_row_contradicting_its_verdict_is_not_the_standing_row(self) -> None:
+        # The constant row's verdict is NEEDS-HUMAN. A V row stating another verdict while it
+        # mentions NEEDS-HUMAN elsewhere is not that constant: it reaches the human as HUMAN.
+        review = _full_review({"V": ("N/A", "NEEDS-HUMAN at sign-off")})
+        items = assemble._items_from_artifact(review, allow_standing=True)
+        self.assertEqual([(it.text, it.kind) for it in items], [
+            ("Validation — fitness-to-purpose — NEEDS-HUMAN at sign-off", assemble.HUMAN)])
+
+    def test_a_contradicting_second_v_row_still_trips_the_fail_closed_guard(self) -> None:
+        # It is a second V row all the same: beside the real one, neither is standing.
+        review = (_full_review()
+                  + "| V — Validation — fitness-to-purpose | PASS | NEEDS-HUMAN again |\n")
+        self.assertEqual(assemble._needs_human(review), [
+            ("Validation — fitness-to-purpose — fitness is the human's call", False),
+            ("Validation — fitness-to-purpose — NEEDS-HUMAN again", False)])
+
+    def test_a_concerns_table_copy_of_the_v_row_is_not_folded_into_it(self) -> None:
+        # Only the verdict table's Item cells are normalised. Normalised in a "## Concerns"
+        # table too, a `V —` copy with the same Basis read as the standing row's own text, and
+        # the dedup folded it into that row: an objection waved through as the constant.
+        basis = "fitness is the human's call"
+        review = (_full_review()
+                  + "\n## Concerns\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                  f"| V — Validation — fitness-to-purpose | NEEDS-HUMAN | {basis} |\n")
+        items = assemble._items_from_artifact(review, allow_standing=True)
+        self.assertEqual([(it.text, it.kind) for it in items], [
+            (f"Validation — fitness-to-purpose — {basis}", assemble.STANDING),
+            (f"V — Validation — fitness-to-purpose — {basis}", assemble.HUMAN)])
+
+    def test_a_copy_with_the_v_rows_exact_text_stays_a_human_finding(self) -> None:
+        # Sign-off of the third attempt, the other spelling: the verdict table's `V —` row
+        # normalises to the bare label, so a bare copy with the IDENTICAL Verdict and Basis in a
+        # "## Concerns" table read as the same text, and the dedup kept the first row's
+        # STANDING — the objection vanished into the constant row, where before #408 both
+        # reached §6 as HUMAN. One item now, and HUMAN: in every form of the V row, with the
+        # copy after or before the verdict table, and as a bullet. (With the bare form this was
+        # a hole before #408 too.)
+        basis = "fitness is the human's call"
+        concerns = ("\n## Concerns\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                    f"| Validation — fitness-to-purpose | NEEDS-HUMAN | {basis} |\n")
+        bullet = f"\n- NEEDS-HUMAN — Validation — fitness-to-purpose — {basis}\n"
+        for form in _STANDING_FORMS:
+            table = _full_review(item={"V": form})
+            for copy, review in (("concerns table after", table + concerns),
+                                 ("concerns table before", concerns + "\n" + table),
+                                 ("bullet after", table + bullet),
+                                 ("bullet before", bullet + "\n" + table)):
+                with self.subTest(form=form, copy=copy):
+                    self.assertEqual(assemble._needs_human(review), [
+                        (f"Validation — fitness-to-purpose — {basis}", False)])
+                    items = assemble._items_from_artifact(review, allow_standing=True)
+                    self.assertEqual([(it.text, it.kind) for it in items], [
+                        (f"Validation — fitness-to-purpose — {basis}", assemble.HUMAN)])
+
+    def test_a_copy_with_the_v_rows_exact_text_is_held_for_the_human_end_to_end(self) -> None:
+        # What losing it cost: beside C4 work the round fires, and the STANDING row is never
+        # deferred, so the objection was in no later §6. Now it is in the ledger.
+        basis = "fitness is the human's call"
+        d = self._bundle("CONCERNSV", review=(
+            _full_review({"C4": ("NEEDS-HUMAN", "off-by-one")},
+                         item={"V": "V — Validation — fitness-to-purpose"})
+            + "\n## Concerns\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+            f"| Validation — fitness-to-purpose | NEEDS-HUMAN | {basis} |\n"))
+        self.assertTrue(self._try(d))
+        self._assert_deferred(d, [f"Validation — fitness-to-purpose — {basis}"])
+
+
+class TagContractPrompts(unittest.TestCase):
+    """#408 clause 3: the prompts carry the contract the classifier honours."""
+
+    _AGENTS = Path(__file__).resolve().parents[1] / "agents"
+
+    def _role(self, name: str) -> str:
+        path = next((p for p in (self._AGENTS / f"{name}.md.jinja", self._AGENTS / f"{name}.md")
+                     if p.exists()), None)
+        self.assertIsNotNone(path, f"no {name} role body under {self._AGENTS}")
+        return path.read_text(encoding="utf-8")
+
+    def test_review_prompt_lists_bare_labels_and_the_c5_t5_tag(self) -> None:
+        prompt = leaves._REVIEW_PROMPT
+        for elem, label, _k, _o in gates.canonical_elements():
+            self.assertIn(f"\n  {label}\n", prompt)
+            self.assertNotIn(f"{elem} — {label}", prompt)
+        self.assertIn("EXACTLY as listed", prompt)
+        self.assertIn("NEEDS-HUMAN [impl]", prompt)
+        self.assertIn("'C5 Causal adequacy' and 'T5 Judgment' rows ONLY", prompt)
+
+    def test_advisory_prompt_requires_a_tag_and_drops_the_omit_default(self) -> None:
+        prompt = leaves._advisory_prompt({}, "adversary")
+        self.assertNotIn("OMIT '[impl]'", prompt)
+        self.assertNotIn("when in doubt", prompt.lower())
+        self.assertIn("'- NEEDS-HUMAN [impl] — '", prompt)
+        self.assertIn("'- NEEDS-HUMAN [human] — '", prompt)
+        self.assertIn("MUST carry exactly one tag", prompt)
+
+    def test_role_bodies_state_the_same_contract(self) -> None:
+        reviewer = self._role("reviewer")
+        self.assertIn("NEEDS-HUMAN [impl]", reviewer)
+        self.assertIn("`C5 Causal\nadequacy` and `T5 Judgment` rows **only**", reviewer)
+        self.assertIn("no element-id\nprefix", reviewer)
+        adversary = self._role("adversary")
+        self.assertNotIn("when in doubt, omit", adversary.lower())
+        self.assertIn("- NEEDS-HUMAN [human] — ", adversary)
+        self.assertIn("an untagged bullet is read as\n`[human]`", adversary)
+
+
 if __name__ == "__main__":
     unittest.main()

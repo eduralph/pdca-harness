@@ -2740,15 +2740,26 @@ _REVIEW_PROMPT = (
     "with a one-line outline of the task under review (the bug to fix / functionality to "
     "implement), then a complete verdict table — one row for EVERY element of the "
     "5/5/1 matrix, in order:\n"
-    + "\n".join(f"  {elem} — {label}" for elem, label, _kind, _oracle in gates.canonical_elements())
+    # Bare labels, no `{elem} — ` prefix: the Item cell is matched exactly against the label
+    # (#408), and a listed prefix is what reviewers copied into it.
+    + "\n".join(f"  {label}" for _elem, label, _kind, _oracle in gates.canonical_elements())
     + "\nFormat it as a Markdown table `| Item | Verdict | Basis |`, the Item column "
-    "carrying the element label above, the Verdict one of PASS / FAIL / NEEDS-HUMAN / "
+    "carrying the element label EXACTLY as listed above (no element-id prefix, no added "
+    "words), the Verdict one of PASS / FAIL / NEEDS-HUMAN / "
     "N/A, the Basis a one-line reason you re-derived yourself (cite path:line where "
     "you can) — state the DECISION OWED (the context + impact the verdict turns on, "
     "what the human must decide and why), not a restatement of the implementation, "
     "especially for NEEDS-HUMAN rows. Emit NEEDS-HUMAN for the always-human items (validation "
     "fitness-to-purpose, contested root-cause, ambiguous scope) — each NEEDS-HUMAN "
-    "row becomes a §6 item the human must clear. Do not omit a row; use N/A with a "
+    "row becomes a §6 item the human must clear. On the "
+    + " and ".join(f"'{label}'" for elem, label, _kind, _oracle in gates.canonical_elements()
+                   if elem in assemble._PROMOTABLE_ELEMENTS)
+    + " rows ONLY, when your NEEDS-HUMAN concern is an IMPLEMENTATION defect the builder "
+    "can fix by iterating (a logic bug, a missed case, a weak or incorrect test), write the "
+    "Verdict `NEEDS-HUMAN [impl]` so the driver routes it straight back to Do; keep plain "
+    "`NEEDS-HUMAN` there for a concern that needs a human decision (scope, root cause, "
+    "fitness-to-purpose). Never tag any other row `[impl]` — it is ignored there. Do not "
+    "omit a row; use N/A with a "
     "reason when an element does not apply. For a visual / manual-repro NEEDS-HUMAN row, "
     "verify what you can yourself — where feasible, exercise the change with the patch "
     "applied at $PDCA_TARGET (run the relevant test, or start/drive the app if the runner "
@@ -3591,14 +3602,14 @@ def _advisory_prompt(spec: dict, leaf_id: str, rubric: str = "") -> str:
         "gate you cannot re-run (#403); ground every "
         "cited path:line on the target source at $PDCA_TARGET, never other checkouts. "
         f"Write check-advisory-{leaf_id}.md: a short list of findings, each a Markdown "
-        "bullet with a path:line. For any finding a human must adjudicate, prefix the "
-        "bullet '- NEEDS-HUMAN — ' (it becomes a SUMMARY §6 item). If the finding is an "
-        "IMPLEMENTATION defect the builder can fix by iterating — a logic bug, a missed "
-        "case, a weak or incorrect test, a conformance nit — prefix it "
-        "'- NEEDS-HUMAN [impl] — ' instead, so the driver can route it straight back to Do "
-        "without spending the human's attention (issue #264). Keep the plain "
-        "'- NEEDS-HUMAN — ' form for anything needing a human ARCHITECTURAL / scope / "
-        "fitness-to-purpose decision; when in doubt, OMIT '[impl]'. You are ADVISORY — you "
+        "bullet with a path:line. Every NEEDS-HUMAN bullet (each becomes a SUMMARY §6 "
+        "item) MUST carry exactly one tag. If the finding is an IMPLEMENTATION defect the "
+        "builder can fix by iterating — a logic bug, a missed case, a weak or incorrect "
+        "test, a conformance nit — write it '- NEEDS-HUMAN [impl] — ', so the driver can "
+        "route it straight back to Do without spending the human's attention (issue #264). "
+        "If it needs a human ARCHITECTURAL / scope / fitness-to-purpose decision, write it "
+        "'- NEEDS-HUMAN [human] — '. Decide which for every bullet; an untagged bullet is "
+        "read as [human]. You are ADVISORY — you "
         "never gate; the human decides at sign-off. If you find nothing, say so explicitly."
     ) + rubric + _COMPLETION_INSTRUCTION.format(   # last, after the rubric (#541)
         artifact=f"check-advisory-{leaf_id}.md")
