@@ -148,6 +148,11 @@ merge_requires = "all"
 # verdict. `_merge_one` re-reads the rollup until it clears pending/empty or this many
 # wall-clock seconds elapse; only then does an unresolved rollup refuse (with a message
 # that says the checks never reported in time, distinct from a check that actually failed).
+# A green read is confirmed by one more read a full poll interval (15 s) later, charged to
+# this budget: an early rollup can be green on the fast checks alone, before a slow job has
+# registered (issue #582). A green first seen with less than 15 s of budget left to confirm
+# it refuses as not finished (so a value from 1 to 14 refuses every PR) — raise this bound
+# if your checks are slow to report.
 # On every refusal after the ready-mark — timeout, a red/unreadable rollup, or a failing
 # `gh pr merge` — the PR is returned to draft (`gh pr ready --undo`) before the run STOPs,
 # so a stopped wave never leaves a PR advertising a readiness no human granted.

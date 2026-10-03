@@ -377,8 +377,12 @@ class Config:
     # queued or not yet registered, so a rollup read that moment is `pending` or `empty`:
     # absence of evidence, not a verdict. `_merge_one` re-reads the rollup until it resolves
     # or this many wall-clock seconds elapse; only an unresolved rollup at the bound (or a
-    # genuinely failing/unreadable one) refuses. `0` performs no wait at all — a single
-    # read, the original immediate-refusal behaviour. [driver].merge_wait_secs.
+    # genuinely failing/unreadable one) refuses. A green read is confirmed by one more read
+    # a full poll interval (15 s) later, charged to this budget (issue #582: an early
+    # rollup can be green on the fast checks alone); a green with less than 15 s of budget
+    # left to confirm it refuses as pending, so a value from 1 to 14 refuses every PR. `0`
+    # performs no wait at all — a single read, the original immediate-refusal behaviour.
+    # [driver].merge_wait_secs.
     merge_wait_secs: int = 300
     # Optional integration re-gate (#wave-model): after each wave folds onto the
     # integration branch, run the repo-scoped gates over that tip before the next wave
