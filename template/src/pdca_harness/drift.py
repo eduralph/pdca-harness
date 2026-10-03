@@ -47,13 +47,18 @@ def _applies_to_base(repo: Path, base_ref: str, patch: Path) -> tuple[str, str]:
 
 
 def _resolve_base(cfg: Config, d: Path, base: str) -> tuple[str, str, str]:
-    """``(fetch_remote, fetch_ref, base_ref)`` — the branch the PR was ACTUALLY applied onto,
-    resolved exactly as :mod:`publish` does so drift checks the same base publish committed to:
+    """``(fetch_remote, fetch_ref, base_ref)`` — the branch the PR was applied onto, picked
+    by the same rules :mod:`publish` uses, so drift checks the base publish committed to:
       * an ``Onto branch`` (stack-on-an-existing-PR, #54) → ``<remote>/<branch>``;
       * else the wave / ``Stacks on`` integration branch (#wave-model / #123) on ``origin``;
       * else the target base ``<base_remote>/<base>``.
     Checking the brief's target base for a *stacked* PR would report false clean/stale (#211
-    review) — the PR really depends on the branch above, not on upstream ``main``."""
+    review) — the PR really depends on the branch above, not on upstream ``main``.
+
+    Not quite the same commit, though: publish cuts a wave>0 bundle's PR branch from the
+    line commit the run recorded for it (``stack-base-tip``, #593), while drift checks the
+    integration line as it is NOW — grown by later waves, or replaced by a later run's
+    first fold. A known cross-run limit (#616)."""
     onto = brief.onto_branch(d / "brief.md")
     if onto is not None:
         remote, branch = onto

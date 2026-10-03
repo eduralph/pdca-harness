@@ -810,12 +810,13 @@ base; even there the **final** wave's PR stays a draft for your ready-mark.
 This holds for a **batch**, too. A multi-id `pdca flow` runs the batch as
 dependency waves ([09 parallel lanes in the spec](../template/PCDA/quality-cycle/09-parallel-lanes.md);
 mechanics in [step 07](07-crosscutting.md#waves-in-execution)); in the default
-`stack` mode each wave's accepted work is folded onto a run-scoped integration
-branch the next wave builds on, and each dependent opens a **stacked** draft
-PR — the harness still never merges, so you review and merge the stack
-bottom-up yourself. Only the opt-in `[driver].wave_mode = "merge"` (own-repo /
-CD, where you hold merge rights on the base) relaxes this, `gh pr merge`-ing
-each wave before the next builds.
+`stack` mode each wave's published PR branches are folded onto a run-scoped
+integration branch the next wave builds on, and each dependent opens a
+**stacked** draft PR against the real base — the harness still never merges,
+so you review and merge the stack bottom-up yourself, with merge commits.
+Only the opt-in `[driver].wave_mode = "merge"` (own-repo / CD, where you hold
+merge rights on the base) relaxes this, `gh pr merge`-ing each wave before the
+next builds.
 
 State: `COMPLETE`, published. On to the cross-cycle beat — [step 06](06-act.md).
 

@@ -534,10 +534,11 @@ def _run_one(chk: dict, *, cfg: Config, cwd: Path, bundle: Path | None, runner: 
     #      before it ever reads the stack-base marker), so it is also the test base.
     #   2. else the wave's folded integration branch (#273) → PDCA_VERIFY_BASE. A wave>0
     #      bundle's Do worktree is cut off the run-scoped integration branch (prior waves'
-    #      folded patches, pushed to origin), and publish opens its PR against that branch. A
-    #      verifier that instead reset to the brief's origin base would, for a dependent
-    #      sharing a file with its prereq, either false-fail "patch does not apply — stale" or
-    #      measure red→green against a tree LACKING the prereq.
+    #      published PR branches, merged onto it and pushed to origin), and publish cuts its
+    #      PR branch from the line commit it was built on (the PR targets the real base,
+    #      #593). A verifier that instead reset to the brief's origin base would, for a
+    #      dependent sharing a file with its prereq, either false-fail "patch does not apply
+    #      — stale" or measure red→green against a tree LACKING the prereq.
     #   3. else the brief's own `Repo + branch target` base (#387) → PDCA_BRIEF_BASE, as
     #      `<base_remote>/<branch>` — the very ref publish checks the fix out against
     #      (`publish.publish`'s `checkout_base`: `f"{base_remote}/{base}"`), or

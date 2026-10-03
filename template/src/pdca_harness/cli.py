@@ -1055,8 +1055,9 @@ def _publish_flag(d: Path) -> str:
     url, base = rec.get("pr_url"), rec.get("base")
     if not url:
         return "  [published]"
-    # A stacked PR (#wave-model / #123) targets the wave integration branch, not the base —
-    # show ↑<base> so the human knows to merge the stack bottom-up.
+    # ↑<base> means "part of a stack, merge bottom-up" (#wave-model / #123). For a wave stack
+    # it no longer names an intermediate branch: every PR targets the real base (#593), so
+    # it reads ↑main, and the order to merge in comes from the briefs' `Depends on`.
     stacked = rec.get("mode") in ("stacked-pr", "stacked")
     return f"  [PR {url}{f' ↑{base}' if stacked else ''}]"
 

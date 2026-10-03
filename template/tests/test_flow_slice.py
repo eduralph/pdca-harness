@@ -9,10 +9,13 @@ publisher leaf is stubbed (never pushes offline). Run from the project root:
 
 from __future__ import annotations
 
+import contextlib
 import io
+import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -1121,9 +1124,9 @@ class WaveModel(unittest.TestCase):
         calls: list[list[str]] = []
         real = flow.integrate.fold
 
-        def spy(cfg: Config, accepted: list, *, dry_run: bool = False, locks=None):
+        def spy(cfg: Config, accepted: list, **kwargs):   # dry_run, locks, folded_this_run
             calls.append([d.name for d in accepted])
-            return real(cfg, accepted, dry_run=dry_run, locks=locks)
+            return real(cfg, accepted, **kwargs)
 
         flow.integrate.fold = spy
         try:
@@ -1238,6 +1241,11 @@ class WaveModel(unittest.TestCase):
         self.assertIsNone(flow.publish._stack_base_branch(self.cfg, d))
         flow.publish.write_stack_base(d, "pdca-integration/main")
         self.assertEqual(flow.publish._stack_base_branch(self.cfg, d), "pdca-integration/main")
+        # The line commit recorded with it (#593) is publish's alone: every other reader
+        # (Do's worktree, $PDCA_VERIFY_BASE) still gets just the branch.
+        flow.publish.write_stack_base(d, "pdca-integration/main", "0123abcd")
+        self.assertEqual(flow.publish._stack_base_branch(self.cfg, d), "pdca-integration/main")
+        self.assertEqual(flow.publish.read_stack_base(d), "pdca-integration/main")
 
     def test_waves_command_prints_plan(self) -> None:
         # `pdca waves` prints the computed wave plan without building (B3 observability).
@@ -1258,15 +1266,475 @@ class WaveModel(unittest.TestCase):
         self.assertIn("unschedulable", err.getvalue())
 
     def test_publish_flag_marks_stacked_pr(self) -> None:
-        # A stacked PR's status flag shows ↑<integration-branch> so the human merges the
-        # stack bottom-up.
+        # A stacked PR's status flag shows ↑<base> so the human merges the stack bottom-up.
+        # A wave stack's PRs all target the real base (#593), so the cue reads ↑main; an
+        # ordinary new-pr record shows none.
         d = self._brief("SF")
         (d / "publish.json").write_text(
-            '{"pr_url": "https://gh/pr/9", "base": "pdca-integration/main", '
-            '"mode": "stacked-pr"}', encoding="utf-8")
+            '{"pr_url": "https://gh/pr/9", "base": "main", "mode": "stacked-pr"}',
+            encoding="utf-8")
         flag = cli._publish_flag(d)
         self.assertIn("https://gh/pr/9", flag)
-        self.assertIn("↑pdca-integration/main", flag)
+        self.assertIn("↑main", flag)
+        (d / "publish.json").write_text(
+            '{"pr_url": "https://gh/pr/9", "base": "main", "mode": "new-pr"}',
+            encoding="utf-8")
+        self.assertNotIn("↑", cli._publish_flag(d))
+
+
+class StackModeFlow(unittest.TestCase):
+    """#593, the flow's half of stack mode: the run's first fold of a target starts fresh
+    and every later one continues the tip the run's last fold pushed (``folded_this_run``),
+    and an accepted bundle that did not publish holds only what depends on it.
+
+    The non-dry cases swap the publisher leaf off ``stub`` (so the flow is NOT a dry-run)
+    and spy the text pre-pass, publish and — where named — the fold, so no model leaf, no
+    push and no ``gh`` runs; the end-to-end case runs the REAL fold against real git."""
+
+    TARGET = ("example-org/example-repo", "main")
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _brief(self, iid: str, *, depends_on: str = "", target: bool = True) -> Path:
+        d = self.cfg.bundle(iid)
+        d.mkdir(parents=True)
+        body = _TOY_BRIEF.format(slug=iid.lower())
+        if not target:
+            body = "".join(ln for ln in body.splitlines(keepends=True)
+                           if "Repo + branch target" not in ln)
+        if depends_on:
+            body += f"- **Depends on:** {depends_on}\n"
+        (d / "brief.md").write_text(body, encoding="utf-8")
+        return d
+
+    def _spy_fold(self, calls: list[dict]):
+        """A fold spy taking any keyword, returning a worktree that is a real git repo
+        whose HEAD moves on every call (so each fold "pushes" a distinct tip)."""
+        wt = self.tmp / "integ-wt"
+        subprocess.run(["git", "init", "-q", str(wt)], check=True)
+
+        def spy(cfg: Config, accepted: list, **kwargs):
+            calls.append({"accepted": [d.name for d in accepted], **kwargs})
+            subprocess.run(["git", "-C", str(wt), "-c", "user.name=T", "-c",
+                            "user.email=t@example.com", "-c", "commit.gpgsign=false",
+                            "commit", "-q", "--allow-empty", "-m", "fold"], check=True)
+            calls[-1]["pushed"] = subprocess.run(
+                ["git", "-C", str(wt), "rev-parse", "HEAD"], check=True,
+                capture_output=True, text=True).stdout.strip()
+            return {self.TARGET: ("pdca-integration/main", wt)}
+
+        return spy
+
+    def _live(self, *, fold=None, fail_publish: frozenset = frozenset(), publish_fn=None,
+              fail_texts: frozenset = frozenset()):
+        """Patches for a NON-dry run: a non-stub publisher, the text pre-pass spied (no
+        leaf; ``fail_texts`` bundle names fail it, as a failed draft/T4 does), publish spied
+        (``fail_publish`` ids fail: rc 1, nothing recorded — the real path's failure
+        shape), and optionally the fold."""
+        self.cfg.publisher = LeafConfig(mode="command", family="claude", interactive=True)
+        real_publish = flow.publish.publish
+
+        def fake_publish(cfg: Config, issue_id: str, **kw) -> int:
+            d = cfg.bundle(issue_id)
+            if not all(flow.publish._resolve_target(d)[:2]):
+                return real_publish(cfg, issue_id, **kw)   # no target: rc 0, no record
+            if issue_id in fail_publish:
+                return 1
+            if publish_fn is not None:
+                return publish_fn(cfg, d)
+            (d / "publish.json").write_text(json.dumps(
+                {"mode": "new-pr", "branch": f"fix/{issue_id}", "base": "main",
+                 "repo": self.TARGET[0]}), encoding="utf-8")
+            return 0
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(flow.publish, "draft_texts",
+                                              lambda cfg, d, **kw: d.name not in fail_texts))
+        stack.enter_context(mock.patch.object(flow.publish, "publish", fake_publish))
+        if fold is not None:
+            stack.enter_context(mock.patch.object(flow.integrate, "fold", fold))
+        return stack
+
+    def test_each_later_fold_continues_the_tip_the_runs_last_fold_pushed(self) -> None:
+        # Three waves → two folds. The first gets an empty map (start fresh); the second
+        # gets the target with the HEAD the first fold's worktree held when it returned.
+        self._brief("SA")
+        self._brief("SB", depends_on="SA")
+        self._brief("SC", depends_on="SB")
+        calls: list[dict] = []
+        with self._live(fold=self._spy_fold(calls)), redirect_stderr(io.StringIO()):
+            results = flow.flow_ids(self.cfg, ["SA", "SB", "SC"], do_act=False,
+                                    today="2026-10-02")
+        self.assertEqual(results, {"SA": state.COMPLETE, "SB": state.COMPLETE,
+                                   "SC": state.COMPLETE})
+        self.assertEqual([c["accepted"] for c in calls],
+                         [["issue_SA"], ["issue_SA", "issue_SB"]])
+        self.assertEqual(calls[0].get("folded_this_run"), {})
+        self.assertEqual(calls[1].get("folded_this_run"), {self.TARGET: calls[0]["pushed"]})
+
+    def test_a_dry_run_lists_the_folded_target_and_plans_start_then_continue(self) -> None:
+        # Stub publisher ⇒ dry-run: the REAL fold prints its plan, pushes nothing (None).
+        self._brief("DA")
+        self._brief("DB", depends_on="DA")
+        self._brief("DC", depends_on="DB")
+        calls: list[dict] = []
+        real = flow.integrate.fold
+
+        def spy(cfg: Config, accepted: list, **kwargs):
+            calls.append(dict(kwargs))
+            return real(cfg, accepted, **kwargs)
+
+        with mock.patch.object(flow.integrate, "fold", spy), \
+                redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()):
+            results = flow.flow_ids(self.cfg, ["DA", "DB", "DC"], do_act=False,
+                                    today="2026-10-02")
+        self.assertTrue(all(s == state.COMPLETE for s in results.values()))
+        self.assertEqual([c.get("folded_this_run") for c in calls],
+                         [{}, {self.TARGET: None}])
+        text = out.getvalue()
+        start = text.find("start pdca-integration/main fresh from upstream/main")
+        cont = text.find("continue pdca-integration/main from this run's tip")
+        self.assertNotEqual(start, -1, text)
+        self.assertNotEqual(cont, -1, text)
+        self.assertLess(start, cont)
+
+    def test_an_unpublished_bundle_holds_only_its_dependents(self) -> None:
+        # Wave 0 = {HI, HU}; wave 1 = {HD (on HU), HJ (on HI)}; wave 2 = {HE (on HD)}. HU's
+        # publish fails, so it has no branch: it is left out of every fold, HD is skipped
+        # naming it, the skip cascades to HE, HJ is built, and the run goes on — no STOP.
+        self._brief("HU")
+        self._brief("HI")
+        self._brief("HD", depends_on="HU")
+        self._brief("HJ", depends_on="HI")
+        self._brief("HE", depends_on="HD")
+        calls: list[dict] = []
+        with self._live(fold=self._spy_fold(calls), fail_publish=frozenset({"HU"})), \
+                redirect_stderr(io.StringIO()) as err:
+            results = flow.flow_ids(self.cfg, ["HU", "HI", "HD", "HJ", "HE"], do_act=False,
+                                    today="2026-10-02")
+        self.assertEqual([c["accepted"] for c in calls],
+                         [["issue_HI"], ["issue_HI", "issue_HJ"]])
+        self.assertEqual(results.get("HJ"), state.COMPLETE)
+        self.assertNotEqual(results.get("HD"), state.COMPLETE)
+        self.assertNotEqual(results.get("HE"), state.COMPLETE)
+        self.assertIn("issue_HD skipped — prerequisite(s) not ready (HU)", err.getvalue())
+        self.assertIn("issue_HE skipped — prerequisite(s) not ready (HD)", err.getvalue())
+        self.assertNotIn("STOPPING", err.getvalue())
+
+    def test_texts_not_ready_hold_the_bundle_though_an_earlier_record_survives(self) -> None:
+        # The other failure path: TU's publish texts fail draft/T4, so publish never runs
+        # for it this run — while an earlier attempt's publish.json (kept by an iterate) is
+        # still on disk. That record must not stand in for a publish: TU stays out of the
+        # fold, TD (on TU) is skipped naming it, and TJ (on TI) still builds.
+        self._brief("TU")
+        self._brief("TI")
+        self._brief("TD", depends_on="TU")
+        self._brief("TJ", depends_on="TI")
+        (self.cfg.bundle("TU") / "publish.json").write_text(json.dumps(
+            {"mode": "new-pr", "branch": "fix/TU", "base": "main",
+             "repo": self.TARGET[0]}), encoding="utf-8")
+        calls: list[dict] = []
+        with self._live(fold=self._spy_fold(calls), fail_texts=frozenset({"issue_TU"})), \
+                redirect_stderr(io.StringIO()) as err:
+            results = flow.flow_ids(self.cfg, ["TU", "TI", "TD", "TJ"], do_act=False,
+                                    today="2026-10-02")
+        self.assertEqual([c["accepted"] for c in calls], [["issue_TI"]])
+        self.assertEqual(results.get("TJ"), state.COMPLETE)
+        self.assertNotEqual(results.get("TD"), state.COMPLETE)
+        self.assertIn("issue_TU — publish texts not ready", err.getvalue())
+        self.assertIn("issue_TD skipped — prerequisite(s) not ready (TU)", err.getvalue())
+        self.assertNotIn("STOPPING", err.getvalue())
+
+    def test_a_patched_bundle_with_no_target_does_not_hold_its_dependents(self) -> None:
+        # NN publishes with rc 0 and no publish.json (no upstream contribution, the real
+        # publish path) and the REAL fold drops it — its dependent still builds.
+        self._brief("NN", target=False)
+        self._brief("NM", depends_on="NN")
+        with self._live(), redirect_stderr(io.StringIO()) as err:
+            results = flow.flow_ids(self.cfg, ["NN", "NM"], do_act=False,
+                                    today="2026-10-02")
+        self.assertEqual(results.get("NM"), state.COMPLETE, err.getvalue())
+        self.assertNotIn("issue_NM skipped", err.getvalue())
+
+    # -- end to end with the REAL fold against real git -----------------------------------
+    # The drive itself (Do/Check/sign-off) is replaced by accepting each bundle with a real
+    # patch (`_accept_wave`) and publish by pushing its branch the way `publish` does
+    # (`_push_branch`) — neither is what these cases test; the fold and the hold are.
+
+    def _real_origin(self) -> None:
+        """A bare ``origin`` that refuses non-fast-forwards, and the target checkout the
+        config maps ``example-org/example-repo`` to, with ``main`` pushed."""
+        self.origin, self.repo = self.tmp / "origin.git", self.tmp / "example-repo"
+        subprocess.run(["git", "init", "--bare", "-q", str(self.origin)], check=True)
+        subprocess.run(["git", "-C", str(self.origin), "config",
+                        "receive.denyNonFastForwards", "true"], check=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)], check=True)
+        self._git("config", "user.email", "t@example.com")
+        self._git("config", "user.name", "Tester")
+        self._git("config", "commit.gpgsign", "false")
+        (self.repo / "base.txt").write_text("base\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "base")
+        self._git("remote", "add", "origin", str(self.origin))
+        self._git("push", "-q", "origin", "main")
+        self.cfg.base_remote = "origin"
+        self.cut_from: dict[str, str] = {}
+
+    def _git(self, *args: str) -> str:
+        return subprocess.run(["git", "-C", str(self.repo), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def _accept_wave(self, cfg: Config, wave: list, **_kw) -> int:
+        for d in wave:
+            (d / "patch.diff").write_text(
+                f"diff --git a/{d.name}.txt b/{d.name}.txt\nnew file mode 100644\n"
+                f"--- /dev/null\n+++ b/{d.name}.txt\n@@ -0,0 +1 @@\n+{d.name}\n",
+                encoding="utf-8")
+            (d / "check-gates.json").write_text("{}", encoding="utf-8")
+            shutil.copyfile(TEMPLATES / "SUMMARY.md.tpl", d / "SUMMARY.md")
+            signoff.record(d / "SUMMARY.md", action="accept", by="T", date="2026-10-02")
+        return 1
+
+    def _push_branch(self, cfg: Config, d: Path) -> int:
+        stack = flow.publish.read_stack_base(d)
+        base = f"origin/{stack}" if stack else "origin/main"
+        self.cut_from[d.name] = base
+        branch = f"fix/{d.name}"
+        self._git("fetch", "-q", "origin")
+        self._git("checkout", "-q", "-B", branch, base)
+        self._git("apply", str(d / "patch.diff"))
+        self._git("add", "--all")
+        self._git("commit", "-q", "-s", "-m", f"fix {d.name}")
+        self._git("push", "-q", "--force-with-lease", "origin", branch)   # as publish does
+        self._git("checkout", "-q", "main")
+        (d / "publish.json").write_text(json.dumps(
+            {"mode": "stacked-pr" if stack else "new-pr", "branch": branch,
+             "base": "main", "repo": self.TARGET[0]}), encoding="utf-8")
+        return 0
+
+    def _earlier_attempt(self, iid: str) -> str:
+        """An earlier run published ``iid``: its branch is on origin and its record (with
+        its still-open PR) in the bundle, which an iterate keeps. Returns that commit. The
+        record's mtime is set back an hour, as an earlier run's would be, so the flow's
+        "written by this call?" check (#593) never hinges on the clock's resolution."""
+        branch = f"fix/issue_{iid}"
+        self._git("checkout", "-q", "-B", branch, "main")
+        (self.repo / f"{iid.lower()}-old.txt").write_text("rejected\n", encoding="utf-8")
+        self._git("add", "--all")
+        self._git("commit", "-q", "-s", "-m", f"fix issue_{iid} (earlier run, rejected)")
+        self._git("push", "-q", "origin", branch)
+        self._git("checkout", "-q", "main")
+        record = self.cfg.bundle(iid) / "publish.json"
+        record.write_text(json.dumps(
+            {"mode": "new-pr", "branch": branch, "pr_url": "https://example.test/pr/1",
+             "base": "main", "repo": self.TARGET[0]}), encoding="utf-8")
+        then = record.stat().st_mtime_ns - 3600 * 10**9
+        os.utime(record, ns=(then, then))
+        return self._origin_rev(branch)
+
+    def _origin_rev(self, ref: str) -> str:
+        return subprocess.run(["git", "-C", str(self.origin), "rev-parse", ref], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def _in_line(self, commit: str) -> bool:
+        return subprocess.run(["git", "-C", str(self.origin), "merge-base", "--is-ancestor",
+                               commit, "pdca-integration/main"]).returncode == 0
+
+    def _ancestor(self, commit: str, of: str) -> bool:
+        return subprocess.run(["git", "-C", str(self.origin), "merge-base", "--is-ancestor",
+                               commit, of]).returncode == 0
+
+    def _diff(self, base: str, head: str) -> list[str]:
+        """What the PR view shows: the three-dot diff of ``head`` against ``base``."""
+        return subprocess.run(["git", "-C", str(self.origin), "diff", "--name-only",
+                               f"{base}...{head}"], check=True, capture_output=True,
+                              text=True).stdout.split()
+
+    def _merge_into_main(self, branch: str) -> None:
+        """The maintainer merges ``branch``'s PR into main with a merge commit."""
+        self._git("fetch", "-q", "origin")
+        self._git("checkout", "-q", "-B", "main", "origin/main")
+        self._git("merge", "-q", "--no-ff", "--no-edit", f"origin/{branch}")
+        self._git("push", "-q", "origin", "main")
+
+    def _update_from_main(self, branch: str) -> None:
+        """GitHub's "Update branch": merge main into ``branch``."""
+        self._git("fetch", "-q", "origin")
+        self._git("checkout", "-q", "-B", branch, f"origin/{branch}")
+        self._git("merge", "-q", "--no-ff", "--no-edit", "origin/main")
+        self._git("push", "-q", "origin", branch)
+        self._git("checkout", "-q", "main")
+
+    def test_a_three_wave_run_folds_append_only_onto_a_real_origin(self) -> None:
+        # Origin refuses non-fast-forwards; the second fold must continue the line and carry
+        # both PR branches' own commits. A REBUILT line passes that too (fix/issue_EB
+        # descends from the old tip, so even a forced push fast-forwards), so also pin: EA
+        # is merged onto the line once, and only the first fold forces. Each fold commits at
+        # its own clock time, so a rebuilt merge commit cannot match the first by chance.
+        self._real_origin()
+        for iid, dep in (("EA", ""), ("EB", "EA"), ("EC", "EB")):
+            self._brief(iid, depends_on=dep)
+        pushes: list[list[str]] = []
+        real_fold, real_git = flow.integrate.fold, flow.integrate._git
+        clock = iter(range(1_790_000_000, 1_800_000_000, 60))
+
+        def dated_fold(cfg: Config, accepted: list, **kwargs):
+            stamp = f"@{next(clock)} +0000"
+            with mock.patch.dict(os.environ, {"GIT_AUTHOR_DATE": stamp,
+                                              "GIT_COMMITTER_DATE": stamp}):
+                return real_fold(cfg, accepted, **kwargs)
+
+        def spy_git(repo: Path, *args: str) -> int:
+            if args[:1] == ("push",):
+                pushes.append(list(args))
+            return real_git(repo, *args)
+
+        with self._live(publish_fn=self._push_branch), \
+                mock.patch.object(flow, "_drive_wave", self._accept_wave), \
+                mock.patch.object(flow.integrate, "fold", dated_fold), \
+                mock.patch.object(flow.integrate, "_git", spy_git), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+            results = flow.flow_ids(self.cfg, ["EA", "EB", "EC"], do_act=False,
+                                    today="2026-10-02")
+        self.assertNotIn("STOPPING", err.getvalue())
+        self.assertEqual(results, {"EA": state.COMPLETE, "EB": state.COMPLETE,
+                                   "EC": state.COMPLETE})
+        self.assertEqual(self.cut_from["issue_EB"], "origin/pdca-integration/main")
+        self.assertTrue(self._in_line(self._origin_rev("fix/issue_EA")))   # A's own commit
+        self.assertTrue(self._in_line(self._origin_rev("fix/issue_EB")))   # B's own commit
+        # B was cut from the first fold's tip, and that tip is still in the line.
+        self.assertTrue(self._in_line(self._origin_rev("fix/issue_EB~1")))
+        merges = subprocess.run(
+            ["git", "-C", str(self.origin), "log", "--merges", "--format=%s",
+             "pdca-integration/main"], check=True, capture_output=True,
+            text=True).stdout.splitlines()
+        self.assertEqual(merges.count("pdca-integrate: issue_EA"), 1, merges)
+        self.assertEqual(len(pushes), 2, pushes)            # a fold after waves 0 and 1
+        self.assertIn("--force", pushes[0])                 # the run's first fold only
+        self.assertEqual([x for x in pushes[1] if x.startswith("--force")], [], pushes[1])
+
+    def test_a_dependent_carries_every_earlier_wave_branch_not_only_its_prerequisite(
+            self) -> None:
+        # Wave 0 = {ZA, ZZ}; ZB depends on ZA alone, yet carries ZZ too (the line holds every
+        # published branch) and shows its change until ZZ merges. Once both merge, the fold
+        # commit joining them never reaches main: two merge bases, until "Update branch".
+        self._real_origin()
+        self._brief("ZA")
+        self._brief("ZZ")
+        self._brief("ZB", depends_on="ZA")
+        with self._live(publish_fn=self._push_branch), \
+                mock.patch.object(flow, "_drive_wave", self._accept_wave), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+            results = flow.flow_ids(self.cfg, ["ZA", "ZZ", "ZB"], do_act=False,
+                                    today="2026-10-02")
+        self.assertEqual(results, {"ZA": state.COMPLETE, "ZZ": state.COMPLETE,
+                                   "ZB": state.COMPLETE}, err.getvalue())
+        self.assertEqual(self.cut_from["issue_ZB"], "origin/pdca-integration/main")
+        za, zz = self._origin_rev("fix/issue_ZA"), self._origin_rev("fix/issue_ZZ")
+        self.assertTrue(self._ancestor(za, "fix/issue_ZB"))
+        self.assertTrue(self._ancestor(zz, "fix/issue_ZB"))   # though ZB never named ZZ
+        self.assertEqual(self._diff("main", "fix/issue_ZB"),
+                         ["issue_ZA.txt", "issue_ZB.txt", "issue_ZZ.txt"])
+        self._merge_into_main("fix/issue_ZA")
+        self.assertEqual(self._diff("main", "fix/issue_ZB"),
+                         ["issue_ZB.txt", "issue_ZZ.txt"])     # ZZ rides until it merges
+        self._merge_into_main("fix/issue_ZZ")
+        bases = subprocess.run(
+            ["git", "-C", str(self.origin), "merge-base", "--all", "main", "fix/issue_ZB"],
+            check=True, capture_output=True, text=True).stdout.split()
+        self.assertEqual(sorted(bases), sorted([za, zz]))
+        self._update_from_main("fix/issue_ZB")
+        self.assertEqual(self._diff("main", "fix/issue_ZB"), ["issue_ZB.txt"])
+
+    def test_a_failed_re_publish_is_held_though_an_earlier_record_survives(self) -> None:
+        # publish.json survives an iterate. RP was published by an EARLIER run — its old
+        # branch is on origin, its record still in the bundle — then iterated, rebuilt and
+        # accepted again in THIS run, and its re-publish FAILS. The old record must not
+        # stand in for this run's publish: RP is held, so the old, rejected branch never
+        # enters the line, RD (on RP) is skipped naming it, and RJ (on RI) still builds —
+        # the run goes on, no STOP.
+        self._real_origin()
+        for iid, dep in (("RP", ""), ("RI", ""), ("RD", "RP"), ("RJ", "RI")):
+            self._brief(iid, depends_on=dep)
+        old = self._earlier_attempt("RP")
+        with self._live(publish_fn=self._push_branch, fail_publish=frozenset({"RP"})), \
+                mock.patch.object(flow, "_drive_wave", self._accept_wave), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+            results = flow.flow_ids(self.cfg, ["RP", "RI", "RD", "RJ"], do_act=False,
+                                    today="2026-10-03")
+        log = err.getvalue()
+        self.assertNotIn("STOPPING", log)
+        self.assertEqual(results.get("RJ"), state.COMPLETE, log)
+        self.assertNotEqual(results.get("RD"), state.COMPLETE)
+        self.assertIn("issue_RD skipped — prerequisite(s) not ready (RP)", log)
+        self.assertEqual(self._origin_rev("fix/issue_RP"), old)   # nothing re-pushed it
+        self.assertTrue(self._in_line(self._origin_rev("fix/issue_RI")))
+        self.assertFalse(self._in_line(old), "the old, rejected branch was folded")
+
+    def test_a_re_publish_whose_pr_create_failed_is_folded_and_its_dependents_build(
+            self) -> None:
+        # What the hold must NOT catch: PP's re-publish pushed its rebuilt branch and wrote a
+        # fresh publish.json, then `gh pr create` failed (rc 1) because PP's old draft PR is
+        # still open. A branch WAS pushed this run, so it is folded — the new commit, never
+        # the earlier attempt's — and PD (on PP) builds.
+        self._real_origin()
+        subprocess.run(["git", "-C", str(self.origin), "config",   # the re-push is forced
+                        "receive.denyNonFastForwards", "false"], check=True)
+        for iid, dep in (("PP", ""), ("PD", "PP")):
+            self._brief(iid, depends_on=dep)
+        old = self._earlier_attempt("PP")
+
+        def pr_create_fails(cfg: Config, d: Path) -> int:
+            self._push_branch(cfg, d)                 # pushed, record written …
+            return 1 if d.name == "issue_PP" else 0   # … then `gh pr create` failed
+
+        with self._live(publish_fn=pr_create_fails), \
+                mock.patch.object(flow, "_drive_wave", self._accept_wave), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+            results = flow.flow_ids(self.cfg, ["PP", "PD"], do_act=False, today="2026-10-03")
+        log = err.getvalue()
+        self.assertNotIn("STOPPING", log)
+        self.assertEqual(results.get("PD"), state.COMPLETE, log)
+        new = self._origin_rev("fix/issue_PP")
+        self.assertNotEqual(new, old)
+        self.assertTrue(self._in_line(new), "this run's pushed branch was not folded")
+        self.assertFalse(self._in_line(old), "the old, rejected branch was folded")
+
+    def test_a_held_bundle_published_later_is_cut_from_the_line_it_was_built_on(
+            self) -> None:
+        # Waves {LA} → {LU, LJ} → {LK} → {LL}. LU's publish fails, so it is held while the
+        # run folds LJ and then LK onto the line. Publishing LU afterwards (what the flow
+        # tells the human to do) must cut its PR branch from the line commit LU was built
+        # on: cut from the line as later waves left it, its PR against main would carry
+        # LJ's and LK's work, and merging it would land them unreviewed.
+        self._real_origin()
+        for iid, dep in (("LA", ""), ("LU", "LA"), ("LJ", "LA"), ("LK", "LJ"), ("LL", "LK")):
+            self._brief(iid, depends_on=dep)
+        with self._live(publish_fn=self._push_branch, fail_publish=frozenset({"LU"})), \
+                mock.patch.object(flow, "_drive_wave", self._accept_wave), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+            results = flow.flow_ids(self.cfg, ["LA", "LU", "LJ", "LK", "LL"], do_act=False,
+                                    today="2026-10-03")
+        self.assertNotIn("STOPPING", err.getvalue())
+        self.assertEqual(results.get("LL"), state.COMPLETE, err.getvalue())
+        lk = self._origin_rev("fix/issue_LK")
+        self.assertTrue(self._in_line(lk))                   # the line grew past LU's wave
+        u = self.cfg.bundle("LU")
+        for name in ("commit-msg.txt", "pr-description.md"):
+            (u / name).write_text("Fix LU\n\nFixes #1\n", encoding="utf-8")
+        with mock.patch.object(flow.publish, "_warn_if_squash_only"), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            rc = flow.publish.publish(self.cfg, "LU", open_pr=False, by="T",
+                                      today="2026-10-03")
+        self.assertEqual(rc, 0)
+        branch = json.loads((u / "publish.json").read_text(encoding="utf-8"))["branch"]
+        self.assertFalse(self._ancestor(lk, branch), "LU's PR branch carries LK")
+        self.assertEqual(self._diff("main", branch), ["issue_LA.txt", "issue_LU.txt"])
 
 
 class ProgName(unittest.TestCase):

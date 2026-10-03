@@ -283,14 +283,17 @@ status: active
   prerequisite is a **hard error rejected before any build** ([09](09-parallel-lanes.md)).
 - **`Depends on (merged)` / `Stacks on`** — *deprecated, still parsed*; both fold into a plain
   `Depends on` edge. Author `Depends on` ([09](09-parallel-lanes.md)).
-- **Integration branch** — the run-scoped branch a wave's accepted patches are folded onto so
-  the next wave builds on them within one run (one per `(repo, base)` target); carries the diff
-  forward with **no merge by the harness** ([09](09-parallel-lanes.md)).
+- **Integration branch** — the run-scoped branch a wave's published PR branches are merged onto
+  so the next wave builds on them within one run (one per `(repo, base)` target); it carries the
+  PRs' own commits, only grows within a run, and is never merged into the target — **nothing is
+  merged into the target by the harness** ([09](09-parallel-lanes.md)).
 - **wave_mode (`stack` / `merge`)** — how a wave's work reaches the next base (`[driver].wave_mode`):
   **`stack`** (default, fork-safe) folds onto a push-only integration branch and cuts each
-  dependent off it — an own-repo PR is a clean increment-only **stacked PR** `--base`d on the
-  branch, a fork PR opens against the upstream base carrying the *cumulative* diff; in stack
-  mode the harness **never merges** (you merge the PR stack bottom-up). **`merge`** (own-repo /
+  dependent off it; every PR, own-repo or fork, targets the real base. A later wave's PR carries
+  every earlier-wave branch on the line, not only its prerequisites', and shows their changes
+  until they merge (and, unless the line is a plain chain, until its branch is also updated from
+  the base — see [09](09-parallel-lanes.md)). In stack mode the harness **never merges** (you merge
+  the PR stack bottom-up with a merge commit, not squash or rebase). **`merge`** (own-repo /
   CD only, needs merge rights) instead **`gh pr merge`s each non-final wave** so the next wave
   builds on the genuinely-merged base ([09](09-parallel-lanes.md)).
 - **Overlap audit** — a post-Do check flagging two same-wave bundles whose patches touch a

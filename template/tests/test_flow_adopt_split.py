@@ -265,9 +265,9 @@ class AdoptSplitChildren(unittest.TestCase):
                 self.after_wave()      # fault injection BETWEEN the wave and adoption
             return used
 
-        def spy_point(integ, runnable: list[Path]) -> None:
+        def spy_point(integ, runnable: list[Path], *args) -> None:   # + the line tips (#593)
             self.pointed.append([d.name for d in runnable])
-            return real_point(integ, runnable)
+            return real_point(integ, runnable, *args)
 
         flow._build_all = counting
         flow._drive_wave = spy_wave
@@ -375,10 +375,9 @@ class AdoptSplitChildren(unittest.TestCase):
         folds: list[list[str]] = []
         real_fold = flow.integrate.fold
 
-        def spy_fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
-                     locks=None):
+        def spy_fold(cfg: Config, accepted: list[Path], **kwargs):  # dry_run, locks, …
             folds.append([d.name for d in accepted])
-            return real_fold(cfg, accepted, dry_run=dry_run, locks=locks)
+            return real_fold(cfg, accepted, **kwargs)
 
         flow.integrate.fold = spy_fold
         self.addCleanup(setattr, flow.integrate, "fold", real_fold)

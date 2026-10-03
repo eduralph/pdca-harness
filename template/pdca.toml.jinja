@@ -112,11 +112,15 @@ overflow = 0
 # them as an ordered sequence of dependency waves (computed from each brief's `Depends on`
 # / `Conflicts with`): a wave's bundles build in parallel, then its accepted work reaches
 # the NEXT wave's base one of two ways.
-#   wave_mode = "stack"  (default) — fold each wave's accepted patches onto a run-scoped
-#       integration branch the next wave builds on, and open each PR as a stacked PR. This
-#       is PUSH-ONLY (a fork has push), keeps the STOP discipline (the harness never merges;
-#       you merge the PR stack bottom-up with a merge commit, not squash), and completes a
-#       dependent batch in one run. The fork-safe default.
+#   wave_mode = "stack"  (default) — merge each wave's accepted, published PR branches onto a
+#       run-scoped integration branch the next wave builds on; every PR targets the real
+#       base. This is PUSH-ONLY (a fork has push), keeps the STOP discipline (the harness
+#       never merges into your target; you merge the PR stack bottom-up with a merge commit,
+#       not squash or rebase), and completes a dependent batch in one run. Within a run the
+#       line only grows: the first fold force-pushes it fresh off the base (if origin refuses
+#       force-pushes, delete the old pdca-integration/<base> or allow force-pushes on
+#       pdca-integration/*), later folds push without force. A bundle whose publish pushed
+#       no branch holds only its dependents. The fork-safe default.
 #   wave_mode = "merge"  (own-repo / continuous-delivery ONLY) — `gh pr merge` each
 #       non-final wave's PRs so the next wave builds on the genuinely-merged base. Needs
 #       MERGE RIGHTS on the base remote (a fork contributor lacks them upstream — keep
@@ -173,8 +177,9 @@ act_cadence = 5
 # mid-`cargo test` — an environment fault misattributed to the patch.
 #   "clean"  (default) — strip lane worktrees of build state (`git clean -fdxq` +
 #            `reset --hard`; the bulk of the footprint) but keep the checkouts warm;
-#            remove integration + overflow trees outright (folds rebuild from the base
-#            every call, so their reuse value is nil).
+#            remove integration + overflow trees outright (each fold resets its tree to a
+#            freshly fetched ref — the base, or the run's pushed tip — so their reuse value
+#            is nil).
 #   "remove" — remove lane worktrees too (Do / `{{ cli_name }} try` recreate them on demand).
 #   "off"    — never sweep automatically; `{{ cli_name }} sweep` still reclaims on demand.
 sweep_worktrees = "clean"
