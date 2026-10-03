@@ -975,6 +975,96 @@ def _is_split_parent(d: Path) -> bool:
         return False
 
 
+def _has_plan_artifact(cfg: Config, d: Path) -> bool:
+    """True iff ``d`` may enter this run's drive set: it has a ``brief.md`` — or is given one
+    here, when it is a split parent a pre-#481 ``split --accept`` left without one (#597).
+
+    The flow never drives a bundle with no Plan artifact: Do, Check, sign-off and publish
+    all read the brief, and the first read (``_point_at_integration`` →
+    ``publish._resolve_target``) raised ``FileNotFoundError`` out of the whole run. The
+    intake filters only ever asked "UNPLANNED?", and a briefless bundle carrying a close
+    marker or a ``patch.diff`` is past Do by :func:`state.state`'s own contract (#481), so
+    it slipped through as BUILT. Called by every intake path — :func:`flow_ids`,
+    :func:`flow_batch`'s sweep and :func:`_adopt_split_children` — and only AFTER the run
+    holds the bundle's claim (#565), so a bundle another live run drives is never written.
+
+    * A bundle with its own ``brief.md`` is never opened, let alone rewritten.
+    * A split parent with none gets exactly what ``split --accept`` writes since #481
+      (``split.py:937-939``): :func:`split._parent_plan` over its iterate-to-Plan archive,
+      rendered by :func:`split._split_parent_brief` with the lineage record's children as
+      bundle names, in record order. Reused, never re-implemented, so the two cannot drift.
+    * Everything else — no usable archive, no usable children record, a briefless bundle
+      that is not a split parent, a write that fails — is named on stderr with what to do,
+      and kept out of the run. Never raises.
+    """
+    if (d / "brief.md").exists():
+        return True
+    iid = d.name.removeprefix("issue_")
+    try:
+        marker = (d / state.CLOSE_MARKER).read_text(encoding="utf-8").strip()
+    except Exception:  # noqa: BLE001 — absent or unreadable: not a split parent
+        marker = ""
+    if marker != SPLIT_DISPOSITION:
+        print(f"flow: {d.name} — no brief.md, NOT driven: it is past Do (a close marker or "
+              f"patch.diff) with no Plan artifact, and a bundle is never driven without one. "
+              f"Restore {d.name}/brief.md (an iterate-to-Plan archives it as "
+              f"iteration-v<N>/brief.md), then `pdca flow {iid}`", file=sys.stderr)
+        return False
+    try:
+        plan = split._parent_plan(d, cfg)
+    except Exception as exc:  # noqa: BLE001 — skips this bundle, never the run
+        # A SplitError is worded for `split --accept`: its reason, then "— refusing to
+        # split" and that command's own retry. Only the reason belongs in a flow run; the
+        # one remedy is the flow's.
+        why = (str(exc).partition(" — refusing to split")[0]
+               if isinstance(exc, split.SplitError) else f"{type(exc).__name__}: {exc}")
+        print(f"flow: {d.name} — split parent NOT driven: {why}. Write {d.name}/brief.md "
+              f"(slug, success criterion, repo + branch target), then `pdca flow {iid}`",
+              file=sys.stderr)
+        return False
+    if plan is None:
+        # `_parent_plan`'s "it has its own brief.md" (split.py:805-806): written since the
+        # check at the top, by a writer the claim does not fence (drive_claim.py:42-46).
+        return True
+    children = _lineage_children(split.read_lineage(d) or {})
+    if not children:
+        print(f"flow: {d.name} — split parent with no brief.md, NOT driven: its "
+              f"{split.LINEAGE} is missing, unreadable or names no children, so the brief "
+              f"`split --accept` writes (which lists them) cannot be rebuilt. Write "
+              f"{d.name}/brief.md (slug, success criterion, repo + branch target), then "
+              f"`pdca flow {iid}`", file=sys.stderr)
+        return False
+    text = split._split_parent_brief(d, plan, [cfg.bundle(c).name for c in children])
+    tmp = d / ".brief.md.rebuild"
+    try:
+        # Whole or not at all: a half-written brief.md would read as the bundle's OWN brief
+        # on the next run, and is never rewritten again.
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(d / "brief.md")
+    except Exception as exc:  # noqa: BLE001 — a failed write skips this bundle, never the run
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        print(f"flow: {d.name} — split parent with no brief.md, NOT driven: rebuilding it "
+              f"from {plan[0]} failed ({exc}). Write {d.name}/brief.md, then "
+              f"`pdca flow {iid}`", file=sys.stderr)
+        return False
+    print(f"flow: {d.name} — split parent had no brief.md (its split was accepted before "
+          f"#481); rebuilt it from {plan[0]}, as `pdca split --accept` writes it",
+          file=sys.stderr)
+    return True
+
+
+def _admit(cfg: Config, d: Path, claims: drive_claim.Run | None) -> bool:
+    """:func:`_has_plan_artifact` for one intake path, letting go of the claim on a bundle
+    it keeps out — this run will not drive it, so the ``pdca flow <id>`` it was told to run
+    must not be refused by this very run (#565)."""
+    if _has_plan_artifact(cfg, d):
+        return True
+    if claims is not None:
+        claims.release(d)
+    return False
+
+
 def _adoptable(cfg: Config, parent: Path, *, known: set[str],
                refused: list[tuple[str, str, str]]) -> tuple[list[Path], list[Path]]:
     """The children of ``parent`` this run can drive, and the ones to WALK THROUGH —
@@ -1313,6 +1403,8 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
             # Claimed only now, once `_adoptable` has vouched for each child (#565): a
             # child this run may not drive is named here and left out of `taken`.
             kids = [c for c in kids if not _refused_child(claims, parent, c)]
+        # Only now, with the claim held: a child adopted into the run has a brief (#597).
+        kids = [c for c in kids if _admit(cfg, c, claims)]
         to_examine += onward      # a generation that already closed is walked THROUGH
         if kids:
             taken |= {c.name for c in kids}
@@ -1942,6 +2034,14 @@ def flow_batch(
                 print("flow: nothing to drive — this run could not claim any in-flight "
                       "bundle (each is named above).", file=sys.stderr)
                 return {}
+        # After the claim, never in the state filter above (#565): a briefless bundle past Do
+        # is given its brief or named and left out — never written while another run holds
+        # it, and never driven without one (#597).
+        bundles = [d for d in bundles if _admit(cfg, d, claims)]
+        if not bundles:
+            print("flow: nothing to drive — no in-flight bundle has a brief.md (each is "
+                  "named above).", file=sys.stderr)
+            return {}
         # Resume tolerance (#191): the sweep pulls in EVERY in-flight bundle, so a stale /
         # misconfigured `Depends on` in an unrelated leftover must not abort the whole run.
         # Hold (skip this run, leave in-flight) any bundle with an unresolvable dependency or
@@ -2099,6 +2199,11 @@ def flow_ids(
                       "command is only needed for whatever cannot be adopted, which is "
                       "named below.", file=sys.stderr)
                 seeds.append(d)
+            continue
+        if not _admit(cfg, d, claims):
+            # Past Do with no brief.md and none to rebuild (#597): named by `_admit`, and
+            # still answered for in the map (#468), so the run cannot exit 0 over it.
+            skipped[iid] = s
             continue
         bundles.append(d)
     if not bundles and not seeds:
