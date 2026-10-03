@@ -36,7 +36,12 @@ seconds between create and ready_for_review), so the FIRST rollup read above is 
 ``_wait_for_green`` re-reads the rollup until it resolves or ``[driver].merge_wait_secs``
 (default 300; ``0`` disables the wait — the original immediate-refusal behaviour) of
 wall-clock time elapses, through the patchable ``_sleep`` below so a test costs no real
-time. Whichever way ``_merge_one`` declines to merge a PR it already readied — the rollup
+time. A ``green`` read is confirmed once before it is believed (issue #582): the rollup
+lists only the checks registered so far, so a fast check that passed can read green while
+a slow job has not reported yet. The wait re-reads one full poll interval later and merges
+only if that read is green too; a green seen with less than a poll interval of budget left
+to confirm it refuses as pending.
+Whichever way ``_merge_one`` declines to merge a PR it already readied — the rollup
 never resolving green, a failing ``gh pr merge`` — ``_undo_ready`` marks it back to draft
 (``gh pr ready --undo``) before returning, so a stopped wave never leaves a PR advertising
 a readiness no human granted (``docs/INTEGRATION.md`` §10).
@@ -143,21 +148,49 @@ def _names(checks: list) -> str:
 def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15) -> tuple[str, str]:
     """Re-read ``pr_url``'s check rollup (``_check_rollup``) until it clears ``pending``/
     ``empty`` or ``wait_secs`` of (patchable) wall-clock time is exhausted (issue #462).
-    Returns the final ``(verdict, detail)`` unchanged — this never itself decides to merge.
+    Returns the final ``(verdict, detail)`` — this never itself decides to merge.
 
-    ``wait_secs <= 0`` performs exactly one read and returns immediately: the original
-    behaviour, for a host whose checks are known to already be in by the time the wave
-    boundary fires. Sleeps go through the module-level ``_sleep`` so a test can make the
-    whole loop cost no real time.
+    A ``green`` read is not believed on its own (issue #582): seconds after a PR opens, the
+    rollup lists only the checks registered SO FAR, so one fast check that already passed
+    reads as ``green`` while a slow job has not created its check run yet. A green is
+    therefore re-read once more, one full poll interval later (charged to ``wait_secs``),
+    and returned only if that read is ``green`` too. A confirm that reads ``pending``/
+    ``empty`` goes back into the wait; ``failing``/``unreadable`` is returned at once. The
+    confirm is never shortened to fit the budget: a green first seen with less than one
+    poll interval of budget left is returned as ``pending`` (fail-closed), with a detail
+    that says so — so a ``wait_secs`` below ``poll_interval`` never returns ``green``. This
+    compares verdicts only, not check names: a slow job that has not registered within one
+    poll interval still gets through.
+
+    ``wait_secs <= 0`` performs exactly one read and returns its verdict as-is: the
+    original behaviour, for a host whose checks are known to already be in by the time the
+    wave boundary fires. Sleeps go through the module-level ``_sleep`` so a test can make
+    the whole loop cost no real time; their sum never exceeds ``wait_secs``.
     """
     verdict, detail = _check_rollup(pr_url)
+    if wait_secs <= 0:
+        return verdict, detail
     waited = 0
-    while verdict in ("pending", "empty") and waited < wait_secs:
-        step = min(poll_interval, wait_secs - waited)
-        _sleep(step)
-        waited += step
+    while True:
+        while verdict in ("pending", "empty") and waited < wait_secs:
+            step = min(poll_interval, wait_secs - waited)
+            _sleep(step)
+            waited += step
+            verdict, detail = _check_rollup(pr_url)
+        if verdict != "green":
+            return verdict, detail
+        # Confirm a full poll interval later or not at all: a re-read squeezed into what is
+        # left of the budget is too soon to show a slow job registering, and overrunning
+        # the budget would break its bound — so refuse the green as unconfirmed instead.
+        left = wait_secs - waited
+        if left < poll_interval:
+            return "pending", (f"green first seen with {left}s of wait budget left, too "
+                               f"little to confirm it {poll_interval}s later ({detail})")
+        _sleep(poll_interval)
+        waited += poll_interval
         verdict, detail = _check_rollup(pr_url)
-    return verdict, detail
+        if verdict == "green":
+            return verdict, detail
 
 
 def _undo_ready(pr_url: str) -> None:
