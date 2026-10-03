@@ -48,12 +48,27 @@ def declared_deps(bp: Path) -> list[str]:
     return brief.depends_on(bp) + brief.depends_on_merged(bp) + brief.stacks_on(bp)
 
 
+class DependencyGraphError(ValueError):
+    """The declared dependency graph is unschedulable — operator input, not a crash (#589).
+
+    Still a ``ValueError``, so every caller that already expects one keeps working; the
+    distinct type lets ``pdca flow`` turn exactly THIS refusal into a short message and
+    rc 2 without swallowing any other ``ValueError``. ``remedy`` is the one-line "ways out"
+    the CLI prints under the message.
+    """
+
+    def __init__(self, message: str, remedy: str) -> None:
+        super().__init__(message)
+        self.remedy = remedy
+
+
 def check_dep_graph(cfg: Config, bundles: list[Path]) -> None:
     """Validate the declared dependency DAG before any build (issue #36).
 
     A dependency that is neither in this batch nor an already-COMPLETE bundle on disk
-    is a misconfigured brief; a cycle is unschedulable. Both raise ``ValueError`` so the
-    run aborts before touching any bundle. No deps declared ⇒ no-op.
+    is a misconfigured brief; a cycle is unschedulable. Both raise
+    :class:`DependencyGraphError` (a ``ValueError``) so the run aborts before touching any
+    bundle. No deps declared ⇒ no-op.
     """
     names = {b.name for b in bundles}
     graph: dict[str, list[str]] = {}
@@ -75,9 +90,12 @@ def check_dep_graph(cfg: Config, bundles: list[Path]) -> None:
             # Stacks on against bundle() (an archived-only stack parent stays rejected).
             resolved = cfg.bundle(dep) if dep in stacks else cfg.find_bundle(dep)
             if state.state(resolved) != state.COMPLETE:
-                raise ValueError(
+                raise DependencyGraphError(
                     f"{b.name}: declared dependency '{dep}' is neither in this batch "
-                    f"nor an existing COMPLETE bundle")
+                    f"nor an existing COMPLETE bundle",
+                    remedy=f"add {dep} to this run's ids; or, if it landed outside the "
+                           f"cycle, drop the edge from {b.name}'s brief; or finish {dep} "
+                           f"first")
         graph[b.name] = edges
 
     WHITE, GRAY, BLACK = 0, 1, 2
@@ -90,7 +108,10 @@ def check_dep_graph(cfg: Config, bundles: list[Path]) -> None:
         for m in graph[n]:
             if color[m] == GRAY:
                 cyc = path[path.index(m):] + [m]
-                raise ValueError("dependency cycle: " + " → ".join(cyc))
+                raise DependencyGraphError(
+                    "dependency cycle: " + " → ".join(cyc),
+                    remedy="drop one edge of the cycle from its brief (`Depends on` / "
+                           "`Depends on (merged)` / `Stacks on`)")
             if color[m] == WHITE:
                 visit(m)
         path.pop()
@@ -142,9 +163,10 @@ def compute_waves(cfg: Config, bundles: list[Path]) -> list[list[Path]]:
 
     ``wave[k]`` holds the bundles whose every prerequisite is in an earlier wave; within
     a wave there is no dependency *and* no conflict edge, so it builds in parallel and
-    folds onto the integration branch in one step. Raises ``ValueError`` (via
-    :func:`check_dep_graph`) on an unschedulable graph — a cycle, or a dependency neither
-    in this batch nor already COMPLETE. No fields declared ⇒ one wave, sort-by-name.
+    folds onto the integration branch in one step. Raises :class:`DependencyGraphError`
+    (a ``ValueError``, via :func:`check_dep_graph`) on an unschedulable graph — a cycle,
+    or a dependency neither in this batch nor already COMPLETE. No fields declared ⇒ one
+    wave, sort-by-name.
     """
     check_dep_graph(cfg, bundles)  # cycle / unresolved dep → ValueError, before any work
     by_name = {b.name: b for b in bundles}

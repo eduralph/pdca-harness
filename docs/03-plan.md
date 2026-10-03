@@ -101,8 +101,9 @@ shape and the driver schedules it. Optional brief fields, set at Plan:
 
 Declaring the constraints is a Plan judgment — the planner sets them from the batch's real
 dependency/conflict structure; an unschedulable graph (a cycle, or a dep that is neither in
-the batch nor already COMPLETE) is rejected up front. `pdca waves <ids…>` prints the
-computed wave plan without building.
+the batch nor already COMPLETE) is rejected up front — `pdca flow` exits 2 before building
+anything, naming the bundle and the dependency (or the cycle) and the ways out.
+`pdca waves <ids…>` prints the computed wave plan without building.
 
 ### What a real brief looks like
 
