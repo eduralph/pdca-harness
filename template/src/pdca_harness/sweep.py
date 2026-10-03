@@ -15,8 +15,8 @@ after a run's waves complete, when nothing reuses the trees) and on demand via
 
 * ``"clean"`` (default) — lane worktrees are kept as warm checkouts but stripped of
   build state (``git clean -fdxq`` + ``reset --hard``, the bulk of the footprint);
-  integration and overflow trees are removed outright (folds rebuild from the base
-  every call, so their reuse value is nil).
+  integration and overflow trees are removed outright (each fold resets its tree to a
+  freshly fetched ref — the base, or the run's pushed tip — so their reuse value is nil).
 * ``"remove"`` — lane worktrees are removed too (Do/``pdca try`` recreate on demand).
 * ``"off"`` — the flow never sweeps; ``pdca sweep`` still works (explicit mode).
 

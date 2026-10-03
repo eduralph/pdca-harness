@@ -1,6 +1,6 @@
 """Slice for integration-branch stacking (`integrate.fold`) — the default wave
-sequencing that folds each wave's accepted patches onto a run-scoped branch the next
-wave builds on, without merging (#wave-model).
+sequencing that folds each wave's accepted, published branches onto a run-scoped branch
+the next wave builds on, without merging anything into the target (#wave-model, #593).
 
 Two halves: pure/dry-run cases (no git — naming, nothing-to-fold, dry-run shells
 nothing, different-target exclusion) and real-git folds against a bare ``origin`` +
@@ -12,6 +12,7 @@ a primary checkout (a clean fold pushes the branch; an undeclared overlap raises
 from __future__ import annotations
 
 import io
+import json
 import shutil
 import subprocess
 import tempfile
@@ -156,7 +157,24 @@ class FoldGit(unittest.TestCase):
             f"- **Slug:** {iid.lower()}\n- **Repo + branch target:** org/repo @ main\n",
             encoding="utf-8")
         (d / "patch.diff").write_text(patch, encoding="utf-8")
+        self._publish(d)
         return d
+
+    def _publish(self, d: Path, base: str = "main") -> None:
+        """What publish does for the bundle (#593: the fold merges the PUBLISHED branch):
+        cut its branch off origin/<base>, commit its patch.diff signed off, push it to
+        origin, and record it in publish.json."""
+        branch = f"fix/{d.name.removeprefix('issue_')}"
+        self._git(self.primary, "fetch", "-q", "origin")
+        self._git(self.primary, "checkout", "-q", "-B", branch, f"origin/{base}")
+        self._git(self.primary, "apply", str(d / "patch.diff"))
+        self._git(self.primary, "add", "--all")
+        self._git(self.primary, "commit", "-q", "-s", "-m", f"fix {d.name}")
+        self._git(self.primary, "push", "-q", "origin", branch)
+        self._git(self.primary, "checkout", "-q", "main")
+        (d / "publish.json").write_text(json.dumps(
+            {"mode": "new-pr", "branch": branch, "base": base, "repo": "org/repo"}),
+            encoding="utf-8")
 
     def _pushed(self, branch: str) -> bool:
         out = subprocess.run(
@@ -174,9 +192,8 @@ class FoldGit(unittest.TestCase):
         self.assertTrue(self._pushed("pdca-integration/main"))
 
     def test_fold_commits_carry_a_dco_signoff(self) -> None:
-        # #405: the integration branch is rebuilt each fold, so a stacked PR cut from an
-        # earlier fold carries these commits outside the base's ancestry — where a
-        # DCO-gated host inspects them. Sign them like publish does (#81).
+        # #405: every later wave's PR carries the fold's merge commits outside the base's
+        # ancestry — where a DCO-gated host inspects them. Sign them like publish does (#81).
         b = self._bundle("S1", self._modify_patch("one\n"))
         _, wt = integrate.fold(self.cfg, [b])[("org/repo", "main")]
         trailer = subprocess.run(
@@ -207,7 +224,7 @@ class FoldGit(unittest.TestCase):
             yield False
 
         with mock.patch.object(integrate, "integ_lock", unheld):
-            with self.assertRaises(integrate.IntegrationError):
+            with self.assertRaisesRegex(integrate.IntegrationError, "integration lock"):
                 integrate.fold(self.cfg, [b])
         self.assertFalse(self._pushed("pdca-integration/main"))  # nothing left origin
 
@@ -228,6 +245,7 @@ class FoldGit(unittest.TestCase):
             encoding="utf-8")
         (b_aa / "patch.diff").write_text(self._add_patch("f2.txt", "hi\n"),
                                          encoding="utf-8")
+        self._publish(b_aa, base="aa")
         order: list[str] = []
         real_lock = integrate.integ_lock
 
@@ -272,13 +290,14 @@ class FoldGit(unittest.TestCase):
                 gates.run_integration(self.cfg, self.primary)
 
     def test_overlap_raises_integration_error(self) -> None:
-        # Two patches that each rewrite base.txt's only line — the second can't apply onto
-        # the first, an undeclared cross-wave overlap → a loud STOP.
+        # Two branches that each rewrite base.txt's only line — the second can't merge onto
+        # the first, an undeclared cross-wave overlap → a loud STOP, nothing pushed.
         b1 = self._bundle("C1", self._modify_patch("one\n"))
         b2 = self._bundle("C2", self._modify_patch("two\n"))
         with redirect_stderr(io.StringIO()):
-            with self.assertRaises(integrate.IntegrationError):
+            with self.assertRaisesRegex(integrate.IntegrationError, "does not merge cleanly"):
                 integrate.fold(self.cfg, [b1, b2])
+        self.assertFalse(self._pushed("pdca-integration/main"))   # the line left as it was
 
 
 class PointAtIntegration(unittest.TestCase):

@@ -639,12 +639,39 @@ does with that declaration once a batch actually runs: bundles in the same wave
 build in parallel; each wave's *accepted* result then becomes the base the next
 wave builds on, via `[driver].wave_mode`:
 
-- **`"stack"`** (default, fork-safe) — folds each wave's accepted patches onto a
-  run-scoped integration branch the next wave builds on, and opens every PR as a
-  stacked PR. Push-only, so it works from a fork with no merge rights, and it
-  keeps STOP discipline — the harness never merges anything; you merge the PR
-  stack bottom-up with a merge commit (never squash, or the stack's history
-  breaks).
+- **`"stack"`** (default, fork-safe) — merges each wave's accepted, published PR
+  branches onto a run-scoped integration branch the next wave builds on, and
+  opens every PR against the real base. Push-only, so it works from a fork with
+  no merge rights, and it keeps STOP discipline — the harness never merges
+  anything into your target; you merge the PR stack bottom-up with a merge commit
+  (never squash or rebase: they put a change on the base as new commits, not the
+  ones its dependents carry). The fold puts every published branch of a target
+  on its line, so a later wave's PR carries every earlier-wave branch on the
+  line, not only its prerequisites', and shows their changes until they merge.
+  Once they have all merged, its diff is its own change when the line is a
+  plain chain: one branch per earlier wave, and no newer base taken in (your
+  base did not move between the wave-0 publishes and the run's first fold, and
+  no fold merged it in — see below). Otherwise a fold merge commit joined
+  histories your base got separately, so the PR has several merge bases with it
+  and can keep showing an already-merged change: use "Update branch" (merge the
+  base into it) and its diff is its own change again. Within a run the
+  integration line only grows: the run's first fold starts it fresh from the
+  base with a force-push (if your origin refuses force-pushes, delete the old
+  `pdca-integration/<base>` first, or allow force-pushes on
+  `pdca-integration/*`), and later folds continue it without force — and stop
+  the run if another run moved it. Commits pushed onto a stack PR's branch after
+  a fold carried it reach the line at the next fold. If a PR merges and its
+  branch is deleted, the fold looks up the commit the PR merged with: a line
+  that has it already carries the PR; one that does not (say a fixup was pushed
+  after the fold) merges your base in, after checking that your base has that
+  commit. If it does not (the PR merged into another branch, or was squashed or
+  rebased), the run stops rather than build the next wave without that work. An
+  accepted bundle whose publish pushed no branch holds only the bundles that
+  depend on it; the rest of the run goes on. When you publish it later
+  (`pdca publish <id>`), its PR branch is cut from the line commit it was built
+  on, so it carries no later wave's work; if a later run has replaced the line
+  by then, publish refuses and pushes nothing — re-drive that bundle in a new
+  run.
 - **`"merge"`** (own-repo / continuous-delivery only) — actually `gh pr merge`s
   each non-final wave's PRs, so the next wave builds on a genuinely merged base.
   Needs merge rights on the base remote and relaxes STOP discipline for the

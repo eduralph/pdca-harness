@@ -40,9 +40,13 @@ from .config import Config
 COMMIT_MSG = "commit-msg.txt"
 PR_BODY = "pr-description.md"
 # The wave driver records the run's integration branch here for a wave>0 bundle, so its
-# Do worktree and stacked PR base off the prior waves' folded work (#wave-model); absent ⇒
-# build / open the PR off the target base.
+# Do worktree is cut from the prior waves' folded work (#wave-model); its PR targets the
+# real base (#593). Absent ⇒ build and cut the PR branch off the target base.
 STACK_BASE_FILE = "stack-base"
+# Beside it, the line commit the run's last fold pushed (one SHA) — the commit the bundle
+# was built on, and the one publish cuts its PR branch from (#593). Ignored without a
+# `stack-base`; absent (a dry-run, or a marker older than #593) ⇒ cut from the branch.
+STACK_BASE_TIP_FILE = "stack-base-tip"
 # The pre-push host-CI record (issue #311): the [gates] host_ci rows as run against the
 # pinned base + patch.diff tree, written when the gate REFUSES (so the refusal survives
 # for the human, naming the command and the base) and removed again once they pass.
@@ -227,8 +231,11 @@ def publish(
     # produced earlier in THIS run — build + publish a NEW draft PR based on that branch (a
     # separate stacked PR), not on the target base. Distinct from `Onto branch` (#54), which
     # appends a commit to one existing PR. The base is derived from the prereq's publish.json
-    # (never hand-written — it doesn't exist at Plan time).
-    stack_branch = _stack_base_branch(cfg, d)
+    # (never hand-written — it doesn't exist at Plan time). A wave's recorded stack base wins,
+    # as in :func:`_stack_base_branch`.
+    wave_base = _read_stack_base(d)
+    wave_tip = read_stack_base_tip(d)
+    stack_branch = wave_base or _stacks_on_branch(cfg, d)
     if brief.stacks_on(d / "brief.md") and not stack_branch:
         print(f"publish: {d.name} `Stacks on` a prereq with no published branch yet — the "
               "prereq must publish first (the flow schedules this).", file=sys.stderr)
@@ -240,23 +247,39 @@ def publish(
 
     git = lambda *a: ["git", "-C", str(repo), *a]
     base_remote = cfg.base_remote
-    # Stacked: cut the dependent's branch off the PARENT / integration branch (on origin) so it
-    # carries the predecessors' diffs; otherwise off the target base (#123). pr_base is what
-    # `gh --base` gets — and it MUST be a branch in the upstream (`--repo`) repo.
-    checkout_base = f"origin/{stack_branch}" if stack_branch else f"{base_remote}/{base}"
-    # Own-repo (base on origin): the integration/parent branch IS an upstream branch, so
-    # `--base` it for a clean, increment-only stacked PR. Fork (base on a separate upstream a
-    # fork contributor can't push to): that branch lives on origin (the fork) and can't be a
-    # `--base`, so the PR opens against the upstream base and carries the CUMULATIVE stacked
-    # diff (predecessors + this fix). It still merges cleanly bottom-up — once a prerequisite
-    # is merged, its identical content re-merges as a no-op — but the displayed diff does NOT
-    # auto-reduce on merge: the fold's `pdca-integrate:*` commits aren't ancestors of the
-    # prereq's PR-merge, so the PR merge-base doesn't advance; the diff clears only when the
-    # dependent is rebuilt off the merged base (a later `pdca flow` run). That visible overlap
-    # is the cost of fork wave-stacking (#185). The dependent's branch is cut off the parent
-    # branch either way.
     own_repo = base_remote == "origin"
-    pr_base = stack_branch if (stack_branch and own_repo) else base
+    wave_stacked = cfg.wave_mode != "merge" and bool(wave_base)
+    # Stacked: cut the dependent's branch off the PARENT / integration branch (on origin) so it
+    # carries the predecessors' work; otherwise off the target base (#123). A wave>0 bundle is
+    # cut from the line commit it was built on, when the run recorded one (#593): the line
+    # keeps growing after its wave, so a held bundle published later off the branch as it is
+    # THEN would carry later waves' work into its PR against the real base. That commit IS
+    # `checkout_base`, so the host-CI gate below fetches, pins and certifies the same commit
+    # (its `host_ci_base` is the recorded tip), and `_line_tip_refusal` first checks the line
+    # still holds it. pr_base is what `gh --base` gets — and it MUST be a branch in the
+    # upstream (`--repo`) repo.
+    cut_from_tip = wave_stacked and bool(wave_tip)
+    if cut_from_tip:
+        checkout_base = wave_tip
+    else:
+        checkout_base = f"origin/{stack_branch}" if stack_branch else f"{base_remote}/{base}"
+    # A wave>0 bundle (a recorded `stack-base`) opens its PR against its REAL target base, on
+    # the own-repo and fork paths alike (#593): the integration branch is a run-scoped
+    # staging line, and a PR merged into it never reaches the target. The PR carries every
+    # earlier-wave branch on the line, not only its own predecessors', and shows their
+    # changes until they merge. Those are the commits of their own PRs (the fold merges the
+    # published branches, never re-applied copies), so merging the stack bottom-up with
+    # merge commits lands every wave on the target. Once they have all merged, this PR's diff
+    # against the base is its own change when the line is a plain chain (one branch per
+    # earlier wave, no newer base taken in). Otherwise a fold merge commit joined histories
+    # the base got separately, and the PR can keep showing an already-merged change until its
+    # branch is updated from the base (GitHub's "Update branch"); integrate's module docstring
+    # has the detail.
+    # Only a hand-declared legacy `Stacks on:` parent (no stack-base) keeps the parent branch
+    # as the `--base` on own-repo (#123). A fork can never `--base` a branch on origin (the
+    # fork), so a fork PR always opens against the upstream base (#185). Merge mode records
+    # no stack-base, and its own guard (#411, below) judges the base this picks, unchanged.
+    pr_base = stack_branch if (stack_branch and own_repo and not wave_stacked) else base
     # Merge-mode base guard (#411) — fail-closed, BEFORE any branch/push/PR work. Under
     # `[driver].wave_mode = "merge"` the driver merges each accepted bundle's PR "into its
     # base" (merge.py:32-33), unattended, mid-flow — whatever base that PR happens to carry.
@@ -311,9 +334,15 @@ def publish(
     if dry_run:
         kind = "draft PR"
         if stack_branch:
-            kind = "stacked draft PR" if own_repo else "stacked draft PR (fork: cumulative diff vs base)"
+            kind = ("stacked draft PR" if pr_base == stack_branch
+                    else "stacked draft PR (fork: cumulative diff vs base)" if not own_repo
+                    else "stacked draft PR (cumulative diff vs base)")
         print(f"publish --dry-run — {d.name} → {kind} on {repo_spec} ({branch} → {pr_base}):")
         print(f"  # stash the target working tree (Do/Check leave it dirty), restore it after")
+        if cut_from_tip:
+            print(f"  # line-tip guard (#593): fetch --prune origin and refuse, pushing "
+                  f"nothing, unless the recorded tip {wave_tip} is still on "
+                  f"origin/{stack_branch} (else re-drive it in a new run, #616)")
         if cfg.host_ci_checks:
             print(f"  # host CI gate (#311): fetch, pin the exact {checkout_base} commit the "
                   f"push will build on, and run {len(cfg.host_ci_checks)} declared command(s) "
@@ -330,6 +359,14 @@ def publish(
     rc = _check_repo(repo, repo_spec, required_remotes={base_remote, "origin"})
     if rc != 0:
         return rc
+    if cut_from_tip:
+        # Never cut from an orphaned tip (#593): once a later run's first fold has replaced
+        # the line, the recorded commit is on no line, and a PR cut from it would carry work
+        # no fold of this target holds any more. Refuse before anything is pushed.
+        refusal = _line_tip_refusal(d, repo, wave_tip, stack_branch)
+        if refusal:
+            print(refusal, file=sys.stderr)
+            return 1
     if stack_branch:
         _warn_if_squash_only(repo_spec)  # a stacked PR must merge-commit, not squash (#123)
 
@@ -598,18 +635,30 @@ def _publish_record(d: Path) -> dict | None:
         return None
 
 
-def write_stack_base(d: Path, branch: str) -> None:
-    """Record the integration branch a wave>0 bundle stacks on, so its Do worktree and
-    stacked PR base off the prior waves' folded work (read by :func:`_stack_base_branch`)."""
+def write_stack_base(d: Path, branch: str, tip: str | None = None) -> None:
+    """Record the integration branch a wave>0 bundle stacks on, so its Do worktree is cut
+    from the prior waves' folded work (read by :func:`_stack_base_branch`).
+
+    ``tip`` (#593) is the line commit the run's last fold pushed: the commit the bundle is
+    built on, and the one publish cuts its PR branch from, however much the line grows
+    before it is published. It goes to its own file beside ``stack-base``
+    (:data:`STACK_BASE_TIP_FILE`), so ``stack-base`` keeps its one-line format for every
+    other reader; without a ``tip`` (a dry-run) any earlier tip file is removed."""
     (d / STACK_BASE_FILE).write_text(branch + "\n", encoding="utf-8")
+    if tip:
+        (d / STACK_BASE_TIP_FILE).write_text(tip + "\n", encoding="utf-8")
+    else:
+        (d / STACK_BASE_TIP_FILE).unlink(missing_ok=True)
 
 
 def clear_stack_base(d: Path) -> None:
     """Remove any recorded integration stack base so the bundle builds off its own target
     base. Clears a **stale** marker a prior/resumed run wrote for a target that this run does
-    not integrate — otherwise the bundle would build + open its PR against an old integration
-    branch (read via :func:`_stack_base_branch`) instead of its own base (#187)."""
+    not integrate — otherwise the bundle would build on (and cut its PR branch from) an old
+    integration branch (read via :func:`_stack_base_branch`) instead of its own base (#187).
+    The recorded line tip goes with it (#593)."""
     (d / STACK_BASE_FILE).unlink(missing_ok=True)
+    (d / STACK_BASE_TIP_FILE).unlink(missing_ok=True)
 
 
 def _read_stack_base(d: Path) -> str:
@@ -629,17 +678,68 @@ def read_stack_base(d: Path) -> str:
     return _read_stack_base(d)
 
 
+def read_stack_base_tip(d: Path) -> str:
+    """The line commit recorded with the bundle's stack base (:func:`write_stack_base`), or
+    "" — none recorded (a dry-run, or a marker older than #593), or no ``stack-base`` at all
+    (a tip file without one is ignored). Publish cuts a wave>0 PR branch from it (#593)."""
+    tip = d / STACK_BASE_TIP_FILE
+    if not (d / STACK_BASE_FILE).exists() or not tip.exists():
+        return ""
+    return tip.read_text(encoding="utf-8").strip()
+
+
+def _line_tip_refusal(d: Path, repo: Path, tip: str, line: str) -> str:
+    """Why publish must not cut ``d``'s PR branch from its recorded line tip, or "" (#593).
+
+    The tip is the line commit the bundle was built on (:func:`read_stack_base_tip`). It
+    is safe to cut from only while ``origin/<line>`` still holds it: a later run's first
+    fold starts a fresh line with a force-push (resuming across runs is #616), and a
+    deleted line holds nothing. So fetch ``origin`` (pruned, so a deleted line stops
+    resolving here rather than leaving a stale ref) and ask ``git merge-base
+    --is-ancestor <tip> origin/<line>``: exit 0 is on the line; exit 1, a tip commit this
+    clone does not have, or a line that does not resolve is not. Any other exit, or a
+    failed fetch, is git failing, and is refused too, saying so. Nothing has been pushed
+    when this refuses."""
+    def git(*a: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+
+    r = git("fetch", "--prune", "origin")
+    if r.returncode != 0:
+        tail = (r.stderr or "").strip().splitlines()
+        return (f"publish: {d.name} — could not fetch origin to check that its recorded line "
+                f"tip {tip} is still on {line} ({tail[-1] if tail else 'no output'}); "
+                "nothing was pushed — fix the checkout, then retry")
+    have_tip = git("cat-file", "-e", f"{tip}^{{commit}}").returncode == 0
+    have_line = git("rev-parse", "--verify", "--quiet",
+                    f"origin/{line}^{{commit}}").returncode == 0
+    if have_tip and have_line:
+        rc = git("merge-base", "--is-ancestor", tip, f"origin/{line}").returncode
+        if rc == 0:
+            return ""
+        if rc != 1:
+            return (f"publish: {d.name} — could not tell whether its recorded line tip {tip} "
+                    f"is still on {line}: `git merge-base --is-ancestor` exited {rc}, a git "
+                    "step failed; nothing was pushed — check the checkout, then retry")
+    return (f"publish: {d.name} was built on {tip}, a commit origin's {line} no longer holds "
+            f"(a later run's first fold replaced the line, or the branch is gone) — refusing "
+            f"to cut its PR branch from it; nothing was pushed. Re-drive it in a new run "
+            f"(#616).")
+
+
 def _stack_base_branch(cfg: Config, d: Path) -> str | None:
-    """The branch a stacked bundle bases off (worktree + ``gh --base``), or None.
+    """The branch a stacked bundle bases off (its worktree, its PR branch), or None.
 
     The wave driver's run-scoped integration branch — recorded in the bundle's
-    ``stack-base`` file (#wave-model) — wins: a wave>0 bundle builds + opens its PR on the
-    prior waves' folded work. Else the legacy single-chain ``Stacks on:`` (#123) parent
-    branch from its publish.json, for a brief that still hand-declares a stack. None when
+    ``stack-base`` file (#wave-model) — wins: a wave>0 bundle builds on, and cuts its PR
+    branch from, the prior waves' folded work (its PR targets the real base, #593). Else
+    the legacy single-chain ``Stacks on:`` (#123) parent branch from its publish.json, for a
+    brief that still hand-declares a stack (also its own-repo ``gh --base``). None when
     neither applies (or the legacy prereq hasn't published yet)."""
-    wave_base = _read_stack_base(d)
-    if wave_base:
-        return wave_base
+    return _read_stack_base(d) or _stacks_on_branch(cfg, d)
+
+
+def _stacks_on_branch(cfg: Config, d: Path) -> str | None:
+    """A legacy ``Stacks on:`` (#123) parent's published branch, or None."""
     parents = brief.stacks_on(d / "brief.md")
     if not parents:
         return None
@@ -701,9 +801,10 @@ def _batch_branch_producer(cfg: Config, d: Path, repo_spec: str, branch: str) ->
 def _warn_if_squash_only(repo_spec: str) -> None:
     """Warn if the target repo can't merge a stacked PR with a merge commit (issue #123).
 
-    Stacked PRs must be merged bottom-up with merge-commit / rebase-merge: a SQUASH drops
-    the parent's commits from the base, so a child retargeted to the base re-shows the
-    parent's diff until rebased. Best-effort via ``gh repo view``; any failure is silent."""
+    Stacked PRs must be merged bottom-up with a merge commit: a squash or rebase merge puts
+    the parent's change on the base as NEW commits, not the ones the child carries, so the
+    child keeps showing the parent's diff until its branch is updated from the base (#593).
+    Best-effort via ``gh repo view``; any failure is silent."""
     try:
         r = subprocess.run(
             ["gh", "repo", "view", repo_spec, "--json", "mergeCommitAllowed,squashMergeAllowed"],

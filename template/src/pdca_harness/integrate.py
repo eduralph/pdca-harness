@@ -1,38 +1,62 @@
 """Integration-branch stacking — fold each wave's accepted work onto a run-scoped
 branch the next wave builds on (the default, fork-safe wave sequencing).
 
-After a wave's bundles are accepted, the *next* wave must build on a base that already
-contains this wave's diffs — otherwise a dependent built off the untouched base misses
-its prerequisite's change and conflicts. Rather than *merge* the wave's PRs (which needs
-merge rights on the upstream base — impossible in a fork model — and relaxes the STOP
-discipline), this folds every accepted patch onto a single run-scoped **integration
-branch** on ``origin`` (push-only — a fork has push). The next wave's Do worktree and
-its stacked PRs base off that branch, so a dependent batch completes in one run as a
-reviewable PR stack the human merges bottom-up — generalising the single-chain
-``Stacks on`` (#123) to whole waves, and fixing its multi-parent gap (the branch carries
-*all* prerequisites, not just ``parents[0]``).
+After a wave's bundles are accepted and published, the *next* wave must build on a base
+that already contains this wave's work — otherwise a dependent built off the untouched
+base misses its prerequisite's change and conflicts. Rather than *merge* the wave's PRs
+into the target (which needs merge rights on the upstream base — impossible in a fork
+model — and relaxes the STOP discipline), this merges every accepted bundle's **published
+PR branch** onto a single run-scoped **integration branch** on ``origin`` (push-only — a
+fork has push). The next wave's Do worktree and PR branches are cut from that branch, so
+a dependent batch completes in one run as a reviewable PR stack the human merges
+bottom-up — generalising the single-chain ``Stacks on`` (#123) to whole waves, and fixing
+its multi-parent gap (the branch carries *all* prerequisites, not just ``parents[0]``).
 
-Idempotent + resumable: :func:`fold` rebuilds the branch from the target base every call,
-applying the **cumulative** accepted patches (waves 0..k) in order — so a re-run
-reproduces the same branch, and a patch that no longer applies (an undeclared cross-wave
-overlap) is a loud :class:`IntegrationError` that stops the run before the next wave
-builds on a broken base. Mechanics are deterministic ``git`` subprocesses (no model).
+Every PR the stack opens targets the real base (publish), and the line carries the PR
+branches' own commits (same SHAs), joined by signed-off merge commits — never re-applied
+as new commits (#593). So merging the stack bottom-up with merge commits lands every wave
+on the target. The fold puts every published branch of a target on its line, so a later
+wave's PR, cut from the line, carries every earlier-wave branch on the line — not only its
+prerequisites' — and shows their changes until they merge. Once they have all merged, its
+diff against the base is its own change when the line is a plain chain: one branch per
+earlier wave, and no base newer than a branch on it taken in (the base did not move
+between the wave-0 publishes and the run's first fold, and no fold merged the base in —
+see below). Otherwise a fold merge commit joined histories the base got separately; that
+commit never reaches the base, so the PR has several merge bases with it and can keep
+showing an already-merged change. Updating its branch from the base (GitHub's "Update
+branch") then leaves only its own change. Within one run the line is **append-only**: the
+run's first fold of a target starts fresh from the base (a force-push that replaces an
+earlier run's line); every later fold continues from the tip this run pushed, pushed
+without force, and refuses a line another run moved (``folded_this_run``, #591).
+
+Commits pushed straight onto a stack PR branch after a fold carried it reach the line: the
+next fold merges the branch's new tip. A branch deleted after its PR merged is judged by
+the head commit the host says the PR merged with (``merged.merged_head``), never by a
+commit message: a line that already has that commit skips it; one that does not (a fixup
+pushed after the fold) takes the base in, once the base is checked to have that commit —
+a PR merged somewhere else (its base edited on the host, a squash or rebase merge) stops
+the run instead. A branch that does not merge cleanly (an undeclared cross-wave overlap)
+is a loud :class:`IntegrationError` that stops the run before the next wave builds on a
+broken base. Mechanics are deterministic ``git`` subprocesses (no model).
 """
 
 from __future__ import annotations
 
 import contextlib
 import subprocess
+import sys
+from collections.abc import Collection, Iterable, Mapping
 from pathlib import Path
 
-from . import publish
+from . import merged, publish
 from .config import Config
 
 
 class IntegrationError(RuntimeError):
-    """A wave's accepted work could not be folded onto the integration branch — a patch
-    no longer applies (undeclared overlap), or a git step failed. The caller STOPs rather
-    than build the next wave on an incomplete base."""
+    """A wave's accepted work could not be folded onto the integration branch — a published
+    branch does not merge cleanly (undeclared overlap) or is missing, another run moved the
+    line, or a git step failed. The caller STOPs rather than build the next wave on an
+    incomplete base."""
 
 
 def integration_branch(cfg: Config, base: str) -> str:
@@ -66,6 +90,69 @@ def _git(repo: Path, *args: str) -> int:
     """Run ``git -C repo args`` quietly; return the exit code (no raise)."""
     return subprocess.run(["git", "-C", str(repo), *args],
                           capture_output=True, text=True).returncode
+
+
+def _rev(repo: Path, ref: str) -> str | None:
+    """The commit SHA ``ref`` resolves to in ``repo``, or None when it does not resolve."""
+    r = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet",
+                        ref + "^{commit}"], capture_output=True, text=True)
+    sha = r.stdout.strip()
+    return sha if r.returncode == 0 and sha else None
+
+
+def pushed_tip(wt: Path) -> str:
+    """The tip a fold just pushed from integration worktree ``wt`` (``git rev-parse HEAD``),
+    for the caller's ``folded_this_run`` (#593); raises when unreadable."""
+    sha = _rev(wt, "HEAD")
+    if not sha:
+        raise IntegrationError(f"could not read the folded tip in {wt}")
+    return sha
+
+
+def _published_ref(d: Path) -> tuple[str, str, bool] | None:
+    """``(remote, ref, onto)`` of the branch bundle ``d`` published, from its
+    ``publish.json`` (read the way ``publish._stack_base_branch`` reads a parent's) — None
+    when it has none.
+
+    A ``"stacked"`` record (``Onto branch``, #54; ``onto`` True) committed onto an existing
+    PR branch that may live on another remote: its own ``base`` (``<remote>/<branch>``,
+    ``publish._publish_stacked``) IS that branch — never a same-named one on ``origin``; a
+    ``base`` of any other shape names no remote, so no branch is on record. Every other
+    record (``"new-pr"`` / ``"stacked-pr"``) pushed ``branch`` to ``origin``."""
+    rec = publish._publish_record(d)
+    branch = rec.get("branch") if isinstance(rec, dict) else None
+    if not branch or not isinstance(branch, str):
+        return None
+    if rec.get("mode") == "stacked":
+        ref, suffix = rec.get("base"), "/" + branch
+        if isinstance(ref, str) and ref.endswith(suffix) and len(ref) > len(suffix):
+            return ref[:-len(suffix)], ref, True
+        return None
+    return "origin", f"origin/{branch}", False
+
+
+def _fold_candidates(bundles: Iterable[Path]
+                     ) -> list[tuple[Path, str, str, str, tuple[str, str, bool] | None]]:
+    """``(bundle, repo_spec, base, slug, published)`` for each bundle the fold carries — a
+    non-empty ``patch.diff`` and a usable target — where ``published`` is its
+    :func:`_published_ref` (None: no branch on record). The ONE definition :func:`fold` and
+    :func:`unpublished` share (#593), so what the fold merges and what the flow holds back
+    cannot drift apart."""
+    return [(d, repo_spec, base, slug, _published_ref(d))
+            for d, repo_spec, base, slug in _targeted([d for d in bundles if _has_patch(d)])]
+
+
+def unpublished(bundles: Iterable[Path], *,
+                pushed: Collection[str] | None = None) -> list[Path]:
+    """The bundles the fold has no branch of to carry (#593): each one it would merge
+    (:func:`_fold_candidates`) whose ``publish.json`` names no branch — and, when the caller
+    passes ``pushed`` (the names of the bundles that pushed a branch THIS run), each one not
+    in it. ``publish.json`` survives an iterate, so a re-publish that failed before its push
+    leaves the old, rejected branch on record. Outside a dry-run :func:`fold` refuses the
+    first kind itself; the flow holds both, and what depends on them, out of the fold. A
+    patched bundle with no target is neither."""
+    return [d for d, _repo, _base, _slug, ref in _fold_candidates(bundles)
+            if ref is None or (pushed is not None and d.name not in pushed)]
 
 
 # The harness-owned sibling-dir infix for integration worktrees; single-sourced so the
@@ -118,36 +205,64 @@ def integ_lock(wt: Path, *, wait: bool = True):
         fh.close()
 
 
-def _targeted(patched: list[Path]) -> list[tuple[Path, str, str]]:
-    """``(bundle, repo_spec, base)`` for each patched bundle that resolves a usable
+def _targeted(patched: list[Path]) -> list[tuple[Path, str, str, str]]:
+    """``(bundle, repo_spec, base, slug)`` for each patched bundle that resolves a usable
     upstream target; bundles with no target (non-contributing cycles) are dropped."""
-    out: list[tuple[Path, str, str]] = []
+    out: list[tuple[Path, str, str, str]] = []
     for d in patched:
-        repo_spec, base, _slug = publish._resolve_target(d)
+        repo_spec, base, slug = publish._resolve_target(d)
         if repo_spec and base:
-            out.append((d, repo_spec, base))
+            out.append((d, repo_spec, base, slug))
     return out
 
 
 def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
-         locks: contextlib.ExitStack | None = None
+         locks: contextlib.ExitStack | None = None,
+         folded_this_run: Mapping[tuple[str, str], str | None] | None = None,
          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
-    """Fold the cumulative accepted bundles' patches onto a per-target integration branch.
+    """Fold the cumulative accepted bundles' published branches onto a per-target
+    integration branch.
 
     ``accepted`` is every accepted bundle (waves 0..k) in stack order (the caller passes
     them wave by wave, name-sorted within each). Bundles are grouped by their upstream
     ``(repo, base)`` target and **each group folds onto its own integration branch** — a
     batch spanning several targets (two repos, or two base branches on one repo) keeps one
     integration line per target, so a later wave's bundle stacks on the branch for *its* own
-    target, never a sibling target's (#187). Returns ``{(repo, base): (branch, worktree)}``
-    — each target's integration branch and the worktree it was built in (for an optional
-    re-gate) — or ``{}`` when there is nothing to integrate (no patches, or none with a
-    target). Raises :class:`IntegrationError` on a real failure (a patch no longer applies,
-    or a git step fails) so the caller STOPs.
+    target, never a sibling target's (#187). Each bundle's published branch
+    (:func:`_published_ref`) is merged onto the line with a signed-off merge commit, so the
+    line carries the PR's own commits rather than a re-applied copy (#593); a branch already
+    in the line is not merged again. Returns ``{(repo, base): (branch, worktree)}`` — each
+    target's integration branch and the worktree it was built in (for an optional re-gate)
+    — or ``{}`` when there is nothing to integrate (no patches, or none with a target).
+    Raises :class:`IntegrationError` on a real failure (a branch does not merge cleanly, the
+    line was moved by another run, or a git step fails) so the caller STOPs.
+
+    ``folded_this_run`` (#593) maps each target THIS run has already folded to the tip its
+    last fold pushed (``None`` in a dry-run, where nothing is pushed). A **listed** target
+    continues from that tip and pushes WITHOUT force (append-only, so no push rewrites a
+    commit an open PR's base or head depends on), and refuses when origin's line is not that
+    SHA — another run on the same base moved it (#591). A target **not listed** is the run's
+    first fold of it: it starts fresh from ``<base_remote>/<base>`` and force-pushes,
+    replacing any earlier run's line. ``None`` (a direct caller) continues the line if
+    origin has it, else starts fresh.
+
+    Fail-closed outside a dry-run: a targeted, patched bundle with no published branch
+    raises before any git step (the flow holds such bundles, and failed publishes, out:
+    :func:`unpublished`). A branch that moved since the last fold (commits pushed onto the
+    PR branch after the fold carried it) has its new tip merged. A published branch gone
+    after the (pruning) fetch is judged by commit, never by message (:func:`_gone_branch`):
+    unless the host reports its PR merged, with the head commit it merged, the fold raises;
+    a line that already has that head skips it; otherwise the line takes the base in
+    (:func:`_take_in_base`), so the work still reaches the next wave — but only once the
+    base is checked to have that head: a PR merged somewhere else (its base edited on the
+    host, a squash or rebase merge) raises, and so does an ``Onto branch`` record, whose
+    PR may have merged into another base.
 
     Dry-run (offline rehearse / CI, where the publisher leaf is stubbed) prints each group's
     git plan and returns the branches with ``None`` worktrees — no worktree, no push — so the
-    next wave falls back to the target base, which is what an offline rehearse wants.
+    next wave falls back to the target base, which is what an offline rehearse wants. A
+    bundle with no ``publish.json`` (the stub records none) is planned as merging
+    ``origin/<branch>`` for the branch a real publish would push.
 
     ``locks`` (#297 review round 10): when the caller passes an ``ExitStack``, each
     target's :func:`integ_lock` is entered on IT and stays held after fold returns —
@@ -157,15 +272,32 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     lock by exiting the stack; ``None`` keeps the per-group scope (lock released when
     the group's build finishes).
     """
-    targeted = _targeted([d for d in accepted if _has_patch(d)])
-    if not targeted:
+    candidates = _fold_candidates(accepted)
+    if not candidates:
         return {}  # nothing to integrate — the next wave builds on the base
+
+    # What each bundle merges — resolved for EVERY bundle before any git step, so a fold
+    # that cannot carry one of them fails before it touches anything.
+    refs: dict[str, tuple[str, str, bool]] = {}      # bundle name → (remote, ref, onto)
+    missing: list[str] = []
+    for d, _repo_spec, _base, slug, ref in candidates:
+        if ref is None and dry_run:
+            ref = ("origin", "origin/" + publish._branch_name(cfg, d, slug), False)
+        if ref is None:
+            missing.append(d.name)
+        else:
+            refs[d.name] = ref
+    if missing:
+        raise IntegrationError(
+            f"{', '.join(missing)} accepted but not published (no publish.json branch) — "
+            f"there is nothing of it to fold; publish it, or leave it out of the fold, then "
+            f"re-run")
 
     # One integration line per (repo, base): group the accepted bundles by target so a
     # multi-target batch folds each onto its own branch (the common single-target batch is
-    # just one group). Preserve stack order within a group (targeted keeps accepted's order).
+    # just one group). Preserve stack order within a group (candidates keep accepted's order).
     groups: dict[tuple[str, str], list[Path]] = {}
-    for d, repo_spec, base in targeted:
+    for d, repo_spec, base, _slug, _ref in candidates:
         groups.setdefault((repo_spec, base), []).append(d)
 
     base_remote = cfg.base_remote
@@ -179,14 +311,22 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     for (repo_spec, base), bundles in sorted(groups.items()):
         branch = integration_branch(cfg, base)
         repo = publish._checkout_path(cfg, repo_spec)
+        start = ("auto" if folded_this_run is None
+                 else "continue" if (repo_spec, base) in folded_this_run else "fresh")
         if dry_run:
             print(f"integrate --dry-run — fold {len(bundles)} patch(es) onto {branch} "
                   f"(off {base_remote}/{base} on {repo_spec}):")
-            print(f"  git worktree → {_integ_worktree(repo, base)} @ {base_remote}/{base}; "
-                  f"checkout -B {branch}")
+            plan = {"fresh": f"start {branch} fresh from {base_remote}/{base}",
+                    "continue": f"continue {branch} from this run's tip",
+                    "auto": f"continue {branch} if origin has it, else start fresh "
+                            f"from {base_remote}/{base}"}[start]
+            print(f"  git worktree → {_integ_worktree(repo, base)}; {plan}")
             for d in bundles:
-                print(f"  git apply {(d / 'patch.diff')}  &&  git commit   ({d.name})")
-            print(f"  git push --force origin {branch}")
+                print(f"  git merge --no-ff --signoff {refs[d.name][1]}   ({d.name})")
+            print({"fresh": f"  git push --force origin {branch}",
+                   "continue": f"  git push origin {branch}",
+                   "auto": f"  git push origin {branch}   (--force only if it started "
+                           f"fresh)"}[start])
             result[(repo_spec, base)] = (branch, None)
             continue
 
@@ -205,40 +345,201 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                     f"could not take the integration lock next to "
                     f"{_integ_worktree(repo, base).name} — fix the checkout's parent "
                     f"directory (permissions?), then re-run")
-            wt = _prepare_worktree(repo, base_remote, base)
-            if _git(wt, "checkout", "-B", branch, f"{base_remote}/{base}") != 0:
-                raise IntegrationError(f"could not start {branch} off {base_remote}/{base}")
-            for d in bundles:
-                patch = (d / "patch.diff").resolve()
-                if _git(wt, "apply", str(patch)) != 0:
+            wt = _prepare_worktree(repo, base_remote, base,
+                                   remotes=[refs[d.name][0] for d in bundles])
+            line = _rev(wt, f"origin/{branch}")  # origin's line, as just fetched
+            if start == "continue":
+                pushed = folded_this_run[(repo_spec, base)]
+                if line is None or line != pushed:
                     raise IntegrationError(
-                        f"{d.name}'s patch does not apply onto {branch} — an undeclared "
-                        f"cross-wave overlap; declare the conflict / re-order, then re-run")
-                _git(wt, "add", "--all")
-                # `-s` adds the Signed-off-by trailer (DCO) — same as publish (#81): the
-                # branch is rebuilt each fold, so a stacked PR cut from an EARLIER fold
-                # carries these commits outside the base's ancestry, where a DCO-gated
-                # host inspects them (#405).
-                if _git(wt, "commit", "-s", "-m", f"pdca-integrate: {d.name}") != 0:
-                    raise IntegrationError(f"could not commit {d.name} onto {branch}")
-            # A harness-owned, rebuilt-each-run branch: a plain force is correct (every fold
-            # rewrites it off the base), and it isn't a human PR branch needing lease safety.
-            if _git(wt, "push", "--force", "origin", branch) != 0:
+                        f"origin's {branch} is at {line or '(absent)'}, not at "
+                        f"{pushed or '(no tip recorded)'}, the tip this run's last fold "
+                        f"pushed — another run on the same base has likely moved it "
+                        f"(#591). Not building on a line this run did not push; let the "
+                        f"other run finish, then re-run")
+            fresh = start == "fresh" or (start == "auto" and line is None)
+            start_ref = f"{base_remote}/{base}" if fresh else line
+            if _git(wt, "checkout", "-B", branch, start_ref) != 0:
+                raise IntegrationError(f"could not start {branch} off {start_ref}")
+            for d in bundles:
+                _merge_published(cfg, wt, d, refs[d.name], branch=branch, base=base)
+            # Fresh: the run's first fold of this target replaces any earlier run's line, so
+            # it is forced. Continuing: a fast-forward of this run's own tip, pushed WITHOUT
+            # force, so it lands on an origin with receive.denyNonFastForwards too, and can
+            # never rewrite a commit an open PR's base or head depends on (#593).
+            push = ("push", "--force", "origin", branch) if fresh else ("push", "origin", branch)
+            if _git(wt, *push) != 0:
+                why = (" (the run's first fold force-pushes over any earlier run's line: if "
+                       f"origin refuses force-pushes, delete the old {branch} there or allow "
+                       "force-pushes on pdca-integration/*)" if fresh else
+                       " (an unforced fast-forward was refused — did another run move it? "
+                       "#591)")
                 raise IntegrationError(
-                    f"could not push {branch} to origin — the next wave cannot stack on it")
+                    f"could not push {branch} to origin{why} — the next wave cannot stack "
+                    f"on it")
         result[(repo_spec, base)] = (branch, wt)
     return result
 
 
-def _prepare_worktree(repo: Path, base_remote: str, base: str) -> Path:
+def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, bool], *,
+                     branch: str, base: str) -> None:
+    """Merge bundle ``d``'s published branch onto the line checked out in ``wt`` (#593):
+    its own commits, joined by a signed-off merge commit — not a re-applied copy. The
+    branch's CURRENT tip is merged, so commits pushed onto it after an earlier fold carried
+    it reach the line too."""
+    _remote, ref, onto = published
+    head = _rev(wt, ref)
+    if head is None:
+        _gone_branch(cfg, wt, d, ref, onto, branch=branch, base=base)
+        return
+    if _in_line(wt, head, f"{d.name}'s branch {ref}", branch):
+        return  # already in the line (an earlier fold carried it) — never merged twice
+    rc, conflicts = _merge(wt, head, f"pdca-integrate: {d.name}")
+    if rc == 0:
+        return
+    if conflicts:
+        raise IntegrationError(
+            f"{d.name}'s branch {ref} does not merge cleanly onto {branch} (conflicts in "
+            f"{', '.join(conflicts)}) — an undeclared cross-wave overlap; declare the "
+            f"conflict / re-order, then re-run")
+    raise IntegrationError(
+        f"could not merge {d.name}'s branch {ref} onto {branch} — `git merge` exited {rc} "
+        f"with no conflicting path in {wt}, so a git step failed (not an overlap): check "
+        f"that checkout and the branch, then re-run")
+
+
+def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch: str,
+                 base: str) -> None:
+    """``d``'s published branch ``ref`` does not resolve after the pruning fetch — a merged
+    PR's branch is commonly deleted on merge (#593). Decided by commit, never by message:
+
+    1. ask the host which head commit the bundle's PR merged with
+       (:func:`merged.merged_head`); not merged, or unknown, raises, naming the ref;
+    2. the line being built already has that commit: it carries all of the PR's work, so
+       skip it and do NOT take the base in — however the base has moved since;
+    3. otherwise (the fold never carried that head — a fixup pushed after the fold — or the
+       commit is not in this clone at all) the line can get that work only from the base.
+       An ``Onto branch`` record (``onto``) is a commit on another PR, and a legacy ``Stacks
+       on:`` PR targets its parent's branch, so either may have merged elsewhere, and that
+       raises. Any other PR targeted this base, but it may still have merged into another
+       branch (its base edited on the host), so the fold first checks that the base has the
+       head: then the line takes the base in (:func:`_take_in_base`). A base without it —
+       or a clone without it, which, having fetched the base, means the same; a squash or
+       rebase merge never puts it on the base either — raises, rather than build the next
+       wave on a line that lacks the PR's work."""
+    base_ref = f"{cfg.base_remote}/{base}"
+    head = merged.merged_head(cfg, d.name.removeprefix("issue_"))
+    if not head:
+        raise IntegrationError(
+            f"{d.name}'s published branch {ref} does not resolve after fetching (deleted?) "
+            f"and its PR is not known to be merged (not merged, or its state could not be "
+            f"read) — restore or re-publish the branch, then re-run")
+    if _carries(wt, head, f"{d.name}'s merged head {head}", branch):
+        print(f"integrate: {d.name}'s branch {ref} is gone and its PR merged at "
+              f"{head[:12]} — {branch} already carries that commit; skipped.",
+              file=sys.stderr)
+        return
+    rec = publish._publish_record(d) or {}
+    if onto or rec.get("base") != base:
+        what = ("an `Onto branch` commit on another PR" if onto else
+                f"a PR against {rec.get('base') or '(no recorded base)'}, not {base}")
+        raise IntegrationError(
+            f"{d.name}'s branch {ref} is gone and its PR merged at {head[:12]}, a commit "
+            f"{branch} does not have, but it is {what}, which may have merged into a base "
+            f"other than {base_ref} — the fold cannot tell its work reaches {branch}; "
+            f"restore the branch, then re-run")
+    if not _carries(wt, head, f"{d.name}'s merged head {head}", base_ref, of=base_ref):
+        raise IntegrationError(
+            f"{d.name}'s branch {ref} is gone and its PR "
+            f"{rec.get('pr_url') or '(no recorded PR)'} merged at {head}, a commit neither "
+            f"{branch} nor {base_ref} has: it merged somewhere other than {base_ref} (its "
+            f"base edited on the host, or a squash or rebase merge), so taking {base_ref} "
+            f"in would not carry that work to the next wave — restore the branch, or get "
+            f"that work into {base_ref}, then re-run")
+    _take_in_base(wt, d, ref, branch, base_ref, head)
+
+
+def _carries(wt: Path, commit: str, what: str, branch: str, *, of: str = "HEAD") -> bool:
+    """Whether ``of`` — by default the line checked out in ``wt`` — has ``commit``. A commit
+    this clone does not have is not in it — never an error (:func:`_in_line` would read
+    git's exit 128 for it as a failure)."""
+    if _git(wt, "cat-file", "-e", f"{commit}^{{commit}}") != 0:
+        return False
+    return _in_line(wt, commit, what, branch, of=of)
+
+
+def _take_in_base(wt: Path, d: Path, ref: str, branch: str, base_ref: str, head: str) -> None:
+    """``d``'s branch ``ref`` is gone and its PR merged at ``head``, a commit the line does
+    not have but the base does (the caller checked), so the base carries the merged work.
+    Merge the base in (signed off, on top of the line: a fast-forward for the push, never a
+    rewrite — #593); a line that already has the base needs nothing."""
+    if not _in_line(wt, base_ref, base_ref, branch):
+        rc, conflicts = _merge(wt, base_ref, f"pdca-integrate: {base_ref} (carries merged "
+                                             f"{d.name})")
+        if rc != 0:
+            why = (f"conflicts in {', '.join(conflicts)}; update the clashing PR's branch "
+                   f"from the base" if conflicts else
+                   f"`git merge` exited {rc} with no conflicting path: a git step failed")
+            raise IntegrationError(
+                f"{d.name}'s branch {ref} is gone and its PR merged at {head[:12]}, which "
+                f"{branch} does not have, but {base_ref}, which carries that work, does not "
+                f"merge onto {branch} ({why}), then re-run")
+    print(f"integrate: {d.name}'s branch {ref} is gone and its PR merged at {head[:12]}, "
+          f"which {branch} did not have — the merged work reaches {branch} through "
+          f"{base_ref}.", file=sys.stderr)
+
+
+def _in_line(wt: Path, rev: str, what: str, branch: str, *, of: str = "HEAD") -> bool:
+    """Whether ``rev`` is an ancestor of ``of`` — by default the line checked out in ``wt``
+    (``branch`` names where it looked, in an error). ``git merge-base --is-ancestor`` exits
+    0 for yes, 1 for no; anything else (128) is git failing, so it raises — never read as
+    "not in the line", or reported as an overlap."""
+    rc = _git(wt, "merge-base", "--is-ancestor", rev, of)
+    if rc in (0, 1):
+        return rc == 0
+    raise IntegrationError(
+        f"could not tell whether {what} is already in {branch} — `git merge-base "
+        f"--is-ancestor` exited {rc} in {wt}; a git step failed (not an overlap): check that "
+        f"checkout, then re-run")
+
+
+def _merge(wt: Path, rev: str, message: str) -> tuple[int, list[str]]:
+    """Merge ``rev`` onto the line in ``wt``; return the exit code and, on a failure, the
+    paths left conflicting (none: it failed for another reason). A failed merge is aborted.
+    ``--signoff`` (DCO, as publish #81): later waves' PRs carry these merge commits outside
+    the base's ancestry, where a DCO-gated host inspects them (#405)."""
+    rc = _git(wt, "merge", "--no-ff", "--no-edit", "--signoff", "-m", message, rev)
+    if rc == 0:
+        return 0, []
+    r = subprocess.run(["git", "-C", str(wt), "diff", "--name-only", "--diff-filter=U"],
+                       capture_output=True, text=True)
+    conflicts = r.stdout.splitlines() if r.returncode == 0 else []
+    _git(wt, "merge", "--abort")   # a no-op when the merge never started
+    return rc, conflicts
+
+
+def _prepare_worktree(repo: Path, base_remote: str, base: str,
+                      remotes: Iterable[str] = ()) -> Path:
     """Create (or reuse) the integration worktree off the freshly-fetched base; raise
     :class:`IntegrationError` if it can't be made (worktree isolation is required here —
-    unlike Do/Check, there is no in-place fallback that would still produce the branch)."""
+    unlike Do/Check, there is no in-place fallback that would still produce the branch).
+
+    Fetches ``origin`` (the line and the PR branches), every remote a ``"stacked"``
+    record's branch lives on (#593), and the base remote. The remotes holding PR branches
+    are fetched with ``--prune``: a published branch deleted on its remote must stop
+    resolving here, and a stale remote-tracking ref would hide that. The base remote is
+    fetched LAST: a merged PR's branch is deleted after its merge, so when these fetches
+    show a branch as gone, the base snapshot already has that merge — the check that the
+    base has the merged head (:func:`_gone_branch`) never runs on a snapshot taken too
+    early. A fetch that fails is a failed git step (the run stops)."""
     if not (repo / ".git").exists():
         raise IntegrationError(f"checkout not found at {repo}")
-    _git(repo, "fetch", base_remote)
-    if base_remote != "origin":
-        _git(repo, "fetch", "origin")
+    branch_remotes = list(dict.fromkeys(("origin", *remotes)))
+    for remote in [r for r in branch_remotes if r != base_remote] + [base_remote]:
+        prune = ("--prune",) if remote in branch_remotes else ()
+        if _git(repo, "fetch", *prune, remote) != 0:
+            raise IntegrationError(f"could not fetch {remote} in {repo} — the fold cannot "
+                                   f"see the branches it merges")
     wt = _integ_worktree(repo, base)
     if not (wt / ".git").exists() and _git(repo, "worktree", "add", "--force",
                                            str(wt), f"{base_remote}/{base}") != 0:

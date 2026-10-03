@@ -24,6 +24,7 @@ import datetime
 import re
 import sys
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 
 from . import (act, assemble, autoiterate, brief, drive_claim, driver, gates, integrate, lane,
@@ -639,11 +640,20 @@ def _sweep_quietly(cfg: Config, bundles: list[Path]) -> None:
 
 
 def _publish_bundle(cfg: Config, d: Path, *, by: str, today: str,
-                    texts_prevalidated: bool = False) -> None:
+                    texts_prevalidated: bool = False) -> bool:
     """Publish one COMPLETE bundle (Check's closing step), isolated so a single failure
     can't abort the batch (testbed #3); a non-zero return is loud, never silent (#97).
     ``texts_prevalidated`` (#295 review): the wave pre-pass already drafted + T4-gated
-    the texts, so publish runs mechanics-only (no second T4 run mid-wave)."""
+    the texts, so publish runs mechanics-only (no second T4 run mid-wave).
+
+    Returns whether this call pushed the bundle's branch, so the wave fold has it to merge
+    (#593). Read off ``publish.json``: both publish paths write it only once every step,
+    the push included, has succeeded — also when ``gh pr create`` then fails (rc 1, e.g. an
+    iterated bundle whose old draft PR is still open), and that pushed branch is folded. So
+    True iff, after the call, the record exists and either did not exist before it or its
+    ``st_mtime_ns`` changed. An earlier run's record, which an iterate keeps, never counts,
+    nor does a call that raised (``_isolate`` logged it): that errs toward holding."""
+    before = _record_mtime(d)
     rc = _isolate(d, "publish", lambda: publish.publish(
         cfg, d.name.removeprefix("issue_"),
         dry_run=cfg.publisher.mode == "stub", by=by, today=today, skip_if_no_target=True,
@@ -651,18 +661,34 @@ def _publish_bundle(cfg: Config, d: Path, *, by: str, today: str,
     if rc not in (0, None):  # None ⇒ _isolate already logged an exception
         print(f"flow: {d.name} is COMPLETE but publish did not complete (rc {rc}) — NOT "
               f"published; run `pdca publish {d.name.removeprefix('issue_')}`.", file=sys.stderr)
+    after = _record_mtime(d)
+    return rc is not None and after is not None and after != before
+
+
+def _record_mtime(d: Path) -> int | None:
+    """``publish.json``'s ``st_mtime_ns``, or None when there is none — to tell a record the
+    publish call just wrote from one an earlier run left (#593)."""
+    try:
+        return (d / "publish.json").stat().st_mtime_ns
+    except OSError:
+        return None
 
 
 # ----------------------------------------------------------------------------
 # Shared multi-bundle driver: compute waves → per wave (drive → cheap-first sign-off →
 # publish → fold onto the integration branch the next wave builds on) → Act once (docs 09).
 # ----------------------------------------------------------------------------
-def _runnable(cfg: Config, wave: list[Path], batch_names: set[str]) -> list[Path]:
+def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+              held: set[str] | frozenset[str] = frozenset()) -> list[Path]:
     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
 
     A prerequisite **in this run's batch** is carried into the dependent's base by the wave
     fold once it reaches COMPLETE (it sits in an earlier wave), so COMPLETE is the bar — e.g.
-    a prereq DISCONTINUED earlier never gets there, and its dependent is skipped loudly. A
+    a prereq DISCONTINUED earlier never gets there, and its dependent is skipped loudly. An
+    in-batch prerequisite named in ``held`` (bundle dir names, #593) is not ready either: it
+    is COMPLETE, but this run pushed no branch of it (its texts or its publish failed before
+    the push), so the fold has nothing of it to carry — its dependents are held while the
+    rest of the run goes on. A
     prerequisite **outside this batch** (a prior run's) is gated on its on-disk COMPLETE state
     (archived `completed/` too, #171) — **except** an out-of-batch ``Depends on (merged)``
     prereq, which keeps its stricter #107 merge-gate (#186): nothing in *this* run carries an
@@ -683,6 +709,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str]) -> list[Path
                     unmet.append(dep)
             elif state.state(cfg.find_bundle(dep)) != state.COMPLETE:  # archived prereq too (#171)
                 unmet.append(dep)
+            elif not out_of_batch and cfg.bundle(dep).name in held:
+                unmet.append(dep)  # accepted, but no branch pushed this run: nothing to fold (#593)
         if unmet:
             print(f"flow: {d.name} skipped — prerequisite(s) not ready "
                   f"({', '.join(unmet)}); not built on a base missing them.", file=sys.stderr)
@@ -691,18 +719,25 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str]) -> list[Path
     return runnable
 
 
-def _point_at_integration(integ: dict[tuple[str, str], str], runnable: list[Path]) -> None:
+def _point_at_integration(integ: dict[tuple[str, str], str], runnable: list[Path],
+                          tips: Mapping[tuple[str, str], str | None] | None = None) -> None:
     """Reconcile each runnable bundle's stack base with THIS run's integration state (#187).
 
     ``integ`` maps each integrated target to its run-scoped integration branch. A bundle is
     pointed at the branch for **its own** ``(repo, base)`` target only — never a sibling
     target's, which is absent on that repo or carries unrelated patches. A bundle whose target
     wasn't integrated this run has any **stale** stack base (left by a prior/resumed run)
-    cleared, so it builds off its own target base rather than an old integration branch."""
+    cleared, so it builds off its own target base rather than an old integration branch.
+
+    ``tips`` maps a target to the line commit the run's last fold pushed (#593; ``None`` in
+    a dry-run): the commit the bundle is built on. It is recorded beside the branch
+    (``stack-base-tip``), so publish cuts the PR branch from it even after later waves have
+    grown the line (a held bundle published late)."""
     for d in runnable:
-        branch = integ.get(publish._resolve_target(d)[:2])
+        target = publish._resolve_target(d)[:2]
+        branch = integ.get(target)
         if branch:
-            publish.write_stack_base(d, branch)
+            publish.write_stack_base(d, branch, (tips or {}).get(target))
         else:
             publish.clear_stack_base(d)
 
@@ -1673,8 +1708,17 @@ def _drive_and_act(
     # if a later reschedule holds it (:func:`_adopt_split_children`).
     named = frozenset(batch_names)
     published: set[str] = set()
+    # Bundles whose publish pushed their branch THIS run (`_publish_bundle` True, #593). An
+    # iterate keeps an earlier attempt's publish.json, so a record on disk cannot tell.
+    pushed: set[str] = set()
+    # Accepted bundles the fold has no branch of to carry (#593): left out of every fold,
+    # their in-batch dependents held by `_runnable`, instead of stopping the run.
+    held_unpushed: set[str] = set()
     accepted: list[Path] = []        # cumulative COMPLETE bundles, wave then name order
     integ: dict[tuple[str, str], str] = {}  # per-target (repo, base) → integration branch (#187)
+    # Per-target (repo, base) → the tip this run's last fold pushed (None in a dry-run), so
+    # each later fold continues THIS run's line, append-only (`integrate.fold`, #593).
+    folded_tips: dict[tuple[str, str], str | None] = {}
     preflighted = False              # per-lane preflight runs at most once, before the first pool
     # The batch the caller NAMED is levelled first and strictly, exactly as before —
     # `compute_waves` raises on a cycle or an unresolvable dependency. That contract belongs
@@ -1722,7 +1766,7 @@ def _drive_and_act(
     # read live below (never cached in a `last`), and an adopted child's wave is driven,
     # published and folded by exactly the code every other wave goes through.
     for k, wave in enumerate(wave_list):
-        runnable = _runnable(cfg, wave, batch_names)
+        runnable = _runnable(cfg, wave, batch_names, held=held_unpushed)
         if not runnable:
             continue
         # The pool, read off the schedule as it stands NOW — so a splice below has already
@@ -1762,10 +1806,11 @@ def _drive_and_act(
                     f"lane preflight failed for a lanes={cfg.lanes} batch — not fanning out "
                     "(fix the per-lane resources above, then re-run)")
         # Reconcile each runnable bundle's stack base with this run's integration state:
-        # point it at its OWN (repo, base) target's branch, or clear a stale marker a
-        # prior/resumed run left so it builds off its own base (#187). Unconditional — the
-        # stale-clear must run even before any wave has folded (integ still empty).
-        _point_at_integration(integ, runnable)
+        # point it at its OWN (repo, base) target's branch, and the line commit it builds on
+        # (#593), or clear a stale marker a prior/resumed run left so it builds off its own
+        # base (#187). Unconditional — the stale-clear must run even before any wave has
+        # folded (integ still empty).
+        _point_at_integration(integ, runnable, folded_tips)
         # This wave's allowance is its own cap AND what is left of the run's pool, whichever
         # is smaller — the second term is the admission rule again, applied to the wave that
         # was let in (#469); with the pool covering the live schedule (#473) it can only bite
@@ -1813,7 +1858,8 @@ def _drive_and_act(
                     # Mechanics-only: the pre-pass drafted AND T4-gated the texts — a
                     # second T4 run here could transiently fail AFTER siblings pushed,
                     # recreating the half-published wave (#295 review).
-                    _publish_bundle(cfg, d, by=by, today=today, texts_prevalidated=True)
+                    if _publish_bundle(cfg, d, by=by, today=today, texts_prevalidated=True):
+                        pushed.add(d.name)   # its branch is this run's to fold (#593)
                 else:
                     print(f"flow: {d.name} — publish texts not ready (draft/T4 failed); "
                           f"NOT published this run; fix and run `pdca publish "
@@ -1833,6 +1879,20 @@ def _drive_and_act(
                           file=sys.stderr)
                     break
             else:  # default: stack — fold onto a per-target integration branch
+                # An accepted, patched, targeted bundle whose branch was not pushed this run
+                # (texts failed draft/T4, or publish failed before or at its push — an
+                # earlier attempt's publish.json may still name the old, rejected branch)
+                # leaves the fold nothing to carry (#593). Hold it, and via `_runnable` its
+                # dependents, rather than stop the run. A branch pushed this run is folded
+                # even if `gh pr create` failed after it. Not in a dry-run: the stub pushes
+                # nothing and records no branch.
+                if not dry:
+                    for d in integrate.unpublished(accepted, pushed=pushed):
+                        if d.name not in held_unpushed:
+                            held_unpushed.add(d.name)
+                            print(f"flow: {d.name} pushed no branch this run — left out "
+                                  f"of the integration fold; bundles that depend on it are "
+                                  f"held this run.", file=sys.stderr)
                 # ONE lock scope covers fold AND re-gate (#297 review round 10): the
                 # locks stack keeps every target's integ lock held between the two,
                 # so no gap exists in which another flow's publish-boundary sweep
@@ -1841,7 +1901,14 @@ def _drive_and_act(
                 stop_wave = False
                 with contextlib.ExitStack() as locks:
                     try:
-                        folded = integrate.fold(cfg, accepted, dry_run=dry, locks=locks)
+                        folded = integrate.fold(
+                            cfg, [d for d in accepted if d.name not in held_unpushed],
+                            dry_run=dry, locks=locks, folded_this_run=dict(folded_tips))
+                        # Record each target's pushed tip at once, before any re-gate: the
+                        # next fold continues from exactly that tip and refuses a line
+                        # another run moved (#593). A dry-run pushes nothing (None).
+                        for tgt, (_branch, wt) in folded.items():
+                            folded_tips[tgt] = integrate.pushed_tip(wt) if wt is not None else None
                     except integrate.IntegrationError as exc:
                         print(f"flow: wave {k} did not integrate ({exc}); STOPPING — "
                               f"later waves not run.", file=sys.stderr)
