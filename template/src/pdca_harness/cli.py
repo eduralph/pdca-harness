@@ -658,6 +658,13 @@ def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run
     except flow.PreflightError as exc:
         print(f"flow: {exc}", file=sys.stderr)
         return 1
+    except waves.DependencyGraphError as exc:
+        # An unschedulable dependency graph is operator input (#589), refused like a bad
+        # pdca.toml (rc 2, #92) — not a traceback. Only this subtype: any other ValueError
+        # out of `flow_ids` is a real fault and still propagates.
+        print(f"flow: {exc}\n  refusing to start — no bundle was built.\n"
+              f"  Ways out: {exc.remedy}.", file=sys.stderr)
+        return 2
 
     # Two PRESENTATIONS of that one map — never two drive paths, and never a second source
     # of truth: both read only `results`, so neither can report what the other cannot see.
