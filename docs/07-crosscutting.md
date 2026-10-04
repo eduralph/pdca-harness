@@ -654,12 +654,15 @@ wave builds on, via `[driver].wave_mode`:
   no fold merged it in — see below). Otherwise a fold merge commit joined
   histories your base got separately, so the PR has several merge bases with it
   and can keep showing an already-merged change: use "Update branch" (merge the
-  base into it) and its diff is its own change again. Within a run the
-  integration line only grows: the run's first fold starts it fresh from the
-  base with a force-push (if your origin refuses force-pushes, delete the old
-  `pdca-integration/<base>` first, or allow force-pushes on
+  base into it) and its diff is its own change again. Each run has its own
+  integration line, `pdca-integration/<base>-r<key>`, where the key comes from
+  the ids the run was asked to drive: two runs on one base that drive different
+  batches never share a line, and running the same ids again gets the same line
+  back. Within a run the line only grows: the run's first fold starts it fresh
+  from the base with a force-push (if your origin refuses force-pushes, delete
+  the old `pdca-integration/<base>-r<key>` first, or allow force-pushes on
   `pdca-integration/*`), and later folds continue it without force — and stop
-  the run if another run moved it. Commits pushed onto a stack PR's branch after
+  the run if something else moved it. Commits pushed onto a stack PR's branch after
   a fold carried it reach the line at the next fold. If a PR merges and its
   branch is deleted, the fold looks up the commit the PR merged with: a line
   that has it already carries the PR; one that does not (say a fixup was pushed

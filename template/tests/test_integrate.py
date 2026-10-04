@@ -73,6 +73,27 @@ class FoldDryAndUnit(unittest.TestCase):
         self.assertNotEqual(integrate.integration_branch(self.cfg, "a-/b"),
                             integrate.integration_branch(self.cfg, "a/-b"))
 
+    def test_integration_branch_name_is_scoped_to_the_batch(self) -> None:
+        # #591: two batches on one base get two lines; the same batch — in any order, any
+        # repeat, `500` or `issue_500` — gets the same line back.
+        def name(base: str, *batch: str) -> str:
+            return integrate.integration_branch(self.cfg, base, list(batch))
+
+        a = name("main", "500", "501")
+        self.assertRegex(a, r"^pdca-integration/main-r[0-9a-f]+$")
+        self.assertEqual(name("main", "501", "issue_500", "500"), a)
+        self.assertNotEqual(name("main", "500"), a)
+        self.assertNotEqual(name("main", "500", "502"), a)
+        self.assertNotEqual(a, integrate.integration_branch(self.cfg, "main"))  # unscoped
+        # Still injective in the base, scoped or not: `-r` never comes out of the base
+        # flattening (its `-`s are `-h` / `-s`), so a base can never pose as base + batch.
+        self.assertNotEqual(name("release/2.0", "500"), name("release-2.0", "500"))
+        key = a.removeprefix("pdca-integration/main-r")
+        self.assertNotEqual(integrate.integration_branch(self.cfg, "main-r" + key), a)
+        self.assertNotEqual(name("main-r" + key, "500", "501"), a)
+        self.assertEqual(subprocess.run(["git", "check-ref-format", "refs/heads/" + a]
+                                        ).returncode, 0)
+
     def test_nothing_to_fold(self) -> None:
         self.assertEqual(integrate.fold(self.cfg, []), {})
         no_patch = self._bundle("NP", patch=None)            # close/no-fix: nothing to ship

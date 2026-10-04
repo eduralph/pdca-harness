@@ -7,10 +7,13 @@ base misses its prerequisite's change and conflicts. Rather than *merge* the wav
 into the target (which needs merge rights on the upstream base — impossible in a fork
 model — and relaxes the STOP discipline), this merges every accepted bundle's **published
 PR branch** onto a single run-scoped **integration branch** on ``origin`` (push-only — a
-fork has push). The next wave's Do worktree and PR branches are cut from that branch, so
-a dependent batch completes in one run as a reviewable PR stack the human merges
-bottom-up — generalising the single-chain ``Stacks on`` (#123) to whole waves, and fixing
-its multi-parent gap (the branch carries *all* prerequisites, not just ``parents[0]``).
+fork has push). The branch belongs to one batch (:func:`integration_branch`): two runs
+driving different batches against the same base fold onto different lines, so neither
+replaces the line the other builds and verifies on (#591). The next wave's Do worktree and
+PR branches are cut from that branch, so a dependent batch completes in one run as a
+reviewable PR stack the human merges bottom-up — generalising the single-chain ``Stacks
+on`` (#123) to whole waves, and fixing its multi-parent gap (the branch carries *all*
+prerequisites, not just ``parents[0]``).
 
 Every PR the stack opens targets the real base (publish), and the line carries the PR
 branches' own commits (same SHAs), joined by signed-off merge commits — never re-applied
@@ -25,9 +28,10 @@ see below). Otherwise a fold merge commit joined histories the base got separate
 commit never reaches the base, so the PR has several merge bases with it and can keep
 showing an already-merged change. Updating its branch from the base (GitHub's "Update
 branch") then leaves only its own change. Within one run the line is **append-only**: the
-run's first fold of a target starts fresh from the base (a force-push that replaces an
-earlier run's line); every later fold continues from the tip this run pushed, pushed
-without force, and refuses a line another run moved (``folded_this_run``, #591).
+run's first fold of a target starts fresh from the base (a force-push that replaces only
+an earlier run of the SAME batch's line — a different batch has a line of its own); every
+later fold continues from the tip this run pushed, pushed without force, and refuses a
+line another run moved (``folded_this_run``, #591).
 
 Commits pushed straight onto a stack PR branch after a fold carried it reach the line: the
 next fold merges the branch's new tip. A branch deleted after its PR merged is judged by
@@ -43,6 +47,7 @@ broken base. Mechanics are deterministic ``git`` subprocesses (no model).
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import subprocess
 import sys
 from collections.abc import Collection, Iterable, Mapping
@@ -59,13 +64,32 @@ class IntegrationError(RuntimeError):
     incomplete base."""
 
 
-def integration_branch(cfg: Config, base: str) -> str:
+def integration_branch(cfg: Config, base: str, batch: Iterable[str] | None = None) -> str:
     """The run-scoped integration branch for a target ``base`` — deterministic (a resumed run
     rebuilds the same branch) and **injective in the base** (#187): the base is flattened to a
     single ref segment under ``pdca-integration/`` via :func:`_flatten_base`, so two bases that
     differ only by ``/`` vs ``-`` (``release/2.0`` → ``release-s2.0`` vs ``release-2.0`` →
-    ``release-h2.0``) never collide onto one branch and force-push over each other's fold."""
-    return "pdca-integration/" + _flatten_base(base)
+    ``release-h2.0``) never collide onto one branch and force-push over each other's fold.
+
+    ``batch`` (#591) is the bundles the run was ASKED to drive. It scopes the branch to that
+    batch — ``pdca-integration/<flattened base>-r<batch key>`` (:func:`batch_key`) — so two
+    runs on one base that drive different batches never share, replace or add to each
+    other's line, while the same batch asked for again gets the same branch back. ``-r``
+    never appears in :func:`_flatten_base`'s output (each ``-`` it emits is ``-h`` or
+    ``-s``), so the base part ends unambiguously and the name stays injective in the base,
+    and a batch-scoped name can never equal an unscoped one. ``None`` (a direct caller with
+    no batch) keeps the unscoped ``pdca-integration/<flattened base>``."""
+    name = "pdca-integration/" + _flatten_base(base)
+    return name if batch is None else f"{name}-r{batch_key(batch)}"
+
+
+def batch_key(names: Iterable[str]) -> str:
+    """A short, deterministic key for a batch of bundles (#591): the names normalised to
+    bundle names (``500`` and ``issue_500`` are one bundle), de-duplicated and sorted — so
+    the order they were asked for in does not matter — then hashed. Lowercase hex: a valid
+    ref-name fragment."""
+    norm = sorted({"issue_" + str(n).removeprefix("issue_") for n in names})
+    return hashlib.sha256("\n".join(norm).encode("utf-8")).hexdigest()[:12]
 
 
 def _flatten_base(base: str) -> str:
@@ -219,6 +243,7 @@ def _targeted(patched: list[Path]) -> list[tuple[Path, str, str, str]]:
 def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
          locks: contextlib.ExitStack | None = None,
          folded_this_run: Mapping[tuple[str, str], str | None] | None = None,
+         batch: Collection[str] | None = None,
          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
     """Fold the cumulative accepted bundles' published branches onto a per-target
     integration branch.
@@ -241,10 +266,15 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     last fold pushed (``None`` in a dry-run, where nothing is pushed). A **listed** target
     continues from that tip and pushes WITHOUT force (append-only, so no push rewrites a
     commit an open PR's base or head depends on), and refuses when origin's line is not that
-    SHA — another run on the same base moved it (#591). A target **not listed** is the run's
-    first fold of it: it starts fresh from ``<base_remote>/<base>`` and force-pushes,
-    replacing any earlier run's line. ``None`` (a direct caller) continues the line if
+    SHA — something else moved it (#591). A target **not listed** is the run's first fold
+    of it: it starts fresh from ``<base_remote>/<base>`` and force-pushes, replacing an
+    earlier run's line of the same name. ``None`` (a direct caller) continues the line if
     origin has it, else starts fresh.
+
+    ``batch`` (#591) is the bundles the run was asked to drive; each target's line is
+    :func:`integration_branch` scoped to it, so a run's fresh first fold replaces only an
+    earlier run of the SAME batch's line, never a concurrent run's on the same base. The
+    flow always passes it. ``None`` (a direct caller) folds onto the unscoped name.
 
     Fail-closed outside a dry-run: a targeted, patched bundle with no published branch
     raises before any git step (the flow holds such bundles, and failed publishes, out:
@@ -309,7 +339,7 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     # waiting on target-1). A globally consistent acquisition order makes them
     # serialize instead. Stack order WITHIN each group is untouched.
     for (repo_spec, base), bundles in sorted(groups.items()):
-        branch = integration_branch(cfg, base)
+        branch = integration_branch(cfg, base, batch)
         repo = publish._checkout_path(cfg, repo_spec)
         start = ("auto" if folded_this_run is None
                  else "continue" if (repo_spec, base) in folded_this_run else "fresh")
@@ -354,24 +384,25 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                     raise IntegrationError(
                         f"origin's {branch} is at {line or '(absent)'}, not at "
                         f"{pushed or '(no tip recorded)'}, the tip this run's last fold "
-                        f"pushed — another run on the same base has likely moved it "
-                        f"(#591). Not building on a line this run did not push; let the "
-                        f"other run finish, then re-run")
+                        f"pushed — another run of the same batch, or someone outside the "
+                        f"harness, has moved it (#591). Not building on a line this run did "
+                        f"not push; let the other run finish, then re-run")
             fresh = start == "fresh" or (start == "auto" and line is None)
             start_ref = f"{base_remote}/{base}" if fresh else line
             if _git(wt, "checkout", "-B", branch, start_ref) != 0:
                 raise IntegrationError(f"could not start {branch} off {start_ref}")
             for d in bundles:
                 _merge_published(cfg, wt, d, refs[d.name], branch=branch, base=base)
-            # Fresh: the run's first fold of this target replaces any earlier run's line, so
-            # it is forced. Continuing: a fast-forward of this run's own tip, pushed WITHOUT
-            # force, so it lands on an origin with receive.denyNonFastForwards too, and can
-            # never rewrite a commit an open PR's base or head depends on (#593).
+            # Fresh: the run's first fold of this target replaces an earlier run of the same
+            # batch's line (the name is batch-scoped, #591), so it is forced. Continuing: a
+            # fast-forward of this run's own tip, pushed WITHOUT force, so it lands on an
+            # origin with receive.denyNonFastForwards too, and can never rewrite a commit an
+            # open PR's base or head depends on (#593).
             push = ("push", "--force", "origin", branch) if fresh else ("push", "origin", branch)
             if _git(wt, *push) != 0:
-                why = (" (the run's first fold force-pushes over any earlier run's line: if "
-                       f"origin refuses force-pushes, delete the old {branch} there or allow "
-                       "force-pushes on pdca-integration/*)" if fresh else
+                why = (" (the run's first fold force-pushes over an earlier run of the same "
+                       f"batch's line: if origin refuses force-pushes, delete the old {branch} "
+                       "there or allow force-pushes on pdca-integration/*)" if fresh else
                        " (an unforced fast-forward was refused — did another run move it? "
                        "#591)")
                 raise IntegrationError(

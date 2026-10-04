@@ -22,10 +22,11 @@
 #         * $PDCA_BASE (issue #54) — the brief's `Onto branch`. Publish appends the fix as a
 #           commit to that existing PR head, so the gate must prove red->green on IT.
 #         * $PDCA_VERIFY_BASE (issue #273) — the wave's folded integration branch
-#           (`origin/pdca-integration/<base>`) for a wave>0 bundle in a dependency batch, so a
-#           dependent verifies against base+prereqs. Resetting to the brief's origin base
-#           instead would false-fail "patch does not apply — stale" for a dependent that
-#           shares a file with its prereq, or measure red->green against a tree LACKING it.
+#           (`origin/pdca-integration/<base>-r<key>`, the run's own line, #591) for a wave>0
+#           bundle in a dependency batch, so a dependent verifies against base+prereqs.
+#           Resetting to the brief's origin base instead would false-fail "patch does not
+#           apply — stale" for a dependent that shares a file with its prereq, or measure
+#           red->green against a tree LACKING it.
 #         * $PDCA_BRIEF_BASE (issue #387) — the ordinary case: the brief's own
 #           `Repo + branch target` base (or the project default branch when it names none),
 #           resolved by the driver with the SAME parser publish uses. Do NOT re-derive it by
