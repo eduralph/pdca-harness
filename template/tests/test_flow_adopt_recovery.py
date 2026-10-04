@@ -37,16 +37,23 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
-from pdca_harness import cli, flow, leaves, signoff, split, state
+from pdca_harness import cli, drive_claim, flow, leaves, signoff, split, state
 from pdca_harness.config import Config, LeafConfig
+
+_SRC = Path(__file__).resolve().parents[1] / "src"
+_WAIT = 30.0   # seconds; bounds every wait on the holder process
 
 
 def _stub_config(root: Path) -> Config:
@@ -98,6 +105,41 @@ _CHILD_ONE = _brief("child-first")
 _CHILD_TWO = _brief("child-second", "- **Depends on:** child-1")
 #: …and the independent sibling: no ordering edge, so the two children land in ONE wave.
 _SIBLING_TWO = _brief("child-second")
+
+
+def _wait_for(path: Path, proc: subprocess.Popen | None = None) -> bool:
+    """Bounded wait for `path` to appear; False early if `proc` has exited."""
+    deadline = time.monotonic() + _WAIT
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        if proc is not None and proc.poll() is not None:
+            return False
+        time.sleep(0.02)
+    return False
+
+
+def _hold_main(argv: list[str]) -> int:
+    """Entry point of the holder process: `<root> <pause> <id>` — take the PRODUCTION drive
+    claim (`drive_claim.Run.take`) on bundle `<id>` the way a live `flow` run does, drop
+    `<pause>/ready`, and keep the claim until `<pause>/go` appears (bounded). The technique
+    of `tests/test_flow_single_driver.py`'s `_hold` — a real second process holding the
+    claim — copied, not imported."""
+    cfg, pause = _stub_config(Path(argv[0])), Path(argv[1])
+    with drive_claim.run(cfg) as claims:
+        if claims.take(cfg.bundle(argv[2])) is not None:
+            return 3
+        (pause / "ready").write_text(argv[2], encoding="utf-8")
+        _wait_for(pause / "go")
+    return 0
+
+
+#: The holder's bootstrap: load THIS file by path and call `_hold_main`.
+_BOOT = ("import importlib.util, sys\n"
+         "spec = importlib.util.spec_from_file_location('adopt_recovery_holder', sys.argv[1])\n"
+         "mod = importlib.util.module_from_spec(spec)\n"
+         "spec.loader.exec_module(mod)\n"
+         "sys.exit(mod._hold_main(sys.argv[2:]))\n")
 
 
 class AdoptRecovery(unittest.TestCase):
@@ -679,6 +721,255 @@ class AdoptRecovery(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(self._state("810"), state.COMPLETE)
         self.assertEqual(self._stdout(), [self._line("810", state.COMPLETE)])
+
+    # -- #590: an id that depends on a recovery seed's child --------------------------
+
+    _REFUSED = "is neither in this batch nor an existing COMPLETE bundle"
+
+    def _assert_refused_up_front(self, rc: int, dep: str) -> None:
+        """Today's up-front refusal (#589's shape): rc 2, the message, nothing driven."""
+        err = self.err.getvalue()
+        self.assertEqual(rc, 2, err)
+        self.assertIn(f"issue_810: declared dependency '{dep}' {self._REFUSED}", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(self.waves_driven, [])
+        self.assertEqual(self.passes, 0)
+        self.assertEqual(self._state("810"), state.PLANNED)
+
+    def _hold_claim(self, iid: str) -> subprocess.Popen:
+        """Another live process holds `iid`'s drive claim until the test ends."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        pause = tmp / "pause"
+        pause.mkdir()
+        log = (tmp / "holder.err").open("w")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("PDCA_")}
+        env["PYTHONPATH"] = str(_SRC)
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _BOOT, str(Path(__file__).resolve()),
+             str(self.cfg.root), str(pause), iid],
+            stdout=subprocess.DEVNULL, stderr=log, env=env, cwd=str(tmp))
+
+        def release() -> None:
+            (pause / "go").write_text("", encoding="utf-8")
+            try:
+                proc.wait(timeout=_WAIT)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=_WAIT)
+            finally:
+                log.close()
+
+        self.addCleanup(release)
+        if not _wait_for(pause / "ready", proc):
+            self.fail(f"holder never took the claim on {iid}: rc={proc.poll()}\n"
+                      + (tmp / "holder.err").read_text(encoding="utf-8"))
+        return proc
+
+    def test_a_named_id_depending_on_a_seeds_child_is_driven_after_it(self) -> None:
+        """`pdca flow 500 810` where 500 is already terminal on a split into 601 and 602
+        (602 `Depends on` 601) and 810 `Depends on: 602`. 602 is part of the request — the
+        operator named its parent as a recovery seed, and the run adopts it — so the
+        up-front check must not refuse the edge to it. The children are adopted in front of
+        the schedule and 810 is driven after 602, its prerequisite."""
+        self._strand_a_split()
+        self._briefed("810", "- **Depends on:** 602")
+        self._arm()
+
+        rc = self._cli(["500", "810"])
+
+        err = self.err.getvalue()
+        self.assertNotIn(self._REFUSED, err)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.waves_driven, [["issue_601"], ["issue_602"], ["issue_810"]])
+        for iid in ("601", "602", "810"):
+            self.assertEqual(self._state(iid), state.COMPLETE, err)
+
+    def test_a_seeds_grandchild_through_a_split_child_counts_as_offered(self) -> None:
+        """#473's walk: 500 → 601, 602, and 601 itself already terminal on a split into 701,
+        702 (702 `Depends on` 701). 810 `Depends on: 702` — a grandchild reached THROUGH a
+        split child is adopted by the run, so the edge to it is resolvable too."""
+        self._strand_a_split()
+        self._split_now(self.cfg.bundle("601"), ["701", "702"], [_CHILD_ONE, _CHILD_TWO])
+        self._drive_to_complete(self.cfg.bundle("601"))
+        self.assertEqual(self._state("601"), state.COMPLETE)
+        self._briefed("810", "- **Depends on:** 702")
+        self._arm()
+
+        rc = self._cli(["500", "810"])
+
+        err = self.err.getvalue()
+        self.assertNotIn(self._REFUSED, err)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.waves_driven,
+                         [["issue_602", "issue_701"], ["issue_702"], ["issue_810"]])
+        for iid in ("602", "701", "702", "810"):
+            self.assertEqual(self._state(iid), state.COMPLETE, err)
+
+    def test_without_the_seed_or_off_its_lineage_the_edge_is_still_refused(self) -> None:
+        """The strict contract still holds for everything the request does NOT schedule:
+        `pdca flow 810` alone (no seed named) is refused as before, and so is `pdca flow
+        500 810` where 810 depends on a PLANNED bundle that is not among 500's children."""
+        self._strand_a_split()
+        self._briefed("810", "- **Depends on:** 602")
+        self._arm()
+        self._assert_refused_up_front(self._cli(["810"]), "602")
+        self.assertEqual(self._state("602"), state.PLANNED)
+
+        self._reset()
+        self._strand_a_split()
+        self._briefed("999")                                   # in flight, but no child
+        self._briefed("810", "- **Depends on:** 999")
+        self._arm()
+        self._assert_refused_up_front(self._cli(["500", "810"]), "999")
+        self.assertEqual(self._state("601"), state.PLANNED)    # the seed was not acted on
+
+    def _discontinue(self, d: Path) -> None:
+        """Carry ONE bundle to DISCONTINUED with production code: the wave driver, with the
+        sign-off session answering `discontinue` (the decision file the driver reads)."""
+        real_wave, real_signoff = self._orig[2], leaves.run_signoff_batch
+
+        def discontinue(cfg: Config, bundles: list[Path]) -> None:
+            for b in bundles:
+                (b / leaves.SIGNOFF_DECISION).write_text(
+                    "discontinue\nabandoned for the test\n", encoding="utf-8")
+
+        leaves.run_signoff_batch = discontinue
+        try:
+            with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+                real_wave(self.cfg, [d], by="t", today="2026-08-10", max_passes=2)
+        finally:
+            leaves.run_signoff_batch = real_signoff
+
+    def test_a_child_not_offered_is_still_refused_up_front(self) -> None:
+        """Boundary (a): 'offered' is an IN-FLIGHT, briefed lineage child. 810 depending on
+        a child of 500 that is DISCONTINUED, RESOLVED, or has no brief.md is refused up
+        front exactly as today — the run will not schedule it."""
+        def discontinued() -> None:
+            self._discontinue(self.cfg.bundle("602"))
+
+        def resolved() -> None:
+            d = self.cfg.bundle("602")
+            (d / "brief.md").unlink()
+            (d / "notes.json").write_text(
+                json.dumps({"resolved": {"note": "settled in the tracker"}}),
+                encoding="utf-8")
+
+        def briefless() -> None:
+            (self.cfg.bundle("602") / "brief.md").unlink()
+
+        for name, make, want in (("discontinued", discontinued, state.DISCONTINUED),
+                                 ("resolved", resolved, state.RESOLVED),
+                                 ("briefless", briefless, state.UNPLANNED)):
+            with self.subTest(name):
+                self._reset()
+                self._strand_a_split(bodies=[_CHILD_ONE, _SIBLING_TWO])
+                make()
+                self.assertEqual(self._state("602"), want)
+                self._briefed("810", "- **Depends on:** 602")
+                self._arm()
+                self._assert_refused_up_front(self._cli(["500", "810"]), "602")
+                self.assertEqual(self._state("601"), state.PLANNED)
+
+    def test_an_offered_child_another_run_holds_is_held_never_a_raise(self) -> None:
+        """Boundary (b): 601 is offered, but another live process holds its drive claim, so
+        adoption does not take it. 810 (`Depends on: 601`) is then reported as not built for
+        want of 601 — held, or skipped at its wave — never refused up front, never a
+        traceback; neither 601 nor 810 is driven."""
+        self._strand_a_split()
+        self._briefed("810", "- **Depends on:** 601")
+        self._arm()
+        holder = self._hold_claim("601")
+
+        rc = self._cli(["500", "810"])
+
+        err = self.err.getvalue()
+        self.assertIsNone(holder.poll(), "the holder let go before the run ended")
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn(self._REFUSED, err)
+        self.assertNotEqual(rc, 2, err)
+        driven = {n for w in self.waves_driven for n in w}
+        self.assertNotIn("issue_601", driven)
+        self.assertNotIn("issue_810", driven)
+        self.assertEqual(self._state("601"), state.PLANNED)
+        self.assertEqual(self._state("810"), state.PLANNED)
+        self.assertTrue([ln for ln in err.splitlines() if "issue_810" in ln and "601" in ln
+                         and ("held this run" in ln or "prerequisite(s) not ready" in ln)],
+                        err)
+
+    def test_depends_on_merged_on_an_offered_child_resolves_like_depends_on(self) -> None:
+        """`Depends on (merged)` is the stricter `Depends on` (#107), and its merge gate is
+        for a prerequisite OUTSIDE the run (`flow._runnable`). An offered child is adopted
+        INTO the run, so the edge is resolvable up front and orders 810 after 602 exactly
+        as the plain field does."""
+        self._strand_a_split()
+        self._briefed("810", "- **Depends on (merged):** 602")
+        self._arm()
+
+        rc = self._cli(["500", "810"])
+
+        err = self.err.getvalue()
+        self.assertNotIn(self._REFUSED, err)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.waves_driven, [["issue_601"], ["issue_602"], ["issue_810"]])
+        for iid in ("601", "602", "810"):
+            self.assertEqual(self._state(iid), state.COMPLETE, err)
+
+    def test_stacks_on_an_offered_child_is_still_refused_up_front(self) -> None:
+        """`Stacks on` is not `Depends on`: a stack parent must be an ACTIVE COMPLETE bundle
+        with a live published branch (`waves.check_dep_graph`), and an offered child is
+        PLANNED. So an edge to one is refused up front exactly as before — alone, and beside
+        a `Depends on`. With `Depends on: 601` + `Stacks on: 602` the refusal names 602: the
+        `Depends on` edge to the offered 601 got through, the `Stacks on` edge did not. One
+        child named in both fields is read as the stack edge, and refused."""
+        for name, fields in (
+                ("stacks on alone", ["- **Stacks on:** 602"]),
+                ("depends on one child, stacks on the other",
+                 ["- **Depends on:** 601", "- **Stacks on:** 602"]),
+                ("depends on and stacks on the same child",
+                 ["- **Depends on:** 602", "- **Stacks on:** 602"])):
+            with self.subTest(name):
+                self._reset()
+                self._strand_a_split()
+                self._briefed("810", *fields)
+                self._arm()
+                self._assert_refused_up_front(self._cli(["500", "810"]), "602")
+                for cid in ("601", "602"):
+                    self.assertEqual(self._state(cid), state.PLANNED)   # seed not acted on
+
+    def _rebrief(self, iid: str, old: str, new: str) -> None:
+        """Re-plan one field of a bundle's brief by hand. The old line must be there, so the
+        edit cannot miss without the test saying so."""
+        bp = self.cfg.bundle(iid) / "brief.md"
+        text = bp.read_text(encoding="utf-8")
+        self.assertIn(old, text)
+        bp.write_text(text.replace(old, new), encoding="utf-8")
+
+    def test_a_loop_through_an_offered_child_is_held_never_a_raise(self) -> None:
+        """A loop that runs THROUGH an offered child: 810 `Depends on: 602`, and 602 — the
+        seed's child — re-planned to `Depends on: 601, 810`. The up-front check cannot see
+        this loop, because an edge to an offered child adds no edge there (602 joins the
+        schedule only at the seed splice). Before #590 the run was refused up front, rc 2,
+        on the edge to 602. Now the splice's tolerant re-level holds BOTH ends of the loop
+        and names them, and the rest of the request goes on: 601 is driven, 602 and 810 are
+        not. A deliberate change, pinned here: no traceback, no up-front refusal, and the
+        run still fails (rc 1), because 810 is an id the operator named and it was held."""
+        self._strand_a_split()
+        self._rebrief("602", "- **Depends on:** 601", "- **Depends on:** 601, 810")
+        self._briefed("810", "- **Depends on:** 602")
+        self._arm()
+
+        rc = self._cli(["500", "810"])
+
+        err = self.err.getvalue()
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn(self._REFUSED, err)
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(self.waves_driven, [["issue_601"]])
+        self.assertEqual(self._state("601"), state.COMPLETE)
+        for iid in ("602", "810"):
+            self.assertEqual(self._state(iid), state.PLANNED)
+            self.assertIn(f"flow: issue_{iid} held this run — dependency cycle", err)
 
 
 if __name__ == "__main__":
