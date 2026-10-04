@@ -62,13 +62,22 @@ class DependencyGraphError(ValueError):
         self.remedy = remedy
 
 
-def check_dep_graph(cfg: Config, bundles: list[Path]) -> None:
+def check_dep_graph(cfg: Config, bundles: list[Path], *,
+                    offered: frozenset[str] = frozenset()) -> None:
     """Validate the declared dependency DAG before any build (issue #36).
 
     A dependency that is neither in this batch nor an already-COMPLETE bundle on disk
     is a misconfigured brief; a cycle is unschedulable. Both raise
     :class:`DependencyGraphError` (a ``ValueError``) so the run aborts before touching any
     bundle. No deps declared ⇒ no-op.
+
+    ``offered`` (bundle names, #590) are ids the request will schedule although they are
+    not in ``bundles`` yet: the in-flight children ``pdca flow`` adopts from a recovery
+    seed it was named (``flow._offered_by_seeds``). A ``Depends on`` / ``Depends on
+    (merged)`` edge to one is resolvable and adds NO edge here — the child joins the
+    schedule only at the seed splice, which re-levels with it in place, so that is where
+    the edge orders anything. A ``Stacks on`` edge to one stays refused (a stack parent must
+    be an active COMPLETE bundle). Empty ⇒ exactly the check as it always was.
     """
     names = {b.name for b in bundles}
     graph: dict[str, list[str]] = {}
@@ -83,6 +92,8 @@ def check_dep_graph(cfg: Config, bundles: list[Path]) -> None:
             if dn in names:
                 edges.append(dn)
                 continue
+            if dn in offered and dep not in stacks:
+                continue  # scheduled by the seed splice, which orders it (#590)
             # Out-of-batch: an archived (completed/) prereq satisfies Depends on / Depends
             # on (merged) (#171). But a `Stacks on` parent must be an ACTIVE bundle — the
             # dependent bases its worktree + stacked PR on the parent's *live* published
@@ -158,17 +169,19 @@ def _reaches(deps: dict[str, set[str]], src: str, dst: str) -> bool:
     return False
 
 
-def compute_waves(cfg: Config, bundles: list[Path]) -> list[list[Path]]:
+def compute_waves(cfg: Config, bundles: list[Path], *,
+                  offered: frozenset[str] = frozenset()) -> list[list[Path]]:
     """Partition ``bundles`` into ordered waves.
 
     ``wave[k]`` holds the bundles whose every prerequisite is in an earlier wave; within
     a wave there is no dependency *and* no conflict edge, so it builds in parallel and
     folds onto the integration branch in one step. Raises :class:`DependencyGraphError`
     (a ``ValueError``, via :func:`check_dep_graph`) on an unschedulable graph — a cycle,
-    or a dependency neither in this batch nor already COMPLETE. No fields declared ⇒ one
-    wave, sort-by-name.
+    or a dependency neither in this batch nor already COMPLETE (nor ``offered``, passed
+    straight to :func:`check_dep_graph`). No fields declared ⇒ one wave, sort-by-name.
     """
-    check_dep_graph(cfg, bundles)  # cycle / unresolved dep → ValueError, before any work
+    # cycle / unresolved dep → ValueError, before any work
+    check_dep_graph(cfg, bundles, offered=offered)
     by_name = {b.name: b for b in bundles}
 
     # Directed prerequisite edges, restricted to the batch (out-of-batch prereqs are
