@@ -126,9 +126,16 @@ overflow = 0
 #       MERGE RIGHTS on the base remote (a fork contributor lacks them upstream — keep
 #       "stack" there) and relaxes the STOP discipline for the batch. Fail-closed: a
 #       non-mergeable PR stops the run.
+#       A wave's PRs merge one after another, so under merge_requires = "all" a PR found
+#       BEHIND its base (an earlier PR of the wave just merged) is first brought up to date
+#       and its new head verified again before it merges — see merge_requires. Turn on
+#       "require branches to be up to date" (`strict`) in the base's branch protection for
+#       merge mode: the host then also refuses a merge if the base moves after the driver's
+#       last read, a window no client-side check can close.
 wave_mode = "stack"
 # The `gh pr merge` strategy when wave_mode = "merge": "merge" (a merge commit — auditable,
-# bisectable; the default), "squash", or "rebase".
+# bisectable; the default), "squash", or "rebase". It governs only that final merge: the
+# update of a PR that is behind its base (merge_requires) is always a merge commit.
 merge_method = "merge"
 # Which checks must be green before wave_mode = "merge" merges a non-final wave's PR
 # (issue #413). `gh pr merge` alone fails closed ONLY on the checks this host marks
@@ -142,9 +149,25 @@ merge_method = "merge"
 #       at all: absence of evidence is not green). Skipped/neutral checks are completed
 #       non-failures and do not block. Refusing is cheap: re-run once CI is green and the
 #       wave resumes idempotently.
+#       A rollup only describes the head it ran on, built on the base that head contains
+#       (issue #531), so first the driver reads whether the PR's head is BEHIND its base, in
+#       plain git: the head from `gh pr view`, a fetch, and `git merge-base --is-ancestor
+#       <base tip> <head>` in the publish checkout. If it is behind, the driver updates the
+#       PR's own branch with a merge commit of the base (`gh pr update-branch`, never a
+#       rebase of the reviewed commits), waits for that update to land, and reads the
+#       rollup of the NEW head. After the green it reads the head and base again (the head
+#       must be unchanged and still up to date) and merges pinned to that head (`gh pr
+#       merge --match-head-commit`). An update that fails (a conflict with the base) or
+#       does not land in time, an updated head that is not green, a head that changed, a
+#       base that moved, or git failing refuses and stops the run, the PR back in draft;
+#       an update commit already pushed stays on the PR branch.
 #   merge_requires = "required"  — host-config-only semantics: skip that gate, so branch
 #       protection is again the only backstop (and an empty rollup merges). Correct only
-#       where the host's required checks really are the whole verification.
+#       where the host's required checks really are the whole verification. It also skips
+#       the behind read and the update, so it keeps the stale-base behaviour: with `strict`
+#       off, a PR green only against the base as it was before an earlier PR of its wave
+#       merged can merge unverified; with `strict` on, the wave's second merge is refused
+#       and the run stops after the first. Use "all" for merge mode.
 merge_requires = "all"
 # Bounded wait for that same non-final check-rollup gate (issue #462). A wave boundary
 # fires SECONDS after the PR is opened, so the FIRST rollup read is routinely `pending`
@@ -157,16 +180,22 @@ merge_requires = "all"
 # registered (issue #582). A green first seen with less than 15 s of budget left to confirm
 # it refuses as not finished (so a value from 1 to 14 refuses every PR) — raise this bound
 # if your checks are slow to report.
-# On every refusal after the ready-mark — timeout, a red/unreadable rollup, or a failing
-# `gh pr merge` — the PR is returned to draft (`gh pr ready --undo`) before the run STOPs,
-# so a stopped wave never leaves a PR advertising a readiness no human granted.
+# The same budget covers waiting for `gh pr update-branch` to land on a PR that was behind
+# its base (issue #531; the head is re-read every 5 s): that time is charged to it, and the
+# rollup wait for the updated head gets what is left.
+# On every refusal after the ready-mark — timeout, a red/unreadable rollup, a failed update
+# or base read, or a failing `gh pr merge` — the PR is returned to draft (`gh pr ready
+# --undo`) before the run STOPs, so a stopped wave never leaves a PR advertising a readiness
+# no human granted.
 #   300  (default) — a sensible bound for CI to register and report on a freshly-opened PR.
 #   0    — perform no wait at all: a single read, the original immediate-refusal behaviour.
 merge_wait_secs = 300
 # Optional integration re-gate (#wave-model). After each wave folds (stack mode), run the
 # repo-scoped gates over the folded integration tip before the next wave builds on it, so a
 # combination that is red though each fix was green ALONE stops the run. Off by default
-# (needs your repo-scoped gates); in merge mode the PR's own CI is the merge-boundary check.
+# (needs your repo-scoped gates). It has NO effect in merge mode (it applies to the stack
+# fold only): there the check at the merge boundary is each PR's own CI, which
+# merge_requires = "all" reads on a head brought up to date with its base.
 regate_between_waves = false
 # Act cadence (issue #109). Act is a cross-cycle beat that yields a real delta only once
 # enough cycles have frozen to show a pattern, so `{{ cli_name }} flow` auto-runs it only when this
