@@ -24,7 +24,7 @@ import datetime
 import re
 import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 
 from . import (act, assemble, autoiterate, brief, drive_claim, driver, gates, integrate, lane,
@@ -1804,6 +1804,7 @@ def _drive_and_act(
     max_passes: int | None = None,
     adopt_seeds: list[Path] | None = None,
     claims: drive_claim.Run | None = None,
+    batch: Collection[str] | None = None,
 ) -> dict[str, str]:
     """Drive a set of in-flight bundles through the full cycle to Act, in waves.
 
@@ -1842,6 +1843,14 @@ def _drive_and_act(
     drive (:func:`_adopt_split_children`). An adoption SEED is let go once the pre-pass over
     it has run: it is terminal, so this run never drives it — only its children, which the
     pre-pass has claimed in their own right. ``None`` — a library call — claims nothing.
+
+    ``batch`` (#591) is the bundles the run was ASKED to drive — ``flow_ids``' id list as
+    given (ids it skips as terminal or briefless included), ``flow_batch``'s sweep as taken
+    at run start. It scopes the run's integration branches (:func:`integrate.fold`), so a
+    concurrent run on the same base that drives a different batch never folds onto — and
+    never replaces — this run's line, while the same batch re-issued (its finished bundles
+    now skipped) lands on the same line. ``None`` — a library call — scopes by the drive set
+    as passed.
     """
     bundles = list(bundles)          # the drive set — split adoption extends it (#469)
     allowance = cfg.max_passes if max_passes is None else max_passes
@@ -1852,6 +1861,9 @@ def _drive_and_act(
     # answered for even when held, from "a child this run adopted", which is dropped again
     # if a later reschedule holds it (:func:`_adopt_split_children`).
     named = frozenset(batch_names)
+    # What scopes this run's integration line (#591): the request, frozen before adoption
+    # grows the drive set, so every fold of the run lands on one batch-scoped branch.
+    run_batch = sorted(batch) if batch is not None else sorted(named)
     published: set[str] = set()
     # Bundles whose publish pushed their branch THIS run (`_publish_bundle` True, #593). An
     # iterate keeps an earlier attempt's publish.json, so a record on disk cannot tell.
@@ -2054,7 +2066,8 @@ def _drive_and_act(
                     try:
                         folded = integrate.fold(
                             cfg, [d for d in accepted if d.name not in held_unpushed],
-                            dry_run=dry, locks=locks, folded_this_run=dict(folded_tips))
+                            dry_run=dry, locks=locks, folded_this_run=dict(folded_tips),
+                            batch=run_batch)
                         # Record each target's pushed tip at once, before any re-gate: the
                         # next fold continues from exactly that tip and refuses a line
                         # another run moved (#593). A dry-run pushes nothing (None).
@@ -2150,6 +2163,11 @@ def flow_batch(
              not in (state.COMPLETE, state.UNPLANNED, state.DISCONTINUED, state.RESOLVED)),
             key=lambda p: p.name,
         )
+        # The batch identity (#591): the sweep as taken at run start, before the claim /
+        # `_admit` / scheduling trims below — it scopes this run's integration line. No
+        # resume stability: finished bundles leave the sweep, so a re-run gets a fresh line
+        # of its own — never another run's.
+        swept = [d.name for d in bundles]
         if not bundles:
             print("flow: nothing to do — no in-flight briefs (all COMPLETE or none authored; "
                   "brief new issues to add work).", file=sys.stderr)
@@ -2187,7 +2205,8 @@ def flow_batch(
                   "unresolved dependency or a cycle.", file=sys.stderr)
             return {}
         return _drive_and_act(cfg, bundles, do_publish=do_publish, do_act=do_act, by=by,
-                              today=today, max_passes=max_passes, claims=claims)
+                              today=today, max_passes=max_passes, claims=claims,
+                              batch=swept)
     finally:
         # The sweep is fully decided by every return above (and by a raise, which leaves
         # nothing further for `cli._split` to promise about either) — released here so the
@@ -2335,9 +2354,13 @@ def flow_ids(
     if not bundles and not seeds:
         return skipped
     bundles.sort(key=lambda p: p.name)
+    # The batch is the ids AS ASKED FOR (#591), skipped ones included, so a re-issued run
+    # whose finished bundles are now skipped still folds onto the same integration line
+    # (`integrate.batch_key` normalises `500` / `issue_500`, order and repeats).
     return skipped | _drive_and_act(cfg, bundles, adopt_seeds=seeds, do_publish=do_publish,
                                     do_act=do_act, by=by, today=today,
-                                    max_passes=max_passes, claims=claims)
+                                    max_passes=max_passes, claims=claims,
+                                    batch=list(ids))
 
 
 def _bundle_dirs(cfg: Config) -> set[str]:
