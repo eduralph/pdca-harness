@@ -58,7 +58,8 @@ def _resolve_base(cfg: Config, d: Path, base: str) -> tuple[str, str, str]:
     Not quite the same commit, though: publish cuts a wave>0 bundle's PR branch from the
     line commit the run recorded for it (``stack-base-tip``, #593), while drift checks the
     integration line as it is NOW — grown by later waves, or replaced by a later run's
-    first fold. A known cross-run limit (#616)."""
+    first fold (a re-issued run continues the line instead only when it carries a finished
+    prerequisite onto it, #646). A known cross-run limit."""
     onto = brief.onto_branch(d / "brief.md")
     if onto is not None:
         remote, branch = onto

@@ -675,6 +675,31 @@ wave builds on, via `[driver].wave_mode`:
   on, so it carries no later wave's work; if a later run has replaced the line
   by then, publish refuses and pushes nothing — re-drive that bundle in a new
   run.
+
+  To recover a run that stopped part-way (an integrity stop, the pass budget, a
+  crash, Ctrl-C), re-issue the same `pdca flow <ids>`. The ids the earlier run
+  finished are skipped, and if a bundle the new run drives names one of them in
+  its plain `Depends on`, the run first carries the finished prerequisites of
+  that target onto the line, before wave 0, and points that target's bundles at
+  it. It continues the line already on origin, without force, when every commit
+  on it is accounted for by your base or a finished prerequisite's PR head, and
+  starts the line when origin has none. Only a clean prerequisite is carried:
+  its PR is open (or merged, with its head already on your base or the line), it
+  merges onto the line without error, and, with `[driver].regate_between_waves`,
+  the carried line's re-gate is not red. A finished prerequisite that is not
+  clean holds only the bundles whose plain `Depends on` names it, and is named
+  on one line with the reason and what to do; the rest of the run goes on. If
+  the line on origin holds a commit the run cannot account for, nothing is
+  carried onto it and those bundles are held: delete that line on origin
+  (unless the run's own fold already replaced it) and re-issue. A line the run
+  did not carry onto is still replaced by its first fold, as above. Known limits,
+  each of which holds the dependents (or the publish) until you act: a
+  prerequisite squash- or rebase-merged with its branch deleted; a closed PR
+  that a newer PR replaced; a prerequisite with no recorded PR URL; a rejected
+  or force-pushed-over commit left on the old line; two finished prerequisites
+  that conflict with each other; an old line that still holds a prerequisite
+  whose PR was closed since; and an accepted but unpublished bundle whose line a
+  later run's fresh fold replaced (publish refuses it, as above).
 - **`"merge"`** (own-repo / continuous-delivery only) — actually `gh pr merge`s
   each non-final wave's PRs, so the next wave builds on a genuinely merged base.
   Needs merge rights on the base remote and relaxes STOP discipline for the

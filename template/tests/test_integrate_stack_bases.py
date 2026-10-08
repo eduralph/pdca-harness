@@ -831,7 +831,9 @@ class StackFoldGit(unittest.TestCase):
     def test_a_late_publish_refuses_a_tip_the_line_no_longer_holds(self) -> None:
         # Case 15: a later run's first fold has force-pushed a fresh line (one that does not
         # hold U's recorded tip). Publishing U must refuse, push nothing, and send the human
-        # to re-drive it (#616) — never cut a PR from an orphaned commit.
+        # to re-drive it — never cut a PR from an orphaned commit. A re-issue continues the
+        # line only when it carries a finished prerequisite onto it (#646), so the advice
+        # stands.
         a = self._publish("A", {"a.txt": "a\n"})
         integrate.fold(self.cfg, [a], folded_this_run={})
         t1 = self._tip(LINE)
@@ -841,7 +843,8 @@ class StackFoldGit(unittest.TestCase):
         self.assertFalse(self._ancestor(t1, LINE))
         rc, err = self._late_publish(u)
         self.assertNotEqual(rc, 0)
-        for part in ("issue_U", t1, LINE, "#616", "re-drive it in a new run"):
+        for part in ("issue_U", t1, LINE, "re-drive it in a new run",
+                     "only when it carries a finished prerequisite"):
             self.assertIn(part.lower(), err.lower())
         self.assertFalse(self._has("fix/U-u"))               # nothing pushed
         self.assertFalse((u / "publish.json").exists())
@@ -849,7 +852,7 @@ class StackFoldGit(unittest.TestCase):
         self._delete(LINE)
         rc, err = self._late_publish(u)
         self.assertNotEqual(rc, 0)
-        self.assertIn("#616", err)
+        self.assertIn("re-drive it in a new run", err.lower())
         self.assertFalse(self._has("fix/U-u"))
 
     # -- #591: one integration line per batch, not per base -------------------------------
@@ -1009,7 +1012,7 @@ class StackPublishDryRun(unittest.TestCase):
         self.assertIn(f"checkout -B fix/DEP-my-fix {ABSENT}", out)
         self.assertIn("--base main", out)
         self.assertIn(f"recorded tip {ABSENT} is still on origin/{LINE}", out)
-        self.assertIn("#616", out)
+        self.assertIn("re-drive it in a new run", out)
 
 
 class StackBaseTip(unittest.TestCase):

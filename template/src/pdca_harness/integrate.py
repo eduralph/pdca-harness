@@ -31,7 +31,10 @@ branch") then leaves only its own change. Within one run the line is **append-on
 run's first fold of a target starts fresh from the base (a force-push that replaces only
 an earlier run of the SAME batch's line — a different batch has a line of its own); every
 later fold continues from the tip this run pushed, pushed without force, and refuses a
-line another run moved (``folded_this_run``, #591).
+line another run moved (``folded_this_run``, #591). The one exception is a line the flow's
+pre-wave carry puts to use (#646): a re-issued run that carries finished prerequisites
+onto its batch's line continues origin's line from its tip — only when every commit on it
+is accounted for (:func:`foreign_commit`) — and stays append-only from there.
 
 Commits pushed straight onto a stack PR branch after a fold carried it reach the line: the
 next fold merges the branch's new tip. A branch deleted after its PR merged is judged by
@@ -179,6 +182,31 @@ def unpublished(bundles: Iterable[Path], *,
             if ref is None or (pushed is not None and d.name not in pushed)]
 
 
+def carry_view(cfg: Config, repo_spec: str, line: str,
+               remotes: Iterable[str] = ()) -> tuple[Path, str | None]:
+    """What the flow's pre-wave carry (#646) judges finished bundles against, before it
+    folds: ``repo_spec``'s checkout, fetched as a fold fetches it (:func:`_fetch`), and the
+    tip of origin's ``line`` there — None when origin has no such line. Raises
+    :class:`IntegrationError` when the checkout is missing or a fetch fails."""
+    repo = publish._checkout_path(cfg, repo_spec)
+    _fetch(repo, cfg.base_remote, remotes)
+    return repo, _rev(repo, f"origin/{line}")
+
+
+def foreign_commit(repo: Path, tip: str, base_ref: str, heads: Iterable[str]) -> str | None:
+    """The first commit on the line at ``tip`` the carry cannot account for (#646): one that
+    is not a merge and is reachable neither from ``base_ref`` nor from any of ``heads`` (the
+    PR heads of the finished bundles it would carry) — an old, rejected commit, say, or a
+    closed PR's. None: every commit is accounted for. A fold's own commits are merges, so
+    they never count. A git failure raises :class:`IntegrationError`."""
+    r = subprocess.run(["git", "-C", str(repo), "rev-list", "--no-merges", tip, "--not",
+                        base_ref, *heads], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise IntegrationError(f"could not list the commits on {tip} in {repo} — `git "
+                               f"rev-list` exited {r.returncode}; check that checkout")
+    return next(iter(r.stdout.split()), None)
+
+
 # The harness-owned sibling-dir infix for integration worktrees; single-sourced so the
 # footprint sweeper (issue #297) globs exactly what this module creates.
 INTEG_INFIX = ".pdca-integ-"
@@ -244,6 +272,7 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
          locks: contextlib.ExitStack | None = None,
          folded_this_run: Mapping[tuple[str, str], str | None] | None = None,
          batch: Collection[str] | None = None,
+         skipped: dict[str, str] | None = None,
          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
     """Fold the cumulative accepted bundles' published branches onto a per-target
     integration branch.
@@ -301,6 +330,15 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     the fold and ``gates.run_integration`` attesting it. The caller releases every
     lock by exiting the stack; ``None`` keeps the per-group scope (lock released when
     the group's build finishes).
+
+    ``skipped`` (#646, the flow's pre-wave carry): when given, an :class:`IntegrationError`
+    raised while merging ONE bundle (:func:`_merge_published`, its :func:`_gone_branch`
+    included) is recorded as ``skipped[name] = message`` and the next bundle is merged — a
+    failed merge is aborted, so the tree is clean for it. A target whose every bundle was
+    skipped pushes nothing and has no entry in the result. Every other failure still raises:
+    the lock, the worktree, a moved line, the push, and the up-front refusal of a bundle
+    with no published branch (the carry passes only bundles that have one). ``None`` (every
+    other caller) raises on the first failure, as before.
     """
     candidates = _fold_candidates(accepted)
     if not candidates:
@@ -383,16 +421,24 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                 if line is None or line != pushed:
                     raise IntegrationError(
                         f"origin's {branch} is at {line or '(absent)'}, not at "
-                        f"{pushed or '(no tip recorded)'}, the tip this run's last fold "
-                        f"pushed — another run of the same batch, or someone outside the "
-                        f"harness, has moved it (#591). Not building on a line this run did "
-                        f"not push; let the other run finish, then re-run")
+                        f"{pushed or '(no tip recorded)'}, the tip this run last pushed (or "
+                        f"checked, for a carried line) — another run of the same batch, or "
+                        f"someone outside the harness, has moved it (#591). Not building on "
+                        f"a line this run did not push or check; let the other run finish, "
+                        f"then re-run")
             fresh = start == "fresh" or (start == "auto" and line is None)
             start_ref = f"{base_remote}/{base}" if fresh else line
             if _git(wt, "checkout", "-B", branch, start_ref) != 0:
                 raise IntegrationError(f"could not start {branch} off {start_ref}")
             for d in bundles:
-                _merge_published(cfg, wt, d, refs[d.name], branch=branch, base=base)
+                try:
+                    _merge_published(cfg, wt, d, refs[d.name], branch=branch, base=base)
+                except IntegrationError as exc:
+                    if skipped is None:
+                        raise
+                    skipped[d.name] = str(exc)   # this bundle only; the merge was aborted
+            if skipped is not None and all(d.name in skipped for d in bundles):
+                continue   # nothing of this target merged: push nothing, report nothing
             # Fresh: the run's first fold of this target replaces an earlier run of the same
             # batch's line (the name is batch-scoped, #591), so it is forced. Continuing: a
             # fast-forward of this run's own tip, pushed WITHOUT force, so it lands on an
@@ -549,20 +595,16 @@ def _merge(wt: Path, rev: str, message: str) -> tuple[int, list[str]]:
     return rc, conflicts
 
 
-def _prepare_worktree(repo: Path, base_remote: str, base: str,
-                      remotes: Iterable[str] = ()) -> Path:
-    """Create (or reuse) the integration worktree off the freshly-fetched base; raise
-    :class:`IntegrationError` if it can't be made (worktree isolation is required here —
-    unlike Do/Check, there is no in-place fallback that would still produce the branch).
-
-    Fetches ``origin`` (the line and the PR branches), every remote a ``"stacked"``
-    record's branch lives on (#593), and the base remote. The remotes holding PR branches
-    are fetched with ``--prune``: a published branch deleted on its remote must stop
-    resolving here, and a stale remote-tracking ref would hide that. The base remote is
-    fetched LAST: a merged PR's branch is deleted after its merge, so when these fetches
-    show a branch as gone, the base snapshot already has that merge — the check that the
-    base has the merged head (:func:`_gone_branch`) never runs on a snapshot taken too
-    early. A fetch that fails is a failed git step (the run stops)."""
+def _fetch(repo: Path, base_remote: str, remotes: Iterable[str] = ()) -> None:
+    """Fetch what a fold reads into ``repo``: ``origin`` (the line and the PR branches),
+    every remote a ``"stacked"`` record's branch lives on (#593), and the base remote. The
+    remotes holding PR branches are fetched with ``--prune``: a published branch deleted on
+    its remote must stop resolving here, and a stale remote-tracking ref would hide that.
+    The base remote is fetched LAST: a merged PR's branch is deleted after its merge, so
+    when these fetches show a branch as gone, the base snapshot already has that merge — the
+    check that the base has the merged head (:func:`_gone_branch`) never runs on a snapshot
+    taken too early. A missing checkout, or a fetch that fails, is a failed git step (the
+    run stops)."""
     if not (repo / ".git").exists():
         raise IntegrationError(f"checkout not found at {repo}")
     branch_remotes = list(dict.fromkeys(("origin", *remotes)))
@@ -571,6 +613,14 @@ def _prepare_worktree(repo: Path, base_remote: str, base: str,
         if _git(repo, "fetch", *prune, remote) != 0:
             raise IntegrationError(f"could not fetch {remote} in {repo} — the fold cannot "
                                    f"see the branches it merges")
+
+
+def _prepare_worktree(repo: Path, base_remote: str, base: str,
+                      remotes: Iterable[str] = ()) -> Path:
+    """Create (or reuse) the integration worktree off the freshly-fetched base (:func:`_fetch`);
+    raise :class:`IntegrationError` if it can't be made (worktree isolation is required here
+    — unlike Do/Check, there is no in-place fallback that would still produce the branch)."""
+    _fetch(repo, base_remote, remotes)
     wt = _integ_worktree(repo, base)
     if not (wt / ".git").exists() and _git(repo, "worktree", "add", "--force",
                                            str(wt), f"{base_remote}/{base}") != 0:
