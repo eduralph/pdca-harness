@@ -12,12 +12,13 @@ merged into another branch stops the fold, and so does an `Onto branch` record),
 base fetched last so its snapshot is never older than a deletion the fold sees; a
 line another run moved is refused; a wave>0 PR targets the real base and is cut from the
 line commit recorded for it, and a late publish refuses a recorded commit the line no
-longer holds. They also pin the diff a dependent PR shows once the earlier waves merge —
-its own change for a plain chain, and, where the line joined histories the base got
-separately (two branches of one wave; a base that moved before the first fold), several
-merge bases until "Update branch". Real git against a bare ``origin`` + a primary checkout
-(the ``FoldGit`` shape of ``tests/test_integrate.py``), plus offline cases; ``gh`` is
-always patched.
+longer holds. Two runs driving different batches on one base fold onto lines of their own,
+and a batch asked for again gets its line back (#591). They also pin the diff a dependent PR
+shows once the earlier waves merge — its own change for a plain chain, and, where the line
+joined histories the base got separately (two branches of one wave; a base that moved
+before the first fold), several merge bases until "Update branch". Real git against a bare
+``origin`` + a primary checkout (the ``FoldGit`` shape of ``tests/test_integrate.py``),
+plus offline cases; ``gh`` is always patched.
 
 Only modules are imported (never a symbol the fix adds), and the new ``merged.merged_head``
 is patched with ``create=True``, so with the production change reverted these cases still
@@ -28,6 +29,7 @@ load and run — and fail.
 from __future__ import annotations
 
 import contextlib
+import inspect
 import io
 import json
 import shutil
@@ -38,7 +40,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from pdca_harness import integrate, merged, publish, signoff
+from pdca_harness import flow, integrate, merged, publish, signoff
 from pdca_harness.config import Config, LeafConfig, _normalize_host_ci
 
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
@@ -829,7 +831,9 @@ class StackFoldGit(unittest.TestCase):
     def test_a_late_publish_refuses_a_tip_the_line_no_longer_holds(self) -> None:
         # Case 15: a later run's first fold has force-pushed a fresh line (one that does not
         # hold U's recorded tip). Publishing U must refuse, push nothing, and send the human
-        # to re-drive it (#616) — never cut a PR from an orphaned commit.
+        # to re-drive it — never cut a PR from an orphaned commit. A re-issue continues the
+        # line only when it carries a finished prerequisite onto it (#646), so the advice
+        # stands.
         a = self._publish("A", {"a.txt": "a\n"})
         integrate.fold(self.cfg, [a], folded_this_run={})
         t1 = self._tip(LINE)
@@ -839,7 +843,8 @@ class StackFoldGit(unittest.TestCase):
         self.assertFalse(self._ancestor(t1, LINE))
         rc, err = self._late_publish(u)
         self.assertNotEqual(rc, 0)
-        for part in ("issue_U", t1, LINE, "#616", "re-drive it in a new run"):
+        for part in ("issue_U", t1, LINE, "re-drive it in a new run",
+                     "only when it carries a finished prerequisite"):
             self.assertIn(part.lower(), err.lower())
         self.assertFalse(self._has("fix/U-u"))               # nothing pushed
         self.assertFalse((u / "publish.json").exists())
@@ -847,8 +852,103 @@ class StackFoldGit(unittest.TestCase):
         self._delete(LINE)
         rc, err = self._late_publish(u)
         self.assertNotEqual(rc, 0)
-        self.assertIn("#616", err)
+        self.assertIn("re-drive it in a new run", err.lower())
         self.assertFalse(self._has("fix/U-u"))
+
+    # -- #591: one integration line per batch, not per base -------------------------------
+
+    def _fold_as(self, batch: list[str], bundles: list[Path], **kw):
+        """``integrate.fold`` as a flow run asked to drive ``batch`` calls it (#591). A fold
+        with no ``batch`` parameter (the code before #591) is called without it, so the red
+        leg fails the way the bug does — on the shared line — rather than on a TypeError."""
+        if "batch" in inspect.signature(integrate.fold).parameters:
+            kw["batch"] = batch
+        return integrate.fold(self.cfg, bundles, **kw)
+
+    def test_two_batches_on_one_base_never_share_an_integration_line(self) -> None:
+        # Run A = {A1, A2 (on A1)}, run B = {B1}, both org/repo @ main, interleaved: A folds
+        # wave 0, B makes its first fold, then A makes its continuing fold. Before #591 both
+        # used pdca-integration/main: B's fresh fold force-pushed over A's line, and A's
+        # continuing fold refused it (IntegrationError, "#591").
+        run_a, run_b = ["A1", "A2"], ["B1"]
+        a1 = self._publish("A1", {"a1.txt": "a1\n"})
+        (line_a, _wt), = self._fold_as(run_a, [a1], folded_this_run={}).values()
+        t1 = self._tip(line_a)
+        # What the flow does before A's wave 1 builds: point A2 at A's line and its tip.
+        # This marker is what Do's worktree and PDCA_VERIFY_BASE read.
+        a2_dir = self.cfg.bundle("A2")
+        _brief(a2_dir)
+        flow._point_at_integration({TARGET: line_a}, [a2_dir], {TARGET: t1})
+
+        b1 = self._publish("B1", {"b1.txt": "b1\n"})
+        (line_b, _wt), = self._fold_as(run_b, [b1], folded_this_run={}).values()
+
+        stack = publish.read_stack_base(a2_dir)
+        a2 = self._publish("A2", {"a2.txt": "a2\n"}, cut_from=f"origin/{stack}")
+        (line_a2, _wt), = self._fold_as(run_a, [a1, a2],
+                                        folded_this_run={TARGET: t1}).values()
+
+        self.assertNotEqual(line_a, line_b)
+        self.assertEqual(line_a2, line_a)                    # one line for the whole run
+        for line in (line_a, line_b):
+            self.assertTrue(line.startswith("pdca-integration/main-r"), line)
+        a1c, a2c, b1c = (self._tip(f"fix/{i}") for i in ("A1", "A2", "B1"))
+        self.assertTrue(self._ancestor(a1c, line_a))
+        self.assertTrue(self._ancestor(a2c, line_a))
+        self.assertFalse(self._ancestor(b1c, line_a), "B's work is on A's line")
+        self.assertTrue(self._ancestor(b1c, line_b))
+        self.assertFalse(self._ancestor(a1c, line_b), "A's work is on B's line")
+        self.assertFalse(self._ancestor(a2c, line_b), "A's work is on B's line")
+        self.assertTrue(self._ancestor(t1, line_a))          # A's line only grew
+        # A's wave-1 bundle was built and verified on A's line — not B's.
+        self.assertEqual(stack, line_a)
+        self.assertNotEqual(stack, line_b)
+
+    def _flow_fold_names(self, ids: list[str], *, complete: tuple[str, ...] = ()) -> list[str]:
+        """Drive ``flow.flow_ids(ids)`` over fresh bundles (stubbed leaves, so the REAL fold
+        runs as a dry-run: no git) and return the branch name of every fold it made. The
+        bundles are X1, X2 and X3 (on X2) plus Y1, Y2 (on Y1); each id in ``complete`` is
+        accepted before the run, so the flow skips it as terminal."""
+        root = Path(tempfile.mkdtemp(dir=self.tmp))
+        cfg = _cfg(root, root / "absent-checkout")
+        deps = {"X3": "X2", "Y2": "Y1"}
+        for iid in ("X1", "X2", "X3", "Y1", "Y2"):
+            d = cfg.bundle(iid)
+            dep = deps.get(iid)
+            _brief(d, extra=f"- **Depends on:** {dep}\n" if dep else "")
+        for iid in complete:
+            d = cfg.bundle(iid)
+            (d / "patch.diff").write_text(_new_file_patch(f"{iid}.txt", iid), encoding="utf-8")
+            _accept(d)
+        names: list[str] = []
+        real = integrate.fold
+
+        def spy(cfg_, accepted, **kw):
+            out = real(cfg_, accepted, **kw)
+            names.extend(branch for branch, _wt in out.values())
+            return out
+
+        with mock.patch.object(flow.integrate, "fold", spy), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            flow.flow_ids(cfg, ids, do_act=False, today="2026-10-04")
+        self.assertTrue(names, f"flow_ids({ids}) made no fold")
+        self.assertEqual(len(set(names)), 1, names)          # every fold of a run: one line
+        return names
+
+    def test_the_flow_keys_the_line_on_the_ids_it_was_asked_for(self) -> None:
+        # The batch identity comes from the request, not the drive set: re-issuing the same
+        # ids with X1 already COMPLETE (skipped as terminal, so absent from the drive set)
+        # folds onto the same line; a different request — a subset, or other ids — does not.
+        first = self._flow_fold_names(["X1", "X2", "X3"])[0]
+        again = self._flow_fold_names(["X3", "X2", "X1"], complete=("X1",))[0]
+        subset = self._flow_fold_names(["X2", "X3"])[0]
+        other = self._flow_fold_names(["X1", "Y1", "Y2"])[0]
+        self.assertEqual(again, first)
+        self.assertNotEqual(subset, first)
+        self.assertNotEqual(other, first)
+        self.assertNotEqual(other, subset)
+        for name in (first, subset, other):
+            self.assertTrue(name.startswith("pdca-integration/main-r"), name)
 
 
 class StackPublishDryRun(unittest.TestCase):
@@ -912,7 +1012,7 @@ class StackPublishDryRun(unittest.TestCase):
         self.assertIn(f"checkout -B fix/DEP-my-fix {ABSENT}", out)
         self.assertIn("--base main", out)
         self.assertIn(f"recorded tip {ABSENT} is still on origin/{LINE}", out)
-        self.assertIn("#616", out)
+        self.assertIn("re-drive it in a new run", out)
 
 
 class StackBaseTip(unittest.TestCase):

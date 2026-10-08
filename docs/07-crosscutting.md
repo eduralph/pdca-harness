@@ -654,12 +654,15 @@ wave builds on, via `[driver].wave_mode`:
   no fold merged it in — see below). Otherwise a fold merge commit joined
   histories your base got separately, so the PR has several merge bases with it
   and can keep showing an already-merged change: use "Update branch" (merge the
-  base into it) and its diff is its own change again. Within a run the
-  integration line only grows: the run's first fold starts it fresh from the
-  base with a force-push (if your origin refuses force-pushes, delete the old
-  `pdca-integration/<base>` first, or allow force-pushes on
+  base into it) and its diff is its own change again. Each run has its own
+  integration line, `pdca-integration/<base>-r<key>`, where the key comes from
+  the ids the run was asked to drive: two runs on one base that drive different
+  batches never share a line, and running the same ids again gets the same line
+  back. Within a run the line only grows: the run's first fold starts it fresh
+  from the base with a force-push (if your origin refuses force-pushes, delete
+  the old `pdca-integration/<base>-r<key>` first, or allow force-pushes on
   `pdca-integration/*`), and later folds continue it without force — and stop
-  the run if another run moved it. Commits pushed onto a stack PR's branch after
+  the run if something else moved it. Commits pushed onto a stack PR's branch after
   a fold carried it reach the line at the next fold. If a PR merges and its
   branch is deleted, the fold looks up the commit the PR merged with: a line
   that has it already carries the PR; one that does not (say a fixup was pushed
@@ -672,6 +675,48 @@ wave builds on, via `[driver].wave_mode`:
   on, so it carries no later wave's work; if a later run has replaced the line
   by then, publish refuses and pushes nothing — re-drive that bundle in a new
   run.
+
+  To recover a run that stopped part-way (an integrity stop, the pass budget, a
+  crash, Ctrl-C), re-issue the same `pdca flow <ids>`. The ids the earlier run
+  finished are skipped, and if a bundle the new run drives names one of them in
+  its plain `Depends on`, the run first carries the finished prerequisites of
+  that target onto the line, before wave 0, and points that target's bundles at
+  it. It continues the line already on origin, without force, when every commit
+  on it is accounted for by your base or a finished prerequisite's PR head, and
+  starts the line when origin has none. Only a clean prerequisite is carried:
+  its PR is open (or merged, with its head already on your base or the line), it
+  merges onto the line without error, and, with `[driver].regate_between_waves`,
+  the carried line's re-gate is not red. A finished prerequisite that is not
+  clean holds only the bundles whose plain `Depends on` names it, and is named
+  on one line with the reason and what to do; the rest of the run goes on. If
+  the line on origin holds a commit the run cannot account for, nothing is
+  carried onto it and those bundles are held: delete that line on origin
+  (unless the run's own fold already replaced it) and re-issue. A line the run
+  did not carry onto is still replaced by its first fold, as above. Known limits,
+  each of which holds the dependents (or the publish) until you act: a
+  prerequisite squash- or rebase-merged with its branch deleted; a closed PR
+  that a newer PR replaced; a prerequisite with no recorded PR URL; a rejected
+  or force-pushed-over commit left on the old line; two finished prerequisites
+  that conflict with each other; an old line that still holds a prerequisite
+  whose PR was closed since; and an accepted but unpublished bundle whose line a
+  later run's fresh fold replaced (publish refuses it, as above).
+
+  A plain `Depends on` prerequisite that is not one of the ids the run was
+  asked to drive (a `pdca flow --from-csv` sweep never includes a finished
+  bundle; a `pdca flow <ids>` may not name it) is on no line of the run. Its
+  dependent waits until that prerequisite's PR merges into the dependent's own
+  target base, the repo and branch of its `Repo + branch target`. A PR that
+  merged into another branch (an integration line, say), an `Onto branch`
+  commit, or a PR whose state cannot be read (`gh` missing or failing) does not
+  count. The dependent is named on one line with the prerequisite and what to
+  do, and the rest of the run goes on: name the prerequisite in the same
+  `pdca flow <ids>` command so the run carries it onto its line (as above), or
+  wait for the merge and re-run. Nothing is held for a prerequisite with no
+  patch or no usable target, for a dependent with no usable target of its own,
+  with `--no-publish`, or in a dry-run. `Depends on (merged)` counts a merge the
+  same way: a prerequisite the run does not drive must have merged into the
+  dependent's base (a dependent with no usable target still takes a merge into
+  any branch).
 - **`"merge"`** (own-repo / continuous-delivery only) — actually `gh pr merge`s
   each non-final wave's PRs, so the next wave builds on a genuinely merged base.
   Needs merge rights on the base remote and relaxes STOP discipline for the
@@ -683,8 +728,17 @@ wave builds on, via `[driver].wave_mode`:
   at all; `gh pr merge` alone would only refuse what *this host* marks required in
   branch protection, so without that read a thin protection config lets the next
   wave build on a base that never went green.
+  A rollup only describes the head it ran on, so the driver first checks in git
+  whether the PR's head is behind its base (an earlier PR of the same wave just
+  merged): `git merge-base --is-ancestor` after a fetch. If it is, the driver
+  updates the PR's branch with a merge commit of the base (`gh pr update-branch`,
+  never a rebase), waits for the update to land and for the new head's rollup,
+  and merges pinned to that head (`--match-head-commit`). A failed update, a red
+  updated head, or a head or base that moved stops the run. Turn on "require
+  branches to be up to date" in the base's branch protection: the host then also
+  refuses a merge if the base moves after the driver's last read.
   `[driver].merge_requires = "required"` opts back into host-config-only
-  semantics.
+  semantics, and skips the behind check and the update too.
 
 In merge mode the merge is unattended, so **publish refuses to open a PR against
 any branch this run produced** — the work must land on a base that exists

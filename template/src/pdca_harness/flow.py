@@ -24,7 +24,7 @@ import datetime
 import re
 import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 
 from . import (act, assemble, autoiterate, brief, drive_claim, driver, gates, integrate, lane,
@@ -679,42 +679,90 @@ def _record_mtime(d: Path) -> int | None:
 # publish → fold onto the integration branch the next wave builds on) → Act once (docs 09).
 # ----------------------------------------------------------------------------
 def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
-              held: set[str] | frozenset[str] = frozenset()) -> list[Path]:
+              held: set[str] | frozenset[str] = frozenset(),
+              requested: Collection[str] | None = None,
+              hold_unmerged: bool = False) -> list[Path]:
     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
 
-    A prerequisite **in this run's batch** is carried into the dependent's base by the wave
-    fold once it reaches COMPLETE (it sits in an earlier wave), so COMPLETE is the bar — e.g.
-    a prereq DISCONTINUED earlier never gets there, and its dependent is skipped loudly. An
-    in-batch prerequisite named in ``held`` (bundle dir names, #593) is not ready either: it
-    is COMPLETE, but this run pushed no branch of it (its texts or its publish failed before
-    the push), so the fold has nothing of it to carry — its dependents are held while the
-    rest of the run goes on. A
-    prerequisite **outside this batch** (a prior run's) is gated on its on-disk COMPLETE state
-    (archived `completed/` too, #171) — **except** an out-of-batch ``Depends on (merged)``
-    prereq, which keeps its stricter #107 merge-gate (#186): nothing in *this* run carries an
-    out-of-batch prereq's diff into the base, and COMPLETE means only "a draft PR was opened",
-    so a dependent built on a COMPLETE-but-unmerged base would miss the prerequisite. It must
-    wait until the PR is genuinely merged (``merged.is_merged``) — a later ``pdca flow`` run
-    then picks it up. A skipped bundle never completes, so its own dependents fall out of later
-    waves the same way (the skip cascades)."""
+    A prerequisite that is not COMPLETE on disk (archived ``completed/`` too, #171) is never
+    ready, whichever field names it — e.g. a prereq DISCONTINUED earlier never gets there,
+    and its dependent is skipped loudly. A prerequisite **in this run's batch** is carried
+    into the dependent's base by the wave fold once it reaches COMPLETE (it sits in an
+    earlier wave), so COMPLETE is the bar. An in-batch prerequisite named in ``held``
+    (bundle dir names, #593) is not ready either: it is COMPLETE, but this run pushed no
+    branch of it (its texts or its publish failed before the push), so the fold has nothing
+    of it to carry — its dependents are held while the rest of the run goes on. A
+    prerequisite **outside this batch** (a prior run's) is gated on its COMPLETE state —
+    **except** an out-of-batch ``Depends on (merged)`` prereq, which keeps its stricter #107
+    merge-gate (#186): nothing in *this* run carries an out-of-batch prereq's diff into the
+    base (a finished named id aside, below), and COMPLETE means only "a draft PR was
+    opened", so a dependent built on a COMPLETE-but-unmerged base would miss the
+    prerequisite. It must wait until the PR is genuinely merged into the DEPENDENT's target
+    base — its repo and branch (``publish._resolve_target``), not just some branch
+    (``merged.merged_into``, #647) — a later ``pdca flow`` run then picks it up. With
+    ``hold_unmerged`` (stack mode, publishing on, not a dry-run, #647) a plain ``Depends
+    on`` prerequisite the run was NOT asked for — not in ``requested`` (bundle dir names;
+    ``None``: ``batch_names``) — waits the same way when a line would carry it (a non-empty
+    patch and a usable target, ``integrate._fold_candidates``): no line of this run does.
+    Either way the dependent is named on ONE stderr line, with what to do. A dependent with
+    no usable target of its own (publish skips it) has no base to wait for: no #647 hold,
+    and its ``Depends on (merged)`` keeps #186's answer — any merge counts. A finished named
+    id (an id the run was asked for that an earlier run finished, #646) is carried onto the
+    line before wave 0 when it is clean (:func:`_carry_finished`); when it is not, it is
+    named in ``held``, and a bundle whose plain ``Depends on`` names it is not ready (a
+    ``Stacks on`` edge to it is not held). A skipped bundle never completes, so its own
+    dependents fall out of later waves the same way (the skip cascades)."""
+    asked = set(requested) if requested is not None else set(batch_names)
     runnable: list[Path] = []
     for d in wave:
         bp = d / "brief.md"
-        merged_deps = set(brief.depends_on_merged(bp)) if bp.exists() else set()
+        deps = waves.declared_deps(bp) if bp.exists() else []
+        merged_deps = set(brief.depends_on_merged(bp)) if deps else set()
+        plain_deps = set(brief.depends_on(bp)) if deps else set()
+        # "Merged" means merged into d's OWN target (#647) — none usable: ("", "").
+        repo, base = publish._resolve_target(d)[:2] if deps else ("", "")
+        targeted = bool(repo and base)
         unmet: list[str] = []
-        for dep in (waves.declared_deps(bp) if bp.exists() else []):
-            out_of_batch = cfg.bundle(dep).name not in batch_names
-            if out_of_batch and dep in merged_deps:
-                if not merged.is_merged(cfg, dep):  # PR not yet merged — wait, don't build (#186)
+        unmerged: list[str] = []   # COMPLETE, but not merged into d's base: wait (#647)
+        carryable: list[str] = []  # … of those, ones a line of d's target would carry
+        for dep in deps:
+            p = cfg.find_bundle(dep)
+            out_of_batch = p.name not in batch_names
+            if state.state(p) != state.COMPLETE:  # archived prereq too (#171)
+                unmet.append(dep)  # not ready, whichever field names it
+                continue
+            # A plain `Depends on` prereq the run was not asked for, which a line would
+            # carry: no line of this run does (#647).
+            cand = (integrate._fold_candidates([p])
+                    if hold_unmerged and targeted and out_of_batch and dep in plain_deps
+                    and p.name not in asked else [])
+            if out_of_batch and (dep in merged_deps or cand):
+                # Only a merge INTO d's base puts it there (#186 for `Depends on (merged)`,
+                # #647 for the plain edge above). With no target of d's own, #186's answer
+                # and its "not ready" line stand.
+                if merged.merged_into(cfg, dep, repo, base):
+                    continue
+                if not targeted:
                     unmet.append(dep)
-            elif state.state(cfg.find_bundle(dep)) != state.COMPLETE:  # archived prereq too (#171)
+                    continue
+                unmerged.append(p.name)
+                if cand and dep not in merged_deps and cand[0][1:3] == (repo, base):
+                    carryable.append(p.name)  # named in the run, the carry puts it on (#646)
+            elif p.name in held and (not out_of_batch or dep in plain_deps):
+                # In batch: accepted, but no branch pushed this run: nothing to fold (#593).
+                # Out of batch: a finished named id the carry could not put on the line (#646).
                 unmet.append(dep)
-            elif not out_of_batch and cfg.bundle(dep).name in held:
-                unmet.append(dep)  # accepted, but no branch pushed this run: nothing to fold (#593)
+        if unmerged:
+            todo = (f"name {', '.join(carryable)} in the same `pdca flow <ids>` command so "
+                    f"the run's line carries them, or wait" if carryable else "wait")
+            print(f"flow: {d.name} held — prerequisite(s) {', '.join(unmerged)} not merged "
+                  f"into {base} ({repo}), and no line of this run carries them; not built "
+                  f"on a base missing them. To build it, {todo} until their PR merges into "
+                  f"{base}, then re-run.", file=sys.stderr)
         if unmet:
             print(f"flow: {d.name} skipped — prerequisite(s) not ready "
                   f"({', '.join(unmet)}); not built on a base missing them.", file=sys.stderr)
-        else:
+        if not unmet and not unmerged:
             runnable.append(d)
     return runnable
 
@@ -740,6 +788,172 @@ def _point_at_integration(integ: dict[tuple[str, str], str], runnable: list[Path
             publish.write_stack_base(d, branch, (tips or {}).get(target))
         else:
             publish.clear_stack_base(d)
+
+
+def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
+                folded_this_run: Mapping[tuple[str, str], str | None], batch: list[str],
+                skipped: dict[str, str] | None = None,
+                ) -> tuple[dict[tuple[str, str], tuple[str, Path | None]],
+                           dict[tuple[str, str], str | None], tuple[str, str] | None]:
+    """ONE :func:`integrate.fold` of ``bundles`` and, with ``[driver].regate_between_waves``,
+    the re-gate of each line it pushed, under ONE lock scope (#297 review round 10): the
+    locks stack keeps every target's integ lock held from the fold through the tip read and
+    the re-gate, so no gap exists in which another flow's publish-boundary sweep could
+    remove the tree — or another fold rewrite it — before the re-gate attests it. The in-run
+    fold and the pre-wave carry (#646) share it; only what they do with the result differs.
+
+    Returns ``(folded, tips, red)``: the fold's result, each folded target's pushed tip
+    (None in a dry-run, which pushes nothing), and the first target whose re-gate is red
+    (None: none is, or none ran). An :class:`integrate.IntegrationError` from the fold or
+    the tip read propagates."""
+    with contextlib.ExitStack() as locks:
+        folded = integrate.fold(cfg, bundles, dry_run=dry, locks=locks,
+                                folded_this_run=folded_this_run, batch=batch, skipped=skipped)
+        tips = {tgt: integrate.pushed_tip(wt) if wt is not None else None
+                for tgt, (_branch, wt) in folded.items()}
+        # hold_lock=False: the locks stack already holds each tree's lock (re-acquiring
+        # would deadlock on our own flock).
+        red = next((tgt for tgt, (_branch, wt) in folded.items()
+                    if cfg.regate_between_waves and not dry and wt is not None
+                    and gates.run_integration(cfg, wt, hold_lock=False)
+                    .get("overall") == "fail"), None)
+    return folded, tips, red
+
+
+def _finished_named(cfg: Config, batch: Collection[str] | None,
+                    drive_names: set[str]) -> list[Path]:
+    """The run's finished named ids (#646): each id it was asked for (``batch``) that is
+    COMPLETE and not in the drive set — the caller skipped it as terminal — once, in the
+    order asked for. None without a ``batch``."""
+    found: dict[str, Path] = {}
+    for iid in batch or ():
+        d = cfg.bundle(str(iid).removeprefix("issue_"))
+        if d.name not in drive_names and state.state(d) == state.COMPLETE:
+            found.setdefault(d.name, d)
+    return list(found.values())
+
+
+def _finished_head(d: Path, ref: tuple[str, str, bool] | None, repo: Path, base_ref: str,
+                   tip: str | None) -> str | tuple[str, str]:
+    """Finished bundle ``d``'s PR head when it is state-clean (#646): its PR reads OPEN, or
+    MERGED with the head already on ``base_ref`` or on the line at ``tip``, and the head
+    resolves in ``repo``. Else ``(reason, hint)`` — fail-closed: no recorded PR or branch,
+    or a state that cannot be read, is not clean."""
+    rec = publish._publish_record(d) if ref else None
+    pr_url = rec.get("pr_url") if isinstance(rec, dict) else None
+    if not pr_url:
+        return "no PR with a pushed branch on record (publish.json)", "open"
+    st = merged.pr_state(str(pr_url))
+    if st is None:
+        return f"its PR state could not be read (`gh pr view {pr_url}` failed)", "open"
+    pr, head = st
+    if pr not in ("OPEN", "MERGED"):
+        return f"its PR is {pr}", "open"
+    if not head or integrate._rev(repo, head) is None:
+        return f"its PR head {head or '(none reported)'} is not in {repo}", "open"
+    if pr == "MERGED" and not any(integrate._carries(repo, head, f"{d.name}'s head", r, of=r)
+                                  for r in (base_ref, tip) if r):
+        return f"its PR merged at {head[:12]}, which neither {base_ref} nor the line has", "edge"
+    return head
+
+
+_CARRY_HINTS = {
+    "open": "get {name}'s PR open with its branch on origin (re-open it, `pdca publish {iid}`, "
+            "or re-drive {name}), then re-issue",
+    "edge": "remove the `Depends on: {iid}` edge from the dependent's brief, then re-issue",
+    "line": "delete {line} on origin unless this run's own fold already replaced it, then "
+            "re-issue",
+}
+
+
+def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+                    batch: list[str], integ: dict[tuple[str, str], str],
+                    folded_tips: dict[tuple[str, str], str | None], held: set[str]) -> None:
+    """Before wave 0, put a re-issued run's finished named ids on its line (#646).
+
+    ``finished`` (:func:`_finished_named`) are ids the run was asked for that an earlier run
+    of the batch finished. Nothing happens unless a drive-set bundle's plain ``Depends on``
+    names one the fold can carry (:func:`integrate._fold_candidates`); then every carryable
+    finished id of THAT target is judged, in the order asked for. Clean — its PR state
+    clean (:func:`_finished_head`), origin's line holding nothing else it cannot account for
+    (:func:`integrate.foreign_commit`), merged without error, re-gate not red — it is folded
+    by ONE fold per target (:func:`_fold_lines`), which continues origin's line from the
+    tip checked here (no force; refused if it moved) or starts it when absent. The target
+    is then seeded into ``integ`` / ``folded_tips``: wave 0 is pointed at the line and every
+    later fold continues it. Any other finished id goes into ``held``, so only its plain
+    ``Depends on`` dependents wait (:func:`_runnable`), named with its reason on ONE stderr
+    line; the run goes on. A target the carry did not put to use is not seeded, so the
+    run's first fold of it starts fresh, as today. A dry-run (stub publisher) asks no host
+    and holds nothing: it prints the plan. A prerequisite that is no requested id, such as
+    a split child an earlier run adopted, is not carried: :func:`_runnable` holds its plain
+    ``Depends on`` dependents until its PR merges into their base (#647)."""
+    cands = {d.name: (d, (repo, base), ref)
+             for d, repo, base, _slug, ref in integrate._fold_candidates(finished)}
+    dependents: dict[str, list[str]] = {}
+    for b in bundles:
+        bp = b / "brief.md"
+        for dep in (brief.depends_on(bp) if bp.exists() else []):
+            if cfg.bundle(dep).name in cands:
+                dependents.setdefault(cfg.bundle(dep).name, []).append(b.name)
+    for tgt in sorted({cands[name][1] for name in dependents}):
+        ids = [d for d, t, _ref in cands.values() if t == tgt]          # in the order asked for
+        line = integrate.integration_branch(cfg, tgt[1], batch)
+        if cfg.publisher.mode == "stub":    # dry-run: ask no host, hold nothing
+            print(f"flow: dry-run — before wave 0, carry {', '.join(d.name for d in ids)} "
+                  f"(finished in an earlier run) onto {line} if clean:", file=sys.stderr)
+            integrate.fold(cfg, ids, dry_run=True, batch=batch)
+            continue
+        why: dict[str, tuple[str, str]] = {}    # not clean: name → (reason, hint)
+        heads: dict[str, str] = {}              # state-clean: name → its PR head
+        base_ref, tip, bad = f"{cfg.base_remote}/{tgt[1]}", None, None
+        try:
+            repo, tip = integrate.carry_view(cfg, tgt[0], line, [
+                cands[d.name][2][0] for d in ids if cands[d.name][2]])
+            for d in ids:
+                try:
+                    v = _finished_head(d, cands[d.name][2], repo, base_ref, tip)
+                except integrate.IntegrationError as exc:
+                    v = (str(exc), "open")
+                if isinstance(v, str):
+                    heads[d.name] = v
+                else:
+                    why[d.name] = v
+            bad = integrate.foreign_commit(repo, tip, base_ref, heads.values()) if tip else None
+        except integrate.IntegrationError as exc:
+            why = {d.name: (str(exc), "open") for d in ids}
+        if bad:   # an untrusted line: carry nothing onto it, point nothing at it
+            why = {d.name: (f"origin's {line} holds {bad[:12]}, which neither {base_ref} nor "
+                            f"a finished prerequisite's PR accounts for", "line") for d in ids}
+        clean = [d for d in ids if d.name not in why]
+        if clean:
+            skipped: dict[str, str] = {}
+            try:
+                folded, tips, red = _fold_lines(cfg, clean, dry=False, batch=batch,
+                                                folded_this_run={tgt: tip} if tip else {},
+                                                skipped=skipped)
+            except integrate.IntegrationError as exc:
+                folded, tips, red = {}, {}, None
+                skipped.update({d.name: str(exc) for d in clean})
+            carried = [d.name for d in clean if d.name not in skipped]
+            why.update({name: (msg, "open") for name, msg in skipped.items()})
+            if red:
+                why.update({name: (f"the re-gate of {line} carrying it is red", "open")
+                            for name in carried})
+            elif tgt in folded:
+                integ[tgt], folded_tips[tgt] = folded[tgt][0], tips[tgt]
+                print(f"flow: carried {', '.join(carried)} (finished in an earlier run) onto "
+                      f"{line} at {tips[tgt]} before wave 0 — this run's {tgt[0]} @ {tgt[1]} "
+                      f"bundles build on it.", file=sys.stderr)
+        for d in ids:
+            if d.name in why:
+                held.add(d.name)
+                reason, hint = why[d.name]
+                advice = _CARRY_HINTS[hint].format(name=d.name, line=line,
+                                                   iid=d.name.removeprefix("issue_"))
+                print(f"flow: {d.name} (finished in an earlier run) is not carried onto "
+                      f"{line}: {reason} — holding "
+                      f"{', '.join(dependents.get(d.name, [])) or 'no bundle'} this run; "
+                      f"{advice}.", file=sys.stderr)
 
 
 def _audit_wave_overlap(wave: list[Path]) -> None:
@@ -1740,6 +1954,59 @@ def _warn_stranded_split_children(cfg: Config, bundles: list[Path],
                   f"{' '.join(stranded)}`", file=sys.stderr)
 
 
+def _offered_by_seeds(cfg: Config, seeds: list[Path]) -> frozenset[str]:
+    """The bundle names the adoption seeds will OFFER this run (#590) — read silently.
+
+    The strict levelling of the named batch runs before the ``k=-1`` seed splice, so a
+    named id with ``Depends on`` a seed's child was refused as "neither in this batch nor
+    COMPLETE" one statement before that child would have been scheduled ahead of it. The
+    child IS part of the request — the operator named its parent as a recovery seed — so
+    :func:`waves.check_dep_graph` takes these names as resolvable.
+
+    "Offered" is: a lineage child, reached transitively through children that are
+    themselves terminal on a split (:func:`_is_split_parent`, the walk-through
+    :func:`_adoptable` hands back), whose bundle has a brief and is not terminal. A child
+    already COMPLETE resolves on its own; one DISCONTINUED / RESOLVED, or with no brief, is
+    not offered, so an edge to it still refuses up front. Same reader as adoption
+    (:func:`split.read_lineage` + :func:`_lineage_children`) and the same id / containment
+    guards, but NOTHING is printed or recorded: :func:`_adoptable` reports every skip, and
+    the adoption pass that follows still reports them, once. A child offered here that
+    adoption then does not take (another run holds it, …) is held at the re-level or
+    skipped by :func:`_runnable` at its dependent's wave — never a raise.
+
+    Never raises: a seed whose read fails contributes nothing, which leaves today's strict
+    answer for any edge into it.
+    """
+    offered: set[str] = set()
+    to_examine = list(seeds)
+    examined: set[str] = set()
+    while to_examine:
+        parent = to_examine.pop(0)
+        if parent.name in examined:
+            continue
+        examined.add(parent.name)
+        try:
+            if not _is_split_parent(parent):
+                continue
+            for cid in _lineage_children(split.read_lineage(parent) or {}):
+                if not _PLAIN_ID.fullmatch(cid):
+                    continue
+                d = cfg.bundle(cid)
+                if not _inside_bundle_root(cfg, d):
+                    continue
+                s = state.state(d)
+                if s in _TERMINAL:
+                    if _is_split_parent(d):
+                        to_examine.append(d)   # walked through, not offered (#473)
+                    continue
+                if s == state.UNPLANNED or not (d / "brief.md").exists():
+                    continue
+                offered.add(d.name)
+        except Exception:  # noqa: BLE001 — quiet by contract; the strict check stands
+            continue
+    return frozenset(offered)
+
+
 def _drive_and_act(
     cfg: Config,
     bundles: list[Path],
@@ -1751,6 +2018,7 @@ def _drive_and_act(
     max_passes: int | None = None,
     adopt_seeds: list[Path] | None = None,
     claims: drive_claim.Run | None = None,
+    batch: Collection[str] | None = None,
 ) -> dict[str, str]:
     """Drive a set of in-flight bundles through the full cycle to Act, in waves.
 
@@ -1789,6 +2057,16 @@ def _drive_and_act(
     drive (:func:`_adopt_split_children`). An adoption SEED is let go once the pre-pass over
     it has run: it is terminal, so this run never drives it — only its children, which the
     pre-pass has claimed in their own right. ``None`` — a library call — claims nothing.
+
+    ``batch`` (#591) is the bundles the run was ASKED to drive — ``flow_ids``' id list as
+    given (ids it skips as terminal or briefless included), ``flow_batch``'s sweep as taken
+    at run start. It scopes the run's integration branches (:func:`integrate.fold`), so a
+    concurrent run on the same base that drives a different batch never folds onto — and
+    never replaces — this run's line, while the same batch re-issued (its finished bundles
+    now skipped) lands on the same line. Before wave 0 such a re-issued run puts those
+    finished bundles on that line when a bundle it drives depends on one, or holds that
+    bundle, loudly (:func:`_carry_finished`, #646). ``None`` — a library call — scopes by
+    the drive set as passed.
     """
     bundles = list(bundles)          # the drive set — split adoption extends it (#469)
     allowance = cfg.max_passes if max_passes is None else max_passes
@@ -1799,6 +2077,9 @@ def _drive_and_act(
     # answered for even when held, from "a child this run adopted", which is dropped again
     # if a later reschedule holds it (:func:`_adopt_split_children`).
     named = frozenset(batch_names)
+    # What scopes this run's integration line (#591): the request, frozen before adoption
+    # grows the drive set, so every fold of the run lands on one batch-scoped branch.
+    run_batch = sorted(batch) if batch is not None else sorted(named)
     published: set[str] = set()
     # Bundles whose publish pushed their branch THIS run (`_publish_bundle` True, #593). An
     # iterate keeps an earlier attempt's publish.json, so a record on disk cannot tell.
@@ -1827,7 +2108,13 @@ def _drive_and_act(
     # `test_a_named_id_in_the_re_scheduled_tail_is_held_not_lost`. An ADOPTED child held by
     # that same re-levelling goes the other way — out of the drive set again, so it is not
     # reported as this run's work (`_adopt_split_children`, `named` above).
-    wave_list = waves.compute_waves(cfg, bundles)  # validates (raises) + levels the batch
+    #
+    # The request is the named ids AND what their recovery seeds offer (#590): an edge to a
+    # seed's in-flight child is resolvable here, adds no edge, and is ordered by the `k=-1`
+    # splice below, which re-levels with the child in place. Anything else still refuses.
+    offered = _offered_by_seeds(cfg, list(adopt_seeds)) if adopt_seeds else frozenset()
+    # validates (raises) + levels the batch
+    wave_list = waves.compute_waves(cfg, bundles, offered=offered)
     # Recovery (#473): a seed is an id the operator named whose bundle was ALREADY terminal
     # on a split, so an earlier run's children may still be sitting where it left them.
     # `k=-1` makes `wave_list[k+1:]` the WHOLE schedule — the children are levelled in front
@@ -1852,13 +2139,30 @@ def _drive_and_act(
             # finished bundle has always been. The seeds' own dispositions are `flow_ids`'
             # `skipped` map, which is what the caller reports.
             return {}
+    # A re-issued run's finished named ids (#646): carried onto the line before wave 0 when
+    # clean, else named in `held_finished`, which holds only their plain `Depends on`
+    # dependents. Only where a fold would run: stack mode, publishing on.
+    held_finished: set[str] = set()
+    if do_publish and cfg.wave_mode != "merge":
+        _carry_finished(cfg, bundles, _finished_named(cfg, batch, batch_names),
+                        batch=run_batch, integ=integ, folded_tips=folded_tips,
+                        held=held_finished)
     # `wave_list` is iterated by a LIST iterator on purpose (#469): adoption splices the
     # recomputed remainder into `wave_list[k+1:]` after wave k drives, and the iterator —
     # which simply indexes forward — picks the new tail up. So "how many waves are left" is
     # read live below (never cached in a `last`), and an adopted child's wave is driven,
     # published and folded by exactly the code every other wave goes through.
+    # A plain `Depends on` prerequisite the run was not asked for is on no line of this run,
+    # so its dependent waits for its merge into the dependent's base (#647). Only where a
+    # fold would run (stack mode, publishing on), and not in a dry-run, which asks no host
+    # and holds nothing. The ids asked for are normalised as `_finished_named` does.
+    hold_unmerged = (do_publish and cfg.wave_mode != "merge"
+                     and cfg.publisher.mode != "stub")
+    requested = set(named) | {cfg.bundle(str(i).removeprefix("issue_")).name
+                              for i in (batch or ())}
     for k, wave in enumerate(wave_list):
-        runnable = _runnable(cfg, wave, batch_names, held=held_unpushed)
+        runnable = _runnable(cfg, wave, batch_names, held=held_unpushed | held_finished,
+                             requested=requested, hold_unmerged=hold_unmerged)
         if not runnable:
             continue
         # The pool, read off the schedule as it stands NOW — so a splice below has already
@@ -1985,43 +2289,28 @@ def _drive_and_act(
                             print(f"flow: {d.name} pushed no branch this run — left out "
                                   f"of the integration fold; bundles that depend on it are "
                                   f"held this run.", file=sys.stderr)
-                # ONE lock scope covers fold AND re-gate (#297 review round 10): the
-                # locks stack keeps every target's integ lock held between the two,
-                # so no gap exists in which another flow's publish-boundary sweep
-                # could remove the tree — or another fold rewrite it — before the
-                # re-gate attests it.
-                stop_wave = False
-                with contextlib.ExitStack() as locks:
-                    try:
-                        folded = integrate.fold(
-                            cfg, [d for d in accepted if d.name not in held_unpushed],
-                            dry_run=dry, locks=locks, folded_this_run=dict(folded_tips))
-                        # Record each target's pushed tip at once, before any re-gate: the
-                        # next fold continues from exactly that tip and refuses a line
-                        # another run moved (#593). A dry-run pushes nothing (None).
-                        for tgt, (_branch, wt) in folded.items():
-                            folded_tips[tgt] = integrate.pushed_tip(wt) if wt is not None else None
-                    except integrate.IntegrationError as exc:
-                        print(f"flow: wave {k} did not integrate ({exc}); STOPPING — "
-                              f"later waves not run.", file=sys.stderr)
-                        break
-                    if folded and not dry:
-                        integ = {tgt: branch for tgt, (branch, _wt) in folded.items()}
-                        # Optional re-gate (#wave-model): validate EACH folded
-                        # combination over its integration tip before the next wave
-                        # builds on it; any red ⇒ STOP. hold_lock=False: the locks
-                        # stack already holds this tree's lock (re-acquiring would
-                        # deadlock on our own flock).
-                        if cfg.regate_between_waves and any(
-                                wt is not None
-                                and gates.run_integration(cfg, wt, hold_lock=False)
-                                        .get("overall") == "fail"
-                                for _tgt, (_branch, wt) in folded.items()):
-                            print(f"flow: wave {k} integration re-gate FAILED — a "
-                                  f"combination is red though each fix was green alone; "
-                                  f"STOPPING (later waves not run).", file=sys.stderr)
-                            stop_wave = True
-                if stop_wave:
+                # ONE lock scope covers fold, tip read AND re-gate (#297 review round 10),
+                # shared with the pre-wave carry (`_fold_lines`, #646).
+                try:
+                    folded, tips, red = _fold_lines(
+                        cfg, [d for d in accepted if d.name not in held_unpushed], dry=dry,
+                        folded_this_run=dict(folded_tips), batch=run_batch)
+                except integrate.IntegrationError as exc:
+                    print(f"flow: wave {k} did not integrate ({exc}); STOPPING — "
+                          f"later waves not run.", file=sys.stderr)
+                    break
+                # The next fold continues from exactly each pushed tip and refuses a line
+                # another run moved (#593). A dry-run pushes nothing (None).
+                folded_tips.update(tips)
+                if folded and not dry:
+                    # Update, not replace: a target only the carry folded keeps its line.
+                    integ.update({tgt: branch for tgt, (branch, _wt) in folded.items()})
+                # Optional re-gate (#wave-model): EACH folded combination is validated over
+                # its integration tip before the next wave builds on it; any red ⇒ STOP.
+                if red:
+                    print(f"flow: wave {k} integration re-gate FAILED — a "
+                          f"combination is red though each fix was green alone; "
+                          f"STOPPING (later waves not run).", file=sys.stderr)
                     break
 
     _sweep_quietly(cfg, bundles)  # publish/freeze boundary — reclaim footprint (#297)
@@ -2091,6 +2380,11 @@ def flow_batch(
              not in (state.COMPLETE, state.UNPLANNED, state.DISCONTINUED, state.RESOLVED)),
             key=lambda p: p.name,
         )
+        # The batch identity (#591): the sweep as taken at run start, before the claim /
+        # `_admit` / scheduling trims below — it scopes this run's integration line. No
+        # resume stability: finished bundles leave the sweep, so a re-run gets a fresh line
+        # of its own — never another run's.
+        swept = [d.name for d in bundles]
         if not bundles:
             print("flow: nothing to do — no in-flight briefs (all COMPLETE or none authored; "
                   "brief new issues to add work).", file=sys.stderr)
@@ -2128,7 +2422,8 @@ def flow_batch(
                   "unresolved dependency or a cycle.", file=sys.stderr)
             return {}
         return _drive_and_act(cfg, bundles, do_publish=do_publish, do_act=do_act, by=by,
-                              today=today, max_passes=max_passes, claims=claims)
+                              today=today, max_passes=max_passes, claims=claims,
+                              batch=swept)
     finally:
         # The sweep is fully decided by every return above (and by a raise, which leaves
         # nothing further for `cli._split` to promise about either) — released here so the
@@ -2276,9 +2571,13 @@ def flow_ids(
     if not bundles and not seeds:
         return skipped
     bundles.sort(key=lambda p: p.name)
+    # The batch is the ids AS ASKED FOR (#591), skipped ones included, so a re-issued run
+    # whose finished bundles are now skipped still folds onto the same integration line
+    # (`integrate.batch_key` normalises `500` / `issue_500`, order and repeats).
     return skipped | _drive_and_act(cfg, bundles, adopt_seeds=seeds, do_publish=do_publish,
                                     do_act=do_act, by=by, today=today,
-                                    max_passes=max_passes, claims=claims)
+                                    max_passes=max_passes, claims=claims,
+                                    batch=list(ids))
 
 
 def _bundle_dirs(cfg: Config) -> set[str]:

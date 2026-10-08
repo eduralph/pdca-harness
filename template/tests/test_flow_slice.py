@@ -1397,8 +1397,9 @@ class StackModeFlow(unittest.TestCase):
         self.assertEqual([c.get("folded_this_run") for c in calls],
                          [{}, {self.TARGET: None}])
         text = out.getvalue()
-        start = text.find("start pdca-integration/main fresh from upstream/main")
-        cont = text.find("continue pdca-integration/main from this run's tip")
+        line = self._line("DA", "DB", "DC")     # the run's batch-scoped line (#591)
+        start = text.find(f"start {line} fresh from upstream/main")
+        cont = text.find(f"continue {line} from this run's tip")
         self.assertNotEqual(start, -1, text)
         self.assertNotEqual(cont, -1, text)
         self.assertLess(start, cont)
@@ -1541,9 +1542,15 @@ class StackModeFlow(unittest.TestCase):
         return subprocess.run(["git", "-C", str(self.origin), "rev-parse", ref], check=True,
                               capture_output=True, text=True).stdout.strip()
 
+    def _line(self, *ids: str) -> str:
+        """The integration branch a ``flow_ids(ids)`` run folds ``main`` onto — scoped to
+        the batch it was asked to drive (#591)."""
+        return flow.integrate.integration_branch(self.cfg, "main", ids)
+
     def _in_line(self, commit: str) -> bool:
+        """Whether ``commit`` is on the run's line (``self.line``, set by the test)."""
         return subprocess.run(["git", "-C", str(self.origin), "merge-base", "--is-ancestor",
-                               commit, "pdca-integration/main"]).returncode == 0
+                               commit, self.line]).returncode == 0
 
     def _ancestor(self, commit: str, of: str) -> bool:
         return subprocess.run(["git", "-C", str(self.origin), "merge-base", "--is-ancestor",
@@ -1579,6 +1586,7 @@ class StackModeFlow(unittest.TestCase):
         self._real_origin()
         for iid, dep in (("EA", ""), ("EB", "EA"), ("EC", "EB")):
             self._brief(iid, depends_on=dep)
+        self.line = self._line("EA", "EB", "EC")
         pushes: list[list[str]] = []
         real_fold, real_git = flow.integrate.fold, flow.integrate._git
         clock = iter(range(1_790_000_000, 1_800_000_000, 60))
@@ -1604,14 +1612,14 @@ class StackModeFlow(unittest.TestCase):
         self.assertNotIn("STOPPING", err.getvalue())
         self.assertEqual(results, {"EA": state.COMPLETE, "EB": state.COMPLETE,
                                    "EC": state.COMPLETE})
-        self.assertEqual(self.cut_from["issue_EB"], "origin/pdca-integration/main")
+        self.assertEqual(self.cut_from["issue_EB"], f"origin/{self.line}")
         self.assertTrue(self._in_line(self._origin_rev("fix/issue_EA")))   # A's own commit
         self.assertTrue(self._in_line(self._origin_rev("fix/issue_EB")))   # B's own commit
         # B was cut from the first fold's tip, and that tip is still in the line.
         self.assertTrue(self._in_line(self._origin_rev("fix/issue_EB~1")))
         merges = subprocess.run(
             ["git", "-C", str(self.origin), "log", "--merges", "--format=%s",
-             "pdca-integration/main"], check=True, capture_output=True,
+             self.line], check=True, capture_output=True,
             text=True).stdout.splitlines()
         self.assertEqual(merges.count("pdca-integrate: issue_EA"), 1, merges)
         self.assertEqual(len(pushes), 2, pushes)            # a fold after waves 0 and 1
@@ -1634,7 +1642,8 @@ class StackModeFlow(unittest.TestCase):
                                     today="2026-10-02")
         self.assertEqual(results, {"ZA": state.COMPLETE, "ZZ": state.COMPLETE,
                                    "ZB": state.COMPLETE}, err.getvalue())
-        self.assertEqual(self.cut_from["issue_ZB"], "origin/pdca-integration/main")
+        self.assertEqual(self.cut_from["issue_ZB"],
+                         f"origin/{self._line('ZA', 'ZZ', 'ZB')}")
         za, zz = self._origin_rev("fix/issue_ZA"), self._origin_rev("fix/issue_ZZ")
         self.assertTrue(self._ancestor(za, "fix/issue_ZB"))
         self.assertTrue(self._ancestor(zz, "fix/issue_ZB"))   # though ZB never named ZZ
@@ -1661,6 +1670,7 @@ class StackModeFlow(unittest.TestCase):
         self._real_origin()
         for iid, dep in (("RP", ""), ("RI", ""), ("RD", "RP"), ("RJ", "RI")):
             self._brief(iid, depends_on=dep)
+        self.line = self._line("RP", "RI", "RD", "RJ")
         old = self._earlier_attempt("RP")
         with self._live(publish_fn=self._push_branch, fail_publish=frozenset({"RP"})), \
                 mock.patch.object(flow, "_drive_wave", self._accept_wave), \
@@ -1687,6 +1697,7 @@ class StackModeFlow(unittest.TestCase):
                         "receive.denyNonFastForwards", "false"], check=True)
         for iid, dep in (("PP", ""), ("PD", "PP")):
             self._brief(iid, depends_on=dep)
+        self.line = self._line("PP", "PD")
         old = self._earlier_attempt("PP")
 
         def pr_create_fails(cfg: Config, d: Path) -> int:
@@ -1715,6 +1726,7 @@ class StackModeFlow(unittest.TestCase):
         self._real_origin()
         for iid, dep in (("LA", ""), ("LU", "LA"), ("LJ", "LA"), ("LK", "LJ"), ("LL", "LK")):
             self._brief(iid, depends_on=dep)
+        self.line = self._line("LA", "LU", "LJ", "LK", "LL")
         with self._live(publish_fn=self._push_branch, fail_publish=frozenset({"LU"})), \
                 mock.patch.object(flow, "_drive_wave", self._accept_wave), \
                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
@@ -1940,13 +1952,17 @@ class RunnableMergeGate(unittest.TestCase):
         return d
 
     def test_out_of_batch_depends_on_merged_waits_until_merged(self) -> None:
-        # B `Depends on (merged): X`, X from a PRIOR run (not in this batch). Nothing here
-        # carries X's diff into the base, so X must be MERGED, not merely COMPLETE (#186).
+        # B `Depends on (merged): X`, X COMPLETE in a PRIOR run (not in this batch). Nothing
+        # here carries X's diff into the base, so X must be MERGED, not merely COMPLETE
+        # (#186) — merged into B's own target base (#647): `merged_into` gets B's resolved
+        # repo and branch.
+        self._complete("X")
         b = self._brief("B", "- **Depends on (merged):** X\n")
-        with mock.patch("pdca_harness.flow.merged.is_merged", return_value=False) as m:
+        with mock.patch("pdca_harness.flow.merged.merged_into", return_value=False) as m, \
+                redirect_stderr(io.StringIO()):
             self.assertEqual(flow._runnable(self.cfg, [b], {b.name}), [])   # X's PR open → defer
-        m.assert_called_once_with(self.cfg, "X")
-        with mock.patch("pdca_harness.flow.merged.is_merged", return_value=True):
+        m.assert_called_once_with(self.cfg, "X", "org/repo", "main")
+        with mock.patch("pdca_harness.flow.merged.merged_into", return_value=True):
             self.assertEqual(flow._runnable(self.cfg, [b], {b.name}), [b])  # X merged → runnable
 
     def test_in_batch_depends_on_merged_rides_the_fold_without_gh(self) -> None:
