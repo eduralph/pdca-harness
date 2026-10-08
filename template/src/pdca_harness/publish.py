@@ -342,7 +342,7 @@ def publish(
         if cut_from_tip:
             print(f"  # line-tip guard (#593): fetch --prune origin and refuse, pushing "
                   f"nothing, unless the recorded tip {wave_tip} is still on "
-                  f"origin/{stack_branch} (else re-drive it in a new run, #616)")
+                  f"origin/{stack_branch} (else re-drive it in a new run)")
         if cfg.host_ci_checks:
             print(f"  # host CI gate (#311): fetch, pin the exact {checkout_base} commit the "
                   f"push will build on, and run {len(cfg.host_ci_checks)} declared command(s) "
@@ -693,8 +693,9 @@ def _line_tip_refusal(d: Path, repo: Path, tip: str, line: str) -> str:
 
     The tip is the line commit the bundle was built on (:func:`read_stack_base_tip`). It
     is safe to cut from only while ``origin/<line>`` still holds it: a later run's first
-    fold starts a fresh line with a force-push (resuming across runs is #616), and a
-    deleted line holds nothing. So fetch ``origin`` (pruned, so a deleted line stops
+    fold starts a fresh line with a force-push (a re-issued run continues the line instead
+    only when it carries a finished prerequisite onto it, #646), and a deleted line holds
+    nothing. So fetch ``origin`` (pruned, so a deleted line stops
     resolving here rather than leaving a stale ref) and ask ``git merge-base
     --is-ancestor <tip> origin/<line>``: exit 0 is on the line; exit 1, a tip commit this
     clone does not have, or a line that does not resolve is not. Any other exit, or a
@@ -723,7 +724,8 @@ def _line_tip_refusal(d: Path, repo: Path, tip: str, line: str) -> str:
     return (f"publish: {d.name} was built on {tip}, a commit origin's {line} no longer holds "
             f"(a later run's first fold replaced the line, or the branch is gone) — refusing "
             f"to cut its PR branch from it; nothing was pushed. Re-drive it in a new run "
-            f"(#616).")
+            f"(a re-issued run continues the line only when it carries a finished "
+            f"prerequisite onto it).")
 
 
 def _stack_base_branch(cfg: Config, d: Path) -> str | None:

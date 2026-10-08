@@ -16,6 +16,8 @@ picked up by a later ``pdca flow`` run, after the prereq's PR is merged.
 :func:`merged_head` answers the integration fold's narrower question (#593): which commit
 did a merged PR's branch end at? The fold compares that SHA with its line when the branch
 itself is gone (deleted on merge), so the answer is a commit, never a commit message.
+:func:`pr_state` answers the flow's pre-wave carry (#646): is a finished prerequisite's PR
+open, merged or closed, and at which head commit?
 """
 
 from __future__ import annotations
@@ -89,6 +91,29 @@ def merged_head(cfg: Config, dep_id: str) -> str | None:
         return None
     head = info.get("headRefOid")
     return head if isinstance(head, str) and head else None
+
+
+def pr_state(pr_url: str) -> tuple[str, str] | None:
+    """``(state, head)`` of the PR at ``pr_url`` (``gh pr view --json state,headRefOid``):
+    ``OPEN`` / ``CLOSED`` / ``MERGED`` and its head commit ("" when none is reported), or
+    ``None`` when it cannot be read — a ``gh`` failure (``gh`` missing included, guarded as
+    :func:`merged_head` guards it) or output it cannot parse (#646). Silent: the caller
+    names the bundle and the reason."""
+    try:
+        r = subprocess.run(["gh", "pr", "view", pr_url, "--json", "state,headRefOid"],
+                           capture_output=True, text=True)
+    except OSError:
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        info = json.loads(r.stdout or "{}")
+    except ValueError:
+        return None
+    if not isinstance(info, dict) or not isinstance(info.get("state"), str):
+        return None
+    head = info.get("headRefOid")
+    return info["state"], head if isinstance(head, str) else ""
 
 
 def _publish_record(d: Path) -> dict | None:
