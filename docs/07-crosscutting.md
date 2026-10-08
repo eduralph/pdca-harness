@@ -683,8 +683,17 @@ wave builds on, via `[driver].wave_mode`:
   at all; `gh pr merge` alone would only refuse what *this host* marks required in
   branch protection, so without that read a thin protection config lets the next
   wave build on a base that never went green.
+  A rollup only describes the head it ran on, so the driver first checks in git
+  whether the PR's head is behind its base (an earlier PR of the same wave just
+  merged): `git merge-base --is-ancestor` after a fetch. If it is, the driver
+  updates the PR's branch with a merge commit of the base (`gh pr update-branch`,
+  never a rebase), waits for the update to land and for the new head's rollup,
+  and merges pinned to that head (`--match-head-commit`). A failed update, a red
+  updated head, or a head or base that moved stops the run. Turn on "require
+  branches to be up to date" in the base's branch protection: the host then also
+  refuses a merge if the base moves after the driver's last read.
   `[driver].merge_requires = "required"` opts back into host-config-only
-  semantics.
+  semantics, and skips the behind check and the update too.
 
 In merge mode the merge is unattended, so **publish refuses to open a PR against
 any branch this run produced** — the work must land on a base that exists

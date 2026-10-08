@@ -54,10 +54,23 @@ it there, not by editing this file (so `copier update` keeps the rules current).
   the wave boundary, so the next wave builds on a genuinely merged base. What stands in
   for your ready-mark is not nothing: each such PR carries the **per-bundle human
   sign-off** that made the bundle `COMPLETE` before it was published at all, and the
-  driver refuses to merge unless the PR's **full check rollup is green**
-  (`[driver].merge_requires`, read after the ready-mark and immediately before the
-  merge). A fork keeps the default `wave_mode = "stack"`, where nothing is ever readied
-  or merged for you.
+  driver refuses to merge unless the PR's **full check rollup is green** on a head that
+  contains the base it merges into (`[driver].merge_requires = "all"`, the default). The
+  sequence for each PR: ready-mark → read whether its head is **behind** its base (an
+  earlier PR of the same wave just merged, or the base moved; decided in git, `git
+  merge-base --is-ancestor` after a fetch) → if behind, update the PR's own branch with a
+  merge commit of the base (`gh pr update-branch`, never a rebase) and wait for the update
+  to land → bounded wait for the rollup of that head (`[driver].merge_wait_secs`, one
+  budget for both waits) → read the head and base again (unchanged, not behind) → merge
+  **pinned to that head** (`--match-head-commit`). A failed update, a red updated head, a
+  head that changed or a base that moved stops the run with the PR back in draft; an
+  update commit already pushed stays on the PR branch. **What sign-off covered changes
+  after an update:** the head that merges is then a merge commit of the reviewed PR branch
+  with the newer base. Check reviewed `patch.diff`, not that combination; the combination
+  is verified by the PR's own CI (the green rollup the driver reads), not by a reviewer.
+  `merge_requires = "required"` skips all of this and trusts the host's branch
+  protection, stale base included. A fork keeps the default `wave_mode = "stack"`, where
+  nothing is ever readied or merged for you.
 - No push / PR-open / ready-mark happens without explicit instruction. This is
   **mechanically enforced** by the builder/publisher PreToolUse hook (`builder_guard.py`),
   not left to prompt discipline.
