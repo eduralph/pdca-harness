@@ -1740,6 +1740,59 @@ def _warn_stranded_split_children(cfg: Config, bundles: list[Path],
                   f"{' '.join(stranded)}`", file=sys.stderr)
 
 
+def _offered_by_seeds(cfg: Config, seeds: list[Path]) -> frozenset[str]:
+    """The bundle names the adoption seeds will OFFER this run (#590) — read silently.
+
+    The strict levelling of the named batch runs before the ``k=-1`` seed splice, so a
+    named id with ``Depends on`` a seed's child was refused as "neither in this batch nor
+    COMPLETE" one statement before that child would have been scheduled ahead of it. The
+    child IS part of the request — the operator named its parent as a recovery seed — so
+    :func:`waves.check_dep_graph` takes these names as resolvable.
+
+    "Offered" is: a lineage child, reached transitively through children that are
+    themselves terminal on a split (:func:`_is_split_parent`, the walk-through
+    :func:`_adoptable` hands back), whose bundle has a brief and is not terminal. A child
+    already COMPLETE resolves on its own; one DISCONTINUED / RESOLVED, or with no brief, is
+    not offered, so an edge to it still refuses up front. Same reader as adoption
+    (:func:`split.read_lineage` + :func:`_lineage_children`) and the same id / containment
+    guards, but NOTHING is printed or recorded: :func:`_adoptable` reports every skip, and
+    the adoption pass that follows still reports them, once. A child offered here that
+    adoption then does not take (another run holds it, …) is held at the re-level or
+    skipped by :func:`_runnable` at its dependent's wave — never a raise.
+
+    Never raises: a seed whose read fails contributes nothing, which leaves today's strict
+    answer for any edge into it.
+    """
+    offered: set[str] = set()
+    to_examine = list(seeds)
+    examined: set[str] = set()
+    while to_examine:
+        parent = to_examine.pop(0)
+        if parent.name in examined:
+            continue
+        examined.add(parent.name)
+        try:
+            if not _is_split_parent(parent):
+                continue
+            for cid in _lineage_children(split.read_lineage(parent) or {}):
+                if not _PLAIN_ID.fullmatch(cid):
+                    continue
+                d = cfg.bundle(cid)
+                if not _inside_bundle_root(cfg, d):
+                    continue
+                s = state.state(d)
+                if s in _TERMINAL:
+                    if _is_split_parent(d):
+                        to_examine.append(d)   # walked through, not offered (#473)
+                    continue
+                if s == state.UNPLANNED or not (d / "brief.md").exists():
+                    continue
+                offered.add(d.name)
+        except Exception:  # noqa: BLE001 — quiet by contract; the strict check stands
+            continue
+    return frozenset(offered)
+
+
 def _drive_and_act(
     cfg: Config,
     bundles: list[Path],
@@ -1827,7 +1880,13 @@ def _drive_and_act(
     # `test_a_named_id_in_the_re_scheduled_tail_is_held_not_lost`. An ADOPTED child held by
     # that same re-levelling goes the other way — out of the drive set again, so it is not
     # reported as this run's work (`_adopt_split_children`, `named` above).
-    wave_list = waves.compute_waves(cfg, bundles)  # validates (raises) + levels the batch
+    #
+    # The request is the named ids AND what their recovery seeds offer (#590): an edge to a
+    # seed's in-flight child is resolvable here, adds no edge, and is ordered by the `k=-1`
+    # splice below, which re-levels with the child in place. Anything else still refuses.
+    offered = _offered_by_seeds(cfg, list(adopt_seeds)) if adopt_seeds else frozenset()
+    # validates (raises) + levels the batch
+    wave_list = waves.compute_waves(cfg, bundles, offered=offered)
     # Recovery (#473): a seed is an id the operator named whose bundle was ALREADY terminal
     # on a split, so an earlier run's children may still be sitting where it left them.
     # `k=-1` makes `wave_list[k+1:]` the WHOLE schedule — the children are levelled in front
