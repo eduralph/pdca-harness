@@ -679,49 +679,90 @@ def _record_mtime(d: Path) -> int | None:
 # publish → fold onto the integration branch the next wave builds on) → Act once (docs 09).
 # ----------------------------------------------------------------------------
 def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
-              held: set[str] | frozenset[str] = frozenset()) -> list[Path]:
+              held: set[str] | frozenset[str] = frozenset(),
+              requested: Collection[str] | None = None,
+              hold_unmerged: bool = False) -> list[Path]:
     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
 
-    A prerequisite **in this run's batch** is carried into the dependent's base by the wave
-    fold once it reaches COMPLETE (it sits in an earlier wave), so COMPLETE is the bar — e.g.
-    a prereq DISCONTINUED earlier never gets there, and its dependent is skipped loudly. An
-    in-batch prerequisite named in ``held`` (bundle dir names, #593) is not ready either: it
-    is COMPLETE, but this run pushed no branch of it (its texts or its publish failed before
-    the push), so the fold has nothing of it to carry — its dependents are held while the
-    rest of the run goes on. A
-    prerequisite **outside this batch** (a prior run's) is gated on its on-disk COMPLETE state
-    (archived `completed/` too, #171) — **except** an out-of-batch ``Depends on (merged)``
-    prereq, which keeps its stricter #107 merge-gate (#186): nothing in *this* run carries an
-    out-of-batch prereq's diff into the base (a finished named id aside, below), and COMPLETE
-    means only "a draft PR was opened", so a dependent built on a COMPLETE-but-unmerged base
-    would miss the prerequisite. It must wait until the PR is genuinely merged
-    (``merged.is_merged``) — a later ``pdca flow`` run then picks it up. A finished named id
-    (an id the run was asked for that an earlier run finished, #646) is carried onto the
+    A prerequisite that is not COMPLETE on disk (archived ``completed/`` too, #171) is never
+    ready, whichever field names it — e.g. a prereq DISCONTINUED earlier never gets there,
+    and its dependent is skipped loudly. A prerequisite **in this run's batch** is carried
+    into the dependent's base by the wave fold once it reaches COMPLETE (it sits in an
+    earlier wave), so COMPLETE is the bar. An in-batch prerequisite named in ``held``
+    (bundle dir names, #593) is not ready either: it is COMPLETE, but this run pushed no
+    branch of it (its texts or its publish failed before the push), so the fold has nothing
+    of it to carry — its dependents are held while the rest of the run goes on. A
+    prerequisite **outside this batch** (a prior run's) is gated on its COMPLETE state —
+    **except** an out-of-batch ``Depends on (merged)`` prereq, which keeps its stricter #107
+    merge-gate (#186): nothing in *this* run carries an out-of-batch prereq's diff into the
+    base (a finished named id aside, below), and COMPLETE means only "a draft PR was
+    opened", so a dependent built on a COMPLETE-but-unmerged base would miss the
+    prerequisite. It must wait until the PR is genuinely merged into the DEPENDENT's target
+    base — its repo and branch (``publish._resolve_target``), not just some branch
+    (``merged.merged_into``, #647) — a later ``pdca flow`` run then picks it up. With
+    ``hold_unmerged`` (stack mode, publishing on, not a dry-run, #647) a plain ``Depends
+    on`` prerequisite the run was NOT asked for — not in ``requested`` (bundle dir names;
+    ``None``: ``batch_names``) — waits the same way when a line would carry it (a non-empty
+    patch and a usable target, ``integrate._fold_candidates``): no line of this run does.
+    Either way the dependent is named on ONE stderr line, with what to do. A dependent with
+    no usable target of its own (publish skips it) has no base to wait for: no #647 hold,
+    and its ``Depends on (merged)`` keeps #186's answer — any merge counts. A finished named
+    id (an id the run was asked for that an earlier run finished, #646) is carried onto the
     line before wave 0 when it is clean (:func:`_carry_finished`); when it is not, it is
     named in ``held``, and a bundle whose plain ``Depends on`` names it is not ready (a
     ``Stacks on`` edge to it is not held). A skipped bundle never completes, so its own
     dependents fall out of later waves the same way (the skip cascades)."""
+    asked = set(requested) if requested is not None else set(batch_names)
     runnable: list[Path] = []
     for d in wave:
         bp = d / "brief.md"
-        merged_deps = set(brief.depends_on_merged(bp)) if bp.exists() else set()
-        plain_deps = set(brief.depends_on(bp)) if bp.exists() else set()
+        deps = waves.declared_deps(bp) if bp.exists() else []
+        merged_deps = set(brief.depends_on_merged(bp)) if deps else set()
+        plain_deps = set(brief.depends_on(bp)) if deps else set()
+        # "Merged" means merged into d's OWN target (#647) — none usable: ("", "").
+        repo, base = publish._resolve_target(d)[:2] if deps else ("", "")
+        targeted = bool(repo and base)
         unmet: list[str] = []
-        for dep in (waves.declared_deps(bp) if bp.exists() else []):
-            out_of_batch = cfg.bundle(dep).name not in batch_names
-            if out_of_batch and dep in merged_deps:
-                if not merged.is_merged(cfg, dep):  # PR not yet merged — wait, don't build (#186)
+        unmerged: list[str] = []   # COMPLETE, but not merged into d's base: wait (#647)
+        carryable: list[str] = []  # … of those, ones a line of d's target would carry
+        for dep in deps:
+            p = cfg.find_bundle(dep)
+            out_of_batch = p.name not in batch_names
+            if state.state(p) != state.COMPLETE:  # archived prereq too (#171)
+                unmet.append(dep)  # not ready, whichever field names it
+                continue
+            # A plain `Depends on` prereq the run was not asked for, which a line would
+            # carry: no line of this run does (#647).
+            cand = (integrate._fold_candidates([p])
+                    if hold_unmerged and targeted and out_of_batch and dep in plain_deps
+                    and p.name not in asked else [])
+            if out_of_batch and (dep in merged_deps or cand):
+                # Only a merge INTO d's base puts it there (#186 for `Depends on (merged)`,
+                # #647 for the plain edge above). With no target of d's own, #186's answer
+                # and its "not ready" line stand.
+                if merged.merged_into(cfg, dep, repo, base):
+                    continue
+                if not targeted:
                     unmet.append(dep)
-            elif state.state(cfg.find_bundle(dep)) != state.COMPLETE:  # archived prereq too (#171)
-                unmet.append(dep)
-            elif cfg.bundle(dep).name in held and (not out_of_batch or dep in plain_deps):
+                    continue
+                unmerged.append(p.name)
+                if cand and dep not in merged_deps and cand[0][1:3] == (repo, base):
+                    carryable.append(p.name)  # named in the run, the carry puts it on (#646)
+            elif p.name in held and (not out_of_batch or dep in plain_deps):
                 # In batch: accepted, but no branch pushed this run: nothing to fold (#593).
                 # Out of batch: a finished named id the carry could not put on the line (#646).
                 unmet.append(dep)
+        if unmerged:
+            todo = (f"name {', '.join(carryable)} in the same `pdca flow <ids>` command so "
+                    f"the run's line carries them, or wait" if carryable else "wait")
+            print(f"flow: {d.name} held — prerequisite(s) {', '.join(unmerged)} not merged "
+                  f"into {base} ({repo}), and no line of this run carries them; not built "
+                  f"on a base missing them. To build it, {todo} until their PR merges into "
+                  f"{base}, then re-run.", file=sys.stderr)
         if unmet:
             print(f"flow: {d.name} skipped — prerequisite(s) not ready "
                   f"({', '.join(unmet)}); not built on a base missing them.", file=sys.stderr)
-        else:
+        if not unmet and not unmerged:
             runnable.append(d)
     return runnable
 
@@ -843,8 +884,9 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
     ``Depends on`` dependents wait (:func:`_runnable`), named with its reason on ONE stderr
     line; the run goes on. A target the carry did not put to use is not seeded, so the
     run's first fold of it starts fresh, as today. A dry-run (stub publisher) asks no host
-    and holds nothing: it prints the plan. Not covered: a prerequisite that is no requested
-    id (#647), such as a split child an earlier run adopted."""
+    and holds nothing: it prints the plan. A prerequisite that is no requested id, such as
+    a split child an earlier run adopted, is not carried: :func:`_runnable` holds its plain
+    ``Depends on`` dependents until its PR merges into their base (#647)."""
     cands = {d.name: (d, (repo, base), ref)
              for d, repo, base, _slug, ref in integrate._fold_candidates(finished)}
     dependents: dict[str, list[str]] = {}
@@ -2110,8 +2152,17 @@ def _drive_and_act(
     # which simply indexes forward — picks the new tail up. So "how many waves are left" is
     # read live below (never cached in a `last`), and an adopted child's wave is driven,
     # published and folded by exactly the code every other wave goes through.
+    # A plain `Depends on` prerequisite the run was not asked for is on no line of this run,
+    # so its dependent waits for its merge into the dependent's base (#647). Only where a
+    # fold would run (stack mode, publishing on), and not in a dry-run, which asks no host
+    # and holds nothing. The ids asked for are normalised as `_finished_named` does.
+    hold_unmerged = (do_publish and cfg.wave_mode != "merge"
+                     and cfg.publisher.mode != "stub")
+    requested = set(named) | {cfg.bundle(str(i).removeprefix("issue_")).name
+                              for i in (batch or ())}
     for k, wave in enumerate(wave_list):
-        runnable = _runnable(cfg, wave, batch_names, held=held_unpushed | held_finished)
+        runnable = _runnable(cfg, wave, batch_names, held=held_unpushed | held_finished,
+                             requested=requested, hold_unmerged=hold_unmerged)
         if not runnable:
             continue
         # The pool, read off the schedule as it stands NOW — so a splice below has already

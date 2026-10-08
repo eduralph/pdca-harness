@@ -1952,13 +1952,17 @@ class RunnableMergeGate(unittest.TestCase):
         return d
 
     def test_out_of_batch_depends_on_merged_waits_until_merged(self) -> None:
-        # B `Depends on (merged): X`, X from a PRIOR run (not in this batch). Nothing here
-        # carries X's diff into the base, so X must be MERGED, not merely COMPLETE (#186).
+        # B `Depends on (merged): X`, X COMPLETE in a PRIOR run (not in this batch). Nothing
+        # here carries X's diff into the base, so X must be MERGED, not merely COMPLETE
+        # (#186) — merged into B's own target base (#647): `merged_into` gets B's resolved
+        # repo and branch.
+        self._complete("X")
         b = self._brief("B", "- **Depends on (merged):** X\n")
-        with mock.patch("pdca_harness.flow.merged.is_merged", return_value=False) as m:
+        with mock.patch("pdca_harness.flow.merged.merged_into", return_value=False) as m, \
+                redirect_stderr(io.StringIO()):
             self.assertEqual(flow._runnable(self.cfg, [b], {b.name}), [])   # X's PR open → defer
-        m.assert_called_once_with(self.cfg, "X")
-        with mock.patch("pdca_harness.flow.merged.is_merged", return_value=True):
+        m.assert_called_once_with(self.cfg, "X", "org/repo", "main")
+        with mock.patch("pdca_harness.flow.merged.merged_into", return_value=True):
             self.assertEqual(flow._runnable(self.cfg, [b], {b.name}), [b])  # X merged → runnable
 
     def test_in_batch_depends_on_merged_rides_the_fold_without_gh(self) -> None:

@@ -700,6 +700,23 @@ wave builds on, via `[driver].wave_mode`:
   that conflict with each other; an old line that still holds a prerequisite
   whose PR was closed since; and an accepted but unpublished bundle whose line a
   later run's fresh fold replaced (publish refuses it, as above).
+
+  A plain `Depends on` prerequisite that is not one of the ids the run was
+  asked to drive (a `pdca flow --from-csv` sweep never includes a finished
+  bundle; a `pdca flow <ids>` may not name it) is on no line of the run. Its
+  dependent waits until that prerequisite's PR merges into the dependent's own
+  target base, the repo and branch of its `Repo + branch target`. A PR that
+  merged into another branch (an integration line, say), an `Onto branch`
+  commit, or a PR whose state cannot be read (`gh` missing or failing) does not
+  count. The dependent is named on one line with the prerequisite and what to
+  do, and the rest of the run goes on: name the prerequisite in the same
+  `pdca flow <ids>` command so the run carries it onto its line (as above), or
+  wait for the merge and re-run. Nothing is held for a prerequisite with no
+  patch or no usable target, for a dependent with no usable target of its own,
+  with `--no-publish`, or in a dry-run. `Depends on (merged)` counts a merge the
+  same way: a prerequisite the run does not drive must have merged into the
+  dependent's base (a dependent with no usable target still takes a merge into
+  any branch).
 - **`"merge"`** (own-repo / continuous-delivery only) — actually `gh pr merge`s
   each non-final wave's PRs, so the next wave builds on a genuinely merged base.
   Needs merge rights on the base remote and relaxes STOP discipline for the
