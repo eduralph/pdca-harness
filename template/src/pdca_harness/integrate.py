@@ -67,6 +67,15 @@ class IntegrationError(RuntimeError):
     incomplete base."""
 
 
+class IntegrationTreeError(IntegrationError):
+    """The integration worktree could not be put back to a known commit (#631) — a failed
+    ``reset --hard`` or ``clean``, or a tip that could not be read to reset to. Unlike a
+    bundle that does not merge, this is not about one bundle: every later merge would run
+    in an unknown tree, so the carry's per-bundle ``skipped`` mode never absorbs it — the
+    fold stops. An :class:`IntegrationError`, so every caller that catches that one (the
+    flow's fold and carry) catches this too."""
+
+
 def integration_branch(cfg: Config, base: str, batch: Iterable[str] | None = None) -> str:
     """The run-scoped integration branch for a target ``base`` — deterministic (a resumed run
     rebuilds the same branch) and **injective in the base** (#187): the base is flattened to a
@@ -334,11 +343,13 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     ``skipped`` (#646, the flow's pre-wave carry): when given, an :class:`IntegrationError`
     raised while merging ONE bundle (:func:`_merge_published`, its :func:`_gone_branch`
     included) is recorded as ``skipped[name] = message`` and the next bundle is merged — a
-    failed merge is aborted, so the tree is clean for it. A target whose every bundle was
-    skipped pushes nothing and has no entry in the result. Every other failure still raises:
-    the lock, the worktree, a moved line, the push, and the up-front refusal of a bundle
-    with no published branch (the carry passes only bundles that have one). ``None`` (every
-    other caller) raises on the first failure, as before.
+    failed merge is undone (the tree reset to the line tip it had before it, #631), so the
+    tree is clean for it. A target whose every bundle was skipped pushes nothing and has no
+    entry in the result. Every other failure still raises: the lock, the worktree (one that
+    cannot be made, or reset — :class:`IntegrationTreeError`), a moved line, the push, and
+    the up-front refusal of a bundle with no published branch (the carry passes only
+    bundles that have one). ``None`` (every other caller) raises on the first failure, as
+    before.
     """
     candidates = _fold_candidates(accepted)
     if not candidates:
@@ -428,15 +439,20 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                         f"then re-run")
             fresh = start == "fresh" or (start == "auto" and line is None)
             start_ref = f"{base_remote}/{base}" if fresh else line
+            # The tree is shared by every fold of the run, the #646 carry and the re-gate
+            # (#631): drop whatever its last user left — a mid-merge state, edited tracked
+            # files, untracked build output — so the fold depends only on start_ref and the
+            # branches it merges. Ignored files stay (git overwrites them without refusing).
+            _reset_tree(wt, "HEAD")
             if _git(wt, "checkout", "-B", branch, start_ref) != 0:
                 raise IntegrationError(f"could not start {branch} off {start_ref}")
             for d in bundles:
                 try:
                     _merge_published(cfg, wt, d, refs[d.name], branch=branch, base=base)
                 except IntegrationError as exc:
-                    if skipped is None:
+                    if skipped is None or isinstance(exc, IntegrationTreeError):
                         raise
-                    skipped[d.name] = str(exc)   # this bundle only; the merge was aborted
+                    skipped[d.name] = str(exc)   # this bundle only; its merge was undone
             if skipped is not None and all(d.name in skipped for d in bundles):
                 continue   # nothing of this target merged: push nothing, report nothing
             # Fresh: the run's first fold of this target replaces an earlier run of the same
@@ -582,17 +598,39 @@ def _in_line(wt: Path, rev: str, what: str, branch: str, *, of: str = "HEAD") ->
 
 def _merge(wt: Path, rev: str, message: str) -> tuple[int, list[str]]:
     """Merge ``rev`` onto the line in ``wt``; return the exit code and, on a failure, the
-    paths left conflicting (none: it failed for another reason). A failed merge is aborted.
+    paths left conflicting (none: it failed for another reason). A failed merge is undone by
+    resetting the tree to the line tip it had before the merge (#631) — not a ``merge
+    --abort`` whose failure would go unseen and leave a mid-merge tree for the next merge.
     ``--signoff`` (DCO, as publish #81): later waves' PRs carry these merge commits outside
     the base's ancestry, where a DCO-gated host inspects them (#405)."""
+    before = _rev(wt, "HEAD")
+    if before is None:
+        raise IntegrationTreeError(f"could not read the line tip checked out in {wt} — a "
+                                   f"git step failed: check that checkout, then re-run")
     rc = _git(wt, "merge", "--no-ff", "--no-edit", "--signoff", "-m", message, rev)
     if rc == 0:
         return 0, []
     r = subprocess.run(["git", "-C", str(wt), "diff", "--name-only", "--diff-filter=U"],
                        capture_output=True, text=True)
     conflicts = r.stdout.splitlines() if r.returncode == 0 else []
-    _git(wt, "merge", "--abort")   # a no-op when the merge never started
+    _reset_tree(wt, before)   # drops MERGE_HEAD too; a no-op when the merge never started
     return rc, conflicts
+
+
+def _reset_tree(wt: Path, rev: str) -> None:
+    """Put ``wt`` back to exactly ``rev`` (#631): ``reset --hard`` (drops a merge in
+    progress, restores tracked files) then ``clean -ffd`` (removes untracked files and
+    directories — with ``-f`` twice, also one that is a git repository of its own, such as a
+    gate's clone, which a single ``-f`` skips and which blocks a later merge the same way).
+    No ``-x``: an ignored file never makes a checkout or merge refuse — git overwrites it —
+    so it cannot change a fold's result, and keeping it lets the re-gate reuse its build
+    caches. Raises :class:`IntegrationTreeError` when either step fails."""
+    for step in (("reset", "-q", "--hard", rev), ("clean", "-q", "-ffd")):
+        if _git(wt, *step) != 0:
+            raise IntegrationTreeError(
+                f"could not reset the integration worktree {wt} to {rev} — `git "
+                f"{' '.join(step)}` failed, so the tree's state is unknown: check that "
+                f"checkout (or remove it to have it recreated), then re-run")
 
 
 def _fetch(repo: Path, base_remote: str, remotes: Iterable[str] = ()) -> None:
