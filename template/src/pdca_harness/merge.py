@@ -69,6 +69,15 @@ between the last read and the host executing the merge is a gap no client can cl
 ``strict`` host refuses that merge, a non-strict one would merge it.
 ``merge_requires = "required"`` (trust the host's protection) is unchanged: no base read,
 no update, no pin.
+
+The head ``_base_read`` asks about lives where publish pushed the PR's branch, and that is
+not always ``base_remote`` or ``origin`` (issue #650): an ``Onto branch`` bundle's
+``"stacked"`` record names the remote it pushed to, which may be a third one. So the fetch
+covers that remote too, read from the record as the fold reads it
+(``integrate._published_ref``), and a head commit the fetches still did not bring in is
+refused by name (``_have``) — with the remotes fetched and where the record puts the
+branch, not a guess at why — instead of being left to ``git merge-base`` to fail on with a
+bare exit 128.
 """
 
 from __future__ import annotations
@@ -79,7 +88,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import merged, publish, state
+from . import integrate, merged, publish, state
 from .config import Config
 
 # Patchable indirection so a test can drive the wait loop below with no real wall-clock
@@ -253,14 +262,51 @@ def _git_failed(repo: Path, what: str, r: subprocess.CompletedProcess) -> str:
             f"({tail[-1] if tail else 'no output'})")
 
 
-def _fetch(cfg: Config, repo: Path) -> str:
-    """Fetch the PR's base (``base_remote``) and its branch (``origin``, where publish
-    pushed it — the same remote on an own-repo checkout) into ``repo``. "" or why not."""
-    for remote in dict.fromkeys((cfg.base_remote, "origin")):
+def _remotes(cfg: Config, pub: tuple[str, str, bool] | None) -> tuple[str, ...]:
+    """The remotes to fetch before reading a PR's head against its base: its base
+    (``base_remote``), ``origin``, and the remote its branch is on per its publish record
+    (issue #650). ``pub`` is that record as the fold reads it (``integrate._published_ref``:
+    ``(remote, ref, onto)``, or None when it names no remote). Deduplicated, in that order,
+    so a ``new-pr`` / ``stacked-pr`` record (``origin``) or one naming no remote fetches
+    exactly the base remote and ``origin``, as before; an ``Onto branch`` record's remote,
+    possibly a third one, comes last."""
+    return tuple(dict.fromkeys((cfg.base_remote, "origin", *(pub[:1] if pub else ()))))
+
+
+def _fetch(cfg: Config, repo: Path, pub: tuple[str, str, bool] | None) -> str:
+    """Fetch the PR's base (``base_remote``), ``origin`` and the remote its publish record
+    ``pub`` puts its branch on (``_remotes``) into ``repo``. "" or why not: a fetch that
+    fails, the record's own remote's included, is a refusal."""
+    for remote in _remotes(cfg, pub):
         r = _git(repo, "fetch", remote)
         if r.returncode != 0:
             return _git_failed(repo, f"fetch {remote}", r)
     return ""
+
+
+def _have(cfg: Config, repo: Path, pub: tuple[str, str, bool] | None, head: str) -> str:
+    """"" when the checkout ``repo`` holds commit ``head`` after ``_fetch``; otherwise why
+    not (issue #650), so a missing head is refused by name rather than left to ``git
+    merge-base`` to fail on with a bare exit 128. ``git cat-file -e`` exits 1 for an object
+    the checkout does not have; any other failure is git failing and is said as such.
+
+    The refusal states only what was checked: the commit, the checkout, the remotes
+    fetched, and either where the publish record ``pub`` puts the branch (that remote was
+    fetched and did not bring the commit in) or that the record names no remote. It never
+    guesses why. A fetch refspec that leaves the branch out, a branch moved after the host
+    reported its head, and a record naming the wrong remote all look the same from here."""
+    r = _git(repo, "cat-file", "-e", head)
+    if r.returncode == 0:
+        return ""
+    if r.returncode != 1:
+        return _git_failed(repo, f"cat-file -e {head[:12]}", r)
+    why = (f"its head commit {head} is not in the checkout {repo} after fetching "
+           f"{', '.join(_remotes(cfg, pub))}")
+    if pub is None:
+        return (f"{why}; its publish record does not say which remote its branch is on, "
+                "so no other remote was fetched")
+    return (f"{why}; its publish record puts its branch at {pub[1]}, and fetching "
+            f"{pub[0]} did not bring that commit in")
 
 
 def _contains(repo: Path, tip: str, head: str) -> tuple[bool | None, str]:
@@ -273,19 +319,22 @@ def _contains(repo: Path, tip: str, head: str) -> tuple[bool | None, str]:
     return None, _git_failed(repo, f"merge-base --is-ancestor {tip[:12]} {head[:12]}", r)
 
 
-def _base_read(cfg: Config, repo: Path, pr_url: str) -> tuple[str, str, bool | None, str]:
+def _base_read(cfg: Config, repo: Path, pub: tuple[str, str, bool] | None,
+               pr_url: str) -> tuple[str, str, bool | None, str]:
     """Whether PR ``pr_url``'s head lacks its base branch's current tip (issue #531), in
     plain git as ``publish._line_tip_refusal`` decides its question (#593), not by a
     host-side comparison: the head and base branch from the host (``_pr_head``), a fetch
-    into the checkout ``repo`` (``_fetch``), the base tip recorded from
-    ``<base_remote>/<base>``, then ``_contains``. Returns ``(head, tip, behind, "")``. On any
-    failure — ``gh`` unreadable, a failed fetch, a base that does not resolve, ``git
-    merge-base`` exiting other than 0/1 — ``behind`` is None and the last item says why:
-    the caller refuses, fail-closed, and never guesses "up to date"."""
+    into the checkout ``repo`` (``_fetch``, which reads where the branch is from the publish
+    record ``pub``, #650), the base tip recorded from ``<base_remote>/<base>``, a check
+    that the head is in the checkout (``_have``), then ``_contains``. Returns ``(head, tip,
+    behind, "")``. On any failure — ``gh`` unreadable, a failed fetch, a base that does not
+    resolve, a head the fetches did not bring in, ``git merge-base`` exiting other than 0/1
+    — ``behind`` is None and the last item says why: the caller refuses, fail-closed, and
+    never guesses "up to date"."""
     head, base, why = _pr_head(pr_url)
     if not head:
         return "", "", None, why
-    why = _fetch(cfg, repo)
+    why = _fetch(cfg, repo, pub)
     if why:
         return head, "", None, why
     ref = f"{cfg.base_remote}/{base}"
@@ -294,24 +343,29 @@ def _base_read(cfg: Config, repo: Path, pr_url: str) -> tuple[str, str, bool | N
     if r.returncode != 0 or not tip:
         return head, "", None, (f"its base {ref} does not resolve in {repo} after the "
                                 f"fetch (`git rev-parse` exited {r.returncode})")
+    why = _have(cfg, repo, pub, head)
+    if why:
+        return head, tip, None, why
     contains, why = _contains(repo, tip, head)
     if contains is None:
         return head, tip, None, why
     return head, tip, not contains, ""
 
 
-def _wait_for_update(cfg: Config, repo: Path, pr_url: str, stale: str, tip: str,
-                     wait_secs: int, *, poll_interval: int = 5) -> tuple[str, int, str]:
+def _wait_for_update(cfg: Config, repo: Path, pub: tuple[str, str, bool] | None,
+                     pr_url: str, stale: str, tip: str, wait_secs: int, *,
+                     poll_interval: int = 5) -> tuple[str, int, str]:
     """Wait for ``gh pr update-branch`` to land on PR ``pr_url`` (issue #531). GitHub may
     apply the update after the command returns, so a read straight after it can still see
     the old head ``stale``: re-read the head (``_pr_head``) until it contains the recorded
-    base tip ``tip`` (``_fetch`` + ``_contains``) or ``wait_secs`` of (patchable)
-    wall-clock time is spent. Returns ``(head, waited, "")`` for the first head that
-    contains ``tip`` — ``waited`` is then charged to the rollup wait
-    (``_wait_for_green(spent=waited)``) — or ``("", waited, why)`` to refuse: the bound ran
-    out, or a read failed (``gh`` unreadable, a failed fetch, ``git merge-base`` exiting
-    other than 0/1). Only a head not seen before is fetched and checked. ``wait_secs <=
-    0`` reads once; the sleeps go through ``_sleep`` and never sum past ``wait_secs``."""
+    base tip ``tip`` (``_fetch`` of the remotes the publish record ``pub`` names, #650, +
+    ``_have`` + ``_contains``) or ``wait_secs`` of (patchable) wall-clock time is spent.
+    Returns ``(head, waited, "")`` for the first head that contains ``tip`` — ``waited`` is
+    then charged to the rollup wait (``_wait_for_green(spent=waited)``) — or ``("", waited,
+    why)`` to refuse: the bound ran out, or a read failed (``gh`` unreadable, a failed
+    fetch, a head the fetches did not bring in, ``git merge-base`` exiting other than 0/1).
+    Only a head not seen before is fetched and checked. ``wait_secs <= 0`` reads once; the
+    sleeps go through ``_sleep`` and never sum past ``wait_secs``."""
     waited = 0
     seen = stale
     while True:
@@ -319,7 +373,7 @@ def _wait_for_update(cfg: Config, repo: Path, pr_url: str, stale: str, tip: str,
         if not head:
             return "", waited, why
         if head != seen:
-            why = _fetch(cfg, repo)
+            why = _fetch(cfg, repo, pub) or _have(cfg, repo, pub, head)
             if why:
                 return "", waited, why
             contains, why = _contains(repo, tip, head)
@@ -421,7 +475,11 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
             return _refuse(d, pr_url, "its publish record names no repo, so there is no "
                                       "checkout to read its base in")
         repo = publish._checkout_path(cfg, repo_spec)
-        head, tip, behind, why = _base_read(cfg, repo, str(pr_url))
+        # Issue #650: the head is read where publish put the branch. An `Onto branch`
+        # bundle's `"stacked"` record names that remote and it may be neither the base
+        # remote nor `origin`, so read the record as the fold does and fetch it too.
+        pub = integrate._published_ref(d)
+        head, tip, behind, why = _base_read(cfg, repo, pub, str(pr_url))
         if behind is None:
             return _refuse(d, pr_url, why)
         waited = 0
@@ -437,7 +495,7 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
                                "base, the update refused, or a `gh` too old for it)")
             # GitHub may apply the update after the command returns: poll for it, charged
             # to the same merge_wait_secs budget the rollup wait below then gets.
-            head, waited, why = _wait_for_update(cfg, repo, str(pr_url), head, tip,
+            head, waited, why = _wait_for_update(cfg, repo, pub, str(pr_url), head, tip,
                                                  cfg.merge_wait_secs)
             if not head:
                 return _refuse(d, pr_url, why)
@@ -473,7 +531,7 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
         # base again: the head must be the one read before the wait (the green rollup is
         # then that head's) and must still contain its base's tip. The merge is pinned to
         # it, so a head that changes after this read is refused by the host, not merged.
-        after, _, behind, why = _base_read(cfg, repo, str(pr_url))
+        after, _, behind, why = _base_read(cfg, repo, pub, str(pr_url))
         if behind is None:
             return _refuse(d, pr_url, why)
         if after != head:
