@@ -368,6 +368,109 @@ class ResumeStackPrereqs(unittest.TestCase):
         self.assertEqual((list(skipped), pushes), (["issue_S"], []))
         self.assertFalse(self.fx._has(self._line(["Y"])))
 
+    # -- (9): not clean spreads to the finished ids built on it (#652, #624) -----------------
+
+    def _finished_on(self, iid: str, prereq: str, *, pr: str = "OPEN") -> Path:
+        """``iid`` finished in an earlier run, built on finished ``prereq``: its brief says
+        ``Depends on: <prereq>`` and its branch is cut from ``origin/fix/<prereq>``, so it
+        holds ``prereq``'s commit."""
+        d = self.fx._publish(iid, {f"{iid.lower()}.txt": f"{iid}\n"},
+                             cut_from=f"origin/fix/{prereq}")
+        sb._brief(d, extra=f"- **Depends on:** {prereq}\n")   # after: _publish rewrites it
+        sb._accept(d)
+        self.assertEqual(state.state(d), state.COMPLETE)
+        self.assertTrue(self.fx._ancestor(self.fx._tip(f"fix/{prereq}"),
+                                          self.fx._tip(f"fix/{iid}")))
+        self.gh[iid] = pr
+        return d
+
+    def _not_carried(self, iid: str) -> str:
+        """The ONE stderr line saying finished ``iid`` is not carried."""
+        lines = [x for x in self.err.splitlines()
+                 if x.startswith(f"flow: issue_{iid} (finished in an earlier run) is not")]
+        self.assertEqual(len(lines), 1, self.err)
+        return lines[0]
+
+    def test_a_finished_id_built_on_a_closed_one_is_not_carried(self):
+        # Q's PR is open, but its branch holds P's closed work. Before: Q was carried, and D
+        # was built on a line holding P.
+        self._finished("P", {"p.txt": "p\n"}, pr="CLOSED")
+        self._finished_on("Q", "P")
+        d, u = self._planned("D", "Q"), self._planned("U")
+        self._run([d, u], ["P", "Q", "D", "U"])
+        held = self._held("Q", "D", "issue_P", "built on")
+        self.assertNotIn("get issue_Q's PR open", held)         # not the `open` hint
+        self.assertIn("get issue_P carried, or re-drive issue_Q on a base without it", held)
+        self.assertIn("CLOSED", self._not_carried("P"))
+        self.assertNotIn("flow: carried", self.err)
+        self.assertFalse(self.fx._has(self.line))               # no line holds anything
+        self._on_base("U")
+
+    def test_a_hold_cascades_through_a_dependent_finished_before_the_run(self):
+        # (#624) U is held; D finished before the run (`Depends on: U`); E depends on D.
+        self._finished("U", {"u.txt": "u\n"}, pr="CLOSED")
+        self._finished_on("D", "U")
+        e = self._planned("E", "D")
+        self._run([e], ["U", "D", "E"])
+        self._held("D", "E", "issue_U")
+        self.assertFalse(self.fx._has(self.line))
+
+    def test_not_clean_spreads_through_a_chain_of_finished_ids(self):
+        # P (CLOSED) ← Q ← R ← D, asked for from the far end: any length, in any order.
+        self._finished("P", {"p.txt": "p\n"}, pr="CLOSED")
+        self._finished_on("Q", "P")
+        self._finished_on("R", "Q")
+        d = self._planned("D", "R")
+        self._run([d], ["R", "Q", "P", "D"])
+        self._held("R", "D", "issue_Q", "built on")
+        self.assertIn("issue_P", self._not_carried("Q"))
+        self.assertFalse(self.fx._has(self.line))
+
+    def test_a_clean_finished_id_beside_them_is_still_carried(self):
+        # X is clean, so it is carried: the line exists and is built on, and it holds
+        # nothing of P's or Q's.
+        self._finished("P", {"p.txt": "p\n"}, pr="CLOSED")
+        self._finished_on("Q", "P")
+        self._finished("X", {"x.txt": "x\n"})
+        d, e, u = self._planned("D", "Q"), self._planned("E", "X"), self._planned("U")
+        self._run([d, e, u], ["P", "Q", "X", "D", "E", "U"])
+        self._held("Q", "D", "issue_P", "built on")
+        self.assertIn("flow: carried issue_X (finished", self.err)
+        self.assertTrue(self.fx._has(self.line), self.err)
+        for iid in ("E", "U"):
+            base, tip, line_tip = self._built(iid)
+            self.assertEqual((base, tip), (self.line, line_tip), self.err)
+            self.assertTrue(self.fx._ancestor(self.fx._tip("fix/X"), tip))
+            for gone in ("P", "Q"):
+                self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), tip), gone)
+            self.assertEqual(self.results[iid], state.COMPLETE)
+        for gone in ("P", "Q"):
+            self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), self.line), gone)
+
+    def test_a_held_ids_head_does_not_vouch_for_an_old_line(self):
+        # An earlier run's line holds P and Q, and P's PR was closed since. Q is not clean,
+        # so its head accounts for nothing on that line: nothing is carried onto it (X
+        # neither), and the run's first fold replaces it.
+        p = self._finished("P", {"p.txt": "p\n"}, pr="CLOSED")
+        q = self._finished_on("Q", "P")
+        self._finished("X", {"x.txt": "x\n"})
+        d, e = self._planned("D", "Q"), self._planned("E", "X")
+        u, w = self._planned("U"), self._planned("W", "U")
+        batch = ["P", "Q", "X", "D", "E", "U", "W"]
+        line = self._line(batch)
+        integrate.fold(self.cfg, [p, q], folded_this_run={}, batch=batch)   # the earlier run
+        old = self.fx._tip(line)
+        self._run([d, e, u, w], batch)
+        self._held("Q", "D", line, "delete")
+        self._held("X", "E", line, "delete")
+        self._on_base("U")
+        self.assertEqual(self._built("U")[2], old)              # the carry pushed nothing
+        w_base, w_tip, w_line = self._built("W")
+        self.assertEqual((w_base, w_tip), (line, w_line))
+        for gone in ("P", "Q"):
+            self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), w_line), gone)
+        self.assertEqual(self.results["W"], state.COMPLETE)
+
 
 if __name__ == "__main__":
     unittest.main()

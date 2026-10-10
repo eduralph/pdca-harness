@@ -687,9 +687,16 @@ wave builds on, via `[driver].wave_mode`:
   its PR is open (or merged, with its head already on your base or the line), it
   merges onto the line without error, and, with `[driver].regate_between_waves`,
   the carried line's re-gate is not red. A finished prerequisite that is not
-  clean holds only the bundles whose plain `Depends on` names it, and is named
-  on one line with the reason and what to do; the rest of the run goes on. If
-  the line on origin holds a commit the run cannot account for, nothing is
+  clean holds the bundles whose plain `Depends on` names it, and is named on one
+  line with the reason and what to do; the rest of the run goes on. One judged
+  not clean before the fold, from its PR state and head, also holds the finished
+  prerequisites built on it (their plain `Depends on` names it, directly or
+  through others), since their branches carry its work: none of them is carried
+  or accounts for a commit on the line, and the bundles that depend on them are
+  held, each named on one line with the cause. A prerequisite whose merge fails
+  only during the fold does not hold the finished prerequisites built on it: one
+  that merges in the same fold is still carried, with the failed one's commits.
+  If the line on origin holds a commit the run cannot account for, nothing is
   carried onto it and those bundles are held: delete that line on origin
   (unless the run's own fold already replaced it) and re-issue. A line the run
   did not carry onto is still replaced by its first fold, as above. Known limits,
