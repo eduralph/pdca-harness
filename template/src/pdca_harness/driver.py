@@ -133,6 +133,7 @@ def advance(d: Path, cfg: Config) -> None:
         _say(f"→ {d.name}: iterate-to-Do — archiving the attempt to iteration-v{n}/, rebuilding…")
         _carry_forward_into_brief(d, n)  # fold prior insight into the surviving brief
         _retire_cleared_deferrals(d, cfg)  # read the human's §6 ticks before SUMMARY moves
+        _carry_plan_advisory_ticks(d)      # …and the plan-advisory ones, which stay (#603)
         _archive_iteration(d, n, include_brief=False)  # rebuild against the annotated brief
     elif s == state.ITERATE_PLAN:
         n = _next_iteration_no(d)
@@ -338,6 +339,23 @@ def _retire_cleared_deferrals(d: Path, cfg: Config) -> None:
     except Exception as exc:  # noqa: BLE001 — never break the iterate on a ledger write
         _say(f"⚠ {d.name}: could not retire cleared deferred findings "
              f"({type(exc).__name__}: {exc}); they stay in {autoiterate.DEFERRED_FILE}")
+
+
+def _carry_plan_advisory_ticks(d: Path) -> None:
+    """Record the plan-advisory findings the human ticked in this SUMMARY's §6 (#603).
+
+    Iterate-do only: it keeps the ``plan-advisory-*`` artifacts, so their findings would
+    re-enter §6 unticked at the next assembly. Iterate-plan archives them (and this record,
+    which shares their prefix), so a re-plan's review starts with nothing cleared. Read
+    before :func:`_archive_iteration` moves ``SUMMARY.md``, like
+    :func:`_retire_cleared_deferrals`. Best-effort: a failure keeps the rows open, which is
+    the safe direction.
+    """
+    try:
+        assemble.carry_plan_advisory_ticks(d, d / "SUMMARY.md")
+    except Exception as exc:  # noqa: BLE001 — never break the iterate on this record
+        _say(f"⚠ {d.name}: could not record cleared plan-advisory findings "
+             f"({type(exc).__name__}: {exc}); they return to §6 open")
 
 
 def _next_iteration_no(d: Path) -> int:

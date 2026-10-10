@@ -443,9 +443,12 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
     # a plan advisory can never cause an auto-iterate round (#264), whatever its prompt says;
     # beside real implementation work they are deferred to the handover §6 like any HUMAN
     # item (#409).
-    for ptext in [p.read_text(encoding="utf-8")
-                  for p in sorted(d.glob("plan-advisory-*.md"))]:
-        items += _items_from_artifact(ptext, plan_advisory=True)
+    # A finding the human ticked at an earlier sign-off of this same plan advisory is NOT
+    # folded in again (#603): the iterate-do kept its artifact, so without this it came back
+    # unticked every round. Dropped, never rendered `- [x]` — a tick assembly wrote would
+    # read as the human's (`signoff.cleared_needs_human`). See `carry_plan_advisory_ticks`.
+    cleared = plan_advisory_cleared(d)
+    items += [it for it in _plan_advisory_items(d) if _norm_text(it.text) not in cleared]
     # The empirical size backstop (#324). HUMAN, never IMPL — the tag and the text
     # together are the mechanism: `autoiterate.eligible()` rebuilds past every other HUMAN
     # item (#409) but STOPS the rebuild loop on a HUMAN item `size_signal.is_size_item`
@@ -458,6 +461,86 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
     if size_reasons:
         items += [NeedsHumanItem(size_signal.needs_human_text(size_reasons), HUMAN)]
     return items
+
+
+# The plan-advisory findings the human ticked in §6 at an iterate-do (#603). It lives under
+# the `plan-advisory-` prefix, so it goes exactly when that evidence does: the iterate-plan
+# archive (`driver._archive_iteration`) and a plan-advisory re-run (`leaves.py`, which
+# unlinks `plan-advisory-*`) both take it with them. Not `.md`, so no reader of
+# `plan-advisory-*.md` parses it as findings; not in `state.DOWNSTREAM_GLOBS`, so an
+# iterate-do keeps it.
+PLAN_ADVISORY_CLEARED = "plan-advisory-cleared.json"
+
+
+def _norm_text(text: str) -> str:
+    """``autoiterate._norm`` — the one normalisation §6 rows are matched by. Local import:
+    ``autoiterate`` imports this module at its top level."""
+    from . import autoiterate
+
+    return autoiterate._norm(text)
+
+
+def _plan_advisory_items(d: Path) -> list[NeedsHumanItem]:
+    """Every finding the bundle's ``plan-advisory-*.md`` artifacts raise, in §6 order."""
+    items: list[NeedsHumanItem] = []
+    for p in sorted(d.glob("plan-advisory-*.md")):
+        items += _items_from_artifact(p.read_text(encoding="utf-8"), plan_advisory=True)
+    return items
+
+
+def _read_plan_advisory_cleared(d: Path) -> list[str]:
+    """The recorded texts, or ``[]`` when absent or unreadable. Unreadable fails safe: every
+    plan finding renders open again and blocks accept until the human re-ticks it."""
+    p = d / PLAN_ADVISORY_CLEARED
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return []
+    items = data.get("items") if isinstance(data, dict) else None
+    return [t for t in items if isinstance(t, str)] if isinstance(items, list) else []
+
+
+def plan_advisory_cleared(d: Path) -> set[str]:
+    """The normalised texts of the plan-advisory findings the human has cleared (#603)."""
+    return {_norm_text(t) for t in _read_plan_advisory_cleared(d)}
+
+
+def carry_plan_advisory_ticks(d: Path, summary_path: Path) -> list[str]:
+    """Record the plan-advisory findings the human ticked in ``summary_path``'s §6 (#603).
+
+    Called at an iterate-do, before ``driver._archive_iteration`` moves the SUMMARY away:
+    the plan-advisory artifacts survive that archive, so without a record their findings
+    re-enter §6 unticked at the next assembly and block accept again, every round.
+
+    Only a positive tick counts, read with ``signoff.cleared_needs_human`` (strict: the §6
+    ``assemble`` wrote, never a block a leaf quoted into §5). A tick must equal a plan
+    finding's text exactly; an edited row clears nothing. A text that also still stands as
+    an open row (the same text raised by another source) is not recorded: fail closed.
+    The record accumulates, so a finding stays cleared across every later iterate-do until
+    the plan-advisory evidence is replaced. Returns the full record.
+    """
+    from . import autoiterate, signoff
+
+    ticked = {autoiterate._row_text(line) for line in signoff.cleared_needs_human(summary_path)}
+    still_open = {autoiterate._row_text(line) for line in signoff.open_needs_human(summary_path)}
+    record = _read_plan_advisory_cleared(d)
+    seen = {_norm_text(t) for t in record}
+    new: list[str] = []
+    for item in _plan_advisory_items(d):
+        key = _norm_text(item.text)
+        if key and key in ticked and key not in still_open and key not in seen:
+            seen.add(key)
+            new.append(item.text)
+    if new:
+        record += new
+        p = d / PLAN_ADVISORY_CLEARED
+        tmp = d / f".{PLAN_ADVISORY_CLEARED}.tmp"
+        tmp.write_text(json.dumps({"items": record}, indent=1, ensure_ascii=False) + "\n",
+                       encoding="utf-8")
+        tmp.replace(p)
+    return record
 
 
 def _plan_advisory_benefit(d: Path) -> dict | None:
@@ -588,7 +671,9 @@ def _deferred_needs_human(d: Path, fresh: list[str]) -> list[str]:
         ledger = autoiterate.deferred(d)
     except autoiterate.DeferredLedgerUnreadable:
         return [autoiterate.UNREADABLE_LEDGER_ITEM]
-    seen = {autoiterate._norm(t) for t in fresh}
+    # A plan-advisory finding the human cleared (#603) is not brought back by its ledger copy
+    # either: plan findings are HUMAN, so an auto-iterate round may have deferred one.
+    seen = {autoiterate._norm(t) for t in fresh} | plan_advisory_cleared(d)
     out: list[str] = []
     for text in ledger:
         key = autoiterate._norm(text)
