@@ -2292,5 +2292,162 @@ class TagContractPrompts(unittest.TestCase):
         self.assertIn("an untagged bullet is read as\n`[human]`", adversary)
 
 
+class PlanAdvisoryTickSurvivesIterateDo(_Base):
+    """A plan-advisory finding the human ticked stays cleared across every iterate-do (#603).
+
+    An iterate-do keeps the ``plan-advisory-*.md`` artifacts (only iterate-plan archives
+    them), so every re-assembly folded the same findings into §6 again, unticked, and the
+    human re-cleared them each round. The tick must persist until the plan-advisory evidence
+    is replaced (iterate-plan, or a plan-advisory re-run, even one raising the same text); a
+    finding the human never ticked must still be open and still block accept. Assembly must
+    never write a ``- [x]`` itself: a tick it wrote would read as the human's.
+
+    Driven end to end through the production beats: ``signoff.record`` + ``driver.advance``
+    for the iterate, the real gates and ``assemble.assemble_summary`` for each rebuild, and
+    the stub plan-advisory leaf (``leaves.run_plan_advisory``) for the re-run legs. Only
+    pre-existing API is called, so the red leg loads and fails on the behaviour.
+    """
+
+    TICKED = "the success criterion names no test"
+    OPEN = "the scope omits the CLI entry point"
+    PLAN = ("# Plan advisory — x\n\n"
+            f"- NEEDS-HUMAN — {TICKED}\n"
+            f"- NEEDS-HUMAN — {OPEN}\n"
+            f"\n{assemble.LEAF_COMPLETE_TRAILER}\n")
+    STUB_LEAF = {"id": "plan-reviewer", "mode": "stub",
+                 "role": "refute the brief: wrong root cause, untestable criterion"}
+
+    # --- the beats -----------------------------------------------------------------------
+    def _planned(self, iid: str) -> Path:
+        d = self._bundle(iid)
+        (d / "plan-advisory-x.md").write_text(self.PLAN, encoding="utf-8")
+        assemble.assemble_summary(d, self.cfg)
+        return d
+
+    def _tick(self, d: Path, text: str) -> None:
+        summ = d / "SUMMARY.md"
+        body = summ.read_text(encoding="utf-8")
+        self.assertIn(f"- [ ] {text}\n", _section6(summ), "precondition: the row is open")
+        summ.write_text(body.replace(f"- [ ] {text}\n", f"- [x] {text}\n"), encoding="utf-8")
+
+    def _iterate(self, d: Path, action: str) -> None:
+        signoff.record(d / "SUMMARY.md", action=action, by="human", date="2026-10-10")
+        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            driver.advance(d, self.cfg)                          # the one iterate beat
+
+    def _rebuild(self, d: Path) -> None:
+        """A fresh Do + Check round on whatever brief and plan advisory the bundle holds."""
+        (d / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
+        (d / "check-review.md").write_text(_CLEAN_REVIEW, encoding="utf-8")
+        gates.run_gates(d, self.cfg)
+        assemble.assemble_summary(d, self.cfg)
+        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
+
+    # --- what §6 must and must not say ---------------------------------------------------
+    def _assert_cleared(self, d: Path, text: str) -> None:
+        sec6 = _section6(d / "SUMMARY.md")
+        self.assertNotIn(f"- [ ] {text}", sec6, "a ticked plan finding came back open")
+        self.assertNotIn(f"- [x] {text}", sec6, "assembly must never write a tick")
+        self.assertNotIn(f"- [X] {text}", sec6)
+        blockers = flow.accept_blockers(d)
+        self.assertFalse([r for r in blockers if text in r], blockers)
+
+    def _assert_open(self, d: Path, text: str) -> None:
+        self.assertIn(f"- [ ] {text}\n", _section6(d / "SUMMARY.md"))
+        self.assertIn(f"- [ ] {text}", flow.accept_blockers(d))
+        self.assertIn(f"- [ ] {text}", signoff.open_needs_human(d / "SUMMARY.md"))
+
+    # --- the legs ------------------------------------------------------------------------
+    def test_a_tick_survives_two_iterate_dos_and_the_unticked_one_still_blocks(self) -> None:
+        d = self._planned("PATICK")
+        self._assert_open(d, self.TICKED)
+        self._assert_open(d, self.OPEN)
+        self._tick(d, self.TICKED)
+        self._iterate(d, "iterate-do")                           # round N → N+1
+        self.assertTrue((d / "iteration-v1").is_dir())
+        self.assertTrue((d / "plan-advisory-x.md").exists())     # the evidence stayed
+        self._rebuild(d)
+        self._assert_cleared(d, self.TICKED)
+        self._assert_open(d, self.OPEN)                          # (i) never ticked: open
+        self._iterate(d, "iterate-do")                           # N+1 → N+2, no new tick
+        self.assertTrue((d / "iteration-v2").is_dir())
+        self._rebuild(d)
+        self._assert_cleared(d, self.TICKED)                     # the tick persisted
+        self._assert_open(d, self.OPEN)
+
+    def test_an_iterate_plan_reopens_it_even_with_byte_identical_text(self) -> None:
+        d = self._planned("PAREPLAN")
+        self._tick(d, self.TICKED)
+        self._iterate(d, "iterate-do")
+        self._rebuild(d)
+        self._assert_cleared(d, self.TICKED)
+        self._iterate(d, "iterate-plan")                         # (ii) the evidence is replaced
+        self.assertEqual(state.state(d), state.UNPLANNED)
+        (d / "brief.md").write_text("- **Slug:** ai-replanned\n", encoding="utf-8")
+        (d / "plan-advisory-x.md").write_text(self.PLAN, encoding="utf-8")  # same bytes
+        self._rebuild(d)
+        self._assert_open(d, self.TICKED)                        # new evidence, open again
+        self._assert_open(d, self.OPEN)
+
+    def test_a_plan_advisory_rerun_reopens_it_with_the_stub_leafs_same_text(self) -> None:
+        self.cfg.plan_advisory_leaves = [dict(self.STUB_LEAF)]
+        d = self._bundle("PARERUN")
+        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            leaves.run_plan_advisory(d, self.cfg)
+        assemble.assemble_summary(d, self.cfg)
+        sec6 = _section6(d / "SUMMARY.md")
+        stub_rows = [ln[len("- [ ] "):] for ln in sec6.splitlines()
+                     if ln.startswith("- [ ] ") and "plan-advisory lens is a stub" in ln]
+        self.assertEqual(len(stub_rows), 1, sec6)
+        row = stub_rows[0]
+        self._tick(d, row)
+        self._iterate(d, "iterate-do")
+        self._rebuild(d)
+        self._assert_cleared(d, row)
+        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            leaves.run_plan_advisory(d, self.cfg)                # (ii) a re-run, same text
+        assemble.assemble_summary(d, self.cfg)
+        self._assert_open(d, row)
+
+    def test_a_ledger_copy_does_not_bring_a_ticked_plan_finding_back(self) -> None:
+        d = self._bundle("PALEDGER")
+        (d / "plan-advisory-x.md").write_text(self.PLAN, encoding="utf-8")
+        # (iii) an earlier auto-iterate round deferred the plan finding: plan findings are
+        # HUMAN, so `autoiterate.deferrable` keeps them.
+        items = assemble.collect_needs_human(d, self.cfg)
+        self.assertIn(self.TICKED, autoiterate.deferrable(items))
+        _write_ledger(d, [self.TICKED])
+        assemble.assemble_summary(d, self.cfg)
+        self.assertEqual(_section6(d / "SUMMARY.md").count(self.TICKED), 1)  # rendered once
+        self._tick(d, self.TICKED)
+        self._iterate(d, "iterate-do")
+        self._rebuild(d)
+        self._assert_cleared(d, self.TICKED)
+        self._assert_open(d, self.OPEN)
+        # Even a ledger that still holds it (written again by a round after the tick) must
+        # not bring it back through `_deferred_needs_human`.
+        _write_ledger(d, [self.TICKED])
+        assemble.assemble_summary(d, self.cfg)
+        self._assert_cleared(d, self.TICKED)
+        self._iterate(d, "iterate-do")
+        self._rebuild(d)
+        self._assert_cleared(d, self.TICKED)
+        self._assert_open(d, self.OPEN)
+
+    def test_a_tick_quoted_into_section5_clears_no_plan_finding(self) -> None:
+        """Ticks are read from the §6 assembly wrote, never from a quote a leaf put in §5."""
+        quote = ("Quoting the previous round's summary:\n\n"
+                 "## 6. NEEDS-HUMAN — items the human must clear before sign-off\n"
+                 f"- [x] {self.TICKED}\n")
+        d = self._bundle("PAQUOTE", advisory=f"# Adversary\n\n{quote}")
+        (d / "plan-advisory-x.md").write_text(self.PLAN, encoding="utf-8")
+        assemble.assemble_summary(d, self.cfg)
+        self._iterate(d, "iterate-do")                           # the human ticked nothing
+        (d / "check-advisory-adversary.md").write_text(f"# Adversary\n\n{quote}",
+                                                       encoding="utf-8")
+        self._rebuild(d)
+        self._assert_open(d, self.TICKED)
+
+
 if __name__ == "__main__":
     unittest.main()
