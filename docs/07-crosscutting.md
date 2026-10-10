@@ -728,6 +728,13 @@ wave builds on, via `[driver].wave_mode`:
   at all; `gh pr merge` alone would only refuse what *this host* marks required in
   branch protection, so without that read a thin protection config lets the next
   wave build on a base that never went green.
+  A green read is confirmed by a second read one poll interval later, and that
+  read must list the same checks (each name as many times), so a rollup whose
+  set of checks changed in between is not a confirmation. The rollup lists only
+  the checks registered so far, so a slow job that has not registered yet cannot
+  be seen: name such checks in `[driver].expected_checks` and a green read that
+  lacks one counts as still running. With nothing declared (the default), a job
+  that registers more than a poll interval late still gets through.
   A rollup only describes the head it ran on, so the driver first checks in git
   whether the PR's head is behind its base (an earlier PR of the same wave just
   merged): `git merge-base --is-ancestor` after a fetch. If it is, the driver

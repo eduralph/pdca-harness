@@ -1152,5 +1152,198 @@ class MergeAgainstCurrentBase(unittest.TestCase):
                                     f"merged with {budget - polled}s left after polling")
 
 
+# ---- issue #621: a green rollup is believed only once it is the complete one ------------
+
+def _green(*names: str) -> SimpleNamespace:
+    """A green `gh pr checks` read: every named check passed."""
+    return _rollup(*((n, "pass") for n in names))
+
+
+class MergeConfirmRequiresCompleteRollup(unittest.TestCase):
+    """Issue #621: the #582 confirm compared verdicts only, so `green(dco)` → `green(dco)`
+    merged before a slow `e2e` had registered, and `green(dco)` → `green(dco, e2e)` counted
+    as confirmed though the two reads saw different checks. Now the confirm read must list
+    the same checks (as a multiset), and `[driver].expected_checks` names checks a green
+    read must contain. With nothing declared, `green(dco)` → `green(dco)` still merges."""
+
+    URL = "https://gh/pr/1"
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def _wait(self, reads: list[SimpleNamespace], wait_secs: int = 300,
+              **kw: object) -> tuple[str, str, int, list[int]]:
+        """`merge._wait_for_green` over scripted `gh pr checks` reads (the last repeats),
+        with `merge._sleep` patched. Returns verdict, detail, reads made, sleeps."""
+        n = {"read": 0}
+        slept: list[int] = []
+
+        def fake_run(cmd, **_):
+            self.assertEqual(cmd[:3], ["gh", "pr", "checks"])
+            n["read"] += 1
+            return reads[min(n["read"], len(reads)) - 1]
+
+        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
+                mock.patch.object(merge, "_sleep", side_effect=slept.append):
+            verdict, detail = merge._wait_for_green(self.URL, wait_secs, **kw)
+        self.assertLessEqual(sum(slept), wait_secs)
+        return verdict, detail, n["read"], slept
+
+    def _merge(self, reads: list[SimpleNamespace], cfg: Config) -> tuple[int, list, str]:
+        """One COMPLETE bundle through `merge.merge_wave` with scripted rollup reads.
+        Returns the exit code, every command shelled, and stderr."""
+        d = cfg.bundle("621")
+        d.mkdir(parents=True)
+        (d / "patch.diff").write_text("diff\n", encoding="utf-8")
+        (d / "publish.json").write_text(json.dumps({"pr_url": self.URL, "repo": "org/repo"}),
+                                        encoding="utf-8")
+        calls: list[list[str]] = []
+        n = {"read": 0}
+
+        def fake_run(cmd, **_):
+            calls.append(cmd)
+            if cmd[:3] == ["gh", "pr", "checks"]:
+                n["read"] += 1
+                return reads[min(n["read"], len(reads)) - 1]
+            return _up_to_date(cmd) or SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
+                mock.patch.object(merge, "_sleep"), \
+                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
+                mock.patch.object(merge.merged, "is_merged", return_value=False), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+            rc = merge.merge_wave(cfg, [d])
+        return rc, calls, err.getvalue()
+
+    @staticmethod
+    def _merged(calls: list[list[str]]) -> bool:
+        return any(c[:3] == ["gh", "pr", "merge"] for c in calls)
+
+    # (1) declared checks -------------------------------------------------------------
+
+    def test_declared_check_that_never_registers_never_reads_green(self) -> None:
+        verdict, detail, reads, _ = self._wait([_green("dco")], expected=("dco", "e2e"))
+        self.assertEqual(verdict, "pending")
+        self.assertIn("e2e", detail)
+        self.assertNotIn("dco", detail.split("(")[0])   # names only what is missing
+        self.assertGreater(reads, 2)                     # it kept waiting to the bound
+
+    def test_declared_check_missing_refuses_the_merge_and_undoes_ready(self) -> None:
+        cfg = _cfg(self.tmp, expected_checks=("dco", "e2e"))
+        rc, calls, err = self._merge([_green("dco")], cfg)
+        self.assertEqual(rc, 1)
+        self.assertFalse(self._merged(calls))
+        self.assertIn("e2e", err)
+        self.assertIn(["gh", "pr", "ready", self.URL, "--undo"], calls)
+
+    def test_declared_check_that_registers_and_passes_merges_after_two_same_reads(self) -> None:
+        reads = [_green("dco"), _green("dco"), _green("dco", "e2e"), _green("dco", "e2e")]
+        verdict, _, n, slept = self._wait(reads, expected=("dco", "e2e"))
+        self.assertEqual((verdict, n), ("green", 4))
+        self.assertEqual(slept[-1], 15)                  # confirm one poll interval later
+        rc, calls, _ = self._merge(reads, _cfg(self.tmp, expected_checks=("dco", "e2e")))
+        self.assertEqual(rc, 0)
+        self.assertTrue(self._merged(calls))
+
+    def test_declared_check_that_is_skipped_does_not_block(self) -> None:
+        # gh reports skipped and neutral checks as `skipping` — a completed non-failure.
+        read = _rollup(("dco", "pass"), ("e2e", "skipping"))
+        verdict, _, n, _ = self._wait([read], expected=("dco", "e2e"))
+        self.assertEqual((verdict, n), ("green", 2))
+
+    # (1b) single read --------------------------------------------------------------
+
+    def test_declared_check_applies_to_the_single_read_of_wait_zero(self) -> None:
+        verdict, detail, n, slept = self._wait([_green("dco")], 0, expected=("dco", "e2e"))
+        self.assertEqual((verdict, n, slept), ("pending", 1, []))
+        self.assertIn("e2e", detail)
+        rc, calls, err = self._merge(
+            [_green("dco")], _cfg(self.tmp, merge_wait_secs=0, expected_checks=("dco", "e2e")))
+        self.assertEqual(rc, 1)
+        self.assertFalse(self._merged(calls))
+        self.assertIn("e2e", err)
+        self.assertIn(["gh", "pr", "ready", self.URL, "--undo"], calls)
+
+    # (2) names compared ------------------------------------------------------------
+
+    def test_confirm_read_over_a_different_set_is_not_a_confirmation(self) -> None:
+        # 29 s of budget: room for one confirm (15 s) but not a second, so a changed set at
+        # the confirm leaves the green unconfirmed.
+        verdict, _, n, _ = self._wait([_green("dco"), _green("dco", "e2e")], 29)
+        self.assertEqual((verdict, n), ("pending", 2))
+        # With budget left, the changed set is confirmed by a later read listing the same.
+        verdict, _, n, slept = self._wait(
+            [_green("dco"), _green("dco", "e2e"), _green("dco", "e2e")])
+        self.assertEqual((verdict, n, slept), ("green", 3, [15, 15]))
+        rc, calls, _ = self._merge([_green("dco"), _green("dco", "e2e"), _green("dco", "e2e")],
+                                   _cfg(self.tmp))
+        self.assertEqual(rc, 0)
+        self.assertEqual(len([c for c in calls if c[:3] == ["gh", "pr", "checks"]]), 3)
+
+    def test_names_are_compared_as_a_multiset(self) -> None:
+        # The same job name in two workflows (or a re-run listed twice) is a different rollup.
+        verdict, _, n, _ = self._wait([_green("build"), _green("build", "build")], 29)
+        self.assertEqual((verdict, n), ("pending", 2))
+        verdict, _, n, _ = self._wait(
+            [_green("build"), _green("build", "build"), _green("build", "build")])
+        self.assertEqual((verdict, n), ("green", 3))
+
+    # (3) unchanged with nothing declared ---------------------------------------------
+
+    def test_same_set_with_nothing_declared_still_confirms(self) -> None:
+        verdict, detail, n, slept = self._wait([_green("dco")])
+        self.assertEqual((verdict, detail, n, slept), ("green", "1 check", 2, [15]))
+        rc, calls, _ = self._merge([_green("dco")], _cfg(self.tmp))
+        self.assertEqual(rc, 0)
+        self.assertTrue(self._merged(calls))
+
+    # (4) the setting -----------------------------------------------------------------
+
+    def test_expected_checks_comes_from_the_driver_table(self) -> None:
+        root = self.tmp / "instance"
+        root.mkdir()
+        toml = root / "pdca.toml"
+        base = '[paths]\nbundle_root = "results"\n'
+
+        toml.write_text(base, encoding="utf-8")                    # unset ⇒ empty
+        cfg = Config.load(root)
+        self.assertEqual((cfg.expected_checks, cfg.expected_checks_error), ((), ""))
+
+        toml.write_text(base + '\n[driver]\nexpected_checks = ["dco", "e2e"]\n',
+                        encoding="utf-8")
+        self.assertEqual(Config.load(root).expected_checks, ("dco", "e2e"))
+
+        toml.write_text(base + '\n[driver]\nexpected_checks = "e2e"\n', encoding="utf-8")
+        cfg = Config.load(root)                                    # bare string ⇒ one item
+        self.assertEqual((cfg.expected_checks, cfg.expected_checks_error), (("e2e",), ""))
+
+        for bad in ("5", '["e2e", 3]', '{ name = "e2e" }', '[""]', "true"):
+            with self.subTest(value=bad):
+                toml.write_text(base + f"\n[driver]\nexpected_checks = {bad}\n",
+                                encoding="utf-8")
+                with redirect_stderr(io.StringIO()) as err:
+                    cfg = Config.load(root)
+                self.assertIn("expected_checks", err.getvalue())   # warns on stderr
+                self.assertIn("expected_checks", cfg.expected_checks_error)
+
+    def test_malformed_expected_checks_fails_closed_in_merge_mode(self) -> None:
+        # Not the empty default: a green rollup that would merge without the setting is
+        # refused, naming the bad setting.
+        root = self.tmp / "instance2"
+        root.mkdir()
+        (root / "pdca.toml").write_text(
+            '[paths]\nbundle_root = "results"\n\n[driver]\nexpected_checks = 5\n',
+            encoding="utf-8")
+        with redirect_stderr(io.StringIO()):
+            loaded = Config.load(root)
+        cfg = _cfg(self.tmp, expected_checks=loaded.expected_checks,
+                   expected_checks_error=loaded.expected_checks_error)
+        rc, calls, err = self._merge([_green("dco", "e2e")], cfg)
+        self.assertEqual(rc, 1)
+        self.assertFalse(self._merged(calls))
+        self.assertIn("expected_checks", err)
+
+
 if __name__ == "__main__":
     unittest.main()

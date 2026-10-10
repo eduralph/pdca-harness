@@ -384,6 +384,16 @@ class Config:
     # performs no wait at all — a single read, the original immediate-refusal behaviour.
     # [driver].merge_wait_secs.
     merge_wait_secs: int = 300
+    # Checks a complete rollup must contain (issue #621). The confirm read above only proves
+    # the same checks stayed green; it cannot know about a slow job that has not registered
+    # yet. Every name here must be reported and pass (or be skipped/neutral) before the
+    # merge-mode rollup gate reads green; a missing one reads as pending. Empty (default)
+    # declares nothing. [driver].expected_checks: a list of check names, or one bare name.
+    expected_checks: tuple[str, ...] = ()
+    # Why ``[driver].expected_checks`` was malformed, or "" when it parsed. Set ⇒ merge mode
+    # refuses every PR naming the bad setting (fail-closed: falling back to the empty list
+    # would be the weakest reading and merge what the operator configured against).
+    expected_checks_error: str = ""
     # Optional integration re-gate (#wave-model): after each wave folds onto the
     # integration branch, run the repo-scoped gates over that tip before the next wave
     # builds on it, so a combination that is red though each fix was green alone STOPs the
@@ -744,6 +754,13 @@ class Config:
             print(f"config: [driver].merge_wait_secs must be >= 0, got {merge_wait_secs} — "
                   "using the default 300", file=sys.stderr)
             merge_wait_secs = 300
+        # Checks a complete rollup must contain (issue #621). A bad value warns and fails
+        # CLOSED like merge_requires above — never to the empty default, the weakest reading.
+        expected_checks, expected_checks_error = _expected_checks(
+            driver_cfg.get("expected_checks", []))
+        if expected_checks_error:
+            print(f"config: {expected_checks_error} — merge mode will refuse every PR until "
+                  "it is fixed", file=sys.stderr)
         regate_between_waves = bool(driver_cfg.get("regate_between_waves", False))
         act_cadence = max(1, int(driver_cfg.get("act_cadence", 5)))  # issue #109
         # Footprint sweep mode (issue #297). An unknown value falls back to "clean" with a
@@ -852,6 +869,8 @@ class Config:
             merge_method=merge_method,
             merge_requires=merge_requires,
             merge_wait_secs=merge_wait_secs,
+            expected_checks=expected_checks,
+            expected_checks_error=expected_checks_error,
             regate_between_waves=regate_between_waves,
             act_cadence=act_cadence,
             sweep_worktrees=sweep_worktrees,
@@ -873,6 +892,18 @@ class Config:
                 "subject", "chore(records): record {n} result bundle(s)")),
             records_issue=str(records_cfg.get("issue", "") or ""),
         )
+
+
+def _expected_checks(raw: object) -> tuple[tuple[str, ...], str]:
+    """Parse ``[driver].expected_checks`` (issue #621) into ``(names, "")``, or ``((),
+    why)`` when it is malformed. A bare string is one name; a list must hold only non-blank
+    strings. Names are stripped and de-duplicated in order. Anything else — another type, a
+    blank name — is malformed: the caller fails closed on ``why``, never on ``()``."""
+    items = [raw] if isinstance(raw, str) else raw
+    if isinstance(items, list) and all(isinstance(n, str) and n.strip() for n in items):
+        return tuple(dict.fromkeys(n.strip() for n in items)), ""
+    return (), ("[driver].expected_checks must be a check name or a list of non-blank check "
+                f"names, got {raw!r}")
 
 
 def _normalize_host_ci(entries: list) -> list[dict]:
