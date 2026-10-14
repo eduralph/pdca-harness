@@ -693,6 +693,21 @@ wave builds on, via `[driver].wave_mode`:
   your base: the carry described below starts only from a plain `Depends on`,
   so an earlier re-run can build the partner without that work.
 
+  Two bundles of one wave whose branches conflict (they change the same lines,
+  and neither declares `Conflicts with` the other) do not stop the run either.
+  The fold merges a wave's bundles in name order; a bundle whose branch merges
+  cleanly onto the line as the wave found it, but not on top of the ones of its
+  wave merged before it, is left out of the line for the rest of the run. The
+  bundles that depend on it or share a `Conflicts with` edge with it are held,
+  as above, and the rest of the run goes on. The run names the pair and the
+  files when it happens and again at the end, with a step for you to confirm:
+  declare `Conflicts with: <the other id>` in the held bundle's brief, then
+  rebuild it on a base that holds the other one. Re-run a held partner only
+  once that rebuilt bundle's PR has merged into your base. A branch that
+  conflicts with work an earlier wave put on the line still stops the run, and
+  so does one that conflicts only with a newer base the fold merged in during
+  the wave (a PR of the wave merged and its branch was deleted meanwhile).
+
   To recover a run that stopped part-way (an integrity stop, the pass budget, a
   crash, Ctrl-C), re-issue the same `pdca flow <ids>`. The ids the earlier run
   finished are skipped, and if a bundle the new run drives names one of them in
