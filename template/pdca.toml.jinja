@@ -192,6 +192,16 @@ merge_requires = "all"
 #   300  (default) — a sensible bound for CI to register and report on a freshly-opened PR.
 #   0    — perform no wait at all: a single read, the original immediate-refusal behaviour.
 merge_wait_secs = 300
+# Checks a complete rollup must contain (merge mode, merge_requires = "all"; issue #621).
+# The confirm read above must list the same checks as the green it confirms, but it cannot
+# know about a slow job that has not registered yet: with nothing declared, green(dco) then
+# green(dco) still merges before a late `e2e` shows up. Name such checks here and a green
+# read missing one counts as pending (the wait goes on, then refuses naming it). A declared
+# check counts once it passes or is skipped/neutral (e.g. a path filter skipped it). A bare
+# string is one name. A malformed value (not a name or a list of names) refuses every PR.
+#   []   (default) — declare nothing.
+#   ["dco", "e2e"] — merge only once both have reported and passed.
+# expected_checks = ["dco", "e2e"]
 # Optional integration re-gate (#wave-model). After each wave folds (stack mode), run the
 # repo-scoped gates over the folded integration tip before the next wave builds on it, so a
 # combination that is red though each fix was green ALONE stops the run. Off by default

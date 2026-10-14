@@ -40,7 +40,10 @@ time. A ``green`` read is confirmed once before it is believed (issue #582): the
 lists only the checks registered so far, so a fast check that passed can read green while
 a slow job has not reported yet. The wait re-reads one full poll interval later and merges
 only if that read is green too; a green seen with less than a poll interval of budget left
-to confirm it refuses as pending.
+to confirm it refuses as pending. The confirm read must also list the same checks as the
+green it confirms (issue #621), and ``[driver].expected_checks`` can name checks a complete
+rollup must contain: a green read missing one counts as pending. With nothing declared, a
+slow job that registers more than a poll interval after the fast ones still gets through.
 Whichever way ``_merge_one`` declines to merge a PR it already readied — the rollup
 never resolving green, a failing ``gh pr merge`` — ``_undo_ready`` marks it back to draft
 (``gh pr ready --undo``) before returning, so a stopped wave never leaves a PR advertising
@@ -108,9 +111,12 @@ def merge_wave(cfg: Config, bundles: list[Path], *, dry_run: bool = False,
     return 0
 
 
-def _check_rollup(pr_url: str) -> tuple[str, str]:
+def _check_rollup(pr_url: str) -> tuple[str, str, tuple[str, ...]]:
     """Classify PR ``pr_url``'s FULL check rollup (issue #413). Returns
-    ``(verdict, detail)``; only ``"green"`` may merge.
+    ``(verdict, detail, names)``; only ``"green"`` may merge. ``names`` (issue #621) is the
+    sorted name of every check the read reported, one entry per check (so a name listed
+    twice appears twice), or ``()`` when no list was read; ``_wait_for_green`` compares it
+    between a green and its confirm read and checks the declared checks against it.
 
     * ``"green"``      — every reported check completed without failing (pass, or
       skipped/neutral); ``detail`` counts what was verified, for the run log.
@@ -140,37 +146,55 @@ def _check_rollup(pr_url: str) -> tuple[str, str]:
         # refuse under the default, so a gh that reworded the message costs a message, not
         # a wrong merge.
         if r.returncode == 0 or "no checks reported" in err.lower():
-            return "empty", err or "no checks reported"
-        return "unreadable", err or f"`gh pr checks` exited {r.returncode}"
+            return "empty", err or "no checks reported", ()
+        return "unreadable", err or f"`gh pr checks` exited {r.returncode}", ()
     try:
         checks = json.loads(out)
     except ValueError:
-        return "unreadable", f"unparsable `gh pr checks` output: {out[:200]}"
+        return "unreadable", f"unparsable `gh pr checks` output: {out[:200]}", ()
     if not isinstance(checks, list):
-        return "unreadable", f"unexpected `gh pr checks` payload: {out[:200]}"
+        return "unreadable", f"unexpected `gh pr checks` payload: {out[:200]}", ()
     if not checks:
-        return "empty", "no checks reported"
+        return "empty", "no checks reported", ()
+    names = tuple(sorted(_name(c) for c in checks))
     failing = [c for c in checks if _bucket(c) not in _ROLLUP_OK | _ROLLUP_PENDING]
     if failing:
-        return "failing", _names(failing)
+        return "failing", _names(failing), names
     waiting = [c for c in checks if _bucket(c) in _ROLLUP_PENDING]
     if waiting:
-        return "pending", _names(waiting)
-    return "green", f"{len(checks)} check{'' if len(checks) == 1 else 's'}"
+        return "pending", _names(waiting), names
+    return "green", f"{len(checks)} check{'' if len(checks) == 1 else 's'}", names
 
 
 def _bucket(check: object) -> str:
     return str(check.get("bucket") or "") if isinstance(check, dict) else ""
 
 
+def _name(check: object) -> str:
+    return str((check.get("name") if isinstance(check, dict) else None) or "?")
+
+
 def _names(checks: list) -> str:
-    return ", ".join(
-        f"{(c.get('name') if isinstance(c, dict) else None) or '?'} ({_bucket(c) or '?'})"
-        for c in checks)
+    return ", ".join(f"{_name(c)} ({_bucket(c) or '?'})" for c in checks)
+
+
+def _read_rollup(pr_url: str, expected: tuple[str, ...]) -> tuple[str, str, tuple[str, ...]]:
+    """``_check_rollup``, then the declared checks (issue #621, ``[driver].expected_checks``):
+    a green read that lacks any name in ``expected`` is not the complete rollup, so it is
+    returned as ``pending``, naming what is missing. A declared check that reported counts
+    when the read is green, i.e. it passed or was skipped/neutral (``_ROLLUP_OK``)."""
+    verdict, detail, names = _check_rollup(pr_url)
+    if verdict == "green":
+        missing = [n for n in expected if n not in names]
+        if missing:
+            return "pending", (f"expected check{'' if len(missing) == 1 else 's'} "
+                               f"{', '.join(missing)} not reported yet ({detail} "
+                               "reported)"), names
+    return verdict, detail, names
 
 
 def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15,
-                    spent: int = 0) -> tuple[str, str]:
+                    spent: int = 0, expected: tuple[str, ...] = ()) -> tuple[str, str]:
     """Re-read ``pr_url``'s check rollup (``_check_rollup``) until it clears ``pending``/
     ``empty`` or ``wait_secs`` of (patchable) wall-clock time is exhausted (issue #462).
     Returns the final ``(verdict, detail)`` — this never itself decides to merge.
@@ -189,16 +213,23 @@ def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15,
     ``empty`` goes back into the wait; ``failing``/``unreadable`` is returned at once. The
     confirm is never shortened to fit the budget: a green first seen with less than one
     poll interval of budget left is returned as ``pending`` (fail-closed), with a detail
-    that says so — so a ``wait_secs`` below ``poll_interval`` never returns ``green``. This
-    compares verdicts only, not check names: a slow job that has not registered within one
-    poll interval still gets through.
+    that says so — so a ``wait_secs`` below ``poll_interval`` never returns ``green``.
 
-    ``wait_secs <= 0`` performs exactly one read and returns its verdict as-is: the
-    original behaviour, for a host whose checks are known to already be in by the time the
-    wave boundary fires. Sleeps go through the module-level ``_sleep`` so a test can make
-    the whole loop cost no real time; their sum never exceeds ``wait_secs``.
+    The confirm compares check NAMES too (issue #621): it confirms only if it lists the
+    same checks as the green it confirms, each name as many times. A green confirm read
+    with a different set is itself a new first green, confirmed one poll interval later.
+    ``expected`` (``[driver].expected_checks``) names checks a complete rollup must
+    contain; a green read missing one reads as ``pending`` (``_read_rollup``), so the wait
+    goes on until it registers. Without ``expected`` the harness cannot know about a slow
+    job that has not registered within one poll interval: that one still gets through.
+
+    ``wait_secs <= 0`` performs exactly one read and returns its verdict as-is (a missing
+    declared check still reads as ``pending``): the original behaviour, for a host whose
+    checks are known to already be in by the time the wave boundary fires. Sleeps go
+    through the module-level ``_sleep`` so a test can make the whole loop cost no real
+    time; their sum never exceeds ``wait_secs``.
     """
-    verdict, detail = _check_rollup(pr_url)
+    verdict, detail, names = _read_rollup(pr_url, expected)
     if wait_secs <= 0:
         return verdict, detail
     waited = spent
@@ -207,7 +238,7 @@ def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15,
             step = min(poll_interval, wait_secs - waited)
             _sleep(step)
             waited += step
-            verdict, detail = _check_rollup(pr_url)
+            verdict, detail, names = _read_rollup(pr_url, expected)
         if verdict != "green":
             return verdict, detail
         # Confirm a full poll interval later or not at all: a re-read squeezed into what is
@@ -219,9 +250,12 @@ def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15,
                                f"little to confirm it {poll_interval}s later ({detail})")
         _sleep(poll_interval)
         waited += poll_interval
-        verdict, detail = _check_rollup(pr_url)
-        if verdict == "green":
+        first = names
+        verdict, detail, names = _read_rollup(pr_url, expected)
+        if verdict == "green" and names == first:
             return verdict, detail
+        # A green over a different set of checks confirms nothing (issue #621): it is a new
+        # first green, and the loop above confirms it in turn (or refuses for lack of budget).
 
 
 def _pr_head(pr_url: str) -> tuple[str, str, str]:
@@ -386,6 +420,15 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
     iid = d.name.removeprefix("issue_")
     if merged.is_merged(cfg, iid):
         return 0  # already merged (a resumed run) — idempotent
+    # Issue #621: a malformed [driver].expected_checks fails closed. Config.load keeps the
+    # list empty and records why; merging on that empty list would be the weakest reading
+    # of a setting the operator wrote to be stricter. Refused before the ready-mark, so the
+    # PR stays a draft with nothing to undo.
+    if cfg.expected_checks_error:
+        print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — "
+              f"{cfg.expected_checks_error}. STOP: later waves are NOT run; fix the setting "
+              "in pdca.toml, then re-run (the run resumes idempotently).\n", file=sys.stderr)
+        return 1
 
     # The publisher opens every PR as a draft (STOP discipline), but `gh pr merge` refuses a
     # draft — so in merge mode a non-final wave's PRs must be readied before they can advance
@@ -448,7 +491,10 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
         # A wave boundary fires seconds after the PR opened (issue #462), so the first read
         # is routinely pending/empty — not a verdict yet. Wait for it to resolve, bounded by
         # [driver].merge_wait_secs, before treating an unresolved rollup as a refusal.
-        verdict, detail = _wait_for_green(str(pr_url), cfg.merge_wait_secs, spent=waited)
+        # Issue #621: the green must also be the complete rollup — every declared check in
+        # it, and a confirm read over the same checks.
+        verdict, detail = _wait_for_green(str(pr_url), cfg.merge_wait_secs, spent=waited,
+                                          expected=cfg.expected_checks)
         if verdict != "green":
             why = {
                 "failing": f"a check is FAILING — {detail}",
