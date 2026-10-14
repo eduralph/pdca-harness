@@ -2138,10 +2138,11 @@ def _drive_and_act(
     # each later fold continues THIS run's line, append-only (`integrate.fold`, #593).
     folded_tips: dict[tuple[str, str], str | None] = {}
     preflighted = False              # per-lane preflight runs at most once, before the first pool
-    # The batch the caller NAMED is levelled first and strictly, exactly as before —
-    # `compute_waves` raises on a cycle or an unresolvable dependency. That contract belongs
-    # to the request (`waves.partition_schedulable`'s own docstring, waves.py:243-246, calls
-    # raising "right for an explicit `flow <ids>`"), and adoption never relaxes it.
+    # The batch the caller NAMED is levelled first and strictly: `compute_waves` raises on a
+    # cycle or an unresolvable dependency. That contract belongs to the request
+    # (`waves.partition_schedulable`'s own docstring calls raising "right for an explicit
+    # `flow <ids>`"). Since #590 it has one relaxation, set out at the `offered` line below:
+    # a `Depends on` / `Depends on (merged)` edge to a child a recovery seed offers.
     #
     # It is not a promise about the RE-levelling, and the difference is worth stating
     # plainly (PR review): a splice re-waves `remaining + children` through the tolerant
@@ -2154,9 +2155,16 @@ def _drive_and_act(
     # that same re-levelling goes the other way — out of the drive set again, so it is not
     # reported as this run's work (`_adopt_split_children`, `named` above).
     #
-    # The request is the named ids AND what their recovery seeds offer (#590): an edge to a
-    # seed's in-flight child is resolvable here, adds no edge, and is ordered by the `k=-1`
-    # splice below, which re-levels with the child in place. Anything else still refuses.
+    # The #590 relaxation: the request is the named ids AND the in-flight children their
+    # recovery seeds offer (`_offered_by_seeds`). A `Depends on` / `Depends on (merged)`
+    # edge to such a child is resolvable here instead of raising, but adds NO edge in
+    # `compute_waves`, so a loop through the child is not seen here either. The child joins
+    # the schedule only at the seed's `k=-1` splice below, which re-levels with it in place:
+    # that splice is what orders the edge, and it holds such a loop instead of raising. A
+    # `Stacks on` edge to such a child still refuses (`waves.check_dep_graph`), as does any
+    # other unresolvable dependency. Pinned by
+    # `test_a_named_id_depending_on_a_seeds_child_is_driven_after_it` and the other #590
+    # cases beside it.
     offered = _offered_by_seeds(cfg, list(adopt_seeds)) if adopt_seeds else frozenset()
     # validates (raises) + levels the batch
     wave_list = waves.compute_waves(cfg, bundles, offered=offered)
