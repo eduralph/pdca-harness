@@ -42,7 +42,8 @@ the head commit the host says the PR merged with (``merged.merged_head``), never
 commit message: a line that already has that commit skips it; one that does not (a fixup
 pushed after the fold) takes the base in, once the base is checked to have that commit —
 a PR merged somewhere else (its base edited on the host, a squash or rebase merge) stops
-the run instead. A branch that does not merge cleanly (an undeclared cross-wave overlap)
+the run instead, and so does a base that would undo work already on the line (a revert of
+a merged PR, #623). A branch that does not merge cleanly (an undeclared cross-wave overlap)
 is a loud :class:`IntegrationError` that stops the run before the next wave builds on a
 broken base. Mechanics are deterministic ``git`` subprocesses (no model).
 """
@@ -53,7 +54,7 @@ import contextlib
 import hashlib
 import subprocess
 import sys
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
 
 from . import merged, publish
@@ -65,6 +66,11 @@ class IntegrationError(RuntimeError):
     branch does not merge cleanly (undeclared overlap) or is missing, another run moved the
     line, or a git step failed. The caller STOPs rather than build the next wave on an
     incomplete base."""
+
+
+class _LineBroken(IntegrationError):
+    """The fold could not put the line back the way it was before a failed step (#623), so
+    it must not go on merging and push: raised even under ``skipped``."""
 
 
 def integration_branch(cfg: Config, base: str, batch: Iterable[str] | None = None) -> str:
@@ -315,7 +321,9 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     (:func:`_take_in_base`), so the work still reaches the next wave — but only once the
     base is checked to have that head: a PR merged somewhere else (its base edited on the
     host, a squash or rebase merge) raises, and so does an ``Onto branch`` record, whose
-    PR may have merged into another base.
+    PR may have merged into another base. So does a base that would remove work a bundle
+    put on the line (#623): the line is reset to its tip before the base merge, and the
+    bundles of ``accepted`` and ``batch`` are what the message names.
 
     Dry-run (offline rehearse / CI, where the publisher leaf is stubbed) prints each group's
     git plan and returns the branches with ``None`` worktrees — no worktree, no push — so the
@@ -430,11 +438,20 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
             start_ref = f"{base_remote}/{base}" if fresh else line
             if _git(wt, "checkout", "-B", branch, start_ref) != 0:
                 raise IntegrationError(f"could not start {branch} off {start_ref}")
+            # Who a path the base would undo belongs to (#623): this fold's bundles, then
+            # the rest of the run's batch (folded earlier, absent from this call), found by
+            # id as the flow finds them — an archived one too (`find_bundle`) — and each
+            # listed once, by name.
+            owners: dict[str, Path] = {}
+            for o in [*bundles, *(cfg.find_bundle(str(n).removeprefix("issue_"))
+                                  for n in batch or ())]:
+                owners.setdefault(o.name, o)
             for d in bundles:
                 try:
-                    _merge_published(cfg, wt, d, refs[d.name], branch=branch, base=base)
+                    _merge_published(cfg, wt, d, refs[d.name], branch=branch, base=base,
+                                     owners=tuple(owners.values()))
                 except IntegrationError as exc:
-                    if skipped is None:
+                    if skipped is None or isinstance(exc, _LineBroken):
                         raise
                     skipped[d.name] = str(exc)   # this bundle only; the merge was aborted
             if skipped is not None and all(d.name in skipped for d in bundles):
@@ -459,15 +476,16 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
 
 
 def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, bool], *,
-                     branch: str, base: str) -> None:
+                     branch: str, base: str, owners: Sequence[Path] = ()) -> None:
     """Merge bundle ``d``'s published branch onto the line checked out in ``wt`` (#593):
     its own commits, joined by a signed-off merge commit — not a re-applied copy. The
     branch's CURRENT tip is merged, so commits pushed onto it after an earlier fold carried
-    it reach the line too."""
+    it reach the line too. ``owners``: the bundles a refusal to take the base in may name
+    (:func:`_take_in_base`)."""
     _remote, ref, onto = published
     head = _rev(wt, ref)
     if head is None:
-        _gone_branch(cfg, wt, d, ref, onto, branch=branch, base=base)
+        _gone_branch(cfg, wt, d, ref, onto, branch=branch, base=base, owners=owners)
         return
     if _in_line(wt, head, f"{d.name}'s branch {ref}", branch):
         return  # already in the line (an earlier fold carried it) — never merged twice
@@ -486,7 +504,7 @@ def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, 
 
 
 def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch: str,
-                 base: str) -> None:
+                 base: str, owners: Sequence[Path] = ()) -> None:
     """``d``'s published branch ``ref`` does not resolve after the pruning fetch — a merged
     PR's branch is commonly deleted on merge (#593). Decided by commit, never by message:
 
@@ -500,7 +518,8 @@ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch
        on:`` PR targets its parent's branch, so either may have merged elsewhere, and that
        raises. Any other PR targeted this base, but it may still have merged into another
        branch (its base edited on the host), so the fold first checks that the base has the
-       head: then the line takes the base in (:func:`_take_in_base`). A base without it —
+       head: then the line takes the base in (:func:`_take_in_base`), unless that would
+       remove work a bundle put on the line (#623), which raises. A base without it —
        or a clone without it, which, having fetched the base, means the same; a squash or
        rebase merge never puts it on the base either — raises, rather than build the next
        wave on a line that lacks the PR's work."""
@@ -533,7 +552,7 @@ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch
             f"base edited on the host, or a squash or rebase merge), so taking {base_ref} "
             f"in would not carry that work to the next wave — restore the branch, or get "
             f"that work into {base_ref}, then re-run")
-    _take_in_base(wt, d, ref, branch, base_ref, head)
+    _take_in_base(cfg, wt, d, ref, branch, base_ref, head, owners)
 
 
 def _carries(wt: Path, commit: str, what: str, branch: str, *, of: str = "HEAD") -> bool:
@@ -545,12 +564,23 @@ def _carries(wt: Path, commit: str, what: str, branch: str, *, of: str = "HEAD")
     return _in_line(wt, commit, what, branch, of=of)
 
 
-def _take_in_base(wt: Path, d: Path, ref: str, branch: str, base_ref: str, head: str) -> None:
+def _take_in_base(cfg: Config, wt: Path, d: Path, ref: str, branch: str, base_ref: str,
+                  head: str, owners: Sequence[Path] = ()) -> None:
     """``d``'s branch ``ref`` is gone and its PR merged at ``head``, a commit the line does
     not have but the base does (the caller checked), so the base carries the merged work.
     Merge the base in (signed off, on top of the line: a fast-forward for the push, never a
-    rewrite — #593); a line that already has the base needs nothing."""
+    rewrite — #593); a line that already has the base needs nothing.
+
+    A base merge that would remove work from the line (#623) — the base reverted a merged
+    PR, ``d``'s or one already on the line — is undone (the line is reset to its tip before
+    the merge, so under the carry's ``skipped`` the other bundles merge onto a line without
+    it) and raises, naming each path it would undo and the bundle of ``owners`` that
+    brought it (:func:`_undone_paths`). Commit ancestry alone cannot see this: the base
+    still has the merged head after the revert."""
     if not _in_line(wt, base_ref, base_ref, branch):
+        before = _rev(wt, "HEAD")
+        if before is None:
+            raise IntegrationError(f"could not read the tip of {branch} in {wt}")
         rc, conflicts = _merge(wt, base_ref, f"pdca-integrate: {base_ref} (carries merged "
                                              f"{d.name})")
         if rc != 0:
@@ -561,9 +591,127 @@ def _take_in_base(wt: Path, d: Path, ref: str, branch: str, base_ref: str, head:
                 f"{d.name}'s branch {ref} is gone and its PR merged at {head[:12]}, which "
                 f"{branch} does not have, but {base_ref}, which carries that work, does not "
                 f"merge onto {branch} ({why}), then re-run")
+        try:
+            undone = _undone_paths(cfg, wt, before, base_ref, branch, owners)
+        except IntegrationError:
+            _reset_line(wt, before, branch)
+            raise
+        if undone:
+            _reset_line(wt, before, branch)
+            whose = sorted({n for _p, names, _note in undone for n in names})
+            work = f"{', '.join(whose)}'s work" if whose else "folded work"
+            paths = "; ".join(f"{p} ({', '.join(names) or f'{note} on {branch}'})"
+                              for p, names, note in undone)
+            raise IntegrationError(
+                f"{d.name}'s branch {ref} is gone and its PR merged at {head[:12]}, which "
+                f"{branch} does not have, but taking {base_ref} in would remove {work} from "
+                f"{branch}: {paths} would go back to how {base_ref} had it before the line "
+                f"changed it (a revert on {base_ref}?). Not building the next wave on a line "
+                f"without that work — get it back into {base_ref}, or restore {ref}, then "
+                f"re-run")
     print(f"integrate: {d.name}'s branch {ref} is gone and its PR merged at {head[:12]}, "
           f"which {branch} did not have — the merged work reaches {branch} through "
           f"{base_ref}.", file=sys.stderr)
+
+
+def _out(wt: Path, *args: str, what: str, stdin: str | None = None) -> str:
+    """``git -C wt args``' output; a failing git step raises (``what`` says what it read)."""
+    r = subprocess.run(["git", "-C", str(wt), *args], capture_output=True, text=True,
+                       input=stdin)
+    if r.returncode != 0:
+        raise IntegrationError(f"could not read {what} in {wt} — `git {args[0]}` exited "
+                               f"{r.returncode}; a git step failed: check that checkout, "
+                               f"then re-run")
+    return r.stdout
+
+
+def _cut_point(wt: Path, tip: str, base_ref: str) -> tuple[str | None, list[str]]:
+    """Where the line at ``tip`` leaves the base, and the line's own commits since (#623):
+    ``(cut, chain)``. ``chain`` is the line's first-parent chain, newest first, down to the
+    first commit on it that ``base_ref`` has, which is ``cut`` — decided by commit, never by
+    message. A base that has ``tip`` itself gives ``(tip, [])``. A chain that never meets
+    the base (its oldest commit has no parent) gives a ``cut`` of None: the line starts from
+    nothing."""
+    chain = _out(wt, "rev-list", "--first-parent", "--topo-order", tip, "--not", base_ref,
+                 what=f"the first-parent chain of {tip}").split()
+    if not chain:
+        return tip, chain
+    parents = _out(wt, "rev-list", "--parents", "-n", "1", chain[-1],
+                   what=f"the parents of {chain[-1]}").split()[1:]
+    return (parents[0] if parents else None), chain
+
+
+def _changed(wt: Path, old: str, new: str) -> list[str]:
+    """The paths whose content differs between ``old`` and ``new`` (no rename pairing)."""
+    out = _out(wt, "diff", "--no-renames", "--name-only", "-z", old, new,
+               what=f"the paths changed between {old} and {new}")
+    return [p for p in out.split("\0") if p]
+
+
+def _own_commits(wt: Path, tip: str, since: Sequence[str], skip: Collection[str], *,
+                 what: str) -> set[str]:
+    """The commits a branch at ``tip`` adds of its own since the cut point (#623): each one
+    reachable from ``tip`` without passing through a commit of ``skip`` (the line's and the
+    base's first-parent commits; ``since`` leaves out the cut point's history). A branch cut
+    from the line or from the base, or updated from the base, has those in its history, but
+    they are not its work. A commit merged INTO the branch (say a topic branch merged into
+    the PR branch) is its work, though it is not on the branch's first-parent chain."""
+    out = _out(wt, "rev-list", "--parents", tip, *since, what=what)
+    parents = {c: ps for c, *ps in (row.split() for row in out.splitlines() if row)}
+    own: set[str] = set()
+    todo = [tip]
+    while todo:
+        c = todo.pop()
+        if c in own or c in skip or c not in parents:
+            continue
+        own.add(c)
+        todo.extend(parents[c])
+    return own
+
+
+def _undone_paths(cfg: Config, wt: Path, before: str, base_ref: str, branch: str,
+                  owners: Sequence[Path]) -> list[tuple[str, list[str], str]]:
+    """``(path, bundles, note)`` for each path the base merge just made in ``wt`` undoes
+    (#623): one the line at ``before`` changed since its cut point (:func:`_cut_point`),
+    which is back to its content there now (absent, where the cut point had none). An edit
+    that leaves the path with NEW content removes nothing. ``bundles`` are the ``owners``
+    that brought the change: each one with a commit of its own (:func:`_own_commits`, from
+    its published branch or, gone, the head its PR merged with) among the commits that
+    changed the path on the line; ``note`` names the line commit that last changed it."""
+    cut, chain = _cut_point(wt, before, base_ref)
+    since = ("--not", cut) if cut else ()
+    old = cut or _out(wt, "hash-object", "-t", "tree", "--stdin", stdin="",
+                      what="the empty tree").strip()
+    after = set(_changed(wt, old, "HEAD"))
+    undone = [p for p in _changed(wt, old, before) if p not in after]
+    if not undone:
+        return []
+    skip = {*chain, *_out(wt, "rev-list", "--first-parent", base_ref, *since,
+                          what=f"the first-parent chain of {base_ref}").split()}
+    own: list[tuple[str, set[str]]] = []      # (bundle name, the commits it adds)
+    for o in owners:
+        pub = _published_ref(o)
+        if pub is None:
+            continue
+        tip = _rev(wt, pub[1]) or merged.merged_head(cfg, o.name.removeprefix("issue_"))
+        if tip and _git(wt, "cat-file", "-e", f"{tip}^{{commit}}") == 0:
+            own.append((o.name, _own_commits(wt, tip, since, skip,
+                                             what=f"{o.name}'s commits")))
+    out: list[tuple[str, list[str], str]] = []
+    for path in undone:
+        touched = _out(wt, "rev-list", before, *since, "--", f":(literal){path}",
+                       what=f"the commits on {branch} that changed {path}").split()
+        out.append((path, [name for name, commits in own if commits.intersection(touched)],
+                    f"last changed by {touched[0][:12]}" if touched else "changed"))
+    return out
+
+
+def _reset_line(wt: Path, tip: str, branch: str) -> None:
+    """Put the line in ``wt`` back at ``tip`` (#623); one that will not go back stops the
+    fold even under ``skipped`` (:class:`_LineBroken`) — never merged onto and pushed."""
+    if _git(wt, "reset", "-q", "--hard", tip) != 0 or _rev(wt, "HEAD") != tip:
+        raise _LineBroken(f"could not reset {branch} in {wt} back to {tip} after refusing "
+                          f"to take the base in — check that checkout, then re-run")
 
 
 def _in_line(wt: Path, rev: str, what: str, branch: str, *, of: str = "HEAD") -> bool:

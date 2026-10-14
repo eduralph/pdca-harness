@@ -668,7 +668,11 @@ wave builds on, via `[driver].wave_mode`:
   that has it already carries the PR; one that does not (say a fixup was pushed
   after the fold) merges your base in, after checking that your base has that
   commit. If it does not (the PR merged into another branch, or was squashed or
-  rebased), the run stops rather than build the next wave without that work. An
+  rebased), the run stops rather than build the next wave without that work. It
+  also stops, naming the bundle, when merging your base in would undo work a
+  bundle put on the line (say your base reverted a merged PR, so a file the
+  bundle added would disappear); a base that only edits such a file is merged
+  in as usual. An
   accepted bundle whose publish pushed no branch holds only the bundles that
   depend on it; the rest of the run goes on. When you publish it later
   (`pdca publish <id>`), its PR branch is cut from the line commit it was built

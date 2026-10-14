@@ -20,6 +20,10 @@ before the first fold), several merge bases until "Update branch". Real git agai
 ``origin`` + a primary checkout (the ``FoldGit`` shape of ``tests/test_integrate.py``),
 plus offline cases; ``gh`` is always patched.
 
+A base that would undo work on the line (a revert of a merged PR) is never merged in: the
+fold stops, names the bundle whose work it would remove, and puts the line back for the
+carry (#623).
+
 Only modules are imported (never a symbol the fix adds), and the new ``merged.merged_head``
 is patched with ``create=True``, so with the production change reverted these cases still
 load and run — and fail.
@@ -444,6 +448,194 @@ class StackFoldGit(unittest.TestCase):
         self.assertTrue(self._ancestor(self._tip("main"), tip))
         self.assertTrue(self._ancestor(t, tip), "the line was rewritten, not appended to")
         self.assertEqual([x for p in pushes for x in p if x.startswith("--force")], [], pushes)
+        self.assertIn(f"reaches {LINE} through origin/main", err.getvalue())
+
+    # -- #623: a base that would undo work on the line is never taken in ------------------
+
+    def _revert_on_main(self, *args: str) -> str:
+        """The maintainer reverts ``args`` (a ``git revert`` target) on ``main`` and pushes;
+        returns the revert commit."""
+        _git(self.human, "fetch", "-q", "origin")
+        _git(self.human, "checkout", "-q", "-B", "main", "origin/main")
+        _git(self.human, "revert", "--no-edit", *args)
+        _git(self.human, "push", "-q", "origin", "main")
+        return _git(self.human, "rev-parse", "HEAD").strip()
+
+    def _fixup_merged_then_reverted(self, batch: list[str] | None = None
+                                    ) -> tuple[Path, str, str, str]:
+        """The #593 adversary repro: fold [A] → T1 (onto ``batch``'s line); a fixup lands on
+        fix/A; fix/A merges into main and is deleted; then main reverts that merge. Returns
+        (A, T1, the head A's PR merged with, the revert)."""
+        a = self._publish("A", {"a.txt": "a\n"})
+        integrate.fold(self.cfg, [a], folded_this_run={}, batch=batch)
+        t1 = self._tip(integrate.integration_branch(self.cfg, "main", batch))
+        self._push_from_human({"fix.txt": "f\n"}, to="fix/A", off="origin/fix/A")
+        head = self._tip("fix/A")
+        self._merge_pr("A")
+        self._delete("fix/A")
+        return a, t1, head, self._revert_on_main("-m", "1", "HEAD")
+
+    def _z_reverted_then_a_gone(self, batch: list[str], *, topic: bool = False
+                                ) -> tuple[Path, Path, str, dict[str, str]]:
+        """Criterion (2)'s history: Z and A are folded onto ``batch``'s line (→ T1); main
+        merges Z's PR, then reverts Z's work — the commit that added z.txt or, with
+        ``topic``, a topic commit adding topic.txt that Z's PR branch had merged in; then a
+        fixup lands on fix/A, fix/A merges and is deleted, and B is published. Returns (A,
+        B, T1, the heads Z's and A's PRs merged with)."""
+        z = self._publish("Z", {"z.txt": "z\n"})
+        undo = self._tip("fix/Z")
+        if topic:                                            # Z's author merges a topic
+            undo = self._push_from_human({"topic.txt": "t\n"}, to="topic")
+            _git(self.human, "fetch", "-q", "origin")
+            _git(self.human, "checkout", "-q", "-B", "fix/Z", "origin/fix/Z")
+            _git(self.human, "merge", "-q", "--no-ff", "--no-edit", "origin/topic")
+            _git(self.human, "push", "-q", "origin", "fix/Z")
+        a = self._publish("A", {"a.txt": "a\n"})
+        integrate.fold(self.cfg, [z, a], folded_this_run={}, batch=batch)
+        t1 = self._tip(integrate.integration_branch(self.cfg, "main", batch))
+        heads = {"Z": self._tip("fix/Z")}
+        self._merge_pr("Z")
+        self._delete("fix/Z")
+        self._revert_on_main(undo)
+        self._push_from_human({"fix.txt": "f\n"}, to="fix/A", off="origin/fix/A")
+        heads["A"] = self._tip("fix/A")
+        self._merge_pr("A")
+        self._delete("fix/A")
+        return a, self._publish("B", {"b.txt": "b\n"}), t1, heads
+
+    def test_a_base_that_reverts_the_gone_bundle_stops_the_fold(self) -> None:
+        # Criterion (1). Ancestry still says main has A's merged head, but taking main in
+        # would delete a.txt from the line: B would build without A. The fold stops, names
+        # A, pushes nothing, and never claims the work "reaches" the line. B, cut from the
+        # reverted main, has A's commit and the revert in its history but brought neither
+        # to the line, so it is not named.
+        a, t1, head, _revert = self._fixup_merged_then_reverted()
+        b = self._publish("B", {"b.txt": "b\n"})
+        err = io.StringIO()
+        with _merged_heads({"A": head}), redirect_stderr(err), \
+                self.assertRaises(integrate.IntegrationError) as ctx:
+            integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1})
+        msg = str(ctx.exception)
+        for part in ("issue_A's work", "taking origin/main in would remove",
+                     "a.txt (issue_A) would go back", LINE):
+            self.assertIn(part, msg)
+        self.assertEqual(self._tip(LINE), t1)                # nothing pushed
+        self.assertNotIn("reaches", err.getvalue())
+
+    def test_a_base_that_reverts_another_bundle_on_the_line_stops_the_fold(self) -> None:
+        # Criterion (2). Z and A are on the line; main merges then reverts Z. A's fixup
+        # merges and its branch goes, so the fold would take main in — and with it the
+        # revert of Z. Z is not in this fold's bundles: it is named through the batch.
+        batch = ["Z", "A", "B"]
+        line = integrate.integration_branch(self.cfg, "main", batch)
+        a, b, t1, heads = self._z_reverted_then_a_gone(batch)
+        with _merged_heads(heads), redirect_stderr(io.StringIO()), \
+                self.assertRaises(integrate.IntegrationError) as ctx:
+            integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1}, batch=batch)
+        msg = str(ctx.exception)
+        self.assertIn("issue_Z's work", msg)
+        self.assertIn("z.txt (issue_Z)", msg)
+        self.assertEqual(self._tip(line), t1)                # nothing pushed
+
+    def test_a_reverted_topic_merged_into_a_bundles_branch_names_that_bundle(self) -> None:
+        # Z's PR branch merged a topic branch: Z's work, though not on fix/Z's first-parent
+        # chain. Main reverts only the topic commit, so taking main in would remove
+        # topic.txt from the line. The stop names Z for it, not just the topic commit.
+        batch = ["Z", "A", "B"]
+        line = integrate.integration_branch(self.cfg, "main", batch)
+        a, b, t1, heads = self._z_reverted_then_a_gone(batch, topic=True)
+        with _merged_heads(heads), redirect_stderr(io.StringIO()), \
+                self.assertRaises(integrate.IntegrationError) as ctx:
+            integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1}, batch=batch)
+        msg = str(ctx.exception)
+        self.assertIn("issue_Z's work", msg)
+        self.assertIn("topic.txt (issue_Z) would go back", msg)
+        self.assertEqual(self._tip(line), t1)                # nothing pushed
+
+    def test_an_archived_batch_bundle_is_still_named(self) -> None:
+        # The batch is looked up by id as the flow looks a bundle up (`find_bundle`), so Z,
+        # archived to results/completed/ after its fold, is still found and named.
+        batch = ["Z", "A", "B"]
+        a, b, t1, heads = self._z_reverted_then_a_gone(batch)
+        archive = self.cfg.bundle_root / "completed"
+        archive.mkdir()
+        self.cfg.bundle("Z").rename(archive / "issue_Z")
+        with _merged_heads(heads), redirect_stderr(io.StringIO()), \
+                self.assertRaises(integrate.IntegrationError) as ctx:
+            integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1}, batch=batch)
+        self.assertIn("z.txt (issue_Z) would go back", str(ctx.exception))
+
+    def test_a_bundle_reached_twice_is_named_once(self) -> None:
+        # A is passed to the fold as an archived copy and found again through the batch at
+        # its active path: two paths, one bundle, so it is named once for a.txt.
+        batch = ["A", "B"]
+        a, t1, head, _revert = self._fixup_merged_then_reverted(batch)
+        copy = self.cfg.bundle_root / "completed" / "issue_A"
+        shutil.copytree(a, copy)
+        b = self._publish("B", {"b.txt": "b\n"})
+        with _merged_heads({"A": head}), redirect_stderr(io.StringIO()), \
+                self.assertRaises(integrate.IntegrationError) as ctx:
+            integrate.fold(self.cfg, [copy, b], folded_this_run={TARGET: t1}, batch=batch)
+        self.assertIn("a.txt (issue_A) would go back", str(ctx.exception))
+
+    def test_the_carry_skips_a_bundle_whose_base_would_undo_it_and_folds_the_rest(
+            self) -> None:
+        # Criterion (4). The #646 carry passes `skipped`: A is recorded with the reason and
+        # the line is put back before main came in, so B merges, and the push carries, a
+        # line that still has a.txt and not the revert. B is a later wave, cut from the line
+        # as the flow cuts it — one cut from the reverted main would carry the revert itself.
+        a, t1, head, revert = self._fixup_merged_then_reverted()
+        b = self._publish("B", {"b.txt": "b\n"}, cut_from=f"origin/{LINE}")
+        skipped: dict[str, str] = {}
+        with _merged_heads({"A": head}), redirect_stderr(io.StringIO()):
+            integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1}, skipped=skipped)
+        self.assertEqual(list(skipped), ["issue_A"], skipped)
+        self.assertIn("would remove issue_A's work", skipped["issue_A"])
+        tip = self._tip(LINE)
+        self.assertEqual(self._show(tip, "a.txt"), "a\n")
+        self.assertEqual(self._show(tip, "b.txt"), "b\n")
+        self.assertFalse(self._ancestor(revert, tip), "the revert reached the line")
+        self.assertTrue(self._ancestor(t1, tip))
+
+    def test_a_line_that_will_not_go_back_stops_even_the_carry(self) -> None:
+        # Criterion (4)'s guard: a line the fold cannot put back after refusing main still
+        # has the revert, so the carry must not record A as skipped and go on to merge B
+        # and push it. The fold stops instead, and pushes nothing.
+        a, t1, head, _revert = self._fixup_merged_then_reverted()
+        b = self._publish("B", {"b.txt": "b\n"}, cut_from=f"origin/{LINE}")
+        real = integrate._git
+
+        def stuck(repo: Path, *args: str) -> int:
+            return 1 if args[:1] == ("reset",) else real(repo, *args)
+
+        skipped: dict[str, str] = {}
+        with _merged_heads({"A": head}), mock.patch.object(integrate, "_git", stuck), \
+                redirect_stderr(io.StringIO()), \
+                self.assertRaises(integrate.IntegrationError) as ctx:
+            integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1}, skipped=skipped)
+        self.assertIn(f"could not reset {LINE}", str(ctx.exception))
+        self.assertEqual(skipped, {})
+        self.assertEqual(self._tip(LINE), t1)                # nothing pushed
+
+    def test_a_base_that_edits_a_bundles_file_is_still_taken_in(self) -> None:
+        # Criterion (5), no false stop: main changes a.txt to new content (not back to what
+        # it was before A) — nothing is removed, so main comes in as before.
+        a = self._publish("A", {"a.txt": "a\n"})
+        integrate.fold(self.cfg, [a], folded_this_run={})
+        t1 = self._tip(LINE)
+        self._push_from_human({"fix.txt": "f\n"}, to="fix/A", off="origin/fix/A")
+        head = self._tip("fix/A")
+        self._merge_pr("A")
+        self._delete("fix/A")
+        self._push_from_human({"a.txt": "a2\n"}, to="main")
+        b = self._publish("B", {"b.txt": "b\n"})
+        err = io.StringIO()
+        with _merged_heads({"A": head}), redirect_stderr(err):
+            integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1})
+        tip = self._tip(LINE)
+        self.assertEqual(self._show(tip, "a.txt"), "a2\n")
+        self.assertEqual(self._show(tip, "fix.txt"), "f\n")
+        self.assertEqual(self._show(tip, "b.txt"), "b\n")
         self.assertIn(f"reaches {LINE} through origin/main", err.getvalue())
 
     def test_a_merged_head_missing_from_the_clone_is_not_carried(self) -> None:
