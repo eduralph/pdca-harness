@@ -681,7 +681,9 @@ def _record_mtime(d: Path) -> int | None:
 def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
               held: set[str] | frozenset[str] = frozenset(),
               requested: Collection[str] | None = None,
-              hold_unmerged: bool = False) -> list[Path]:
+              hold_unmerged: bool = False,
+              unpushed: Collection[str] = frozenset(),
+              conflicts: Mapping[str, Collection[str]] | None = None) -> list[Path]:
     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
 
     A prerequisite that is not COMPLETE on disk (archived ``completed/`` too, #171) is never
@@ -710,17 +712,29 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     id (an id the run was asked for that an earlier run finished, #646) is carried onto the
     line before wave 0 when it is clean (:func:`_carry_finished`); when it is not, it is
     named in ``held``, and a bundle whose plain ``Depends on`` names it is not ready (a
-    ``Stacks on`` edge to it is not held). A skipped bundle never completes, so its own
-    dependents fall out of later waves the same way (the skip cascades)."""
+    ``Stacks on`` edge to it is not held). A bundle tied by a ``Conflicts with`` edge
+    (``conflicts``, either direction: :func:`waves.conflict_map` of the run's live bundles)
+    to one in ``unpushed`` — accepted, but no branch pushed this run (#593) — is held the
+    same way (#629): the scheduler put it in a later wave so it builds on a line holding
+    that bundle's work, and no line of this run does. It is named on its own stderr line,
+    not as a prerequisite, and told to wait until that bundle's PR merges into its own
+    base: a re-run's carry (:func:`_carry_finished`) starts only from a plain ``Depends
+    on`` edge, never a ``Conflicts with`` one, so a re-run before then can build it on a
+    base without that work. A skipped bundle never completes, so its own dependents fall
+    out of later waves the same way (the skip cascades)."""
     asked = set(requested) if requested is not None else set(batch_names)
+    unpushed_set = set(unpushed)
     runnable: list[Path] = []
     for d in wave:
+        # A `Conflicts with` partner the fold left out (#629): its work is on no line.
+        partners = (sorted(set(conflicts.get(d.name, ())) & unpushed_set)
+                    if conflicts and unpushed_set else [])
         bp = d / "brief.md"
         deps = waves.declared_deps(bp) if bp.exists() else []
         merged_deps = set(brief.depends_on_merged(bp)) if deps else set()
         plain_deps = set(brief.depends_on(bp)) if deps else set()
         # "Merged" means merged into d's OWN target (#647) — none usable: ("", "").
-        repo, base = publish._resolve_target(d)[:2] if deps else ("", "")
+        repo, base = publish._resolve_target(d)[:2] if deps or partners else ("", "")
         targeted = bool(repo and base)
         unmet: list[str] = []
         unmerged: list[str] = []   # COMPLETE, but not merged into d's base: wait (#647)
@@ -762,7 +776,15 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
         if unmet:
             print(f"flow: {d.name} skipped — prerequisite(s) not ready "
                   f"({', '.join(unmet)}); not built on a base missing them.", file=sys.stderr)
-        if not unmet and not unmerged:
+        if partners:
+            ids = " ".join(p.removeprefix("issue_") for p in partners)
+            into = f" into {base} ({repo})" if repo and base else ""
+            print(f"flow: {d.name} held — it `Conflicts with` {', '.join(partners)}, which "
+                  f"pushed no branch this run, so no line of this run holds that work; not "
+                  f"built on a base missing it. To build it, publish them (`pdca publish "
+                  f"<id>` for {ids}) and wait until their PR merges{into}, then re-run.",
+                  file=sys.stderr)
+        if not unmet and not unmerged and not partners:
             runnable.append(d)
     return runnable
 
@@ -2206,8 +2228,13 @@ def _drive_and_act(
     requested = set(named) | {cfg.bundle(str(i).removeprefix("issue_")).name
                               for i in (batch or ())}
     for k, wave in enumerate(wave_list):
+        # `Conflicts with` partners of `held_unpushed` are held too (#629). The relation is
+        # read off the LIVE `bundles` each wave: an adopted split child adds its edges.
         runnable = _runnable(cfg, wave, batch_names, held=held_unpushed | held_finished,
-                             requested=requested, hold_unmerged=hold_unmerged)
+                             requested=requested, hold_unmerged=hold_unmerged,
+                             unpushed=held_unpushed,
+                             conflicts=(waves.conflict_map(cfg, bundles)
+                                        if held_unpushed else None))
         if not runnable:
             continue
         # The pool, read off the schedule as it stands NOW — so a splice below has already
@@ -2332,8 +2359,9 @@ def _drive_and_act(
                         if d.name not in held_unpushed:
                             held_unpushed.add(d.name)
                             print(f"flow: {d.name} pushed no branch this run — left out "
-                                  f"of the integration fold; bundles that depend on it are "
-                                  f"held this run.", file=sys.stderr)
+                                  f"of the integration fold; bundles that depend on it or "
+                                  f"are its `Conflicts with` partners are held this run.",
+                                  file=sys.stderr)
                 # ONE lock scope covers fold, tip read AND re-gate (#297 review round 10),
                 # shared with the pre-wave carry (`_fold_lines`, #646).
                 try:

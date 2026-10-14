@@ -674,11 +674,15 @@ wave builds on, via `[driver].wave_mode`:
   bundle added would disappear); a base that only edits such a file is merged
   in as usual. An
   accepted bundle whose publish pushed no branch holds only the bundles that
-  depend on it; the rest of the run goes on. When you publish it later
+  depend on it or share a `Conflicts with` edge with it (declared on either
+  side): the run ordered those after it to build on its work, which no line of
+  the run now holds. The rest of the run goes on. When you publish it later
   (`pdca publish <id>`), its PR branch is cut from the line commit it was built
   on, so it carries no later wave's work; if a later run has replaced the line
   by then, publish refuses and pushes nothing — re-drive that bundle in a new
-  run.
+  run. Re-run a held `Conflicts with` partner only once that PR has merged into
+  your base: the carry described below starts only from a plain `Depends on`,
+  so an earlier re-run can build the partner without that work.
 
   To recover a run that stopped part-way (an integrity stop, the pass budget, a
   crash, Ctrl-C), re-issue the same `pdca flow <ids>`. The ids the earlier run
