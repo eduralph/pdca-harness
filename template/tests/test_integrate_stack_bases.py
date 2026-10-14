@@ -606,7 +606,9 @@ class StackFoldGit(unittest.TestCase):
         real = integrate._git
 
         def stuck(repo: Path, *args: str) -> int:
-            return 1 if args[:1] == ("reset",) else real(repo, *args)
+            # Only the reset back to the line's tip fails: the fold's opening reset of the
+            # shared tree to HEAD (#631) must pass, or that one stops the fold first.
+            return 1 if args[:1] == ("reset",) and args[-1] != "HEAD" else real(repo, *args)
 
         skipped: dict[str, str] = {}
         with _merged_heads({"A": head}), mock.patch.object(integrate, "_git", stuck), \
