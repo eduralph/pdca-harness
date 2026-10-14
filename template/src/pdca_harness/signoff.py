@@ -32,6 +32,14 @@ ACTION_TO_OUTCOME = {
 _OUTCOME_RE = re.compile(r"^- Outcome:[ \t]*(.*?)[ \t]*$", re.MULTILINE)
 _DELTA_RE = re.compile(r"^- Iteration delta \(if iterating\):[ \t]*(.*?)[ \t]*$", re.MULTILINE)
 
+#: A run of the characters ``str.splitlines`` treats as line boundaries — the split every
+#: SUMMARY.md reader uses (:func:`_section`). Not just ``\n``: ``\r``, ``\v``, ``\f``,
+#: ``\x1c``-``\x1e``, ``\x85``, ``\u2028`` and ``\u2029`` split a line there too. :func:`record`
+#: replaces each run with one space, so no §9 value can start a line of its own — a
+#: ``## 6. NEEDS-HUMAN`` line in a ``--delta`` would otherwise become the LAST §6 heading,
+#: the one every §6 reader takes (#604).
+_LINE_BREAKS_RE = re.compile("[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]+")
+
 #: The §9 heading. Spelled once: every use is load-bearing (an outcome read outside this
 #: section is not a sign-off, #327), so a typo in one copy would reopen the fail-open.
 SIGNOFF_HEADING = "9. Check sign-off"
@@ -111,8 +119,8 @@ def _needs_human_section(text: str, *, whole_on_missing: bool) -> str:
     quoted block of ticked rows let C6 pass an accept while the real §6 still had open rows,
     and a row added for the human landed inside the quote. Nothing after the assembled §6 is
     a leaf's multi-line text — §6's own rows are one line each, and §9 holds only the
-    sign-off record, whose iteration delta the flow flattens to one line — so the last §6
-    heading is the one ``assemble`` wrote, and the one the human ticks.
+    sign-off record, every value of which :func:`record` writes on one line (#604) — so the
+    last §6 heading is the one ``assemble`` wrote, and the one the human ticks.
 
     ``whole_on_missing`` is the caller's fail-safe direction, as for :func:`_section`.
     """
@@ -274,9 +282,18 @@ def record(summary_path: Path, *, action: str, by: str, date: str, delta: str = 
         a callable's return value is used as-is, with no escape processing. A string
         `repl` raised `re.error` on a value containing e.g. `\\W` and silently expanded
         a value that happened to spell a valid group reference (#529). A callable
-        closes over `value` and returns it untouched, so every byte the human wrote is
-        recorded literally, whatever it contains.
+        closes over `value` and returns it, so every byte the human wrote is recorded
+        literally, whatever it contains — except line breaks, which become spaces.
+
+        Each run of line-boundary characters (:data:`_LINE_BREAKS_RE`) is replaced by one
+        space, so the value stays on its field's line (#604). A value with a line break in
+        it could otherwise put a ``## 6. NEEDS-HUMAN`` heading into §9, where it would be
+        the LAST such heading — the one :func:`_needs_human_section` takes as the real §6 —
+        and its ticks would retire deferred findings the human never cleared. Done here,
+        not at each caller, so the CLI, the flow and ``cleanup`` all get the same rule. A
+        value with no line break is recorded byte-for-byte, as before.
         """
+        value = _LINE_BREAKS_RE.sub(" ", value)
         pat = re.compile(rf"^(- {re.escape(label)}:).*?$", re.MULTILINE)
         def repl(m: re.Match[str]) -> str:
             return f"{m.group(1)} {value}" if value else m.group(1)
