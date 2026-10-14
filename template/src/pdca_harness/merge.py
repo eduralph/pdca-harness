@@ -73,14 +73,22 @@ between the last read and the host executing the merge is a gap no client can cl
 ``merge_requires = "required"`` (trust the host's protection) is unchanged: no base read,
 no update, no pin.
 
-The head ``_base_read`` asks about lives where publish pushed the PR's branch, and that is
-not always ``base_remote`` or ``origin`` (issue #650): an ``Onto branch`` bundle's
-``"stacked"`` record names the remote it pushed to, which may be a third one. So the fetch
-covers that remote too, read from the record as the fold reads it
-(``integrate._published_ref``), and a head commit the fetches still did not bring in is
-refused by name (``_have``) — with the remotes fetched and where the record puts the
-branch, not a guess at why — instead of being left to ``git merge-base`` to fail on with a
-bare exit 128.
+The head ``_base_read`` asks about lives where publish pushed the PR's branch, read from
+the publish record as the fold reads it (``integrate._published_ref``, issue #650), and a
+head commit the fetches still did not bring in is refused by name (``_have``) — with the
+remotes fetched and where the record puts the branch, not a guess at why — instead of
+being left to ``git merge-base`` to fail on with a bare exit 128. An ``Onto branch``
+bundle's ``"stacked"`` record names the remote it pushed to, which may be a third one, and
+``_remotes`` keeps that remote for a caller passing such a record's ``pub`` directly; it is
+not reached from ``_merge_one``, which refuses a ``"stacked"`` record (issue #658) before
+it reads the head.
+
+Merge mode readies and merges only a PR this run opened for the bundle (a ``"new-pr"`` /
+``"stacked-pr"`` record). A ``"stacked"`` record is one commit added to an EXISTING PR —
+possibly someone else's, with other work on it and any base — so ``_merge_one`` refuses it
+(issue #658) before any ``gh`` call for that PR, in a dry run too, and whether or not the
+PR already reads merged, as ``merged.merged_into`` and the fold (``integrate._gone_branch``)
+never trust such a record either.
 """
 
 from __future__ import annotations
@@ -303,7 +311,9 @@ def _remotes(cfg: Config, pub: tuple[str, str, bool] | None) -> tuple[str, ...]:
     ``(remote, ref, onto)``, or None when it names no remote). Deduplicated, in that order,
     so a ``new-pr`` / ``stacked-pr`` record (``origin``) or one naming no remote fetches
     exactly the base remote and ``origin``, as before; an ``Onto branch`` record's remote,
-    possibly a third one, comes last."""
+    possibly a third one, comes last. ``_merge_one`` refuses a ``"stacked"`` record before
+    it reads the head (issue #658), so that last remote is kept for a caller passing such a
+    record's ``pub`` directly; it is not reached from ``_merge_one``."""
     return tuple(dict.fromkeys((cfg.base_remote, "origin", *(pub[:1] if pub else ()))))
 
 
@@ -466,6 +476,22 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
         print(f"merge: {d.name} is COMPLETE but has no recorded PR — cannot merge a wave "
               "whose member wasn't published. STOP.", file=sys.stderr)
         return 1
+    # Issue #658: an `Onto branch` bundle's `"stacked"` record is one commit added to an
+    # EXISTING PR (`publish._publish_stacked`), which may be someone else's, carry other
+    # work, and target any base. Merge mode readies and merges only the PRs this run
+    # opened, so it refuses such a record here, before any `gh` call for it (nothing to
+    # undo), and above the dry-run plan and the `is_merged` skip: a dry run prints no
+    # merge for it, and a PR that already reads merged is refused all the same, as
+    # `merged.merged_into` never counts a `"stacked"` record merged either.
+    if rec.get("mode") == "stacked":
+        print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — it is an `Onto branch` "
+              "commit added to an existing PR, and merge mode does not ready or merge a PR "
+              "this run did not open. STOP: later waves are NOT run. Run this batch in the "
+              "default [driver] wave_mode = \"stack\", or take this bundle out of this "
+              "merge-mode batch, then re-run. The PR itself stays the human's to ready or "
+              "merge, but doing so does not let this merge-mode run continue: its record "
+              "is refused the same way merged or not.\n", file=sys.stderr)
+        return 1
 
     cmd = ["gh", "pr", "merge", str(pr_url), f"--{method}"]
     if dry_run:
@@ -518,9 +544,10 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
             return _refuse(d, pr_url, "its publish record names no repo, so there is no "
                                       "checkout to read its base in")
         repo = publish._checkout_path(cfg, repo_spec)
-        # Issue #650: the head is read where publish put the branch. An `Onto branch`
-        # bundle's `"stacked"` record names that remote and it may be neither the base
-        # remote nor `origin`, so read the record as the fold does and fetch it too.
+        # Issue #650: the head is read where publish put the branch, from the record as the
+        # fold reads it. A `"stacked"` record (whose remote may be neither the base remote
+        # nor `origin`) never gets here: it was refused above before the head was read
+        # (issue #658); `_remotes` keeps its remote for a caller passing such a `pub`.
         pub = integrate._published_ref(d)
         head, tip, behind, why = _base_read(cfg, repo, pub, str(pr_url))
         if behind is None:
