@@ -815,6 +815,7 @@ def _point_at_integration(integ: dict[tuple[str, str], str], runnable: list[Path
 def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
                 folded_this_run: Mapping[tuple[str, str], str | None], batch: list[str],
                 skipped: dict[str, str] | None = None,
+                carried: dict[str, str] | None = None,
                 ) -> tuple[dict[tuple[str, str], tuple[str, Path | None]],
                            dict[tuple[str, str], str | None], tuple[str, str] | None]:
     """ONE :func:`integrate.fold` of ``bundles`` and, with ``[driver].regate_between_waves``,
@@ -823,6 +824,10 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
     the re-gate, so no gap exists in which another flow's publish-boundary sweep could
     remove the tree — or another fold rewrite it — before the re-gate attests it. The in-run
     fold and the pre-wave carry (#646) share it; only what they do with the result differs.
+    ``carried`` is the run's record of the head each bundle's branch had when a fold of
+    this run put it on the line (:func:`integrate.fold`, #633): the in-run folds pass the
+    run's one mapping, so a carried branch rewritten mid-run stops the fold; the carry
+    passes none.
 
     Returns ``(folded, tips, red)``: the fold's result, each folded target's pushed tip
     (None in a dry-run, which pushes nothing), and the first target whose re-gate is red
@@ -830,7 +835,8 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
     the tip read propagates."""
     with contextlib.ExitStack() as locks:
         folded = integrate.fold(cfg, bundles, dry_run=dry, locks=locks,
-                                folded_this_run=folded_this_run, batch=batch, skipped=skipped)
+                                folded_this_run=folded_this_run, batch=batch, skipped=skipped,
+                                carried=carried)
         tips = {tgt: integrate.pushed_tip(wt) if wt is not None else None
                 for tgt, (_branch, wt) in folded.items()}
         # hold_lock=False: the locks stack already holds each tree's lock (re-acquiring
@@ -2159,6 +2165,9 @@ def _drive_and_act(
     # Per-target (repo, base) → the tip this run's last fold pushed (None in a dry-run), so
     # each later fold continues THIS run's line, append-only (`integrate.fold`, #593).
     folded_tips: dict[tuple[str, str], str | None] = {}
+    # Bundle name → the head of its branch an in-run fold put on the line (#633), filled by
+    # `integrate.fold`: a later fold refuses a carried branch rewritten since.
+    carried_heads: dict[str, str] = {}
     preflighted = False              # per-lane preflight runs at most once, before the first pool
     # The batch the caller NAMED is levelled first and strictly, exactly as before —
     # `compute_waves` raises on a cycle or an unresolvable dependency. That contract belongs
@@ -2367,7 +2376,8 @@ def _drive_and_act(
                 try:
                     folded, tips, red = _fold_lines(
                         cfg, [d for d in accepted if d.name not in held_unpushed], dry=dry,
-                        folded_this_run=dict(folded_tips), batch=run_batch)
+                        folded_this_run=dict(folded_tips), batch=run_batch,
+                        carried=carried_heads)
                 except integrate.IntegrationError as exc:
                     print(f"flow: wave {k} did not integrate ({exc}); STOPPING — "
                           f"later waves not run.", file=sys.stderr)

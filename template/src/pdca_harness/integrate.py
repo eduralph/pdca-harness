@@ -36,8 +36,13 @@ pre-wave carry puts to use (#646): a re-issued run that carries finished prerequ
 onto its batch's line continues origin's line from its tip — only when every commit on it
 is accounted for (:func:`foreign_commit`) — and stays append-only from there.
 
-Commits pushed straight onto a stack PR branch after a fold carried it reach the line: the
-next fold merges the branch's new tip. A branch deleted after its PR merged is judged by
+Commits pushed straight onto a stack PR branch after a fold carried it reach the line only
+when they extend it (a fast-forward; GitHub's merge-style "Update branch" is one): the next
+fold merges the branch's new tip. A branch a fold of the run carried that is REWRITTEN
+since — re-published (``publish`` force-pushes), force-pushed, or updated with a rebase —
+no longer holds what the line took from it, so its new tip would put the old and the
+rewritten commits on the line together: the run's next fold stops before it merges or
+pushes anything (``carried``, #633). A branch deleted after its PR merged is judged by
 the head commit the host says the PR merged with (``merged.merged_head``), never by a
 commit message: a line that already has that commit skips it; one that does not (a fixup
 pushed after the fold) takes the base in, once the base is checked to have that commit —
@@ -63,9 +68,9 @@ from .config import Config
 
 class IntegrationError(RuntimeError):
     """A wave's accepted work could not be folded onto the integration branch — a published
-    branch does not merge cleanly (undeclared overlap) or is missing, another run moved the
-    line, or a git step failed. The caller STOPs rather than build the next wave on an
-    incomplete base."""
+    branch does not merge cleanly (undeclared overlap), is missing, or was rewritten after
+    the run carried it (#633), another run moved the line, or a git step failed. The caller
+    STOPs rather than build the next wave on an incomplete base."""
 
 
 class IntegrationTreeError(IntegrationError):
@@ -288,6 +293,7 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
          folded_this_run: Mapping[tuple[str, str], str | None] | None = None,
          batch: Collection[str] | None = None,
          skipped: dict[str, str] | None = None,
+         carried: dict[str, str] | None = None,
          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
     """Fold the cumulative accepted bundles' published branches onto a per-target
     integration branch.
@@ -323,7 +329,8 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     Fail-closed outside a dry-run: a targeted, patched bundle with no published branch
     raises before any git step (the flow holds such bundles, and failed publishes, out:
     :func:`unpublished`). A branch that moved since the last fold (commits pushed onto the
-    PR branch after the fold carried it) has its new tip merged. A published branch gone
+    PR branch after the fold carried it) has its new tip merged — when it only moved
+    forward; a carried one rewritten since raises (``carried``, below). A published branch gone
     after the (pruning) fetch is judged by commit, never by message (:func:`_gone_branch`):
     unless the host reports its PR merged, with the head commit it merged, the fold raises;
     a line that already has that head skips it; otherwise the line takes the base in
@@ -358,6 +365,18 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     the up-front refusal of a bundle with no published branch (the carry passes only
     bundles that have one). ``None`` (every other caller) raises on the first failure, as
     before.
+
+    ``carried`` (#633, the flow's in-run folds): the run's record, filled in place like
+    ``skipped``, of the head each bundle's branch had when a fold of this run put it on its
+    line (merged it, or found it there already) — written once that target has pushed.
+    Before any target merges or pushes, each bundle with a recorded head whose branch still
+    resolves must still hold that head (its tip, or a descendant of it); a branch rewritten
+    since raises (:func:`_carried_tips`), so the line never carries commits no PR holds any
+    more. The tip read for that check is the commit merged: the branch is not read again,
+    so a fetch for another target in the same checkout, or a push from it, cannot swap in
+    a commit that was never checked. A gone branch is left to :func:`_gone_branch`.
+    ``None`` (the pre-wave carry, a direct caller) checks and records nothing; a dry-run
+    does neither.
     """
     candidates = _fold_candidates(accepted)
     if not candidates:
@@ -388,6 +407,11 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
         groups.setdefault((repo_spec, base), []).append(d)
 
     base_remote = cfg.base_remote
+    # A branch this run carried that was rewritten since stops the fold before ANY target
+    # merges or pushes (#633). Each carried branch's tip is read once, here, and that commit
+    # is the one merged below — never the branch read again after a later fetch (another
+    # target in the same checkout) or a push from that checkout has moved it.
+    checked = _carried_tips(cfg, groups, refs, carried, batch) if carried and not dry_run else {}
     result: dict[tuple[str, str], tuple[str, Path | None]] = {}
     # Groups are processed in SORTED (repo, base) order (#297 review round 11): with a
     # caller-held ``locks`` stack the per-target locks accumulate, and two concurrent
@@ -462,14 +486,20 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
             for o in [*bundles, *(cfg.find_bundle(str(n).removeprefix("issue_"))
                                   for n in batch or ())]:
                 owners.setdefault(o.name, o)
+            took: dict[str, str] = {}   # bundle name → the head this fold put on the line
             for d in bundles:
+                # Its branch's tip, read once — a carried branch's is the one checked (#633).
+                head = checked[d.name] if d.name in checked else _rev(wt, refs[d.name][1])
                 try:
-                    _merge_published(cfg, wt, d, refs[d.name], branch=branch, base=base,
+                    _merge_published(cfg, wt, d, refs[d.name], head, branch=branch, base=base,
                                      owners=tuple(owners.values()))
                 except IntegrationError as exc:
                     if skipped is None or isinstance(exc, (IntegrationTreeError, _LineBroken)):
                         raise
                     skipped[d.name] = str(exc)   # this bundle only; its merge was undone
+                else:
+                    if head is not None:        # merged, or in the line already
+                        took[d.name] = head
             if skipped is not None and all(d.name in skipped for d in bundles):
                 continue   # nothing of this target merged: push nothing, report nothing
             # Fresh: the run's first fold of this target replaces an earlier run of the same
@@ -487,19 +517,63 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                 raise IntegrationError(
                     f"could not push {branch} to origin{why} — the next wave cannot stack "
                     f"on it")
+            if carried is not None:
+                carried.update(took)   # pushed: the line now holds these heads (#633)
         result[(repo_spec, base)] = (branch, wt)
     return result
 
 
-def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, bool], *,
-                     branch: str, base: str, owners: Sequence[Path] = ()) -> None:
+def _carried_tips(cfg: Config, groups: Mapping[tuple[str, str], list[Path]],
+                  refs: Mapping[str, tuple[str, str, bool]], carried: Mapping[str, str],
+                  batch: Collection[str] | None) -> dict[str, str | None]:
+    """The tip of each published branch ``carried`` records a head for (#633), read once
+    after fetching its checkout — None for a branch that no longer resolves (gone:
+    :func:`_gone_branch` judges it). :func:`fold` checks every target this way before it
+    merges or pushes anything, and merges exactly the tips returned.
+
+    Raises :class:`IntegrationError` for a branch whose tip no longer holds the head a fold
+    of this run put on the line (``carried[name]``), as itself or an ancestor: the branch
+    was rewritten (re-published, force-pushed, updated with a rebase), and merging its tip
+    would put the old and the rewritten commits on the line together. Decided by ancestry,
+    never by message; a git failure raises (:func:`_in_line`)."""
+    tips: dict[str, str | None] = {}
+    for (repo_spec, base), bundles in sorted(groups.items()):
+        mine = [d for d in bundles if d.name in carried]
+        if not mine:
+            continue
+        repo = publish._checkout_path(cfg, repo_spec)
+        _fetch(repo, cfg.base_remote, [refs[d.name][0] for d in mine])
+        line = integration_branch(cfg, base, batch)
+        for d in mine:
+            ref, took = refs[d.name][1], carried[d.name]
+            tip = tips[d.name] = _rev(repo, ref)
+            if tip is None or tip == took or _in_line(
+                    repo, took, f"{d.name}'s carried head {took[:12]}", ref, of=tip):
+                continue
+            raise IntegrationError(
+                f"{d.name}'s branch {ref} was rewritten after this run folded it onto "
+                f"{line}: it is now at {tip[:12]}, which does not contain {took[:12]}, the "
+                f"commit the line took from it. A re-publish (`pdca publish` force-pushes), "
+                f"a force-push or \"Update with rebase\" does this. Only commits that extend "
+                f"a carried branch reach the line (a fast-forward, such as GitHub's "
+                f"merge-style \"Update branch\"): merging {tip[:12]} would put the old and "
+                f"the rewritten commits on {line} together. Nothing was merged or pushed. "
+                f"Restore {ref} to {took[:12]} or a commit that contains it, then re-issue "
+                f"the run; or let this run stop and re-issue it")
+    return tips
+
+
+def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, bool],
+                     head: str | None, *, branch: str, base: str,
+                     owners: Sequence[Path] = ()) -> None:
     """Merge bundle ``d``'s published branch onto the line checked out in ``wt`` (#593):
-    its own commits, joined by a signed-off merge commit — not a re-applied copy. The
-    branch's CURRENT tip is merged, so commits pushed onto it after an earlier fold carried
-    it reach the line too. ``owners``: the bundles a refusal to take the base in may name
-    (:func:`_take_in_base`)."""
+    its own commits, joined by a signed-off merge commit — not a re-applied copy. ``head``
+    is the branch's tip as :func:`fold` read it — None: it does not resolve (gone). It is
+    the CURRENT tip, so commits pushed onto the branch after an earlier fold carried it
+    reach the line too; for a branch the run carried, the tip checked to extend what the
+    line took from it (:func:`_carried_tips`, #633). ``owners``: the bundles a refusal to
+    take the base in may name (:func:`_take_in_base`)."""
     _remote, ref, onto = published
-    head = _rev(wt, ref)
     if head is None:
         _gone_branch(cfg, wt, d, ref, onto, branch=branch, base=base, owners=owners)
         return
