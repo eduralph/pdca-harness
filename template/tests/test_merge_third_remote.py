@@ -131,7 +131,7 @@ class ThirdRemoteHead(unittest.TestCase):
             return ok
         raise AssertionError(f"unexpected gh call: {cmd}")
 
-    def _wait(self, pr_url, wait_secs, *, spent=0):
+    def _wait(self, pr_url, wait_secs, *, spent=0, expected=()):
         self.waited.append(self.head)
         return self.verdict
 
