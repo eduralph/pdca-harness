@@ -821,6 +821,8 @@ class _Host:
             remote, _, branch = args[-1].removesuffix("^{commit}").partition("/")
             sha = self.tracking.get(remote) if branch == "main" else None
             return _res(out=sha + "\n") if sha else _res(1)
+        if args[:2] == ["cat-file", "-e"]:               # #650: is the head here at all?
+            return _res(0 if args[2] in self.local else 1)
         if args[:2] == ["merge-base", "--is-ancestor"]:
             tip, head = args[2:4]
             if self.git_breaks:
