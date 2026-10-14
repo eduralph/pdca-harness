@@ -403,14 +403,23 @@ def publish(
     pr_failed = False
     if open_pr:
         print("→ gh pr create --draft …")
-        r = subprocess.run(pr_cmd, capture_output=True, text=True)
+        # The branch is already on origin, so a `gh pr create` that RAISES (`gh` not
+        # installed: FileNotFoundError, or anything else) is a failure after the push,
+        # exactly like an rc-1 one (#632): take the same path — record the pushed branch
+        # with an empty pr_url, return 1 — so the flow and the fold count it as pushed.
+        try:
+            r = subprocess.run(pr_cmd, capture_output=True, text=True)
+        except Exception as exc:  # noqa: BLE001 — any raise here comes after the push
+            r = subprocess.CompletedProcess(pr_cmd, 1, "",
+                                            f"{type(exc).__name__}: {exc}")
         out = (r.stdout or "").strip()
         if r.returncode != 0:
             pr_failed = True
             print(r.stderr, file=sys.stderr)
-            print("\n!!! publish: branch pushed, but `gh pr create` FAILED — "
-                  "no draft PR was opened.\n"
-                  "    Open it by hand, then re-run if needed. This is NOT done.\n",
+            print(f"\n!!! publish: branch {branch} is pushed to origin, but "
+                  "`gh pr create` FAILED — no draft PR was opened.\n"
+                  f"    Open the draft PR by hand, or re-run `pdca publish {issue_id}`. "
+                  "This is NOT done.\n",
                   file=sys.stderr)
         else:
             print(out)

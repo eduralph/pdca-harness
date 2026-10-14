@@ -40,7 +40,10 @@ time. A ``green`` read is confirmed once before it is believed (issue #582): the
 lists only the checks registered so far, so a fast check that passed can read green while
 a slow job has not reported yet. The wait re-reads one full poll interval later and merges
 only if that read is green too; a green seen with less than a poll interval of budget left
-to confirm it refuses as pending.
+to confirm it refuses as pending. The confirm read must also list the same checks as the
+green it confirms (issue #621), and ``[driver].expected_checks`` can name checks a complete
+rollup must contain: a green read missing one counts as pending. With nothing declared, a
+slow job that registers more than a poll interval after the fast ones still gets through.
 Whichever way ``_merge_one`` declines to merge a PR it already readied — the rollup
 never resolving green, a failing ``gh pr merge`` — ``_undo_ready`` marks it back to draft
 (``gh pr ready --undo``) before returning, so a stopped wave never leaves a PR advertising
@@ -69,6 +72,15 @@ between the last read and the host executing the merge is a gap no client can cl
 ``strict`` host refuses that merge, a non-strict one would merge it.
 ``merge_requires = "required"`` (trust the host's protection) is unchanged: no base read,
 no update, no pin.
+
+The head ``_base_read`` asks about lives where publish pushed the PR's branch, and that is
+not always ``base_remote`` or ``origin`` (issue #650): an ``Onto branch`` bundle's
+``"stacked"`` record names the remote it pushed to, which may be a third one. So the fetch
+covers that remote too, read from the record as the fold reads it
+(``integrate._published_ref``), and a head commit the fetches still did not bring in is
+refused by name (``_have``) — with the remotes fetched and where the record puts the
+branch, not a guess at why — instead of being left to ``git merge-base`` to fail on with a
+bare exit 128.
 """
 
 from __future__ import annotations
@@ -79,7 +91,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import merged, publish, state
+from . import integrate, merged, publish, state
 from .config import Config
 
 # Patchable indirection so a test can drive the wait loop below with no real wall-clock
@@ -108,9 +120,12 @@ def merge_wave(cfg: Config, bundles: list[Path], *, dry_run: bool = False,
     return 0
 
 
-def _check_rollup(pr_url: str) -> tuple[str, str]:
+def _check_rollup(pr_url: str) -> tuple[str, str, tuple[str, ...]]:
     """Classify PR ``pr_url``'s FULL check rollup (issue #413). Returns
-    ``(verdict, detail)``; only ``"green"`` may merge.
+    ``(verdict, detail, names)``; only ``"green"`` may merge. ``names`` (issue #621) is the
+    sorted name of every check the read reported, one entry per check (so a name listed
+    twice appears twice), or ``()`` when no list was read; ``_wait_for_green`` compares it
+    between a green and its confirm read and checks the declared checks against it.
 
     * ``"green"``      — every reported check completed without failing (pass, or
       skipped/neutral); ``detail`` counts what was verified, for the run log.
@@ -140,37 +155,55 @@ def _check_rollup(pr_url: str) -> tuple[str, str]:
         # refuse under the default, so a gh that reworded the message costs a message, not
         # a wrong merge.
         if r.returncode == 0 or "no checks reported" in err.lower():
-            return "empty", err or "no checks reported"
-        return "unreadable", err or f"`gh pr checks` exited {r.returncode}"
+            return "empty", err or "no checks reported", ()
+        return "unreadable", err or f"`gh pr checks` exited {r.returncode}", ()
     try:
         checks = json.loads(out)
     except ValueError:
-        return "unreadable", f"unparsable `gh pr checks` output: {out[:200]}"
+        return "unreadable", f"unparsable `gh pr checks` output: {out[:200]}", ()
     if not isinstance(checks, list):
-        return "unreadable", f"unexpected `gh pr checks` payload: {out[:200]}"
+        return "unreadable", f"unexpected `gh pr checks` payload: {out[:200]}", ()
     if not checks:
-        return "empty", "no checks reported"
+        return "empty", "no checks reported", ()
+    names = tuple(sorted(_name(c) for c in checks))
     failing = [c for c in checks if _bucket(c) not in _ROLLUP_OK | _ROLLUP_PENDING]
     if failing:
-        return "failing", _names(failing)
+        return "failing", _names(failing), names
     waiting = [c for c in checks if _bucket(c) in _ROLLUP_PENDING]
     if waiting:
-        return "pending", _names(waiting)
-    return "green", f"{len(checks)} check{'' if len(checks) == 1 else 's'}"
+        return "pending", _names(waiting), names
+    return "green", f"{len(checks)} check{'' if len(checks) == 1 else 's'}", names
 
 
 def _bucket(check: object) -> str:
     return str(check.get("bucket") or "") if isinstance(check, dict) else ""
 
 
+def _name(check: object) -> str:
+    return str((check.get("name") if isinstance(check, dict) else None) or "?")
+
+
 def _names(checks: list) -> str:
-    return ", ".join(
-        f"{(c.get('name') if isinstance(c, dict) else None) or '?'} ({_bucket(c) or '?'})"
-        for c in checks)
+    return ", ".join(f"{_name(c)} ({_bucket(c) or '?'})" for c in checks)
+
+
+def _read_rollup(pr_url: str, expected: tuple[str, ...]) -> tuple[str, str, tuple[str, ...]]:
+    """``_check_rollup``, then the declared checks (issue #621, ``[driver].expected_checks``):
+    a green read that lacks any name in ``expected`` is not the complete rollup, so it is
+    returned as ``pending``, naming what is missing. A declared check that reported counts
+    when the read is green, i.e. it passed or was skipped/neutral (``_ROLLUP_OK``)."""
+    verdict, detail, names = _check_rollup(pr_url)
+    if verdict == "green":
+        missing = [n for n in expected if n not in names]
+        if missing:
+            return "pending", (f"expected check{'' if len(missing) == 1 else 's'} "
+                               f"{', '.join(missing)} not reported yet ({detail} "
+                               "reported)"), names
+    return verdict, detail, names
 
 
 def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15,
-                    spent: int = 0) -> tuple[str, str]:
+                    spent: int = 0, expected: tuple[str, ...] = ()) -> tuple[str, str]:
     """Re-read ``pr_url``'s check rollup (``_check_rollup``) until it clears ``pending``/
     ``empty`` or ``wait_secs`` of (patchable) wall-clock time is exhausted (issue #462).
     Returns the final ``(verdict, detail)`` — this never itself decides to merge.
@@ -189,16 +222,23 @@ def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15,
     ``empty`` goes back into the wait; ``failing``/``unreadable`` is returned at once. The
     confirm is never shortened to fit the budget: a green first seen with less than one
     poll interval of budget left is returned as ``pending`` (fail-closed), with a detail
-    that says so — so a ``wait_secs`` below ``poll_interval`` never returns ``green``. This
-    compares verdicts only, not check names: a slow job that has not registered within one
-    poll interval still gets through.
+    that says so — so a ``wait_secs`` below ``poll_interval`` never returns ``green``.
 
-    ``wait_secs <= 0`` performs exactly one read and returns its verdict as-is: the
-    original behaviour, for a host whose checks are known to already be in by the time the
-    wave boundary fires. Sleeps go through the module-level ``_sleep`` so a test can make
-    the whole loop cost no real time; their sum never exceeds ``wait_secs``.
+    The confirm compares check NAMES too (issue #621): it confirms only if it lists the
+    same checks as the green it confirms, each name as many times. A green confirm read
+    with a different set is itself a new first green, confirmed one poll interval later.
+    ``expected`` (``[driver].expected_checks``) names checks a complete rollup must
+    contain; a green read missing one reads as ``pending`` (``_read_rollup``), so the wait
+    goes on until it registers. Without ``expected`` the harness cannot know about a slow
+    job that has not registered within one poll interval: that one still gets through.
+
+    ``wait_secs <= 0`` performs exactly one read and returns its verdict as-is (a missing
+    declared check still reads as ``pending``): the original behaviour, for a host whose
+    checks are known to already be in by the time the wave boundary fires. Sleeps go
+    through the module-level ``_sleep`` so a test can make the whole loop cost no real
+    time; their sum never exceeds ``wait_secs``.
     """
-    verdict, detail = _check_rollup(pr_url)
+    verdict, detail, names = _read_rollup(pr_url, expected)
     if wait_secs <= 0:
         return verdict, detail
     waited = spent
@@ -207,7 +247,7 @@ def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15,
             step = min(poll_interval, wait_secs - waited)
             _sleep(step)
             waited += step
-            verdict, detail = _check_rollup(pr_url)
+            verdict, detail, names = _read_rollup(pr_url, expected)
         if verdict != "green":
             return verdict, detail
         # Confirm a full poll interval later or not at all: a re-read squeezed into what is
@@ -219,9 +259,12 @@ def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15,
                                f"little to confirm it {poll_interval}s later ({detail})")
         _sleep(poll_interval)
         waited += poll_interval
-        verdict, detail = _check_rollup(pr_url)
-        if verdict == "green":
+        first = names
+        verdict, detail, names = _read_rollup(pr_url, expected)
+        if verdict == "green" and names == first:
             return verdict, detail
+        # A green over a different set of checks confirms nothing (issue #621): it is a new
+        # first green, and the loop above confirms it in turn (or refuses for lack of budget).
 
 
 def _pr_head(pr_url: str) -> tuple[str, str, str]:
@@ -253,14 +296,51 @@ def _git_failed(repo: Path, what: str, r: subprocess.CompletedProcess) -> str:
             f"({tail[-1] if tail else 'no output'})")
 
 
-def _fetch(cfg: Config, repo: Path) -> str:
-    """Fetch the PR's base (``base_remote``) and its branch (``origin``, where publish
-    pushed it — the same remote on an own-repo checkout) into ``repo``. "" or why not."""
-    for remote in dict.fromkeys((cfg.base_remote, "origin")):
+def _remotes(cfg: Config, pub: tuple[str, str, bool] | None) -> tuple[str, ...]:
+    """The remotes to fetch before reading a PR's head against its base: its base
+    (``base_remote``), ``origin``, and the remote its branch is on per its publish record
+    (issue #650). ``pub`` is that record as the fold reads it (``integrate._published_ref``:
+    ``(remote, ref, onto)``, or None when it names no remote). Deduplicated, in that order,
+    so a ``new-pr`` / ``stacked-pr`` record (``origin``) or one naming no remote fetches
+    exactly the base remote and ``origin``, as before; an ``Onto branch`` record's remote,
+    possibly a third one, comes last."""
+    return tuple(dict.fromkeys((cfg.base_remote, "origin", *(pub[:1] if pub else ()))))
+
+
+def _fetch(cfg: Config, repo: Path, pub: tuple[str, str, bool] | None) -> str:
+    """Fetch the PR's base (``base_remote``), ``origin`` and the remote its publish record
+    ``pub`` puts its branch on (``_remotes``) into ``repo``. "" or why not: a fetch that
+    fails, the record's own remote's included, is a refusal."""
+    for remote in _remotes(cfg, pub):
         r = _git(repo, "fetch", remote)
         if r.returncode != 0:
             return _git_failed(repo, f"fetch {remote}", r)
     return ""
+
+
+def _have(cfg: Config, repo: Path, pub: tuple[str, str, bool] | None, head: str) -> str:
+    """"" when the checkout ``repo`` holds commit ``head`` after ``_fetch``; otherwise why
+    not (issue #650), so a missing head is refused by name rather than left to ``git
+    merge-base`` to fail on with a bare exit 128. ``git cat-file -e`` exits 1 for an object
+    the checkout does not have; any other failure is git failing and is said as such.
+
+    The refusal states only what was checked: the commit, the checkout, the remotes
+    fetched, and either where the publish record ``pub`` puts the branch (that remote was
+    fetched and did not bring the commit in) or that the record names no remote. It never
+    guesses why. A fetch refspec that leaves the branch out, a branch moved after the host
+    reported its head, and a record naming the wrong remote all look the same from here."""
+    r = _git(repo, "cat-file", "-e", head)
+    if r.returncode == 0:
+        return ""
+    if r.returncode != 1:
+        return _git_failed(repo, f"cat-file -e {head[:12]}", r)
+    why = (f"its head commit {head} is not in the checkout {repo} after fetching "
+           f"{', '.join(_remotes(cfg, pub))}")
+    if pub is None:
+        return (f"{why}; its publish record does not say which remote its branch is on, "
+                "so no other remote was fetched")
+    return (f"{why}; its publish record puts its branch at {pub[1]}, and fetching "
+            f"{pub[0]} did not bring that commit in")
 
 
 def _contains(repo: Path, tip: str, head: str) -> tuple[bool | None, str]:
@@ -273,19 +353,22 @@ def _contains(repo: Path, tip: str, head: str) -> tuple[bool | None, str]:
     return None, _git_failed(repo, f"merge-base --is-ancestor {tip[:12]} {head[:12]}", r)
 
 
-def _base_read(cfg: Config, repo: Path, pr_url: str) -> tuple[str, str, bool | None, str]:
+def _base_read(cfg: Config, repo: Path, pub: tuple[str, str, bool] | None,
+               pr_url: str) -> tuple[str, str, bool | None, str]:
     """Whether PR ``pr_url``'s head lacks its base branch's current tip (issue #531), in
     plain git as ``publish._line_tip_refusal`` decides its question (#593), not by a
     host-side comparison: the head and base branch from the host (``_pr_head``), a fetch
-    into the checkout ``repo`` (``_fetch``), the base tip recorded from
-    ``<base_remote>/<base>``, then ``_contains``. Returns ``(head, tip, behind, "")``. On any
-    failure — ``gh`` unreadable, a failed fetch, a base that does not resolve, ``git
-    merge-base`` exiting other than 0/1 — ``behind`` is None and the last item says why:
-    the caller refuses, fail-closed, and never guesses "up to date"."""
+    into the checkout ``repo`` (``_fetch``, which reads where the branch is from the publish
+    record ``pub``, #650), the base tip recorded from ``<base_remote>/<base>``, a check
+    that the head is in the checkout (``_have``), then ``_contains``. Returns ``(head, tip,
+    behind, "")``. On any failure — ``gh`` unreadable, a failed fetch, a base that does not
+    resolve, a head the fetches did not bring in, ``git merge-base`` exiting other than 0/1
+    — ``behind`` is None and the last item says why: the caller refuses, fail-closed, and
+    never guesses "up to date"."""
     head, base, why = _pr_head(pr_url)
     if not head:
         return "", "", None, why
-    why = _fetch(cfg, repo)
+    why = _fetch(cfg, repo, pub)
     if why:
         return head, "", None, why
     ref = f"{cfg.base_remote}/{base}"
@@ -294,24 +377,29 @@ def _base_read(cfg: Config, repo: Path, pr_url: str) -> tuple[str, str, bool | N
     if r.returncode != 0 or not tip:
         return head, "", None, (f"its base {ref} does not resolve in {repo} after the "
                                 f"fetch (`git rev-parse` exited {r.returncode})")
+    why = _have(cfg, repo, pub, head)
+    if why:
+        return head, tip, None, why
     contains, why = _contains(repo, tip, head)
     if contains is None:
         return head, tip, None, why
     return head, tip, not contains, ""
 
 
-def _wait_for_update(cfg: Config, repo: Path, pr_url: str, stale: str, tip: str,
-                     wait_secs: int, *, poll_interval: int = 5) -> tuple[str, int, str]:
+def _wait_for_update(cfg: Config, repo: Path, pub: tuple[str, str, bool] | None,
+                     pr_url: str, stale: str, tip: str, wait_secs: int, *,
+                     poll_interval: int = 5) -> tuple[str, int, str]:
     """Wait for ``gh pr update-branch`` to land on PR ``pr_url`` (issue #531). GitHub may
     apply the update after the command returns, so a read straight after it can still see
     the old head ``stale``: re-read the head (``_pr_head``) until it contains the recorded
-    base tip ``tip`` (``_fetch`` + ``_contains``) or ``wait_secs`` of (patchable)
-    wall-clock time is spent. Returns ``(head, waited, "")`` for the first head that
-    contains ``tip`` — ``waited`` is then charged to the rollup wait
-    (``_wait_for_green(spent=waited)``) — or ``("", waited, why)`` to refuse: the bound ran
-    out, or a read failed (``gh`` unreadable, a failed fetch, ``git merge-base`` exiting
-    other than 0/1). Only a head not seen before is fetched and checked. ``wait_secs <=
-    0`` reads once; the sleeps go through ``_sleep`` and never sum past ``wait_secs``."""
+    base tip ``tip`` (``_fetch`` of the remotes the publish record ``pub`` names, #650, +
+    ``_have`` + ``_contains``) or ``wait_secs`` of (patchable) wall-clock time is spent.
+    Returns ``(head, waited, "")`` for the first head that contains ``tip`` — ``waited`` is
+    then charged to the rollup wait (``_wait_for_green(spent=waited)``) — or ``("", waited,
+    why)`` to refuse: the bound ran out, or a read failed (``gh`` unreadable, a failed
+    fetch, a head the fetches did not bring in, ``git merge-base`` exiting other than 0/1).
+    Only a head not seen before is fetched and checked. ``wait_secs <= 0`` reads once; the
+    sleeps go through ``_sleep`` and never sum past ``wait_secs``."""
     waited = 0
     seen = stale
     while True:
@@ -319,7 +407,7 @@ def _wait_for_update(cfg: Config, repo: Path, pr_url: str, stale: str, tip: str,
         if not head:
             return "", waited, why
         if head != seen:
-            why = _fetch(cfg, repo)
+            why = _fetch(cfg, repo, pub) or _have(cfg, repo, pub, head)
             if why:
                 return "", waited, why
             contains, why = _contains(repo, tip, head)
@@ -386,6 +474,15 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
     iid = d.name.removeprefix("issue_")
     if merged.is_merged(cfg, iid):
         return 0  # already merged (a resumed run) — idempotent
+    # Issue #621: a malformed [driver].expected_checks fails closed. Config.load keeps the
+    # list empty and records why; merging on that empty list would be the weakest reading
+    # of a setting the operator wrote to be stricter. Refused before the ready-mark, so the
+    # PR stays a draft with nothing to undo.
+    if cfg.expected_checks_error:
+        print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — "
+              f"{cfg.expected_checks_error}. STOP: later waves are NOT run; fix the setting "
+              "in pdca.toml, then re-run (the run resumes idempotently).\n", file=sys.stderr)
+        return 1
 
     # The publisher opens every PR as a draft (STOP discipline), but `gh pr merge` refuses a
     # draft — so in merge mode a non-final wave's PRs must be readied before they can advance
@@ -421,7 +518,11 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
             return _refuse(d, pr_url, "its publish record names no repo, so there is no "
                                       "checkout to read its base in")
         repo = publish._checkout_path(cfg, repo_spec)
-        head, tip, behind, why = _base_read(cfg, repo, str(pr_url))
+        # Issue #650: the head is read where publish put the branch. An `Onto branch`
+        # bundle's `"stacked"` record names that remote and it may be neither the base
+        # remote nor `origin`, so read the record as the fold does and fetch it too.
+        pub = integrate._published_ref(d)
+        head, tip, behind, why = _base_read(cfg, repo, pub, str(pr_url))
         if behind is None:
             return _refuse(d, pr_url, why)
         waited = 0
@@ -437,7 +538,7 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
                                "base, the update refused, or a `gh` too old for it)")
             # GitHub may apply the update after the command returns: poll for it, charged
             # to the same merge_wait_secs budget the rollup wait below then gets.
-            head, waited, why = _wait_for_update(cfg, repo, str(pr_url), head, tip,
+            head, waited, why = _wait_for_update(cfg, repo, pub, str(pr_url), head, tip,
                                                  cfg.merge_wait_secs)
             if not head:
                 return _refuse(d, pr_url, why)
@@ -448,7 +549,10 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
         # A wave boundary fires seconds after the PR opened (issue #462), so the first read
         # is routinely pending/empty — not a verdict yet. Wait for it to resolve, bounded by
         # [driver].merge_wait_secs, before treating an unresolved rollup as a refusal.
-        verdict, detail = _wait_for_green(str(pr_url), cfg.merge_wait_secs, spent=waited)
+        # Issue #621: the green must also be the complete rollup — every declared check in
+        # it, and a confirm read over the same checks.
+        verdict, detail = _wait_for_green(str(pr_url), cfg.merge_wait_secs, spent=waited,
+                                          expected=cfg.expected_checks)
         if verdict != "green":
             why = {
                 "failing": f"a check is FAILING — {detail}",
@@ -473,7 +577,7 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
         # base again: the head must be the one read before the wait (the green rollup is
         # then that head's) and must still contain its base's tip. The merge is pinned to
         # it, so a head that changes after this read is refused by the host, not merged.
-        after, _, behind, why = _base_read(cfg, repo, str(pr_url))
+        after, _, behind, why = _base_read(cfg, repo, pub, str(pr_url))
         if behind is None:
             return _refuse(d, pr_url, why)
         if after != head:

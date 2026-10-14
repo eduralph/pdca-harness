@@ -668,7 +668,11 @@ wave builds on, via `[driver].wave_mode`:
   that has it already carries the PR; one that does not (say a fixup was pushed
   after the fold) merges your base in, after checking that your base has that
   commit. If it does not (the PR merged into another branch, or was squashed or
-  rebased), the run stops rather than build the next wave without that work. An
+  rebased), the run stops rather than build the next wave without that work. It
+  also stops, naming the bundle, when merging your base in would undo work a
+  bundle put on the line (say your base reverted a merged PR, so a file the
+  bundle added would disappear); a base that only edits such a file is merged
+  in as usual. An
   accepted bundle whose publish pushed no branch holds only the bundles that
   depend on it; the rest of the run goes on. When you publish it later
   (`pdca publish <id>`), its PR branch is cut from the line commit it was built
@@ -687,9 +691,16 @@ wave builds on, via `[driver].wave_mode`:
   its PR is open (or merged, with its head already on your base or the line), it
   merges onto the line without error, and, with `[driver].regate_between_waves`,
   the carried line's re-gate is not red. A finished prerequisite that is not
-  clean holds only the bundles whose plain `Depends on` names it, and is named
-  on one line with the reason and what to do; the rest of the run goes on. If
-  the line on origin holds a commit the run cannot account for, nothing is
+  clean holds the bundles whose plain `Depends on` names it, and is named on one
+  line with the reason and what to do; the rest of the run goes on. One judged
+  not clean before the fold, from its PR state and head, also holds the finished
+  prerequisites built on it (their plain `Depends on` names it, directly or
+  through others), since their branches carry its work: none of them is carried
+  or accounts for a commit on the line, and the bundles that depend on them are
+  held, each named on one line with the cause. A prerequisite whose merge fails
+  only during the fold does not hold the finished prerequisites built on it: one
+  that merges in the same fold is still carried, with the failed one's commits.
+  If the line on origin holds a commit the run cannot account for, nothing is
   carried onto it and those bundles are held: delete that line on origin
   (unless the run's own fold already replaced it) and re-issue. A line the run
   did not carry onto is still replaced by its first fold, as above. Known limits,
@@ -728,6 +739,13 @@ wave builds on, via `[driver].wave_mode`:
   at all; `gh pr merge` alone would only refuse what *this host* marks required in
   branch protection, so without that read a thin protection config lets the next
   wave build on a base that never went green.
+  A green read is confirmed by a second read one poll interval later, and that
+  read must list the same checks (each name as many times), so a rollup whose
+  set of checks changed in between is not a confirmation. The rollup lists only
+  the checks registered so far, so a slow job that has not registered yet cannot
+  be seen: name such checks in `[driver].expected_checks` and a green read that
+  lacks one counts as still running. With nothing declared (the default), a job
+  that registers more than a poll interval late still gets through.
   A rollup only describes the head it ran on, so the driver first checks in git
   whether the PR's head is behind its base (an earlier PR of the same wave just
   merged): `git merge-base --is-ancestor` after a fetch. If it is, the driver

@@ -863,7 +863,39 @@ _CARRY_HINTS = {
     "edge": "remove the `Depends on: {iid}` edge from the dependent's brief, then re-issue",
     "line": "delete {line} on origin unless this run's own fold already replaced it, then "
             "re-issue",
+    "built_on": "{name} was built on {cause}, which is not carried (see its line): get "
+                "{cause} carried, or re-drive {name} on a base without it, then re-issue",
 }
+
+
+def _cascade_not_clean(cfg: Config, ids: list[Path],
+                       why: dict[str, tuple[str, str]]) -> dict[str, str]:
+    """Spread "not clean" along the plain ``Depends on`` edges between one target's finished
+    ``ids``, as judged before the fold (#652). A finished id whose brief names a not-clean
+    one (in ``why``) was built on it, so its branch carries that work: it is not clean
+    either, through any number of finished ids. Each one goes into ``why`` with the
+    ``built_on`` hint. Returns name → the not-clean id its ``Depends on`` names (the cause
+    its held line gives). An edge to an id outside ``ids`` is not followed, and neither is
+    a ``Stacks on`` or ``Depends on (merged)`` edge."""
+    names = {d.name for d in ids}
+    prereqs: dict[str, list[str]] = {}
+    for d in ids:
+        bp = d / "brief.md"
+        prereqs[d.name] = [cfg.bundle(dep).name for dep in
+                           (brief.depends_on(bp) if bp.exists() else [])
+                           if cfg.bundle(dep).name in names]
+    causes: dict[str, str] = {}
+    grew = True
+    while grew:                     # to a fixed point: a chain of any length, in any order
+        grew = False
+        for d in ids:
+            cause = next((n for n in prereqs[d.name] if n in why), None)
+            if cause and d.name not in why:
+                why[d.name] = (f"its `Depends on` names {cause}, whose work its branch "
+                               f"carries", "built_on")
+                causes[d.name] = cause
+                grew = True
+    return causes
 
 
 def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
@@ -880,9 +912,15 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
     by ONE fold per target (:func:`_fold_lines`), which continues origin's line from the
     tip checked here (no force; refused if it moved) or starts it when absent. The target
     is then seeded into ``integ`` / ``folded_tips``: wave 0 is pointed at the line and every
-    later fold continues it. Any other finished id goes into ``held``, so only its plain
+    later fold continues it. Any other finished id goes into ``held``, so its plain
     ``Depends on`` dependents wait (:func:`_runnable`), named with its reason on ONE stderr
-    line; the run goes on. A target the carry did not put to use is not seeded, so the
+    line; the run goes on. One judged not clean BEFORE the fold, from its PR state and head,
+    makes every finished id built on it not clean too — its plain ``Depends on`` names it,
+    directly or through others, so its branch carries that work (:func:`_cascade_not_clean`,
+    #652): none of them is folded or accounts for a commit on origin's line, and their
+    dependents wait too, each named with the cause. One whose merge fails only DURING the
+    fold does not spread: its work still reaches the line through a finished id built on it
+    that merges in the same fold. A target the carry did not put to use is not seeded, so the
     run's first fold of it starts fresh, as today. A dry-run (stub publisher) asks no host
     and holds nothing: it prints the plan. A prerequisite that is no requested id, such as
     a split child an earlier run adopted, is not carried: :func:`_runnable` holds its plain
@@ -905,6 +943,7 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
             continue
         why: dict[str, tuple[str, str]] = {}    # not clean: name → (reason, hint)
         heads: dict[str, str] = {}              # state-clean: name → its PR head
+        causes: dict[str, str] = {}             # built on a not-clean id: name → that id
         base_ref, tip, bad = f"{cfg.base_remote}/{tgt[1]}", None, None
         try:
             repo, tip = integrate.carry_view(cfg, tgt[0], line, [
@@ -918,12 +957,17 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
                     heads[d.name] = v
                 else:
                     why[d.name] = v
-            bad = integrate.foreign_commit(repo, tip, base_ref, heads.values()) if tip else None
+            # One built on a not-clean id carries its work (#652): not clean either, so its
+            # head accounts for nothing on origin's line.
+            causes = _cascade_not_clean(cfg, ids, why)
+            bad = integrate.foreign_commit(repo, tip, base_ref, [
+                h for n, h in heads.items() if n not in why]) if tip else None
         except integrate.IntegrationError as exc:
             why = {d.name: (str(exc), "open") for d in ids}
         if bad:   # an untrusted line: carry nothing onto it, point nothing at it
             why = {d.name: (f"origin's {line} holds {bad[:12]}, which neither {base_ref} nor "
-                            f"a finished prerequisite's PR accounts for", "line") for d in ids}
+                            f"a clean finished prerequisite's PR accounts for", "line")
+                   for d in ids}
         clean = [d for d in ids if d.name not in why]
         if clean:
             skipped: dict[str, str] = {}
@@ -949,7 +993,8 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
                 held.add(d.name)
                 reason, hint = why[d.name]
                 advice = _CARRY_HINTS[hint].format(name=d.name, line=line,
-                                                   iid=d.name.removeprefix("issue_"))
+                                                   iid=d.name.removeprefix("issue_"),
+                                                   cause=causes.get(d.name, ""))
                 print(f"flow: {d.name} (finished in an earlier run) is not carried onto "
                       f"{line}: {reason} — holding "
                       f"{', '.join(dependents.get(d.name, [])) or 'no bundle'} this run; "
