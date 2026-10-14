@@ -379,8 +379,8 @@ def _maybe_auto_iterate(
     rerun = sum(1 for item in items if item.no_verdict)
     deferred = (f"; {held} finding(s) needing human judgment deferred to handover "
                 f"({autoiterate.DEFERRED_FILE})" if held else "")
-    rechecked = (f"; {rerun} review/gate row(s) with no verdict left for the next Check to "
-                 "re-run" if rerun else "")
+    rechecked = (f"; {rerun} row(s) about this Check's own run left for the next Check to "
+                 "re-check" if rerun else "")
     print(f"flow: {d.name} — auto-iterate {spent + 1}/{cfg.max_auto_iters}: rebuilding for "
           f"{impl} implementation-level finding(s){deferred}{rechecked}", file=sys.stderr)
     return _apply_decision(cfg, d, by="auto-iterate", today=today,
