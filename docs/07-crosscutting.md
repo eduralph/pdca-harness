@@ -663,7 +663,12 @@ wave builds on, via `[driver].wave_mode`:
   the old `pdca-integration/<base>-r<key>` first, or allow force-pushes on
   `pdca-integration/*`), and later folds continue it without force — and stop
   the run if something else moved it. Commits pushed onto a stack PR's branch after
-  a fold carried it reach the line at the next fold. If a PR merges and its
+  a fold carried it reach the line at the next fold only when they extend it (a
+  fast-forward; GitHub's merge-style "Update branch" is one). If the branch was
+  rewritten instead (re-published with `pdca publish`, force-pushed, or updated
+  with "Update with rebase"), the next fold stops the run before it merges or
+  pushes anything. Restore the branch so it contains what the line took from it
+  and re-issue the run, or let the run stop and re-issue it. If a PR merges and its
   branch is deleted, the fold looks up the commit the PR merged with: a line
   that has it already carries the PR; one that does not (say a fixup was pushed
   after the fold) merges your base in, after checking that your base has that
