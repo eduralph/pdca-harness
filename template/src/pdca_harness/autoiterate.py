@@ -21,9 +21,11 @@ stopped the loop in practice: auto-iterate fired on 31 of 230 eligible-checked a
 (13.5%), because one situational HUMAN row beside any number of build defects declined the
 round. A set with NO implementation work — an empty §6, or HUMAN items only — still halts at
 once: there is nothing for a rebuild to address. One kind of HUMAN row is not deferred: a
-review or a gate that gave NO verdict this round (``NeedsHumanItem.no_verdict``). The next
-Check runs them again, so its §6 carries that row exactly while the failure lasts, and a
-failure that has recovered never needs clearing by hand at handover.
+row about this Check's own run (``NeedsHumanItem.no_verdict``) — a review or a gate that
+gave NO verdict this round, or the note that its advisory selection could not be
+decorrelated from the builder (#605). The next Check runs the review, the gates and the
+selection again, so its §6 carries that row exactly while the problem lasts, and a problem
+that has gone never needs clearing by hand at handover.
 
 Exactly two things stop the loop while implementation work remains, and neither is new:
 
@@ -304,13 +306,14 @@ def deferrable(items: list[NeedsHumanItem]) -> list[str]:
     are the round's work, not a deferral, and STANDING is emitted every cycle whatever the
     reviewer found — neither is held.
 
-    Nor is a ``no_verdict`` row — a review or a gate that gave no verdict this round (the
-    review missing or a placeholder, an advisory leaf's placeholder, a gate that could not
-    run). It reports on this Check's own run, not on the patch, and every Check runs the
-    review and the gates again, so the next Check's §6 carries the row exactly while the
-    problem lasts and drops it once it has recovered. Held instead, a failure that had since
-    recovered would still come back at handover for the human to clear by hand — the human
-    ruled it must not (#409 sign-off).
+    Nor is a ``no_verdict`` row — a row about this Check's own run, not the patch: a review
+    or a gate that gave no verdict this round (the review missing or a placeholder, an
+    advisory leaf's placeholder, a gate that could not run), or the note that this Check's
+    advisory selection could not be decorrelated from the builder (#605). Every Check runs
+    the review, the advisory selection and the gates again, so the next Check's §6 carries
+    the row exactly while the problem lasts and drops it once it has gone. Held instead, a
+    problem that had since gone would still come back at handover for the human to clear by
+    hand — the human ruled it must not (#409 sign-off).
 
     The one definition :func:`defer` records, and :func:`rationale` and the flow's notice
     count, so neither can report a finding held that the ledger does not hold.
