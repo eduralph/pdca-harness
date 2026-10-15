@@ -50,7 +50,10 @@ a PR merged somewhere else (its base edited on the host, a squash or rebase merg
 the run instead, and so does a base that would undo work already on the line (a revert of
 a merged PR, #623). A branch that does not merge cleanly (an undeclared cross-wave overlap)
 is a loud :class:`IntegrationError` that stops the run before the next wave builds on a
-broken base. Mechanics are deterministic ``git`` subprocesses (no model).
+broken base — unless its conflict is with bundles of its own wave merged before it (it
+merges cleanly onto the line as the wave found it, but not onto that line plus them): the
+flow's fold then holds just that bundle out of the line and names the bundles it conflicts
+with (``held_out``, #674). Mechanics are deterministic ``git`` subprocesses (no model).
 """
 
 from __future__ import annotations
@@ -85,6 +88,12 @@ class IntegrationTreeError(IntegrationError):
 class _LineBroken(IntegrationError):
     """The fold could not put the line back the way it was before a failed step (#623), so
     it must not go on merging and push: raised even under ``skipped``."""
+
+
+class _Conflict(IntegrationError):
+    """A published branch that does not merge cleanly onto the line. Raised by
+    :func:`_merge_published` so :func:`fold`'s ``held_out`` mode (#674) can tell a textual
+    conflict from any other failed merge."""
 
 
 def integration_branch(cfg: Config, base: str, batch: Iterable[str] | None = None) -> str:
@@ -294,6 +303,8 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
          batch: Collection[str] | None = None,
          skipped: dict[str, str] | None = None,
          carried: dict[str, str] | None = None,
+         held_out: dict[str, tuple[list[str], list[str]]] | None = None,
+         wave: Collection[str] = (),
          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
     """Fold the cumulative accepted bundles' published branches onto a per-target
     integration branch.
@@ -377,6 +388,21 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     a commit that was never checked. A gone branch is left to :func:`_gone_branch`.
     ``None`` (the pre-wave carry, a direct caller) checks and records nothing; a dry-run
     does neither.
+
+    ``held_out`` (#674, the flow's in-run folds) with ``wave``, the names of the bundles of
+    the wave just published: a bundle of ``wave`` whose branch conflicts with the line is
+    left out — recorded in place as ``held_out[name] = (partners, paths)`` — when at least
+    one bundle of ``wave`` was merged before it on this line, and its branch merges cleanly
+    onto the line as it was before the first of them but not onto that line plus them
+    (:func:`_held_by`). ``partners`` are the ones of those it conflicts with, ``paths`` the
+    conflicting files. So a bundle is judged against the bundles actually kept, in merge
+    order, never against one already held; a branch that merges cleanly is never held,
+    whatever files it shares; and one whose conflict is not with them — with earlier-wave
+    work, or with a base the line took in for a gone branch — raises, as before. Nothing
+    is pushed for a held bundle, and the caller leaves it out of its later folds.
+    The trial merges run in the integration worktree under the fold's lock and leave it
+    clean on the line. ``None`` (the carry, a direct caller): every conflict raises (or,
+    under ``skipped``, is skipped) as before; a dry-run merges nothing, so holds nothing.
     """
     candidates = _fold_candidates(accepted)
     if not candidates:
@@ -487,19 +513,35 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                                   for n in batch or ())]:
                 owners.setdefault(o.name, o)
             took: dict[str, str] = {}   # bundle name → the head this fold put on the line
+            pre: str | None = None      # the line before the wave's first merge (#674)
+            kept: list[tuple[str, str]] = []   # the wave's bundles merged so far: (name, head)
             for d in bundles:
                 # Its branch's tip, read once — a carried branch's is the one checked (#633).
                 head = checked[d.name] if d.name in checked else _rev(wt, refs[d.name][1])
+                ours = held_out is not None and d.name in wave
+                if ours and pre is None:
+                    pre = _rev(wt, "HEAD")
+                    if pre is None:
+                        raise IntegrationTreeError(f"could not read the tip of {branch} in "
+                                                   f"{wt} — check that checkout, then re-run")
                 try:
                     _merge_published(cfg, wt, d, refs[d.name], head, branch=branch, base=base,
                                      owners=tuple(owners.values()))
                 except IntegrationError as exc:
+                    if (held_out is not None and ours and kept and head is not None
+                            and pre is not None and isinstance(exc, _Conflict)):
+                        clash = _held_by(wt, branch, head, pre, kept)
+                        if clash:   # a same-wave conflict: this bundle only (#674)
+                            held_out[d.name] = clash
+                            continue
                     if skipped is None or isinstance(exc, (IntegrationTreeError, _LineBroken)):
                         raise
                     skipped[d.name] = str(exc)   # this bundle only; its merge was undone
                 else:
                     if head is not None:        # merged, or in the line already
                         took[d.name] = head
+                        if ours:
+                            kept.append((d.name, head))
             if skipped is not None and all(d.name in skipped for d in bundles):
                 continue   # nothing of this target merged: push nothing, report nothing
             # Fresh: the run's first fold of this target replaces an earlier run of the same
@@ -583,7 +625,7 @@ def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, 
     if rc == 0:
         return
     if conflicts:
-        raise IntegrationError(
+        raise _Conflict(
             f"{d.name}'s branch {ref} does not merge cleanly onto {branch} (conflicts in "
             f"{', '.join(conflicts)}) — an undeclared cross-wave overlap; declare the "
             f"conflict / re-order, then re-run")
@@ -837,6 +879,66 @@ def _merge(wt: Path, rev: str, message: str) -> tuple[int, list[str]]:
     conflicts = r.stdout.splitlines() if r.returncode == 0 else []
     _reset_tree(wt, before)   # drops MERGE_HEAD too; a no-op when the merge never started
     return rc, conflicts
+
+
+def _held_by(wt: Path, branch: str, head: str, pre: str,
+             kept: Sequence[tuple[str, str]]) -> tuple[list[str], list[str]] | None:
+    """Whether branch tip ``head``, which just failed to merge onto the line checked out in
+    ``wt``, is held for a conflict with ``kept`` — the wave's bundles already merged onto
+    ``branch``, ``(name, head)`` in merge order (#674) — and if so ``(partners, paths)``:
+    the bundles of ``kept`` it conflicts with and the files it conflicts in.
+
+    Decided on ``pre``, the line as the wave found it (before the first of them), never on
+    the line as it is now: held exactly when ``head`` merges cleanly onto ``pre`` but not
+    onto ``pre`` plus ``kept``, merged in order. None otherwise, and the fold stops on it
+    as before: a ``head`` that does not merge onto ``pre`` conflicts with earlier-wave
+    work, and one that merges onto ``pre`` plus ``kept`` conflicts with something else the
+    line took in after ``pre`` — the base, merged in for a bundle of the wave whose PR
+    merged and whose branch is gone (:func:`_take_in_base`). Neither is a conflict with
+    the bundles kept, so none of them is named. ``partners``: each bundle of ``kept`` tried
+    on its own (``pre``, then it, then ``head``) that ``head`` conflicts with; when it
+    conflicts only with several of them together, all of them. ``paths``: the files left
+    conflicting on ``pre`` plus ``kept``. The trials never move the line (:func:`_trial`)."""
+    if _trial(wt, branch, pre, [head])[0] is not None:
+        return None
+    at, paths = _trial(wt, branch, pre, [*(its for _name, its in kept), head])
+    if at != len(kept):
+        return None
+    partners = [name for name, its in kept if _trial(wt, branch, pre, [its, head])[0] == 1]
+    return (partners or [name for name, _its in kept]), paths
+
+
+def _trial(wt: Path, branch: str, onto: str,
+           revs: Sequence[str]) -> tuple[int | None, list[str]]:
+    """Merge ``revs`` one after another onto commit ``onto`` in ``wt``, as a trial (#674):
+    ``(i, paths)`` for the first that does not merge cleanly — its index and the files it
+    left conflicting — or ``(None, [])`` when all do. It runs on a detached HEAD, so
+    ``branch`` never moves, and ends with the tree back on ``branch`` at the tip it had,
+    clean (:func:`_reset_tree`): one that will not go back raises :class:`_LineBroken`. A
+    merge that fails with no conflicting path is a failed git step and raises. The caller
+    holds the worktree's lock (:func:`fold`)."""
+    tip = _rev(wt, "HEAD")
+    if tip is None:
+        raise IntegrationTreeError(f"could not read the tip of {branch} in {wt} — check that "
+                                   f"checkout, then re-run")
+    try:
+        if _git(wt, "checkout", "-q", "--detach", onto) != 0:
+            raise IntegrationTreeError(f"could not check out {onto} in {wt} to try a merge "
+                                       f"— check that checkout, then re-run")
+        for i, rev in enumerate(revs):
+            rc, conflicts = _merge(wt, rev, f"pdca-integrate: trial merge of {rev}")
+            if rc != 0 and not conflicts:
+                raise IntegrationError(
+                    f"could not try merging {rev} in {wt} — `git merge` exited {rc} with no "
+                    f"conflicting path, so a git step failed: check that checkout, then re-run")
+            if rc != 0:
+                return i, conflicts
+        return None, []
+    finally:
+        _reset_tree(wt, "HEAD")
+        if _git(wt, "checkout", "-q", branch) != 0 or _rev(wt, "HEAD") != tip:
+            raise _LineBroken(f"could not put {branch} back at {tip} in {wt} after a trial "
+                              f"merge — check that checkout, then re-run")
 
 
 def _reset_tree(wt: Path, rev: str) -> None:

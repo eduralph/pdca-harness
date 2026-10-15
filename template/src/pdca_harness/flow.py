@@ -684,6 +684,7 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
               hold_unmerged: bool = False,
               unpushed: Collection[str] = frozenset(),
               conflicts: Mapping[str, Collection[str]] | None = None,
+              conflict_held: Mapping[str, Collection[str]] | None = None,
               lines: Mapping[tuple[str, str], tuple[str, str | None]] | None = None
               ) -> list[Path]:
     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
@@ -695,7 +696,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     earlier wave), so COMPLETE is the bar. An in-batch prerequisite named in ``held``
     (bundle dir names, #593) is not ready either: it is COMPLETE, but this run pushed no
     branch of it (its texts or its publish failed before the push), so the fold has nothing
-    of it to carry — its dependents are held while the rest of the run goes on. A
+    of it to carry, or a fold held its branch out of the line for a conflict with a bundle
+    of its own wave (#674) — its dependents are held while the rest of the run goes on. A
     prerequisite **outside this batch** (a prior run's) is gated on its COMPLETE state —
     **except** an out-of-batch ``Depends on (merged)`` prereq, which keeps its stricter #107
     merge-gate (#186): nothing in *this* run carries an out-of-batch prereq's diff into the
@@ -722,8 +724,13 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     not as a prerequisite, and told to wait until that bundle's PR merges into its own
     base: a re-run's carry (:func:`_carry_finished`) starts only from a plain ``Depends
     on`` edge, never a ``Conflicts with`` one, so a re-run before then can build it on a
-    base without that work. A skipped bundle never completes, so its own dependents fall
-    out of later waves the same way (the skip cascades).
+    base without that work. ``conflict_held`` (#674) maps each bundle a fold of this run held
+    out of the line, for a conflict with bundles of its own wave, to those bundles. A bundle
+    tied by a ``Conflicts with`` edge to one of them is held the same way, for the same
+    reason — one stderr line per such bundle, naming the conflict — and waits until that
+    bundle, rebuilt on a base holding them, has its PR merged. A skipped bundle never
+    completes, so its own dependents fall out of later waves the same way (the skip
+    cascades).
 
     ``lines`` maps a target ``(repo, base)`` to the run's line for it — ``(branch, the tip
     the run recorded)`` — once the run has folded (or carried) that target: a dependent of
@@ -744,12 +751,16 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
         # A `Conflicts with` partner the fold left out (#629): its work is on no line.
         partners = (sorted(set(conflicts.get(d.name, ())) & unpushed_set)
                     if conflicts and unpushed_set else [])
+        # … or held out for a conflict with a bundle of its own wave (#674): on no line either.
+        clashed = (sorted(set(conflicts.get(d.name, ())) & set(conflict_held))
+                   if conflicts and conflict_held else [])
         bp = d / "brief.md"
         deps = waves.declared_deps(bp) if bp.exists() else []
         merged_deps = set(brief.depends_on_merged(bp)) if deps else set()
         plain_deps = set(brief.depends_on(bp)) if deps else set()
         # "Merged" means merged into d's OWN target (#647) — none usable: ("", "").
-        repo, base = publish._resolve_target(d)[:2] if deps or partners else ("", "")
+        repo, base = (publish._resolve_target(d)[:2] if deps or partners or clashed
+                      else ("", ""))
         targeted = bool(repo and base)
         unmet: list[str] = []
         unmerged: list[str] = []   # COMPLETE, but not merged into d's base: wait (#647)
@@ -823,7 +834,15 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                   f"built on a base missing it. To build it, publish them (`pdca publish "
                   f"<id>` for {ids}) and wait until their PR merges{into}, then re-run.",
                   file=sys.stderr)
-        if not unmet and not unmerged and not off_line and not partners:
+        for p in clashed:
+            into = f" into {base} ({repo})" if repo and base else ""
+            print(f"flow: {d.name} held — it `Conflicts with` {p}, which this run's fold held "
+                  f"out of the line (its change conflicts with "
+                  f"{_conflict_partners(conflict_held[p])}), so no line of this run holds that "
+                  f"work; not built on a base missing it. To build it, wait until {p} is "
+                  f"rebuilt on a base that holds {', '.join(conflict_held[p])} and its PR "
+                  f"merges{into}, then re-run.", file=sys.stderr)
+        if not unmet and not unmerged and not off_line and not partners and not clashed:
             runnable.append(d)
     return runnable
 
@@ -895,6 +914,8 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
                 folded_this_run: Mapping[tuple[str, str], str | None], batch: list[str],
                 skipped: dict[str, str] | None = None,
                 carried: dict[str, str] | None = None,
+                held_out: dict[str, tuple[list[str], list[str]]] | None = None,
+                wave: Collection[str] = (),
                 ) -> tuple[dict[tuple[str, str], tuple[str, Path | None]],
                            dict[tuple[str, str], str | None], tuple[str, str] | None]:
     """ONE :func:`integrate.fold` of ``bundles`` and, with ``[driver].regate_between_waves``,
@@ -906,7 +927,10 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
     ``carried`` is the run's record of the head each bundle's branch had when a fold of
     this run put it on the line (:func:`integrate.fold`, #633): the in-run folds pass the
     run's one mapping, so a carried branch rewritten mid-run stops the fold; the carry
-    passes none.
+    passes none. ``held_out`` / ``wave`` (#674): the in-run folds pass the wave just
+    published, so a bundle of it whose branch conflicts with ones of its own wave merged
+    before it (and not with the line as the wave found it) is left out and recorded in
+    ``held_out``, not stopped on; the carry passes none.
 
     Returns ``(folded, tips, red)``: the fold's result, each folded target's pushed tip
     (None in a dry-run, which pushes nothing), and the first target whose re-gate is red
@@ -915,7 +939,7 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
     with contextlib.ExitStack() as locks:
         folded = integrate.fold(cfg, bundles, dry_run=dry, locks=locks,
                                 folded_this_run=folded_this_run, batch=batch, skipped=skipped,
-                                carried=carried)
+                                carried=carried, held_out=held_out, wave=wave)
         tips = {tgt: integrate.pushed_tip(wt) if wt is not None else None
                 for tgt, (_branch, wt) in folded.items()}
         # hold_lock=False: the locks stack already holds each tree's lock (re-acquiring
@@ -1124,6 +1148,36 @@ def _audit_wave_overlap(wave: list[Path]) -> None:
                 print(f"flow: ⚠ {a} and {b} both touch {', '.join(sorted(shared))} but "
                       f"neither declares `Conflicts with` the other — a likely undeclared "
                       f"conflict; review before merge.", file=sys.stderr)
+
+
+def _conflict_partners(partners: Collection[str]) -> str:
+    """``issue_10's`` / ``issue_10's, issue_12's`` — whose change a held bundle's clashes with."""
+    return ", ".join(f"{p}'s" for p in partners)
+
+
+def _announce_conflict_holds(held: Mapping[str, tuple[list[str], list[str]]],
+                             names: Collection[str], k: int) -> None:
+    """One stderr line per bundle of ``names`` the wave-``k`` fold just held out of the line
+    (#674): its branch conflicts with the same-wave bundle(s) the fold merged before it,
+    named with the files. Printed before the next wave builds."""
+    for name in names:
+        partners, paths = held[name]
+        print(f"flow: {name} held out of the integration fold — its change conflicts with "
+              f"{_conflict_partners(partners)}, merged before it in the same wave {k} "
+              f"(conflicts in {', '.join(paths)}); bundles that depend on it or are its "
+              f"`Conflicts with` partners are held this run.", file=sys.stderr)
+
+
+def _report_conflict_holds(held: Mapping[str, tuple[list[str], list[str]]]) -> None:
+    """At the end of the run, one stderr line per bundle a fold held out of the line for a
+    same-wave conflict (#674), with the step to take. The ``Conflicts with`` declaration is
+    a proposal for the human: no brief is written."""
+    for name, (partners, paths) in held.items():
+        ids = ", ".join(p.removeprefix("issue_") for p in partners)
+        print(f"flow: {name} was held out of this run's integration line — its change "
+              f"conflicts with {_conflict_partners(partners)} ({', '.join(paths)}). Proposed, "
+              f"for you to confirm: declare `Conflicts with: {ids}` in {name}'s brief, then "
+              f"rebuild {name} on a base that holds {', '.join(partners)}.", file=sys.stderr)
 
 
 # Terminal: finished (COMPLETE), deliberately abandoned (DISCONTINUED), or settled in the
@@ -2239,6 +2293,11 @@ def _drive_and_act(
     # Accepted bundles the fold has no branch of to carry (#593): left out of every fold,
     # their in-batch dependents held by `_runnable`, instead of stopping the run.
     held_unpushed: set[str] = set()
+    # Accepted bundles a fold left out because their branch conflicts with a bundle of their
+    # own wave merged before it (#674): name → (those bundles, the files). Left out of every
+    # later fold, their in-batch dependents and `Conflicts with` partners held by
+    # `_runnable`, as `held_unpushed`'s are.
+    held_conflict: dict[str, tuple[list[str], list[str]]] = {}
     accepted: list[Path] = []        # cumulative COMPLETE bundles, wave then name order
     integ: dict[tuple[str, str], str] = {}  # per-target (repo, base) → integration branch (#187)
     # Per-target (repo, base) → the tip this run's last fold pushed (None in a dry-run), so
@@ -2324,13 +2383,16 @@ def _drive_and_act(
     requested = set(named) | {cfg.bundle(str(i).removeprefix("issue_")).name
                               for i in (batch or ())}
     for k, wave in enumerate(wave_list):
-        # `Conflicts with` partners of `held_unpushed` are held too (#629). The relation is
-        # read off the LIVE `bundles` each wave: an adopted split child adds its edges.
-        runnable = _runnable(cfg, wave, batch_names, held=held_unpushed | held_finished,
+        # `Conflicts with` partners of `held_unpushed` are held too (#629), and so are those
+        # of `held_conflict` (#674). The relation is read off the LIVE `bundles` each wave:
+        # an adopted split child adds its edges.
+        runnable = _runnable(cfg, wave, batch_names,
+                             held=held_unpushed | held_finished | set(held_conflict),
                              requested=requested, hold_unmerged=hold_unmerged,
                              unpushed=held_unpushed,
                              conflicts=(waves.conflict_map(cfg, bundles)
-                                        if held_unpushed else None),
+                                        if held_unpushed or held_conflict else None),
+                             conflict_held={n: ps for n, (ps, _paths) in held_conflict.items()},
                              # The line each target's bundles are cut from, if any (#655).
                              lines={tgt: (branch, folded_tips.get(tgt))
                                     for tgt, branch in integ.items()})
@@ -2462,16 +2524,26 @@ def _drive_and_act(
                                   f"are its `Conflicts with` partners are held this run.",
                                   file=sys.stderr)
                 # ONE lock scope covers fold, tip read AND re-gate (#297 review round 10),
-                # shared with the pre-wave carry (`_fold_lines`, #646).
+                # shared with the pre-wave carry (`_fold_lines`, #646). A bundle of this wave
+                # whose branch conflicts with ones of the wave the fold merged before it, not
+                # with the line the wave found, is held, not stopped on (#674): left out of
+                # this and every later fold.
+                had = set(held_conflict)
                 try:
                     folded, tips, red = _fold_lines(
-                        cfg, [d for d in accepted if d.name not in held_unpushed], dry=dry,
-                        folded_this_run=dict(folded_tips), batch=run_batch,
-                        carried=carried_heads)
+                        cfg, [d for d in accepted
+                              if d.name not in held_unpushed and d.name not in held_conflict],
+                        dry=dry, folded_this_run=dict(folded_tips), batch=run_batch,
+                        carried=carried_heads, held_out=None if dry else held_conflict,
+                        wave=[d.name for d in complete])
                 except integrate.IntegrationError as exc:
+                    _announce_conflict_holds(held_conflict,
+                                             [n for n in held_conflict if n not in had], k)
                     print(f"flow: wave {k} did not integrate ({exc}); STOPPING — "
                           f"later waves not run.", file=sys.stderr)
                     break
+                _announce_conflict_holds(held_conflict,
+                                         [n for n in held_conflict if n not in had], k)
                 # The next fold continues from exactly each pushed tip and refuses a line
                 # another run moved (#593). A dry-run pushes nothing (None).
                 folded_tips.update(tips)
@@ -2496,6 +2568,8 @@ def _drive_and_act(
     # produced is either driven by this run or named, with the command that drives it, by
     # the time it ends.
     _warn_stranded_split_children(cfg, bundles, adopt_seeds)
+    # Each bundle a fold held for a same-wave conflict, again, with the step to take (#674).
+    _report_conflict_holds(held_conflict)
     return results
 
 
