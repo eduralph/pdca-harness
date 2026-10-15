@@ -42,7 +42,13 @@ fold merges the branch's new tip. A branch a fold of the run carried that is REW
 since — re-published (``publish`` force-pushes), force-pushed, or updated with a rebase —
 no longer holds what the line took from it, so its new tip would put the old and the
 rewritten commits on the line together: the run's next fold stops before it merges or
-pushes anything (``carried``, #633). A branch deleted after its PR merged is judged by
+pushes anything (``carried``, #633). A rewrite after the run's last fold read the branch
+(during that fold, or while the last wave builds, publishes, or Act runs) has no next fold
+to stop: the run checks every branch it carried once more at its end, names each one
+rewritten and each one it could not check, and exits 1 (:func:`rewritten_carried`,
+#695). Both checks fetch while no integration lock is held, where another git process in
+the same checkout (a held ref lock) can fail the fetch once: it is tried twice before it
+counts as failed (#695). A branch deleted after its PR merged is judged by
 the head commit the host says the PR merged with (``merged.merged_head``), never by a
 commit message: a line that already has that commit skips it; one that does not (a fixup
 pushed after the fold) takes the base in, once the base is checked to have that commit —
@@ -68,6 +74,7 @@ import contextlib
 import hashlib
 import subprocess
 import sys
+import time
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
 
@@ -79,7 +86,16 @@ class IntegrationError(RuntimeError):
     """A wave's accepted work could not be folded onto the integration branch — a published
     branch does not merge cleanly (undeclared overlap), is missing, or was rewritten after
     the run carried it (#633), another run moved the line, or a git step failed. The caller
-    STOPs rather than build the next wave on an incomplete base."""
+    STOPs rather than build the next wave on an incomplete base.
+
+    ``cause`` (#695): what failed, in a few words, without the step the message tells a fold
+    to take (fix the checkout, then re-run) — for a report made outside a fold, where that
+    step is wrong (:func:`rewritten_carried`, at the end of a run that already pushed its
+    line). The whole message when the raiser gives none."""
+
+    def __init__(self, *args: object, cause: str | None = None) -> None:
+        super().__init__(*args)
+        self.cause = str(self) if cause is None else cause
 
 
 class IntegrationTreeError(IntegrationError):
@@ -684,38 +700,111 @@ def _carried_tips(cfg: Config, groups: Mapping[tuple[str, str], list[Path]],
     """The tip of each published branch ``carried`` records a head for (#633), read once
     after fetching its checkout — None for a branch that no longer resolves (gone:
     :func:`_gone_branch` judges it). :func:`fold` checks every target this way before it
-    merges or pushes anything, and merges exactly the tips returned.
+    merges or pushes anything, and merges exactly the tips returned. The fetch runs before
+    the fold takes any integration lock, so a concurrent git process in the same checkout
+    can make it fail for a reason that has nothing to do with the bundles (a ref lock):
+    it is tried twice before it raises (``attempts``, :func:`_fetch`, #695).
 
     Raises :class:`IntegrationError` for a branch whose tip no longer holds the head a fold
-    of this run put on the line (``carried[name]``), as itself or an ancestor: the branch
-    was rewritten (re-published, force-pushed, updated with a rebase), and merging its tip
-    would put the old and the rewritten commits on the line together. Decided by ancestry,
-    never by message; a git failure raises (:func:`_in_line`)."""
+    of this run put on the line (``carried[name]``), as itself or an ancestor
+    (:func:`_carried_rewrite`): the branch was rewritten (re-published, force-pushed,
+    updated with a rebase), and merging its tip would put the old and the rewritten commits
+    on the line together. Decided by ancestry, never by message; a git failure raises."""
     tips: dict[str, str | None] = {}
     for (repo_spec, base), bundles in sorted(groups.items()):
         mine = [d for d in bundles if d.name in carried]
         if not mine:
             continue
         repo = publish._checkout_path(cfg, repo_spec)
-        _fetch(repo, cfg.base_remote, [refs[d.name][0] for d in mine])
+        _fetch(repo, cfg.base_remote, [refs[d.name][0] for d in mine], attempts=2)
         line = integration_branch(cfg, base, batch)
         for d in mine:
             ref, took = refs[d.name][1], carried[d.name]
             tip = tips[d.name] = _rev(repo, ref)
-            if tip is None or tip == took or _in_line(
-                    repo, took, f"{d.name}'s carried head {took[:12]}", ref, of=tip):
+            if tip is None:
+                continue
+            facts = _carried_rewrite(repo, d.name, ref, took, tip, line)
+            if facts is None:
                 continue
             raise IntegrationError(
-                f"{d.name}'s branch {ref} was rewritten after this run folded it onto "
-                f"{line}: it is now at {tip[:12]}, which does not contain {took[:12]}, the "
-                f"commit the line took from it. A re-publish (`pdca publish` force-pushes), "
-                f"a force-push or \"Update with rebase\" does this. Only commits that extend "
+                f"{facts} Only commits that extend "
                 f"a carried branch reach the line (a fast-forward, such as GitHub's "
                 f"merge-style \"Update branch\"): merging {tip[:12]} would put the old and "
                 f"the rewritten commits on {line} together. Nothing was merged or pushed. "
                 f"Restore {ref} to {took[:12]} or a commit that contains it, then re-issue "
                 f"the run; or let this run stop and re-issue it")
     return tips
+
+
+def _carried_rewrite(repo: Path, name: str, ref: str, took: str, tip: str,
+                     line: str) -> str | None:
+    """Whether bundle ``name``'s branch ``ref``, now at ``tip``, was rewritten after a fold
+    of this run put ``took`` from it on ``line`` (#633): the facts, in words, or None when
+    ``tip`` is ``took`` or a descendant of it. The one judgment both checks make — the
+    fold's before it merges (:func:`_carried_tips`) and the run's at its end
+    (:func:`rewritten_carried`, #695). Decided by ancestry, never by message; a git
+    failure raises (:func:`_in_line`)."""
+    if tip == took or _in_line(repo, took, f"{name}'s carried head {took[:12]}", ref, of=tip):
+        return None
+    return (f"{name}'s branch {ref} was rewritten after this run folded it onto {line}: it "
+            f"is now at {tip[:12]}, which does not contain {took[:12]}, the commit the line "
+            f"took from it. A re-publish (`pdca publish` force-pushes), a force-push or "
+            f"\"Update with rebase\" does this.")
+
+
+def rewritten_carried(cfg: Config, bundles: Iterable[Path], carried: Mapping[str, str],
+                      batch: Collection[str] | None = None
+                      ) -> tuple[dict[str, str], dict[str, tuple[str, str]]]:
+    """The end-of-run half of the #633 check (#695), over each bundle of ``bundles`` whose
+    published branch a fold of this run put on its line (``carried``, the record
+    :func:`fold` filled). A fold checks the branches it carries only before it merges, and
+    a fold runs only between waves, so without this a rewrite during the run's last fold
+    (after its check read the tip) or after it (while the last wave builds, publishes, or
+    Act runs) went unseen.
+
+    Returns ``(rewritten, unchecked)``. ``rewritten`` is ``{name: report}`` for each branch
+    rewritten since, judged and worded as a fold judges it (:func:`_carried_rewrite`), with
+    what to do now that no fold will. A branch that no longer resolves is left alone (in a
+    fold, :func:`_gone_branch` judges it; at the end of the run nothing does).
+    ``unchecked`` is ``{name: (ref, why)}`` for each branch that could not be judged: every
+    one of a target whose checkout is missing or whose fetch failed twice (:func:`_fetch`),
+    or one whose ancestry check failed (:func:`_in_line`). ``why`` is the error's
+    ``cause`` — what failed, without the step its message tells a fold to take: re-running
+    is no remedy once the run has pushed its line. Each target is fetched and each branch
+    judged on its own, so one that cannot be checked never hides a rewrite found on
+    another, nor stops the others being checked. Never raises :class:`IntegrationError`."""
+    groups: dict[tuple[str, str], list[tuple[str, str, str]]] = {}   # (name, remote, ref)
+    for d, repo_spec, base, _slug, published in _fold_candidates(bundles):
+        if d.name in carried and published is not None:
+            remote, ref, _onto = published
+            groups.setdefault((repo_spec, base), []).append((d.name, remote, ref))
+    rewritten: dict[str, str] = {}
+    unchecked: dict[str, tuple[str, str]] = {}
+    for (repo_spec, base), mine in sorted(groups.items()):
+        repo = publish._checkout_path(cfg, repo_spec)
+        try:
+            _fetch(repo, cfg.base_remote, [remote for _name, remote, _ref in mine], attempts=2)
+        except IntegrationError as exc:
+            unchecked.update({name: (ref, exc.cause) for name, _remote, ref in mine})
+            continue
+        line = integration_branch(cfg, base, batch)
+        for name, _remote, ref in mine:
+            took, tip = carried[name], _rev(repo, ref)
+            if tip is None:
+                continue
+            try:
+                facts = _carried_rewrite(repo, name, ref, took, tip, line)
+            except IntegrationError as exc:
+                unchecked[name] = (ref, exc.cause)
+                continue
+            if facts is not None:
+                rewritten[name] = (
+                    f"{facts} No fold of this run ran after the rewrite, so {line} still "
+                    f"carries the old commits, and so does every PR this run cut from {line} "
+                    f"after it took {took[:12]}: they hold commits {ref} no longer has. "
+                    f"Restore {ref} to {took[:12]} or a commit that contains it; or rebuild "
+                    f"those PRs on the rewritten branch before any of them merges")
+    return rewritten, unchecked
 
 
 def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, bool],
@@ -1102,10 +1191,10 @@ def _in_line(wt: Path, rev: str, what: str, branch: str, *, of: str = "HEAD") ->
     rc = _git(wt, "merge-base", "--is-ancestor", rev, of)
     if rc in (0, 1):
         return rc == 0
+    cause = f"`git merge-base --is-ancestor` exited {rc} in {wt}"
     raise IntegrationError(
-        f"could not tell whether {what} is already in {branch} — `git merge-base "
-        f"--is-ancestor` exited {rc} in {wt}; a git step failed (not an overlap): check that "
-        f"checkout, then re-run")
+        f"could not tell whether {what} is already in {branch} — {cause}; a git step failed "
+        f"(not an overlap): check that checkout, then re-run", cause=cause)
 
 
 def _merge(wt: Path, rev: str, message: str) -> tuple[int, list[str]]:
@@ -1437,7 +1526,12 @@ def _reset_tree(wt: Path, rev: str) -> None:
                 f"checkout (or remove it to have it recreated), then re-run")
 
 
-def _fetch(repo: Path, base_remote: str, remotes: Iterable[str] = ()) -> None:
+#: Seconds :func:`_fetch` waits before it tries a failed fetch again (``attempts``, #695).
+_FETCH_RETRY_PAUSE = 1.0
+
+
+def _fetch(repo: Path, base_remote: str, remotes: Iterable[str] = (), *,
+           attempts: int = 1) -> None:
     """Fetch what a fold reads into ``repo``: ``origin`` (the line and the PR branches),
     every remote a ``"stacked"`` record's branch lives on (#593), and the base remote. The
     remotes holding PR branches are fetched with ``--prune``: a published branch deleted on
@@ -1446,15 +1540,26 @@ def _fetch(repo: Path, base_remote: str, remotes: Iterable[str] = ()) -> None:
     when these fetches show a branch as gone, the base snapshot already has that merge — the
     check that the base has the merged head (:func:`_gone_branch`) never runs on a snapshot
     taken too early. A missing checkout, or a fetch that fails, is a failed git step (the
-    run stops)."""
+    run stops). ``attempts`` (#695): how many times each fetch is tried, with a short pause
+    between, before it counts as failed — 2 for the carried-branch checks, which fetch
+    while no integration lock is held (:func:`_carried_tips` before a fold takes any,
+    :func:`rewritten_carried` at the end of the run), where a concurrent git process
+    holding a ref lock in the same checkout can fail it once; 1 (no retry) everywhere
+    else."""
     if not (repo / ".git").exists():
         raise IntegrationError(f"checkout not found at {repo}")
     branch_remotes = list(dict.fromkeys(("origin", *remotes)))
     for remote in [r for r in branch_remotes if r != base_remote] + [base_remote]:
         prune = ("--prune",) if remote in branch_remotes else ()
-        if _git(repo, "fetch", *prune, remote) != 0:
-            raise IntegrationError(f"could not fetch {remote} in {repo} — the fold cannot "
-                                   f"see the branches it merges")
+        for attempt in range(max(1, attempts)):
+            if attempt:
+                time.sleep(_FETCH_RETRY_PAUSE)
+            if _git(repo, "fetch", *prune, remote) == 0:
+                break
+        else:
+            cause = f"could not fetch {remote} in {repo}"
+            raise IntegrationError(f"{cause} — the fold cannot see the branches it merges",
+                                   cause=cause)
 
 
 def _prepare_worktree(repo: Path, base_remote: str, base: str,
