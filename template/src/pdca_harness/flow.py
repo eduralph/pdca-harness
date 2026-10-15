@@ -916,6 +916,8 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
                 carried: dict[str, str] | None = None,
                 held_out: dict[str, tuple[list[str], list[str]]] | None = None,
                 wave: Collection[str] = (),
+                pr_heads: Mapping[str, str] | None = None,
+                holds: dict[str, str] | None = None,
                 ) -> tuple[dict[tuple[str, str], tuple[str, Path | None]],
                            dict[tuple[str, str], str | None], tuple[str, str] | None]:
     """ONE :func:`integrate.fold` of ``bundles`` and, with ``[driver].regate_between_waves``,
@@ -930,7 +932,10 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
     passes none. ``held_out`` / ``wave`` (#674): the in-run folds pass the wave just
     published, so a bundle of it whose branch conflicts with ones of its own wave merged
     before it (and not with the line as the wave found it) is left out and recorded in
-    ``held_out``, not stopped on; the carry passes none.
+    ``held_out``, not stopped on; the carry passes none. ``pr_heads`` / ``holds`` (#672):
+    the carry passes each finished id's PR head, so a skipped id's work counts from it
+    too, and gets back, for each id left out for holding a skipped id's work, that id;
+    the in-run folds pass neither.
 
     Returns ``(folded, tips, red)``: the fold's result, each folded target's pushed tip
     (None in a dry-run, which pushes nothing), and the first target whose re-gate is red
@@ -939,7 +944,8 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
     with contextlib.ExitStack() as locks:
         folded = integrate.fold(cfg, bundles, dry_run=dry, locks=locks,
                                 folded_this_run=folded_this_run, batch=batch, skipped=skipped,
-                                carried=carried, held_out=held_out, wave=wave)
+                                carried=carried, held_out=held_out, wave=wave,
+                                pr_heads=pr_heads, holds=holds)
         tips = {tgt: integrate.pushed_tip(wt) if wt is not None else None
                 for tgt, (_branch, wt) in folded.items()}
         # hold_lock=False: the locks stack already holds each tree's lock (re-acquiring
@@ -1049,13 +1055,18 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
     makes every finished id built on it not clean too — its plain ``Depends on`` names it,
     directly or through others, so its branch carries that work (:func:`_cascade_not_clean`,
     #652): none of them is folded or accounts for a commit on origin's line, and their
-    dependents wait too, each named with the cause. One whose merge fails only DURING the
-    fold does not spread: its work still reaches the line through a finished id built on it
-    that merges in the same fold. A target the carry did not put to use is not seeded, so the
-    run's first fold of it starts fresh, as today. A dry-run (stub publisher) asks no host
-    and holds nothing: it prints the plan. A prerequisite that is no requested id, such as
-    a split child an earlier run adopted, is not carried: :func:`_runnable` holds its plain
-    ``Depends on`` dependents until its PR merges into their base (#647)."""
+    dependents wait too, each named with the cause. One the fold skips — its merge fails
+    DURING the fold, whatever the error — spreads by commit instead (:func:`integrate.fold`,
+    #672): a finished id whose branch holds any of its work, with a ``Depends on`` edge or
+    without, merged before the skip or after, is held for it too (the ``built_on`` hint),
+    and so on through the ids held this way, their dependents with them; the fold takes
+    them off the line before its one push. So the carry adds none of a skipped id's
+    commits to the line; ones an earlier run already put on a line it continues stay
+    there. A target the carry did not put to use is not seeded, so the run's first fold of
+    it starts fresh, as today. A dry-run (stub publisher) asks no host and holds nothing: it
+    prints the plan. A prerequisite that is no requested id, such as a split child an
+    earlier run adopted, is not carried: :func:`_runnable` holds its plain ``Depends on``
+    dependents until its PR merges into their base (#647)."""
     cands = {d.name: (d, (repo, base), ref)
              for d, repo, base, _slug, ref in integrate._fold_candidates(finished)}
     dependents: dict[str, list[str]] = {}
@@ -1102,15 +1113,21 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
         clean = [d for d in ids if d.name not in why]
         if clean:
             skipped: dict[str, str] = {}
+            holds: dict[str, str] = {}      # left out for a skipped id's work → that id
             try:
                 folded, tips, red = _fold_lines(cfg, clean, dry=False, batch=batch,
                                                 folded_this_run={tgt: tip} if tip else {},
-                                                skipped=skipped)
+                                                skipped=skipped, pr_heads=heads, holds=holds)
             except integrate.IntegrationError as exc:
                 folded, tips, red = {}, {}, None
                 skipped.update({d.name: str(exc) for d in clean})
+                holds.clear()
             carried = [d.name for d in clean if d.name not in skipped]
             why.update({name: (msg, "open") for name, msg in skipped.items()})
+            # One whose branch holds a skipped id's work never reached the push (#672): held
+            # for that id, as one built on it, and its dependents wait.
+            why.update({name: (skipped[name], "built_on") for name in holds})
+            causes.update(holds)
             if red:
                 why.update({name: (f"the re-gate of {line} carrying it is red", "open")
                             for name in carried})

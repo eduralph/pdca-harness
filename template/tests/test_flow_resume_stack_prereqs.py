@@ -12,6 +12,10 @@ build and sign-off leaves are stubbed, ``flow._publish_bundle`` is the fixture's
 ``_publish``, and ``gh`` is answered by a stub in front of ``subprocess.run``. The publisher
 is NOT a stub (a stub turns every fold into a dry-run), except in the dry-run case.
 
+A finished id the carry's fold skips (its merge fails there) keeps all its work off the
+line: a finished id whose branch holds any of it, with a ``Depends on`` edge or without,
+merged before the skip or after, is held for it, and the run still pushes once (#672).
+
 Only modules are imported (never a symbol the fix adds), so with the production change
 reverted these cases still load and run — and fail on their assertions.
     cd template && PYTHONPATH=src python3 -m unittest tests.test_flow_resume_stack_prereqs
@@ -50,6 +54,7 @@ class ResumeStackPrereqs(unittest.TestCase):
         self.cfg = self.fx.cfg
         self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="command")
         self.gh: dict[str, str] | None = {}   # PR state by id; None: `gh` is not installed
+        self.gh_heads: dict[str, str] = {}    # PR head by id, where it is not the branch tip
         self.gh_calls: list[list[str]] = []
         self.events: list[str] = []
         # bundle → (stack base, recorded tip, origin's line tip) when its wave was driven
@@ -89,14 +94,16 @@ class ResumeStackPrereqs(unittest.TestCase):
 
     def _gh_stub(self, args, *a, **kw):
         """``gh pr view <url> --json state,headRefOid`` answered from ``self.gh``; the PR head
-        is the branch's tip on origin. Everything else runs for real."""
+        is the branch's tip on origin, or ``self.gh_heads``' entry. Everything else runs for
+        real."""
         if not (isinstance(args, list) and args[:1] == ["gh"]):
             return self._real_run(args, *a, **kw)
         self.gh_calls.append(list(args))
         if self.gh is None:
             raise FileNotFoundError(2, "No such file or directory", "gh")
         iid = str(args[3]).rsplit("/", 1)[-1]
-        head = self.fx._tip(f"fix/{iid}") if self.fx._has(f"fix/{iid}") else ""
+        head = self.gh_heads.get(iid) or (
+            self.fx._tip(f"fix/{iid}") if self.fx._has(f"fix/{iid}") else "")
         out = json.dumps({"state": self.gh.get(iid, "OPEN"), "headRefOid": head})
         return subprocess.CompletedProcess(args, 0, out, "")
 
@@ -470,6 +477,264 @@ class ResumeStackPrereqs(unittest.TestCase):
         for gone in ("P", "Q"):
             self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), w_line), gone)
         self.assertEqual(self.results["W"], state.COMPLETE)
+
+    # -- (10): a skip in the carry's fold holds the finished ids holding its work (#672) ----
+
+    def _update_ours(self, iid: str) -> None:
+        """Someone updates ``fix/<iid>`` from the base, every conflict resolved in the
+        branch's favour (``git merge -X ours``), and pushes it."""
+        human = self.fx.human
+        sb._git(human, "fetch", "-q", "origin")
+        sb._git(human, "checkout", "-q", "-B", f"fix/{iid}", f"origin/fix/{iid}")
+        sb._git(human, "merge", "-q", "-X", "ours", "--no-edit", "origin/main")
+        sb._git(human, "push", "-q", "origin", f"fix/{iid}")
+
+    def _merge_into(self, iid: str, other: str) -> None:
+        """Someone merges ``fix/<other>`` into ``fix/<iid>`` and pushes it."""
+        human = self.fx.human
+        sb._git(human, "fetch", "-q", "origin")
+        sb._git(human, "checkout", "-q", "-B", f"fix/{iid}", f"origin/fix/{iid}")
+        sb._git(human, "merge", "-q", "--no-ff", "--no-edit", f"origin/fix/{other}")
+        sb._git(human, "push", "-q", "origin", f"fix/{iid}")
+
+    def _drop_edge(self, d: Path) -> None:
+        """Rewrite finished ``d``'s brief with no ``Depends on`` (its branch is unchanged)
+        and accept it again: the accept follows the brief."""
+        sb._brief(d)
+        sb._accept(d)
+        self.assertNotIn("Depends on", (d / "brief.md").read_text(encoding="utf-8"))
+        self.assertEqual(state.state(d), state.COMPLETE)
+
+    def _merges_cleanly(self, iid: str, other: str) -> bool:
+        """Whether ``fix/<other>`` merges onto ``fix/<iid>`` with no conflict, tried in the
+        scratch clone (origin is not touched)."""
+        human = self.fx.human
+        sb._git(human, "fetch", "-q", "origin")
+        sb._git(human, "checkout", "-q", "-B", "trial", f"origin/fix/{iid}")
+        ok = sb._run(human, "merge", "-q", "--no-edit", f"origin/fix/{other}").returncode == 0
+        sb._run(human, "merge", "--abort")      # after a conflict; a no-op after a merge
+        return ok
+
+    def _finished_from(self, iid: str, files: dict[str, str], cut_from: str) -> Path:
+        """``iid`` finished in an earlier run, its branch cut from ``cut_from`` and its brief
+        naming no ``Depends on``; its PR is open."""
+        d = self.fx._publish(iid, files, cut_from=cut_from)
+        sb._accept(d)
+        self.assertEqual(state.state(d), state.COMPLETE)
+        self.assertNotIn("Depends on", (d / "brief.md").read_text(encoding="utf-8"))
+        self.gh[iid] = "OPEN"
+        return d
+
+    def _carried_beside(self, drive: list[Path], batch: list[str]) -> str:
+        """Run with finished X and planned E (``Depends on: X``) beside the others: X is
+        carried, E is built on the line and COMPLETE, and the run pushes exactly once — no
+        push, then a fix-up. Returns the line tip E was built on."""
+        pushes = self.fx._pushes(lambda: self._run(drive, batch))
+        self.assertEqual(len(pushes), 1, pushes)
+        carried = [x for x in self.err.splitlines() if x.startswith("flow: carried ")]
+        self.assertEqual(len(carried), 1, self.err)
+        self.assertIn("issue_X", carried[0])
+        base, tip, line_tip = self._built("E")
+        self.assertEqual((base, tip), (self.line, line_tip), self.err)
+        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/X"), tip))
+        self.assertEqual(self.results["E"], state.COMPLETE)
+        return tip
+
+    def _off_the_line(self, commit: str, e_tip: str) -> None:
+        """``commit`` is on neither the carried line nor the tip E was built on."""
+        for of in (self.line, e_tip):
+            self.assertFalse(self.fx._ancestor(commit, of), f"{commit} is on {of}\n{self.err}")
+
+    def test_a_skipped_ids_work_does_not_reach_the_line_through_one_built_on_it(self):
+        # (1) Q is built on P (`Depends on: P`, cut from fix/P), then updated from a base
+        # that conflicts with P, the conflict resolved for Q. P's merge fails in the fold.
+        # Before: Q merged, so P's commit was on the line D was built on.
+        self._finished("P", {"base.txt": "p\n"})
+        self._finished_on("Q", "P")
+        self._finished("X", {"x.txt": "x\n"})
+        self.fx._push_from_human({"base.txt": "r\n"}, to="main")
+        self._update_ours("Q")
+        d, e = self._planned("D", "Q"), self._planned("E", "X")
+        e_tip = self._carried_beside([d, e], ["P", "Q", "X", "D", "E"])
+        held = self._held("Q", "D", "issue_P")
+        self.assertIn("get issue_P carried, or re-drive issue_Q on a base without it", held)
+        self.assertIn("does not merge cleanly", self._not_carried("P"))
+        for gone in ("P", "Q"):
+            self._off_the_line(self.fx._tip(f"fix/{gone}"), e_tip)
+
+    def test_a_branch_holding_a_skipped_ids_work_is_held_with_no_depends_on_edge(self):
+        # (2) As (1), but Q's brief names no prerequisite: its branch is still cut from
+        # fix/P. The hold goes by commit, not by the edge.
+        self._finished("P", {"base.txt": "p\n"})
+        q = self._finished_on("Q", "P")
+        self._drop_edge(q)
+        self._finished("X", {"x.txt": "x\n"})
+        self.fx._push_from_human({"base.txt": "r\n"}, to="main")
+        self._update_ours("Q")
+        d, e = self._planned("D", "Q"), self._planned("E", "X")
+        e_tip = self._carried_beside([d, e], ["P", "Q", "X", "D", "E"])
+        self._held("Q", "D", "issue_P")
+        self.assertIn("does not merge cleanly", self._not_carried("P"))
+        for gone in ("P", "Q"):
+            self._off_the_line(self.fx._tip(f"fix/{gone}"), e_tip)
+
+    def test_one_merged_before_the_skip_is_taken_off_the_line_before_the_push(self):
+        # (3) Q is cut from P's first commit p1; P then adds p2, which conflicts with the
+        # base. Asked for first, Q merges (with p1) before P's merge fails.
+        self._finished("P", {"p1.txt": "p1\n"})
+        p1 = self.fx._tip("fix/P")
+        self._finished_on("Q", "P")
+        self.fx._push_from_human({"base.txt": "p\n"}, to="fix/P", off="origin/fix/P")
+        self._finished("X", {"x.txt": "x\n"})
+        self.fx._push_from_human({"base.txt": "r\n"}, to="main")
+        d, e = self._planned("D", "Q"), self._planned("E", "X")
+        e_tip = self._carried_beside([d, e], ["Q", "P", "X", "D", "E"])
+        self._held("Q", "D", "issue_P")
+        self._off_the_line(p1, e_tip)
+
+    def test_history_shared_through_an_earlier_line_is_held_too(self):
+        # (4) An earlier run's line L held p1. P was rebuilt on L with a change that
+        # conflicts with the base, and Q was published from L with no `Depends on: P`;
+        # both record L as their stack base. L is gone, so the carry starts its line fresh.
+        batch = ["P", "Q", "X", "D", "E"]
+        old = self._line(batch)
+        self._finished("P", {"p1.txt": "p1\n"})
+        p1 = self.fx._tip("fix/P")
+        sb._git(self.fx.origin, "branch", old, p1)
+        p = self.fx._publish("P", {"base.txt": "p\n"}, cut_from=f"origin/{old}")
+        q = self.fx._publish("Q", {"q.txt": "Q\n"}, cut_from=f"origin/{old}")
+        for b in (p, q):
+            sb._accept(b)
+            publish.write_stack_base(b, old, p1)
+            self.assertEqual(state.state(b), state.COMPLETE)
+        self.assertNotIn("Depends on", (q / "brief.md").read_text(encoding="utf-8"))
+        self.gh["Q"] = "OPEN"
+        self._finished("X", {"x.txt": "x\n"})
+        self.fx._push_from_human({"base.txt": "r\n"}, to="main")
+        self.fx._delete(old)
+        d, e = self._planned("D", "Q"), self._planned("E", "X")
+        e_tip = self._carried_beside([d, e], batch)
+        self._held("Q", "D", "issue_P")
+        self._off_the_line(p1, e_tip)
+
+    def test_a_holder_whose_own_merge_fails_too_is_held_for_the_skipped_ids_work(self):
+        # (5) Q is built on P and not updated, so its merge fails the same way P's does.
+        # Its line names P as the cause, not its own conflict; P keeps its own reason.
+        self._finished("P", {"base.txt": "p\n"})
+        self._finished_on("Q", "P")
+        self._finished("X", {"x.txt": "x\n"})
+        self.fx._push_from_human({"base.txt": "r\n"}, to="main")
+        d, e = self._planned("D", "Q"), self._planned("E", "X")
+        self._carried_beside([d, e], ["P", "Q", "X", "D", "E"])
+        line = self._not_carried("Q")
+        self.assertIn("issue_P", line)
+        self.assertNotIn("get issue_Q's PR open", line)
+        self.assertIn("does not merge cleanly", self._not_carried("P"))
+
+    def test_a_skip_that_is_not_a_conflict_holds_the_ids_holding_its_work(self):
+        # (7) fix/P is deleted on origin while P's PR stays open, the host still reporting
+        # its head: P is clean before the fold, and the fold skips it for the gone branch
+        # (a plain IntegrationError, not a conflict). Q, cut from fix/P with no edge, holds
+        # P's commit.
+        self._finished("P", {"p1.txt": "p1\n"})
+        q = self._finished_on("Q", "P")
+        self._drop_edge(q)
+        self._finished("X", {"x.txt": "x\n"})
+        p1 = self.fx._tip("fix/P")
+        self.gh_heads["P"] = p1
+        self.fx._delete("fix/P")
+        d, e = self._planned("D", "Q"), self._planned("E", "X")
+        e_tip = self._carried_beside([d, e], ["P", "Q", "X", "D", "E"])
+        self._held("Q", "D", "issue_P")
+        self.assertIn("is not known to be merged", self._not_carried("P"))   # it reached the fold
+        self._off_the_line(p1, e_tip)
+
+    def test_a_failing_holder_of_an_earlier_commit_of_a_skipped_id_names_it(self):
+        # Q is cut from P's first commit p1 with no `Depends on: P`; P then adds p2, which
+        # conflicts with the base, and Q's own change conflicts with the base too, so both
+        # merges fail (P and Q merge cleanly with each other). Q holds p1, P's work though
+        # not P's tip: Q's line names P with the `built_on` hint, not its own conflict, and
+        # P, asked for first, keeps its own reason.
+        self._finished("P", {"p1.txt": "p1\n"})
+        p1 = self.fx._tip("fix/P")
+        self._finished_from("Q", {"other.txt": "q\n"}, "origin/fix/P")
+        self.fx._push_from_human({"base.txt": "p\n"}, to="fix/P", off="origin/fix/P")
+        self.assertTrue(self._merges_cleanly("P", "Q"))
+        self._finished("X", {"x.txt": "x\n"})
+        self.fx._push_from_human({"base.txt": "r\n", "other.txt": "r\n"}, to="main")
+        d, e = self._planned("D", "Q"), self._planned("E", "X")
+        e_tip = self._carried_beside([d, e], ["P", "Q", "X", "D", "E"])
+        held = self._held("Q", "D", "issue_P")
+        self.assertIn("get issue_P carried, or re-drive issue_Q on a base without it", held)
+        self.assertNotIn("get issue_Q's PR open", held)
+        self.assertIn("does not merge cleanly", self._not_carried("P"))
+        self._off_the_line(p1, e_tip)
+
+    def test_one_holding_only_a_commit_of_a_held_id_is_held_too(self):
+        # R is cut from Q's own commit q1 (`Depends on: Q`, no edge to P). fix/Q then takes
+        # in fix/P (p1), and P adds p2, which conflicts with the base. P's merge fails; Q
+        # merges holding p1, so Q is held for P's work; R holds q1 and none of P's work, so
+        # it is held for Q's. R is asked for before Q: the hold reaches it only once Q's
+        # work has joined.
+        self._finished("P", {"p1.txt": "p1\n"})
+        p1 = self.fx._tip("fix/P")
+        self._finished("Q", {"q.txt": "Q\n"})
+        q1 = self.fx._tip("fix/Q")
+        self._finished_on("R", "Q")
+        self._merge_into("Q", "P")
+        self.fx._push_from_human({"base.txt": "p\n"}, to="fix/P", off="origin/fix/P")
+        self._finished("X", {"x.txt": "x\n"})
+        self.fx._push_from_human({"base.txt": "r\n"}, to="main")
+        self.assertTrue(self.fx._ancestor(p1, self.fx._tip("fix/Q")))
+        self.assertFalse(self.fx._ancestor(p1, self.fx._tip("fix/R")))
+        d, e = self._planned("D", "R"), self._planned("E", "X")
+        e_tip = self._carried_beside([d, e], ["P", "R", "Q", "X", "D", "E"])
+        held = self._held("R", "D", "issue_Q")
+        self.assertIn("get issue_Q carried, or re-drive issue_R on a base without it", held)
+        self.assertIn("issue_P", self._not_carried("Q"))
+        for commit in (p1, q1, self.fx._tip("fix/Q"), self.fx._tip("fix/R")):
+            self._off_the_line(commit, e_tip)
+
+    def test_one_merged_only_on_a_held_ids_work_fails_on_the_restarted_line(self):
+        # H is cut from P's first commit p1 and adds s.txt; S, cut from the base, adds the
+        # same s.txt; T is cut from S. The base then adds a different s.txt, and H and T are
+        # updated from it, keeping their own; P adds p2, which conflicts with the base. The
+        # first pass: P fails, H merges, S merges on top of H (the same s.txt), T merges.
+        # H holds p1, so it comes off and the line starts again: now S's merge fails, and T,
+        # which holds S's commit, comes off in that pass. Only X is carried, with one push.
+        self._finished("P", {"p1.txt": "p1\n"})
+        p1 = self.fx._tip("fix/P")
+        self._finished_from("H", {"s.txt": "s\n"}, "origin/fix/P")
+        self._finished_from("S", {"s.txt": "s\n"}, "origin/main")
+        s1 = self.fx._tip("fix/S")
+        self._finished_from("T", {"t.txt": "t\n"}, "origin/fix/S")
+        self.fx._push_from_human({"base.txt": "r\n", "s.txt": "m\n"}, to="main")
+        self._update_ours("H")
+        self._update_ours("T")
+        self.fx._push_from_human({"base.txt": "p\n"}, to="fix/P", off="origin/fix/P")
+        self._finished("X", {"x.txt": "x\n"})
+        d, e = self._planned("D", "T"), self._planned("E", "X")
+        tried: list[tuple[str, bool]] = []      # each merge the fold tried: (bundle, merged)
+        real = integrate._merge_published
+
+        def merge(cfg, wt, b, *a, **kw):
+            try:
+                real(cfg, wt, b, *a, **kw)
+            except integrate.IntegrationError:
+                tried.append((b.name, False))
+                raise
+            tried.append((b.name, True))
+
+        with mock.patch.object(integrate, "_merge_published", merge):
+            e_tip = self._carried_beside([d, e], ["P", "H", "S", "T", "X", "D", "E"])
+        self.assertEqual([ok for name, ok in tried if name == "issue_S"], [True, False], tried)
+        self.assertIn("flow: carried issue_X (finished", self.err)
+        held = self._held("T", "D", "issue_S")
+        self.assertIn("get issue_S carried, or re-drive issue_T on a base without it", held)
+        self.assertIn("does not merge cleanly", self._not_carried("S"))
+        self.assertIn("issue_P", self._not_carried("H"))
+        for commit in (p1, s1, self.fx._tip("fix/H"), self.fx._tip("fix/T")):
+            self._off_the_line(commit, e_tip)
 
 
 if __name__ == "__main__":
