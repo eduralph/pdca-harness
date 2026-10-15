@@ -726,8 +726,18 @@ wave builds on, via `[driver].wave_mode`:
   through others), since their branches carry its work: none of them is carried
   or accounts for a commit on the line, and the bundles that depend on them are
   held, each named on one line with the cause. A prerequisite whose merge fails
-  only during the fold does not hold the finished prerequisites built on it: one
-  that merges in the same fold is still carried, with the failed one's commits.
+  during the fold (a conflict, a branch that is gone, or any other failed merge)
+  also holds every finished prerequisite whose branch has any of its commits,
+  with a `Depends on` edge or without, merged before the failed one or after,
+  and in turn every one whose branch has a commit of one held this way. A
+  prerequisite's commits are those on its branch or its PR head that neither
+  your base nor the commit the fold started the line from has. Each one held is
+  named on one line with the prerequisite whose commit it has as the cause, and
+  the bundles that depend on it are held too. So is one whose own merge fails as
+  well, when the failed one whose commit it has was asked for before it: a commit
+  two failed ones share counts for both, so the one asked for first is the cause.
+  The fold takes them off the line before its one push, so the carry adds none
+  of their commits to the line.
   If the line on origin holds a commit the run cannot account for, nothing is
   carried onto it and those bundles are held: delete that line on origin
   (unless the run's own fold already replaced it) and re-issue. A line the run
@@ -738,7 +748,14 @@ wave builds on, via `[driver].wave_mode`:
   or force-pushed-over commit left on the old line; two finished prerequisites
   that conflict with each other; an old line that still holds a prerequisite
   whose PR was closed since; and an accepted but unpublished bundle whose line a
-  later run's fresh fold replaced (publish refuses it, as above).
+  later run's fresh fold replaced (publish refuses it, as above). The hold for a
+  failed merge can be wider than needed, and it leaves one gap: a prerequisite is
+  held for a commit its branch shares with the failed one even when that commit
+  is its own (say the failed one was built on it); one whose merge failed only
+  because of a prerequisite the fold then took off the line stays held; two that
+  conflict with each other, one having the other's commit, can both be held; and
+  on a line continued from an earlier run, the failed one's commits that run
+  already put on the line stay there.
 
   A plain `Depends on` prerequisite that is not one of the ids the run was
   asked to drive (a `pdca flow --from-csv` sweep never includes a finished

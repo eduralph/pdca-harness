@@ -305,6 +305,8 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
          carried: dict[str, str] | None = None,
          held_out: dict[str, tuple[list[str], list[str]]] | None = None,
          wave: Collection[str] = (),
+         pr_heads: Mapping[str, str] | None = None,
+         holds: dict[str, str] | None = None,
          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
     """Fold the cumulative accepted bundles' published branches onto a per-target
     integration branch.
@@ -370,12 +372,26 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     raised while merging ONE bundle (:func:`_merge_published`, its :func:`_gone_branch`
     included) is recorded as ``skipped[name] = message`` and the next bundle is merged — a
     failed merge is undone (the tree reset to the line tip it had before it, #631), so the
-    tree is clean for it. A target whose every bundle was skipped pushes nothing and has no
-    entry in the result. Every other failure still raises: the lock, the worktree (one that
-    cannot be made, or reset — :class:`IntegrationTreeError`), a moved line, the push, and
-    the up-front refusal of a bundle with no published branch (the carry passes only
-    bundles that have one). ``None`` (every other caller) raises on the first failure, as
-    before.
+    tree is clean for it. None of a skipped bundle's work reaches the line the fold pushes
+    (#672). Its work is every commit, merge commits included, reachable from its branch tip
+    as read here or from its ``pr_heads`` entry (the PR head the caller read), and from
+    neither ``<base_remote>/<base>`` nor the commit the line started from (:func:`_work`);
+    a commit it shares with another branch counts, whoever wrote it. So a bundle whose
+    merged head reaches any of it — merged before the skip or after — is left out too
+    (:func:`_hold_work`): recorded in ``skipped`` with that cause and in ``holds`` as
+    ``holds[name] = <the bundle whose work it holds>``, its own work then left out the same
+    way. The line is then started again from the same commit with only the bundles kept,
+    before the fold's one push; a bundle that fails on that line is skipped the same way,
+    and nothing left out is tried again. A bundle whose merge failed, and whose branch holds
+    any of the work of one before it in fold order whose merge failed too, is recorded for
+    holding that one's work, not for its own failure (:func:`_built_on_skipped`); a commit
+    two of them share is the work of both, so the earlier one is the cause.
+    A target whose every bundle was skipped pushes nothing and has no entry in the result.
+    Every other failure still raises: the lock, the worktree (one that cannot be made, or
+    reset — :class:`IntegrationTreeError`), a moved line, the push, and the up-front
+    refusal of a bundle with no published branch (the carry passes only bundles that have
+    one). ``None`` (every other caller) raises on the first failure, as before, and
+    computes no work.
 
     ``carried`` (#633, the flow's in-run folds): the run's record, filled in place like
     ``skipped``, of the head each bundle's branch had when a fold of this run put it on its
@@ -512,36 +528,76 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
             for o in [*bundles, *(cfg.find_bundle(str(n).removeprefix("issue_"))
                                   for n in batch or ())]:
                 owners.setdefault(o.name, o)
-            took: dict[str, str] = {}   # bundle name → the head this fold put on the line
-            pre: str | None = None      # the line before the wave's first merge (#674)
-            kept: list[tuple[str, str]] = []   # the wave's bundles merged so far: (name, head)
-            for d in bundles:
-                # Its branch's tip, read once — a carried branch's is the one checked (#633).
-                head = checked[d.name] if d.name in checked else _rev(wt, refs[d.name][1])
-                ours = held_out is not None and d.name in wave
-                if ours and pre is None:
-                    pre = _rev(wt, "HEAD")
-                    if pre is None:
-                        raise IntegrationTreeError(f"could not read the tip of {branch} in "
-                                                   f"{wt} — check that checkout, then re-run")
-                try:
-                    _merge_published(cfg, wt, d, refs[d.name], head, branch=branch, base=base,
-                                     owners=tuple(owners.values()))
-                except IntegrationError as exc:
-                    if (held_out is not None and ours and kept and head is not None
-                            and pre is not None and isinstance(exc, _Conflict)):
-                        clash = _held_by(wt, branch, head, pre, kept)
-                        if clash:   # a same-wave conflict: this bundle only (#674)
-                            held_out[d.name] = clash
-                            continue
-                    if skipped is None or isinstance(exc, (IntegrationTreeError, _LineBroken)):
-                        raise
-                    skipped[d.name] = str(exc)   # this bundle only; its merge was undone
-                else:
-                    if head is not None:        # merged, or in the line already
-                        took[d.name] = head
-                        if ours:
-                            kept.append((d.name, head))
+            read: dict[str, str | None] = {}   # each branch's tip, read once (#633)
+            dropped: set[str] = set()          # left out of the line: never tried again (#672)
+            failed: list[str] = []             # the bundles skipped: their merge raised (#672)
+            work: dict[str, list[str]] = {}    # each bundle left out → its work (#672)
+            ends = (f"{base_remote}/{base}", start_ref)   # a bundle's work: what neither has
+            pr = pr_heads or {}
+            while True:
+                took: dict[str, str] = {}   # bundle name → the head this fold put on the line
+                pre: str | None = None      # the line before the wave's first merge (#674)
+                kept: list[tuple[str, str]] = []   # the wave's bundles merged so far: (name, head)
+                new: list[str] = []         # the bundles this pass skipped
+                for d in bundles:
+                    if d.name in dropped:
+                        continue
+                    # Its branch's tip, read once — a carried branch's is the one checked
+                    # (#633) — and kept for a pass that starts the line again (#672).
+                    if d.name not in read:
+                        read[d.name] = (checked[d.name] if d.name in checked
+                                        else _rev(wt, refs[d.name][1]))
+                    head = read[d.name]
+                    ours = held_out is not None and d.name in wave
+                    if ours and pre is None:
+                        pre = _rev(wt, "HEAD")
+                        if pre is None:
+                            raise IntegrationTreeError(f"could not read the tip of {branch} "
+                                                       f"in {wt} — check that checkout, then "
+                                                       f"re-run")
+                    try:
+                        _merge_published(cfg, wt, d, refs[d.name], head, branch=branch,
+                                         base=base, owners=tuple(owners.values()))
+                    except IntegrationError as exc:
+                        if (held_out is not None and ours and kept and head is not None
+                                and pre is not None and isinstance(exc, _Conflict)):
+                            clash = _held_by(wt, branch, head, pre, kept)
+                            if clash:   # a same-wave conflict: this bundle only (#674)
+                                held_out[d.name] = clash
+                                dropped.add(d.name)
+                                continue
+                        if skipped is None or isinstance(exc, (IntegrationTreeError,
+                                                                _LineBroken)):
+                            raise
+                        skipped[d.name] = str(exc)   # this bundle only; its merge was undone
+                        dropped.add(d.name)
+                        new.append(d.name)
+                    else:
+                        if head is not None:        # merged, or in the line already
+                            took[d.name] = head
+                            if ours:
+                                kept.append((d.name, head))
+                if not new:     # none skipped (never, without ``skipped``): the line stands
+                    break
+                # A skipped bundle's work stays off the line (#672). A merged bundle that
+                # holds any of it, merged before the skip or after, comes off too; then the
+                # line starts again from the same commit with only the bundles kept. Each
+                # pass leaves out at least one more bundle, so this ends.
+                failed += new
+                for n in new:
+                    work[n] = _work(wt, (read[n], pr.get(n)), ends, what=f"{n}'s work")
+                held = _hold_work(wt, [d.name for d in bundles], took, work, ends, pr,
+                                  refs=refs, branch=branch, skipped=skipped, holds=holds)
+                if not held:
+                    break
+                dropped.update(held)
+                _reset_tree(wt, "HEAD")
+                if _git(wt, "checkout", "-B", branch, start_ref) != 0:
+                    raise IntegrationError(f"could not start {branch} off {start_ref}")
+            if len(failed) > 1:
+                _built_on_skipped(wt, [d.name for d in bundles if d.name in failed],
+                                  {n: read[n] or pr.get(n) for n in failed}, work, ends,
+                                  refs=refs, branch=branch, skipped=skipped, holds=holds)
             if skipped is not None and all(d.name in skipped for d in bundles):
                 continue   # nothing of this target merged: push nothing, report nothing
             # Fresh: the run's first fold of this target replaces an earlier run of the same
@@ -939,6 +995,82 @@ def _trial(wt: Path, branch: str, onto: str,
         if _git(wt, "checkout", "-q", branch) != 0 or _rev(wt, "HEAD") != tip:
             raise _LineBroken(f"could not put {branch} back at {tip} in {wt} after a trial "
                               f"merge — check that checkout, then re-run")
+
+
+def _work(wt: Path, heads: Iterable[str | None], ends: Sequence[str], *,
+          what: str) -> list[str]:
+    """The commits reachable from any of ``heads`` and from none of ``ends``, newest first,
+    merge commits included (#672): a bundle's work, measured against the base and the
+    commit its line started from. A head that is None, or that this clone does not have,
+    adds nothing. A git failure raises (:func:`_out`)."""
+    have = [h for h in dict.fromkeys(heads)
+            if h and _git(wt, "cat-file", "-e", f"{h}^{{commit}}") == 0]
+    if not have:
+        return []
+    return _out(wt, "rev-list", *have, "--not", *ends, what=what).split()
+
+
+def _holding(name: str, ref: str, commit: str, cause: str, branch: str) -> str:
+    """Why ``name`` is left out for holding ``cause``'s work (#672)."""
+    return (f"{name}'s branch {ref} holds {commit[:12]}, which is also {cause}'s work, and "
+            f"this fold leaves {cause} off {branch}")
+
+
+def _hold_work(wt: Path, order: Sequence[str], took: Mapping[str, str],
+               work: dict[str, list[str]], ends: Sequence[str], pr_heads: Mapping[str, str],
+               *, refs: Mapping[str, tuple[str, str, bool]], branch: str,
+               skipped: dict[str, str], holds: dict[str, str] | None) -> set[str]:
+    """Leave out each bundle merged onto the line whose head reaches work the fold left out
+    (#672). ``took``: name → the head merged; ``work``: name → the work (:func:`_work`) of
+    each bundle left out so far, filled in place. A merged bundle whose head reaches a
+    commit of one of them — the first in fold order ``order`` — is recorded in ``skipped``
+    and ``holds`` with that one as its cause, and its own work, from its head and its PR
+    head, joins ``work``: a bundle that reaches only that is left out too, to a fixed point.
+    A cause is always one left out before, so no two name each other. Returns the names
+    left out."""
+    reach = {n: set(_work(wt, (h,), ends, what=f"{n}'s commits")) for n, h in took.items()}
+    held: set[str] = set()
+    grew = True
+    while grew:
+        grew = False
+        for n in order:
+            if n not in reach or n in work:
+                continue
+            hit = next(((c, x) for c in order if c in work
+                        for x in work[c] if x in reach[n]), None)
+            if hit is None:
+                continue
+            cause, commit = hit
+            work[n] = _work(wt, (took[n], pr_heads.get(n)), ends, what=f"{n}'s work")
+            skipped[n] = _holding(n, refs[n][1], commit, cause, branch)
+            if holds is not None:
+                holds[n] = cause
+            held.add(n)
+            grew = True
+    return held
+
+
+def _built_on_skipped(wt: Path, failed: Sequence[str], tips: Mapping[str, str | None],
+                      work: Mapping[str, Sequence[str]], ends: Sequence[str], *,
+                      refs: Mapping[str, tuple[str, str, bool]], branch: str,
+                      skipped: dict[str, str], holds: dict[str, str] | None) -> None:
+    """Of the bundles whose merge failed (``failed``, in fold order), record each one whose
+    branch holds any of the work of one before it in fold order (``work``, :func:`_work`)
+    for holding that one's work, not for its own failure (#672): the first such one is its
+    cause. Its branch is read at one tip (``tips``: the branch tip the fold read, else the
+    PR head). A commit two of them share is the work of both, so the earlier one in fold
+    order is the cause: a cause always comes before the bundle it names, and no two name
+    each other."""
+    for i, n in enumerate(failed):
+        if not tips.get(n):
+            continue
+        mine = set(_work(wt, (tips[n],), ends, what=f"{n}'s commits"))
+        hit = next(((c, x) for c in failed[:i] for x in work.get(c, ()) if x in mine), None)
+        if hit:
+            cause, commit = hit
+            skipped[n] = _holding(n, refs[n][1], commit, cause, branch)
+            if holds is not None:
+                holds[n] = cause
 
 
 def _reset_tree(wt: Path, rev: str) -> None:
