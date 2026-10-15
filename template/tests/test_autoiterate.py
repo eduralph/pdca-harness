@@ -763,7 +763,8 @@ class DefersHumanFindings(_Base):
                 self.assertNotIn(row, _section6(summ), "a recovered failure came back")
                 self.assertEqual(flow.accept_blockers(d), [f"- [ ] {ordinary}"])
                 self.assertEqual(_ledger(d), [ordinary])
-                self.assertIn("with no verdict left for the next Check", buf.getvalue())
+                self.assertIn("about this Check's own run left for the next Check",
+                              buf.getvalue())
 
     def test_only_a_review_or_gate_with_no_verdict_is_left_to_the_next_check(self) -> None:
         """Which rows count as "no verdict", pinned at the source (`collect_needs_human`):
@@ -2447,6 +2448,131 @@ class PlanAdvisoryTickSurvivesIterateDo(_Base):
                                                        encoding="utf-8")
         self._rebuild(d)
         self._assert_open(d, self.TICKED)
+
+
+class CheckDecorrelationNoteIsNotDeferred(_Base):
+    """#605 — the Check-side decorrelation note is a row about that Check's own run.
+
+    Under ``[leaves.advisory_selection] mode = "vendor-complement"``, a Check that cannot pick
+    a different-vendor advisory writes ``check-advisory-decorrelation.md``
+    (``leaves._decorrelation_note``). The note is about that Check's leaf selection, not the
+    patch, and every Check selects again. So, like a review or a gate that gave no verdict, it
+    must never be deferred into the ledger: it shows in a round's §6 exactly when that round
+    wrote it, and blocks accept there until the human clears it.
+
+    Round 1 has no ``loop-telemetry.json`` (the builder family is unknown), so Check's real
+    advisory step (``leaves.run_advisory_leaves`` → ``_select_advisory``) writes the note
+    beside a C4 IMPL row. The decision is ``autoiterate.write_decision`` on
+    ``assemble.collect_needs_human``'s items, the iterate is ``driver.advance``, and round 2 is
+    ``driver.run_issue``: stub Do, real gates, real advisory selection, and only the reviewer
+    leaf replaced by a clean review. Only pre-existing API is called, so the red leg loads
+    and fails on the behaviour.
+    """
+
+    NOTE = "could not be decorrelated from the builder"    # `_select_advisory`'s note
+    STUB = "advisory code-review lens is a stub here"       # `_stub_advisory`'s finding
+    POOL = ({"id": "adversary", "family": "codex"},)        # the builder is family claude
+
+    def _select_vendor_complement(self) -> None:
+        self.cfg.advisory_leaves = [dict(spec) for spec in self.POOL]
+        self.cfg.advisory_selection = {"mode": "vendor-complement"}
+
+    def _round1(self, iid: str) -> Path:
+        d = self._bundle(iid, review=_IMPL_ONLY_REVIEW)
+        self._select_vendor_complement()
+        self.assertFalse((d / "loop-telemetry.json").exists(), "precondition: family unknown")
+        leaves.run_advisory_leaves(d, self.cfg)                # Check's advisory step
+        self.assertTrue(leaves.advisory_artifact(d, "decorrelation").exists())
+        assemble.assemble_summary(d, self.cfg)
+        self.assertEqual(len(self._note_rows(d)), 1, "precondition: round 1's §6 shows it")
+        items = assemble.collect_needs_human(d, self.cfg)
+        self.assertTrue(any(it.kind == assemble.IMPL for it in items), items)
+        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            autoiterate.write_decision(d, items)
+            self.assertEqual(flow._apply_decision(self.cfg, d, by="auto-iterate",
+                                                  today="2026-10-14", apply_now=False),
+                             "iterate-do")
+            self.assertEqual(state.state(d), state.ITERATE_DO)
+            driver.advance(d, self.cfg)                        # the iterate: archive round 1
+        self.assertTrue((d / "iteration-v1").is_dir())
+        self.assertFalse(leaves.advisory_artifact(d, "decorrelation").exists(),
+                         "premise: the round-1 note is gone before round 2")
+        return d
+
+    def _round2(self, d: Path) -> Path:
+        def clean_review(bundle: Path, cfg: Config) -> None:
+            (bundle / "check-review.md").write_text(_CLEAN_REVIEW, encoding="utf-8")
+
+        with mock.patch.object(leaves, "run_review", clean_review), \
+             redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            driver.run_issue(d, self.cfg)        # Do (stub) → Check (real advisory selection)
+        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
+        return d / "SUMMARY.md"
+
+    def _note_rows(self, d: Path) -> list[str]:
+        return [ln for ln in _section6(d / "SUMMARY.md").splitlines() if self.NOTE in ln]
+
+    def _decide(self, d: Path, action: str) -> str | None:
+        (d / leaves.SIGNOFF_DECISION).write_text(f"{action}\n", encoding="utf-8")
+        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            return flow._apply_decision(self.cfg, d, by="human", today="2026-10-14",
+                                        apply_now=False)
+
+    def test_a_note_round_2_did_not_write_is_not_carried_into_its_section6(self) -> None:
+        d = self._round1("DECOR1")
+        # Round 2's Do recorded the builder that ran, so its selection finds the complement.
+        (d / "loop-telemetry.json").write_text(
+            json.dumps({"attempts": [{"family": "claude"}]}), encoding="utf-8")
+        self._round2(d)
+        self.assertFalse(leaves.advisory_artifact(d, "decorrelation").exists(),
+                         "precondition: round 2 wrote no note")
+        self.assertTrue(leaves.advisory_artifact(d, "adversary").exists())
+        self.assertEqual(self._note_rows(d), [],
+                         "a note about round 1's thrown-away review came back in §6")
+        self.assertEqual([t for t in autoiterate.deferred(d) if self.NOTE in t], [])
+        self.assertEqual([b for b in flow.accept_blockers(d) if self.NOTE in b], [])
+        # Keyed on the note alone: round 1's ordinary advisory finding was still deferred.
+        self.assertTrue([t for t in autoiterate.deferred(d) if self.STUB in t],
+                        autoiterate.deferred(d))
+
+    def test_a_note_round_2_wrote_again_shows_once_and_blocks_accept(self) -> None:
+        d = self._round1("DECOR2")
+        summ = self._round2(d)                                 # still no loop-telemetry.json
+        self.assertTrue(leaves.advisory_artifact(d, "decorrelation").exists(),
+                        "precondition: round 2's own selection wrote the note")
+        rows = self._note_rows(d)
+        self.assertEqual(len(rows), 1, _section6(summ))
+        self.assertTrue(rows[0].startswith("- [ ] "), rows)
+        self.assertEqual([t for t in autoiterate.deferred(d) if self.NOTE in t], [])
+        # It blocks accept on its own: clear every other row, and C6 still refuses…
+        row = rows[0].removeprefix("- [ ] ")
+        summ.write_text(summ.read_text(encoding="utf-8").replace("- [ ]", "- [x]")
+                        .replace(f"- [x] {row}", f"- [ ] {row}"), encoding="utf-8")
+        self.assertEqual(flow.accept_blockers(d), [f"- [ ] {row}"])
+        self.assertEqual(self._decide(d, "accept"), "blocked")
+        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
+        # …until the human clears it.
+        summ.write_text(summ.read_text(encoding="utf-8").replace(f"- [ ] {row}", f"- [x] {row}"),
+                        encoding="utf-8")
+        self.assertEqual(self._decide(d, "accept"), "accept")
+        self.assertEqual(state.state(d), state.COMPLETE)
+
+    def test_the_flow_notice_does_not_call_the_note_a_row_with_no_verdict(self) -> None:
+        d = self._bundle("DECOR3", review=_IMPL_ONLY_REVIEW)
+        self._select_vendor_complement()
+        leaves._select_advisory(self.cfg.advisory_leaves, d, self.cfg)   # writes the note
+        self.assertTrue(leaves.advisory_artifact(d, "decorrelation").exists())
+        assemble.assemble_summary(d, self.cfg)
+        buf = io.StringIO()
+        with redirect_stderr(buf), redirect_stdout(io.StringIO()):
+            self.assertTrue(flow._maybe_auto_iterate(
+                self.cfg, d, by="", today="2026-10-14", apply_now=False))
+        notice = buf.getvalue()
+        self.assertNotIn("with no verdict", notice)
+        self.assertIn("; 1 row(s) about this Check's own run left for the next Check to "
+                      "re-check", notice)
+        self.assertNotIn("deferred to handover", notice)
+        self.assertIsNone(_ledger(d), "nothing about this Check's own run is held")
 
 
 if __name__ == "__main__":

@@ -44,12 +44,15 @@ class NeedsHumanItem(NamedTuple):
 
     text: str
     kind: str
-    # True for a row the harness writes itself because a review or a gate gave NO verdict
-    # this round — the review missing or a placeholder, an advisory leaf's placeholder, a gate
-    # that could not run. It is about this Check's own run, not the patch, and every Check
-    # runs the review and the gates again, so the next Check's §6 carries the row exactly
-    # while the problem lasts. That is why auto-iterate never defers one (#409): held for the
-    # handover, it would ask the human to clear a failure that had long since recovered.
+    # True for a row about this Check's own run, not the patch: a row the harness writes
+    # itself because a review or a gate gave NO verdict this round — the review missing or a
+    # placeholder, an advisory leaf's placeholder, a gate that could not run — or the note
+    # that this Check's advisory selection could not be decorrelated from the builder
+    # (`check-advisory-decorrelation.md`, #605). Every Check runs the review, the advisory
+    # selection and the gates again, so the next Check's §6 carries the row exactly while
+    # the problem lasts. That is why auto-iterate never defers one (#409): held for the
+    # handover, it would ask the human to clear a problem that had long since gone — or to
+    # confirm the independence of a review of a patch that was thrown away.
     no_verdict: bool = False
 
 
@@ -404,9 +407,17 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
         items = [it._replace(no_verdict=True) for it in items]
     for p in sorted(d.glob("check-advisory-*.md")):
         leaf = p.stem.removeprefix("check-advisory-")
-        items += _items_from_artifact(
+        found = _items_from_artifact(
             p.read_text(encoding="utf-8"),
             no_verdict=lambda t, leaf=leaf: _is_advisory_unavailable(t, leaf))
+        if leaf == "decorrelation":
+            # `leaves._decorrelation_note`: this Check's advisory selection could not pick a
+            # different-vendor reviewer. That is about this Check's own run, not the patch,
+            # and every Check selects again (re-writing or removing the note), so it is never
+            # deferred (#605). Keyed on the artifact: the note carries no leaf-status marker,
+            # so the `no_verdict` callback above is never called for it.
+            found = [it._replace(no_verdict=True) for it in found]
+        items += found
     # A gate that COULD NOT RUN is not builder-fixable — a rebuild cannot supply the missing
     # mechanic — so it is HUMAN regardless of its (gate-kind) element: it never causes an
     # auto-iterate round. It is no verdict either, so it is not deferred (#409): every Check

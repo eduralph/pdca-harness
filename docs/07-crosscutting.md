@@ -461,7 +461,11 @@ leaf's placeholder, a gate that couldn't run. That row is about the Check's own
 run, not the patch, and every Check runs the review and the gates again, so §6
 shows it exactly while the problem lasts. Once a later round's review or gate
 comes back, the row is gone, and you never clear a failure that has already
-recovered.
+recovered. The same goes for the note a Check files when it can't pick an
+advisory reviewer from a different vendor than the builder (under
+`mode = "vendor-complement"`): it's about that Check's choice of reviewer,
+every Check makes that choice again, and §6 shows the note only for a round
+that wrote it.
 
 The ledger is only emptied by you. If you tick a deferred finding in §6 and
 then choose `iterate-do` or `iterate-plan` for some other reason, that entry
