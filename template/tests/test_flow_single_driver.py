@@ -803,14 +803,14 @@ class SingleDriver(unittest.TestCase):
         leaves.do_plan_batch = _quiet_plan
         real_report, probe = cli._report_batch, {}
 
-        def report(results):
+        def report(results, *rest):
             # Still inside the run: fix 8's brief and drive it from a SECOND process. A
             # released claim lets that through; a claim held to the end of the run does not.
             (self.cfg.bundle("8") / "brief.md").write_text(_brief("slice-8"),
                                                            encoding="utf-8")
             probe["rc"], probe["err"] = self._run_child(
                 "flow", str(self.cfg.root), "-", "8", tag="probe")
-            return real_report(results)
+            return real_report(results, *rest)
 
         cli._report_batch = report
 

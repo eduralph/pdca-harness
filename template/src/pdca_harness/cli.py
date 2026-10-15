@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from . import (act, brief, cleanup, doctor, drift, drive_claim, driver, flow, gates, leaves,
@@ -167,7 +167,14 @@ def main(argv: list[str] | None = None) -> int:
     # sequential cycle, several ids fan out across lanes with a cheap-first sign-off
     # queue. Unbriefed ids are auto-planned (one shared Plan session); --from-csv with
     # no ids plans a batch the planner picks from the export. --rehearse (#87) dry-runs.
-    p_flow = sub.add_parser("flow", help="run the cycle for one or more issues (Plan→Do→Check→sign-off→publish→Act)")
+    p_flow = sub.add_parser(
+        "flow", help="run the cycle for one or more issues (Plan→Do→Check→sign-off→publish→Act)",
+        epilog="exit status: 0 every bundle finished (with one id, a stop for sign-off counts "
+               "too); 1 a bundle did not finish, or the run could not start; 2 bad input (a "
+               "bad pdca.toml, no ids, an unschedulable dependency graph); 3 every bundle "
+               "finished, but a fold held an accepted bundle out of the run's integration "
+               "line (it pushed no branch, or it conflicts with a same-wave bundle), so that "
+               "work is on no line of the run (#693).")
     p_flow.add_argument("issue_ids", nargs="*", help="issue ids; 1 → single cycle, N → batch; 0 + --from-csv → plan a batch from the export")
     p_flow.add_argument("--from-csv", help="tracker export to seed the interactive Plan of unbriefed ids")
     p_flow.add_argument("--from-briefs", type=Path, help="init any missing bundle from DIR/<id>.md before driving")
@@ -628,6 +635,9 @@ def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run
             shutil.copyfile(src, d / "brief.md")
 
     do_publish, do_act = not args.no_publish, not args.no_act
+    # The bundles a fold of this run held out of its line (#693), filled by the drive: they
+    # read COMPLETE in the results map, so the exit code needs this beside it.
+    holds: dict[str, str] = {}
 
     if not ids:  # batch the planner picks from the export
         if not args.from_csv:
@@ -637,7 +647,7 @@ def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run
         try:
             return _report_batch(flow.flow_batch(
                 cfg, csv=args.from_csv, do_publish=do_publish, do_act=do_act, by=args.by,
-                claims=claims))
+                claims=claims, holds=holds), holds)
         except flow.PreflightError as exc:
             print(f"flow: {exc}", file=sys.stderr)
             return 1
@@ -654,7 +664,7 @@ def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run
     try:
         results = flow.flow_ids(cfg, ids, plan_missing=True, csv=args.from_csv,
                                 do_publish=do_publish, do_act=do_act, by=args.by,
-                                claims=claims)
+                                claims=claims, holds=holds)
     except flow.PreflightError as exc:
         print(f"flow: {exc}", file=sys.stderr)
         return 1
@@ -668,7 +678,8 @@ def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run
 
     # Two PRESENTATIONS of that one map — never two drive paths, and never a second source
     # of truth: both read only `results`, so neither can report what the other cannot see.
-    return _report_single(cfg, ids[0], results) if len(ids) == 1 else _report_batch(results)
+    return (_report_single(cfg, ids[0], results, holds) if len(ids) == 1
+            else _report_batch(results, holds))
 
 
 #: States a flow run counts as a SUCCESSFUL terminal: finished, or settled in the tracker
@@ -676,18 +687,36 @@ def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run
 _FLOW_OK = (state.COMPLETE, state.RESOLVED)
 
 
-def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK) -> int:
-    """The ONE exit-code rule over a flow results map (issue #468): 0 iff every bundle in it
-    reached a successful terminal. An EMPTY map — nothing was asked for, or nothing driven —
-    is 0: a no-op is not a failure. (Only ``flow_batch``, which is handed no ids, can produce
-    one: :func:`flow.flow_ids` answers for every id it is given.)
+#: Exit code of a flow run that finished every bundle but held one out of its line (#693).
+_RC_HELD = 3
+
+
+def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
+                holds: Mapping[str, str] | None = None) -> int:
+    """The ONE exit-code rule over a flow results map (issue #468), in precedence order:
+
+    - **1** — a bundle in the map did not reach a successful terminal. This wins over 3.
+    - **3** — every bundle did, but ``holds`` is not empty (#693): a fold of this run held
+      an accepted bundle out of the integration line — it pushed no branch (#593,
+      ``"unpushed"``) or its branch conflicts with a same-wave bundle merged before it
+      (#674, ``"conflict"``). Such a bundle is COMPLETE in the map, so the map alone read
+      it as success while its work is on no line of the run; 3 lets a script or CI job
+      tell that run from a clean one without parsing stderr. ``holds`` is the collector
+      ``_flow`` passes to :func:`flow.flow_ids` / :func:`flow.flow_batch`.
+    - **0** — every bundle reached a successful terminal and nothing was held.
+
+    An EMPTY map — nothing was asked for, or nothing driven — is 0: a no-op is not a
+    failure. (Only ``flow_batch``, which is handed no ids, can produce one:
+    :func:`flow.flow_ids` answers for every id it is given.)
 
     ``ok`` carries the single documented difference between the shapes, in one place instead
     of as an emergent property of two drive paths: a SINGLE-id run adds AWAITING_SIGNOFF,
     because stopping for the human who just typed the command is the intended end of that
     run, not a failure. A multi-id set keeps the batch rule (rc 0 iff all COMPLETE/RESOLVED).
     """
-    return 0 if all(s in ok for s in results.values()) else 1
+    if not all(s in ok for s in results.values()):
+        return 1
+    return _RC_HELD if holds else 0
 
 
 def _report_entry(cfg: Config, iid: str, st: str) -> None:
@@ -705,7 +734,8 @@ def _report_entry(cfg: Config, iid: str, st: str) -> None:
             print(f"    {it}")
 
 
-def _report_single(cfg: Config, iid: str, results: dict[str, str]) -> int:
+def _report_single(cfg: Config, iid: str, results: dict[str, str],
+                   holds: Mapping[str, str] | None = None) -> int:
     """The single-id presentation of the shared results map (issue #468).
 
     Preserved from the pre-#468 single-id route, now DERIVED from the map the batch shape
@@ -738,15 +768,15 @@ def _report_single(cfg: Config, iid: str, results: dict[str, str]) -> int:
     for other in sorted(results):
         if other != iid:
             _report_entry(cfg, other, results[other])
-    return _results_rc(results, ok=(*_FLOW_OK, state.AWAITING_SIGNOFF))
+    return _results_rc(results, ok=(*_FLOW_OK, state.AWAITING_SIGNOFF), holds=holds)
 
 
-def _report_batch(results: dict[str, str]) -> int:
+def _report_batch(results: dict[str, str], holds: Mapping[str, str] | None = None) -> int:
     """Print a batch result map and return a process code — :func:`_results_rc`'s rule
     (0 iff every bundle reached a SUCCESSFUL terminal — COMPLETE, or RESOLVED (#302 review
     round 11): a tracker item settled outside the cycle is a successful no-op, and
     automation must not read it as a failed flow), which the single-id shape derives its
-    own exit code from too (issue #468)."""
+    own exit code from too (issue #468); 3 when it also held a bundle (``holds``, #693)."""
     if not results:
         print("flow: nothing to drive — no in-flight briefs among the ids.", file=sys.stderr)
         return 0
@@ -756,7 +786,7 @@ def _report_batch(results: dict[str, str]) -> int:
     resolved = sum(1 for s in results.values() if s == state.RESOLVED)
     tail = f" ({resolved} resolved in the tracker)" if resolved else ""
     print(f"flow: {done}/{len(results)} complete{tail}")
-    return _results_rc(results)
+    return _results_rc(results, holds=holds)
 
 
 def _prog() -> str:
