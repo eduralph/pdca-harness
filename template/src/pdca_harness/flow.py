@@ -684,7 +684,9 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
               hold_unmerged: bool = False,
               unpushed: Collection[str] = frozenset(),
               conflicts: Mapping[str, Collection[str]] | None = None,
-              conflict_held: Mapping[str, Collection[str]] | None = None) -> list[Path]:
+              conflict_held: Mapping[str, Collection[str]] | None = None,
+              lines: Mapping[tuple[str, str], tuple[str, str | None]] | None = None
+              ) -> list[Path]:
     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
 
     A prerequisite that is not COMPLETE on disk (archived ``completed/`` too, #171) is never
@@ -728,9 +730,22 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     reason — one stderr line per such bundle, naming the conflict — and waits until that
     bundle, rebuilt on a base holding them, has its PR merged. A skipped bundle never
     completes, so its own dependents fall out of later waves the same way (the skip
-    cascades)."""
+    cascades).
+
+    ``lines`` maps a target ``(repo, base)`` to the run's line for it — ``(branch, the tip
+    the run recorded)`` — once the run has folded (or carried) that target: a dependent of
+    it is cut from that line, not from the freshly fetched base (#655), and the line does
+    not follow the base. So an out-of-batch prerequisite judged merged into d's base above
+    counts only when the line has its work: the commit its PR merge put on the base, or
+    the PR's head, which the carry may have put on the line (:func:`_line_lacks_merge`).
+    Else d is held, named on ONE stderr line with the line's tip and the way out — once
+    the run ends, delete the line on origin, then re-run: a re-run whose carry finds the
+    line continues it, and holds d again. A target with no line (or no recorded tip: a
+    dry-run) is judged as before."""
     asked = set(requested) if requested is not None else set(batch_names)
     unpushed_set = set(unpushed)
+    views: dict[str, Path | str] = {}   # repo → its fetched checkout, or why not (#655)
+    lacks: dict[tuple[str, str, str], tuple[str, bool] | None] = {}  # (prereq, target)
     runnable: list[Path] = []
     for d in wave:
         # A `Conflicts with` partner the fold left out (#629): its work is on no line.
@@ -749,6 +764,7 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
         targeted = bool(repo and base)
         unmet: list[str] = []
         unmerged: list[str] = []   # COMPLETE, but not merged into d's base: wait (#647)
+        off_line: list[tuple[str, str, bool]] = []  # merged, not on d's line (#655)
         carryable: list[str] = []  # … of those, ones a line of d's target would carry
         for dep in deps:
             p = cfg.find_bundle(dep)
@@ -766,6 +782,17 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                 # #647 for the plain edge above). With no target of d's own, #186's answer
                 # and its "not ready" line stand.
                 if merged.merged_into(cfg, dep, repo, base):
+                    # … and when d is cut from this run's line, that line must have it too
+                    # (#655). A close/no-fix prereq merged nothing.
+                    line = (lines or {}).get((repo, base)) if targeted else None
+                    if line is None or line[1] is None or not integrate._has_patch(p):
+                        continue
+                    key = (p.name, repo, base)
+                    if key not in lacks:
+                        lacks[key] = _line_lacks_merge(cfg, dep, repo, line, views)
+                    lack = lacks[key]
+                    if lack is not None:
+                        off_line.append((p.name, *lack))
                     continue
                 if not targeted:
                     unmet.append(dep)
@@ -784,6 +811,18 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                   f"into {base} ({repo}), and no line of this run carries them; not built "
                   f"on a base missing them. To build it, {todo} until their PR merges into "
                   f"{base}, then re-run.", file=sys.stderr)
+        if off_line:
+            branch, tip = (lines or {})[(repo, base)]  # off_line: only when d has one
+            has = ("does not have" if all(known for _n, _w, known in off_line)
+                   else "is not known to have")
+            print(f"flow: {d.name} held — prerequisite(s) "
+                  f"{', '.join(f'{n} ({why})' for n, why, _k in off_line)}: their PR merged "
+                  f"into {base} ({repo}), but the line {d.name} would build on, {branch} at "
+                  f"{(tip or '')[:12]}, {has} that merge; not built on a base missing them. "
+                  f"To build it, once this run ends delete {branch} on origin, then re-run: "
+                  f"a re-run that finds the line on origin may continue it and hold "
+                  f"{d.name} again, and one that does not starts from {base}, which has the "
+                  f"merge.", file=sys.stderr)
         if unmet:
             print(f"flow: {d.name} skipped — prerequisite(s) not ready "
                   f"({', '.join(unmet)}); not built on a base missing them.", file=sys.stderr)
@@ -803,9 +842,49 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                   f"work; not built on a base missing it. To build it, wait until {p} is "
                   f"rebuilt on a base that holds {', '.join(conflict_held[p])} and its PR "
                   f"merges{into}, then re-run.", file=sys.stderr)
-        if not unmet and not unmerged and not partners and not clashed:
+        if not unmet and not unmerged and not off_line and not partners and not clashed:
             runnable.append(d)
     return runnable
+
+
+def _line_lacks_merge(cfg: Config, dep: str, repo_spec: str, line: tuple[str, str | None],
+                      views: dict[str, Path | str]) -> tuple[str, bool] | None:
+    """Why the run's ``line`` — ``(branch, recorded tip)`` on ``repo_spec`` — lacks the work
+    of prerequisite ``dep``'s merged PR, or ``None`` when the tip has it (#655). The reason
+    comes with whether it is KNOWN to lack it (True) or could not be checked (False).
+
+    The tip has the work when it has the commit the PR merge put on the base, or the PR's
+    head (:func:`merged.merge_and_head`). The merge commit — one for a merge, squash or
+    rebase merge alike — is on a line started from a base that has it; the head is on a
+    line a fold or the pre-wave carry (:func:`_carry_finished`) put the PR's branch on.
+    Both are asked of ``repo_spec``'s checkout as the carry reads it
+    (``integrate.carry_view``: fetched first, read-only, so no integration lock); ``views``
+    caches that checkout — or why it could not be fetched — per repo for one
+    :func:`_runnable` call. Fail-closed: a failed fetch, a merge commit that cannot be read
+    (a head not on the line cannot rule out a squash or rebase merge that is) or a git
+    failure is a reason, never "on the line". A commit the clone lacks is not on the line
+    (``integrate._carries``)."""
+    branch, tip = line
+    if repo_spec not in views:
+        try:
+            views[repo_spec] = integrate.carry_view(cfg, repo_spec, branch)[0]
+        except integrate.IntegrationError as exc:
+            views[repo_spec] = f"its checkout could not be fetched to check: {exc}"
+    view = views[repo_spec]
+    if isinstance(view, str):
+        return view, False
+    found = merged.merge_and_head(cfg, dep)
+    oid, head = found or ("", "")
+    try:
+        if any(c and integrate._carries(view, c, f"{dep}'s PR {what} {c[:12]}", branch,
+                                        of=str(tip))
+               for c, what in ((oid, "merge commit"), (head, "head"))):
+            return None
+    except integrate.IntegrationError as exc:
+        return str(exc), False
+    if not oid:
+        return "its PR's merge commit could not be read", False
+    return f"merge commit {oid[:12]}", True
 
 
 def _point_at_integration(integ: dict[tuple[str, str], str], runnable: list[Path],
@@ -2313,7 +2392,10 @@ def _drive_and_act(
                              unpushed=held_unpushed,
                              conflicts=(waves.conflict_map(cfg, bundles)
                                         if held_unpushed or held_conflict else None),
-                             conflict_held={n: ps for n, (ps, _paths) in held_conflict.items()})
+                             conflict_held={n: ps for n, (ps, _paths) in held_conflict.items()},
+                             # The line each target's bundles are cut from, if any (#655).
+                             lines={tgt: (branch, folded_tips.get(tgt))
+                                    for tgt, branch in integ.items()})
         if not runnable:
             continue
         # The pool, read off the schedule as it stands NOW — so a splice below has already

@@ -756,6 +756,22 @@ wave builds on, via `[driver].wave_mode`:
   same way: a prerequisite the run does not drive must have merged into the
   dependent's base (a dependent with no usable target still takes a merge into
   any branch).
+
+  Once the run has a line for the dependent's target (its first fold, or the
+  carry above), the dependent is cut from that line, not from the base, and the
+  line does not follow the base: a merge into the base after the line was
+  started may be missing from it. For either edge the dependent then also waits
+  until the line has the prerequisite's work: the commit its PR merge put on
+  the base (`gh pr view --json mergeCommit`; a merge, squash or rebase merge
+  all put one there), or the PR's head, which the carry puts on the line when
+  it carries that prerequisite. A merge commit that cannot be read, or a
+  checkout that cannot be fetched, holds it too. It is named on one line with
+  the line's tip, and the rest of the run goes on. Re-running alone may not
+  help, and that includes a re-run after waiting for a merge as above: a
+  re-run whose carry finds the line on origin continues it, and holds the
+  dependent this way. So once the run ends, delete that line on origin, then
+  re-run: with no line there, the re-run starts from the base, which has the
+  merge. A target with no line yet is judged as above.
 - **`"merge"`** (own-repo / continuous-delivery only) — actually `gh pr merge`s
   each non-final wave's PRs, so the next wave builds on a genuinely merged base.
   Needs merge rights on the base remote and relaxes STOP discipline for the

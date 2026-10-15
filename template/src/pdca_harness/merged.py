@@ -21,6 +21,9 @@ open, merged or closed, and at which head commit?
 :func:`merged_into` answers the flow's readiness question for a prerequisite no line of the
 run carries (#647): is it merged into the DEPENDENT's target base — that repo and branch,
 not just some branch?
+:func:`merge_and_head` answers the follow-up when the dependent is cut from the run's line
+for that base (#655): which commit did the merge put on the base, and which head did it
+merge — so the flow can ask whether the line has either?
 """
 
 from __future__ import annotations
@@ -143,14 +146,48 @@ def merged_head(cfg: Config, dep_id: str) -> str | None:
     return head if isinstance(head, str) and head else None
 
 
+def merge_and_head(cfg: Config, dep_id: str) -> tuple[str, str] | None:
+    """``(merge commit, head)`` of bundle ``dep_id``'s recorded PR once it has merged, or
+    ``None`` (#655): the commits a line can hold that show the merged work is on it.
+
+    Asks ``gh pr view <pr_url> --json state,headRefOid,mergeCommit`` for the PR in
+    ``publish.json``, and answers only when ``state`` is ``MERGED``. The merge commit
+    (``mergeCommit.oid``) is the commit the merge put on the base, for a merge, squash or
+    rebase merge alike. The head (``headRefOid``, as :func:`merged_head` reads it) is on
+    the base only after a merge with a merge commit, but it is on any line a fold carried
+    the PR's branch onto. Either is "" when ``gh`` reports none. Fail-closed and silent, as
+    :func:`pr_state` is: no recorded PR, a PR not merged, a ``gh`` failure (``gh`` missing
+    included) or output it cannot parse all return ``None``; ``flow._runnable`` names the
+    bundle and the reason."""
+    rec = _publish_record(cfg.find_bundle(dep_id))
+    pr_url = rec.get("pr_url") if isinstance(rec, dict) else None
+    info = _pr_view(str(pr_url), "state,headRefOid,mergeCommit") if pr_url else None
+    if info is None or info.get("state") != "MERGED":
+        return None
+    mc, head = info.get("mergeCommit"), info.get("headRefOid")
+    oid = mc.get("oid") if isinstance(mc, dict) else None
+    return (oid if isinstance(oid, str) else "", head if isinstance(head, str) else "")
+
+
 def pr_state(pr_url: str) -> tuple[str, str] | None:
     """``(state, head)`` of the PR at ``pr_url`` (``gh pr view --json state,headRefOid``):
     ``OPEN`` / ``CLOSED`` / ``MERGED`` and its head commit ("" when none is reported), or
     ``None`` when it cannot be read — a ``gh`` failure (``gh`` missing included, guarded as
     :func:`merged_head` guards it) or output it cannot parse (#646). Silent: the caller
     names the bundle and the reason."""
+    info = _pr_view(pr_url, "state,headRefOid")
+    if info is None or not isinstance(info.get("state"), str):
+        return None
+    head = info.get("headRefOid")
+    return info["state"], head if isinstance(head, str) else ""
+
+
+def _pr_view(pr_url: str, fields: str) -> dict | None:
+    """``gh pr view <pr_url> --json <fields>`` read as a JSON object, or ``None`` when it
+    cannot be: ``gh`` missing (``OSError``), ``gh`` failing, or output that is not a JSON
+    object. Silent — :func:`pr_state` and :func:`merge_and_head` share it (#655)."""
     try:
-        r = subprocess.run(["gh", "pr", "view", pr_url, "--json", "state,headRefOid"],
+        r = subprocess.run(["gh", "pr", "view", pr_url, "--json", fields],
                            capture_output=True, text=True)
     except OSError:
         return None
@@ -160,10 +197,7 @@ def pr_state(pr_url: str) -> tuple[str, str] | None:
         info = json.loads(r.stdout or "{}")
     except ValueError:
         return None
-    if not isinstance(info, dict) or not isinstance(info.get("state"), str):
-        return None
-    head = info.get("headRefOid")
-    return info["state"], head if isinstance(head, str) else ""
+    return info if isinstance(info, dict) else None
 
 
 def _publish_record(d: Path) -> dict | None:
