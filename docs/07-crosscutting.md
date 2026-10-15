@@ -681,7 +681,20 @@ wave builds on, via `[driver].wave_mode`:
   also stops, naming the bundle, when merging your base in would undo work a
   bundle put on the line (say your base reverted a merged PR, so a file the
   bundle added would disappear); a base that only edits such a file is merged
-  in as usual. An
+  in as usual. The fold makes the same check when it merges a bundle's own PR
+  branch: a branch cut from your base after such a revert, or updated from it
+  with "Update branch", carries the revert, so merging it would undo that work.
+  The run stops and names the file, the bundle whose work it would remove, and
+  the bundle whose branch brings the change (the pre-wave carry described below
+  leaves just that bundle out instead). If two bundles' branches share the
+  commit that made that work, git cannot tell which of them made it, and the
+  message says so. A change the branch's own commits make is merged as usual,
+  such as a dependent that deletes or edits that file on purpose. Both checks
+  compare each file with how it was where the line leaves your base, so they
+  miss a partial revert inside a file the line also changed in other ways, and
+  a revert of work your base already has. Once a later wave's PR has merged,
+  your base has the line's earlier waves too: that PR brings the line commits
+  under it. Check for such reverts yourself. An
   accepted bundle whose publish pushed no branch holds only the bundles that
   depend on it or share a `Conflicts with` edge with it (declared on either
   side): the run ordered those after it to build on its work, which no line of
