@@ -635,8 +635,10 @@ def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run
             shutil.copyfile(src, d / "brief.md")
 
     do_publish, do_act = not args.no_publish, not args.no_act
-    # The bundles a fold of this run held out of its line (#693), filled by the drive: they
-    # read COMPLETE in the results map, so the exit code needs this beside it.
+    # The bundles a fold of this run held out of its line (#693), and those whose carried
+    # branch was rewritten after its last fold, or could not be checked for that (#695),
+    # filled by the drive: they read COMPLETE in the results map, so the exit code needs
+    # this beside it.
     holds: dict[str, str] = {}
 
     if not ids:  # batch the planner picks from the export
@@ -690,12 +692,21 @@ _FLOW_OK = (state.COMPLETE, state.RESOLVED)
 #: Exit code of a flow run that finished every bundle but held one out of its line (#693).
 _RC_HELD = 3
 
+#: ``holds`` reasons that FAIL the run (exit 1) rather than hold a bundle (#695): a branch a
+#: fold of the run carried, rewritten after the run's last fold read it — or one the run
+#: could not check for that at its end (``flow._report_late_rewrites``).
+_FAILED_REASONS = frozenset({"rewritten", "unchecked"})
+
 
 def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
                 holds: Mapping[str, str] | None = None) -> int:
     """The ONE exit-code rule over a flow results map (issue #468), in precedence order:
 
-    - **1** — a bundle in the map did not reach a successful terminal. This wins over 3.
+    - **1** — a bundle in the map did not reach a successful terminal; or ``holds`` names a
+      bundle whose branch a fold of this run carried and that was rewritten after the run's
+      last fold read it (``"rewritten"``, #695) — the line carries commits no PR holds any
+      more, though every bundle reached a successful terminal — or that the end-of-run
+      check could not judge (``"unchecked"``: the line may). This wins over 3.
     - **3** — every bundle did, but ``holds`` is not empty (#693): a fold of this run held
       an accepted bundle out of the integration line — it pushed no branch (#593,
       ``"unpushed"``) or its branch conflicts with a same-wave bundle merged before it
@@ -715,6 +726,8 @@ def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
     run, not a failure. A multi-id set keeps the batch rule (rc 0 iff all COMPLETE/RESOLVED).
     """
     if not all(s in ok for s in results.values()):
+        return 1
+    if holds and any(why in _FAILED_REASONS for why in holds.values()):
         return 1
     return _RC_HELD if holds else 0
 

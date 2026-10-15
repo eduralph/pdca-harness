@@ -2372,7 +2372,11 @@ def _drive_and_act(
     ``"unpushed"`` for one that pushed no branch (#593) and ``"conflict"`` for one whose
     branch conflicts with a same-wave bundle merged before it (#674). Such a bundle is
     COMPLETE in the returned map, which therefore cannot say it was held; ``cli._flow``
-    reads this to exit 3 instead of 0 (``cli._results_rc``). ``None`` — nobody listens.
+    reads this to exit 3 instead of 0 (``cli._results_rc``). It also names each bundle whose
+    carried branch was rewritten after the run's last fold read it (#695,
+    :func:`_report_late_rewrites`): ``"rewritten"``, or ``"unchecked"`` for each carried
+    branch that end-of-run check could not judge — either one makes ``cli._flow`` exit 1,
+    ahead of any hold. ``None`` — nobody listens.
     """
     bundles = list(bundles)          # the drive set — split adoption extends it (#469)
     allowance = cfg.max_passes if max_passes is None else max_passes
@@ -2482,6 +2486,9 @@ def _drive_and_act(
                      and cfg.publisher.mode != "stub")
     requested = set(named) | {cfg.bundle(str(i).removeprefix("issue_")).name
                               for i in (batch or ())}
+    # The loop stopped on a fold error or a red re-gate: that run already ends non-zero, and
+    # a rewrite the fold refused is reported there — so no end-of-run check (#695).
+    line_stopped = False
     for k, wave in enumerate(wave_list):
         # `Conflicts with` partners of `held_unpushed` are held too (#629), and so are those
         # of `held_conflict` (#674). The relation is read off the LIVE `bundles` each wave:
@@ -2641,6 +2648,7 @@ def _drive_and_act(
                                              [n for n in held_conflict if n not in had], k)
                     print(f"flow: wave {k} did not integrate ({exc}); STOPPING — "
                           f"later waves not run.", file=sys.stderr)
+                    line_stopped = True
                     break
                 _announce_conflict_holds(held_conflict,
                                          [n for n in held_conflict if n not in had], k)
@@ -2656,6 +2664,7 @@ def _drive_and_act(
                     print(f"flow: wave {k} integration re-gate FAILED — a "
                           f"combination is red though each fix was green alone; "
                           f"STOPPING (later waves not run).", file=sys.stderr)
+                    line_stopped = True
                     break
 
     _sweep_quietly(cfg, bundles)  # publish/freeze boundary — reclaim footprint (#297)
@@ -2670,12 +2679,58 @@ def _drive_and_act(
     _warn_stranded_split_children(cfg, bundles, adopt_seeds)
     # Each bundle a fold held for a same-wave conflict, again, with the step to take (#674).
     _report_conflict_holds(held_conflict)
+    # A carried branch rewritten after the run's last fold read it (#695) — after Act on
+    # purpose, so the window covers it too (Act never re-decides a bundle's disposition).
+    # Only where a fold ran: `carried_heads` is filled by a stack-mode fold that pushed, so
+    # it is empty with publishing off, in merge mode and in a dry-run. Not after the loop
+    # stopped on the line: that run already ends non-zero, and reported the rewrite a fold
+    # refused.
+    late = (_report_late_rewrites(cfg, accepted, carried_heads, run_batch)
+            if carried_heads and not line_stopped else {})
     # The run's holds, for the caller's exit code (#693): a held bundle reads COMPLETE above.
     # Keyed exactly as `results` is, so each held id is a key of the map returned beside it.
+    # A late rewrite ("rewritten", or "unchecked" for a branch the check could not judge)
+    # fails the run (exit 1, `cli._results_rc`), so it is written last: it outranks a hold.
     if holds is not None:
         holds.update({n.replace("issue_", ""): "unpushed" for n in sorted(held_unpushed)})
         holds.update({n.replace("issue_", ""): "conflict" for n in held_conflict})
+        holds.update({n.replace("issue_", ""): why for n, why in late.items()})
     return results
+
+
+def _report_late_rewrites(cfg: Config, accepted: list[Path], carried: Mapping[str, str],
+                          batch: Collection[str]) -> dict[str, str]:
+    """Check, once more at the end of the run, every branch a fold of this run carried
+    (#695), and name each one rewritten since on stderr — one line per bundle, the facts
+    and remedy :func:`integrate.rewritten_carried` gives. A fold checks the branches it
+    carried only before the NEXT fold, so a rewrite during the run's last fold or after it
+    left the line with commits no PR holds any more, and the run ended as if all was well.
+
+    Returns ``{name: "rewritten"}`` for those, for the caller's exit code, and
+    ``{name: "unchecked"}`` for each branch the check could not judge (its checkout's fetch
+    failed twice, a git step failed): the run cannot say its line matches that PR, so it
+    does not end as a success either. Those are named after the rewrites, one line per
+    cause, with each branch and the commit the line took from it, to check by hand, and what
+    to do for one that no longer holds it. The cause is what failed
+    (``integrate.IntegrationError.cause``), never the step a fold's error gives (re-run):
+    this run has already pushed its line. Each target and each branch is judged on its own,
+    so a branch that cannot be checked never hides a rewrite found on another."""
+    rewritten, unchecked = integrate.rewritten_carried(cfg, accepted, carried, batch)
+    for name in sorted(rewritten):
+        print(f"flow: {rewritten[name]}.", file=sys.stderr)
+    causes: dict[str, list[str]] = {}    # what failed → the branches it left unchecked
+    for name, (ref, why) in sorted(unchecked.items()):
+        causes.setdefault(why, []).append(f"{name}'s {ref} ({carried[name][:12]})")
+    for why, branches in causes.items():
+        print(f"flow: could not check whether a branch this run folded onto its line was "
+              f"rewritten since ({why}), so the line may carry commits no PR holds any "
+              f"more. Check by hand that each of these branches still contains the commit "
+              f"the line took from it: {'; '.join(branches)}. Restore one that does not to "
+              f"that commit or a commit that contains it, or rebuild on that branch every PR "
+              f"this run cut from the line after it took that commit, before any of them "
+              f"merges.", file=sys.stderr)
+    return ({name: "rewritten" for name in sorted(rewritten)}
+            | {name: "unchecked" for name in sorted(unchecked)})
 
 
 # ----------------------------------------------------------------------------
