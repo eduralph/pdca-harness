@@ -99,7 +99,12 @@ class _LineBroken(IntegrationError):
 class _Conflict(IntegrationError):
     """A published branch that does not merge cleanly onto the line. Raised by
     :func:`_merge_published` so :func:`fold`'s ``held_out`` mode (#674) can tell a textual
-    conflict from any other failed merge."""
+    conflict from any other failed merge. ``paths``: the files the merge left conflicting
+    (#694: the carry names them)."""
+
+    def __init__(self, message: str, paths: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        self.paths = list(paths)
 
 
 def integration_branch(cfg: Config, base: str, batch: Iterable[str] | None = None) -> str:
@@ -313,6 +318,7 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
          wave: Collection[str] = (),
          pr_heads: Mapping[str, str] | None = None,
          holds: dict[str, str] | None = None,
+         clashes: dict[str, tuple[str, dict[str, list[str]], list[str]]] | None = None,
          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
     """Fold the cumulative accepted bundles' published branches onto a per-target
     integration branch.
@@ -428,6 +434,20 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     The trial merges run in the integration worktree under the fold's lock and leave it
     clean on the line. ``None`` (the carry, a direct caller): every conflict raises (or,
     under ``skipped``, is skipped) as before; a dry-run merges nothing, so holds nothing.
+
+    ``clashes`` (#694, the flow's pre-wave carry), with ``skipped``: for each bundle
+    skipped because its branch does not merge cleanly onto the line (a textual conflict),
+    and not held for a skipped bundle's work, ``clashes[name] = (kind, partners, files)``
+    says what it conflicts with (:func:`_clash`). It is judged once every pass is over, on
+    the line the fold pushes, so never against a bundle a later pass took back off: the
+    base (``"base"``); else the bundles the fold carries — merged before it or after, or on
+    the line already — each with its files (``"batch"``); else other work on that line
+    (``"line"``); else, when it merges onto that line, the bundles on the line when it was
+    tried that a later pass took back off and that it conflicts with, maybe none
+    (``"off"``), or, when none was taken off, nothing (``"moved"``: a later merge changed
+    the line). Filled in place; its trial merges run in the integration worktree under the
+    fold's lock and leave it clean on the line, as ``held_out``'s do. ``None`` records
+    nothing and tries nothing.
     """
     candidates = _fold_candidates(accepted)
     if not candidates:
@@ -541,6 +561,8 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
             dropped: set[str] = set()          # left out of the line: never tried again (#672)
             failed: list[str] = []             # the bundles skipped: their merge raised (#672)
             work: dict[str, list[str]] = {}    # each bundle left out → its work (#672)
+            # skipped for a conflict → (head, files, the bundles on the line then) (#694)
+            conflicting: dict[str, tuple[str, list[str], list[str]]] = {}
             ends = (f"{base_remote}/{base}", start_ref)   # a bundle's work: what neither has
             pr = pr_heads or {}
             while True:
@@ -578,6 +600,9 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                         if skipped is None or isinstance(exc, (IntegrationTreeError,
                                                                 _LineBroken)):
                             raise
+                        if (clashes is not None and head is not None
+                                and isinstance(exc, _Conflict)):
+                            conflicting[d.name] = (head, exc.paths, list(took))
                         skipped[d.name] = str(exc)   # this bundle only; its merge was undone
                         dropped.add(d.name)
                         new.append(d.name)
@@ -607,6 +632,29 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                 _built_on_skipped(wt, [d.name for d in bundles if d.name in failed],
                                   {n: read[n] or pr.get(n) for n in failed}, work, ends,
                                   refs=refs, branch=branch, skipped=skipped, holds=holds)
+            # What each bundle skipped for a conflict conflicts with (#694), judged once every
+            # pass is over (a #672 hold may have taken bundles back off), on the line the
+            # fold pushes: against the bundles it carries (``took``), else the ones on the
+            # line when it was tried that a later pass took back off. One held for a skipped
+            # bundle's work is not judged: that is its reason. Every tip was read in the
+            # first pass, once (#633).
+            judge = [n for n in conflicting if n not in (holds or {})]
+            if clashes is not None and judge:
+                tips = {d.name: t for d in bundles
+                        if (t := read.get(d.name) or pr.get(d.name))
+                        and _git(wt, "cat-file", "-e", f"{t}^{{commit}}") == 0}
+                offs = [o for o in tips if o in dropped and o not in failed]  # taken back off
+                try:
+                    under: dict[str, list[str]] | None = _built_on(
+                        wt, f"{base_remote}/{base}", tips, [*took, *offs])
+                except IntegrationError:    # a git read failed (the tree is untouched):
+                    under = None            # name no bundle, as a failed trial does
+                for n in judge:
+                    h, ps, then = conflicting[n]
+                    off = [(o, tips[o]) for o in then if o in offs]
+                    clashes[n] = (("line", {}, list(ps)) if under is None else
+                                  _clash(wt, branch, h, f"{base_remote}/{base}", ps,
+                                         list(took.items()), off, under))
             if skipped is not None and all(d.name in skipped for d in bundles):
                 continue   # nothing of this target merged: push nothing, report nothing
             # Fresh: the run's first fold of this target replaces an earlier run of the same
@@ -703,7 +751,7 @@ def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, 
         raise _Conflict(
             f"{d.name}'s branch {ref} does not merge cleanly onto {branch} (conflicts in "
             f"{', '.join(conflicts)}) — an undeclared cross-wave overlap; declare the "
-            f"conflict / re-order, then re-run")
+            f"conflict / re-order, then re-run", conflicts)
     raise IntegrationError(
         f"could not merge {d.name}'s branch {ref} onto {branch} — `git merge` exited {rc} "
         f"with no conflicting path in {wt}, so a git step failed (not an overlap): check "
@@ -1081,6 +1129,46 @@ def _merge(wt: Path, rev: str, message: str) -> tuple[int, list[str]]:
     return rc, conflicts
 
 
+def _merge_over(wt: Path, rev: str, message: str) -> None:
+    """Merge ``rev`` onto the commit checked out in ``wt`` with ``rev``'s side winning
+    every clash (#694, a trial only: :func:`_trial`'s ``wins``), so the trial always gets
+    past it. Each hunk that clashes takes ``rev``'s side (``-X theirs``). A path the merge
+    still leaves conflicting, which no hunk can settle (a file one side deleted, or that
+    both renamed), is settled the same way: ``rev``'s version of it (git's stage 3), or
+    none where ``rev`` has none. The result is committed (no commit hooks: a trial commit
+    is never pushed) and the tree left clean on it. A merge that fails with no conflicting
+    path, or a step settling one that fails, is a failed git step: the tree goes back to
+    where it was, and this raises."""
+    before = _rev(wt, "HEAD")
+    if before is None:
+        raise IntegrationTreeError(f"could not read the commit checked out in {wt} — a git "
+                                   f"step failed: check that checkout, then re-run")
+    rc = _git(wt, "merge", "--no-ff", "--no-edit", "--signoff", "-X", "theirs", "-m",
+              message, rev)
+    if rc == 0:
+        return
+    r = subprocess.run(["git", "-C", str(wt), "ls-files", "-u", "-z"],
+                       capture_output=True, text=True)
+    wins: dict[str, str] = {}   # each path left conflicting → its index lines: rev's, or gone
+    for meta, path in (row.split("\t", 1) for row in r.stdout.split("\0") if "\t" in row):
+        mode, sha, stage = meta.split()
+        wins.setdefault(path, f"0 {'0' * len(sha)}\t{path}\0")    # drop every stage of it
+        if stage == "3":
+            wins[path] += f"{mode} {sha}\t{path}\0"                # then put rev's back
+    settled = (r.returncode == 0 and bool(wins)
+               and subprocess.run(["git", "-C", str(wt), "update-index", "-z", "--index-info"],
+                                  input="".join(wins.values()), capture_output=True,
+                                  text=True).returncode == 0
+               and _git(wt, "commit", "-q", "--no-verify", "-m", message) == 0)
+    if not settled:
+        _reset_tree(wt, before)
+        raise IntegrationError(
+            f"could not try merging {rev} in {wt} with its side winning — `git merge` exited "
+            f"{rc}{', and settling the paths it left conflicting failed' if wins else ''}, "
+            f"so a git step failed: check that checkout, then re-run")
+    _reset_tree(wt, "HEAD")    # the tree as committed: no copy of a path settled away
+
+
 def _held_by(wt: Path, branch: str, head: str, pre: str,
              kept: Sequence[tuple[str, str]]) -> tuple[list[str], list[str]] | None:
     """Whether branch tip ``head``, which just failed to merge onto the line checked out in
@@ -1108,15 +1196,127 @@ def _held_by(wt: Path, branch: str, head: str, pre: str,
     return (partners or [name for name, _its in kept]), paths
 
 
-def _trial(wt: Path, branch: str, onto: str,
-           revs: Sequence[str]) -> tuple[int | None, list[str]]:
+def _clash(wt: Path, branch: str, head: str, base_ref: str, paths: Sequence[str],
+           on: Sequence[tuple[str, str]], off: Sequence[tuple[str, str]],
+           under: Mapping[str, Sequence[str]]) -> tuple[str, dict[str, list[str]], list[str]]:
+    """What branch tip ``head`` conflicts with (#694, the flow's pre-wave carry): the fold
+    skipped it for a textual conflict (``paths``: the files its merge left conflicting),
+    and the line is checked out in ``wt`` as the fold pushes it, every pass over.
+    ``(kind, partners, files)``, so the carry can name it as the run names a same-wave
+    conflict hold (#674), never with a bundle that line does not carry:
+
+    * ``"base"`` — ``head`` does not merge cleanly onto ``base_ref`` alone: the clash is
+      with the base, so no bundle is named. ``files``: that trial's.
+    * ``"batch"`` — else, the bundles of ``on`` whose own change ``head`` conflicts with
+      (:func:`_partners`), name → the files. ``on``: the bundles the fold carries, each
+      ``(name, head merged)`` in merge order — merged by it, before ``head`` was tried or
+      after, or on the line already.
+    * ``"line"`` — else, when ``head`` does not merge cleanly onto the line: the clash is
+      with other work on it. No bundle is named. ``files``: that trial's.
+    * ``"off"`` — else ``head`` merges onto the line, and ``off`` names the bundles that
+      were on the line when it was tried and that a later pass took back off (#672): its
+      merge failed on work they brought. ``partners``: the ones whose own change ``head``
+      conflicts with — maybe none. ``files``: ``paths``.
+    * ``"moved"`` — else (none of those was taken off): a merge after it changed the line
+      so that ``head`` merges onto it. No bundle is named. ``files``: ``paths``.
+
+    ``under``: what each bundle was built on beyond the base (:func:`_built_on`). A trial
+    git step that fails (a merge with no conflicting path, or one :func:`_merge_over`
+    cannot settle) gives ``"line"`` with ``paths``, never a stop. The trials never move the
+    line (:func:`_trial`); a tree that will not go back raises."""
+    try:
+        at, found = _trial(wt, branch, base_ref, [head])
+        if at is not None:
+            return "base", {}, found
+        partners = _partners(wt, branch, head, base_ref, on, under)
+        if partners:
+            return "batch", partners, list(paths)
+        at, found = _trial(wt, branch, "HEAD", [head])
+        if at is not None:
+            return "line", {}, found
+        if not off:
+            return "moved", {}, list(paths)
+        return "off", _partners(wt, branch, head, base_ref, off, under), list(paths)
+    except (IntegrationTreeError, _LineBroken):
+        raise
+    except IntegrationError:
+        return "line", {}, list(paths)
+
+
+def _partners(wt: Path, branch: str, head: str, base_ref: str,
+              bundles: Sequence[tuple[str, str]], under: Mapping[str, Sequence[str]]
+              ) -> dict[str, list[str]]:
+    """The bundles of ``bundles`` (``(name, head)``) whose own change branch tip ``head``
+    conflicts with (#694), each with the files: ``head`` does not merge cleanly onto
+    ``base_ref`` plus its head. One built on more than the base (``under``, :func:`_built_on`:
+    cut from the line, or from another bundle's branch) is named only for its own change:
+    it is tried on ``base_ref`` plus what it was built on, then ``head`` with its side
+    winning every clash with that (:func:`_merge_over`: each hunk, and each file one side
+    deleted, say), then its own head, and named when that last merge conflicts, with that
+    merge's files. So what it was built on never decides it, either way: a clash ``head``
+    has only with that is not its own, and one it has with its own change is found however
+    ``head`` clashes with that. What it was built on not merging onto ``base_ref`` proves
+    nothing against it: it is not named. Raises as :func:`_trial` does."""
+    named: dict[str, list[str]] = {}
+    for name, its in bundles:
+        at, found = _trial(wt, branch, base_ref, [its, head])
+        if at != 1:
+            continue
+        below = list(under.get(name, ()))
+        if below:
+            at, found = _trial(wt, branch, base_ref, [*below, head, its], wins=len(below))
+            if at != len(below) + 1:
+                continue    # its own change merges with head's (or what it was built on clashes)
+        named[name] = found
+    return named
+
+
+def _built_on(wt: Path, base_ref: str, tips: Mapping[str, str],
+              names: Iterable[str]) -> dict[str, list[str]]:
+    """What each bundle of ``names`` was built on that ``base_ref`` does not have (#694):
+    the parents of its own commits that are neither its own nor on ``base_ref`` — the line
+    commit it was cut from, or the other bundle's commit it was cut from. None for one cut
+    from the base, or updated from it. ``tips``: every bundle of the fold with a head in the
+    clone, name → that head; ``names`` are some of them (the ones a partner is looked for
+    among).
+
+    Its own commits are those its head reaches without passing through the first-parent
+    chain of the line checked out in ``wt``, or of ``base_ref``, as #673 judges a branch's
+    own commits (:func:`_own_commits`), less the own commits of each other bundle of
+    ``tips`` whose head it holds. So one cut from the line, or from another bundle's
+    branch, does not own what it was cut from, and one whose branch moved on since owns its
+    commits, old and new. A commit two of them share while neither holds the other's head
+    counts for both: git cannot tell which branch made it. A git failure raises."""
+    cut, chain = _cut_point(wt, "HEAD", base_ref)
+    since = ("--not", cut) if cut else ()
+    skip = {*chain, *_out(wt, "rev-list", "--first-parent", base_ref, *since,
+                          what=f"the first-parent chain of {base_ref}").split()}
+    walks = {name: _own_commits(wt, tip, since, skip, what=f"{name}'s commits")
+             for name, tip in tips.items()}
+    out: dict[str, list[str]] = {}
+    for name in dict.fromkeys(n for n in names if n in tips):
+        tip = tips[name]
+        mine = walks[name].difference(*(
+            walks[n] for n, t in tips.items()
+            if t != tip and _in_line(wt, t, f"{n}'s head", f"{name}'s head", of=tip)))
+        rows = (_out(wt, "rev-list", "--parents", "--no-walk", *sorted(mine),
+                     what=f"the parents of {name}'s commits").splitlines() if mine else [])
+        out[name] = [p for p in dict.fromkeys(p for row in rows for p in row.split()[1:])
+                     if p not in mine and not _in_line(wt, p, p[:12], base_ref, of=base_ref)]
+    return out
+
+
+def _trial(wt: Path, branch: str, onto: str, revs: Sequence[str], *,
+           wins: int | None = None) -> tuple[int | None, list[str]]:
     """Merge ``revs`` one after another onto commit ``onto`` in ``wt``, as a trial (#674):
     ``(i, paths)`` for the first that does not merge cleanly — its index and the files it
     left conflicting — or ``(None, [])`` when all do. It runs on a detached HEAD, so
     ``branch`` never moves, and ends with the tree back on ``branch`` at the tip it had,
     clean (:func:`_reset_tree`): one that will not go back raises :class:`_LineBroken`. A
     merge that fails with no conflicting path is a failed git step and raises. The caller
-    holds the worktree's lock (:func:`fold`)."""
+    holds the worktree's lock (:func:`fold`). ``wins`` (#694): the index of the rev merged
+    with its side winning every clash with what came before it (:func:`_merge_over`), so it
+    never stops the trial."""
     tip = _rev(wt, "HEAD")
     if tip is None:
         raise IntegrationTreeError(f"could not read the tip of {branch} in {wt} — check that "
@@ -1126,7 +1326,11 @@ def _trial(wt: Path, branch: str, onto: str,
             raise IntegrationTreeError(f"could not check out {onto} in {wt} to try a merge "
                                        f"— check that checkout, then re-run")
         for i, rev in enumerate(revs):
-            rc, conflicts = _merge(wt, rev, f"pdca-integrate: trial merge of {rev}")
+            message = f"pdca-integrate: trial merge of {rev}"
+            if i == wins:
+                _merge_over(wt, rev, message)
+                continue
+            rc, conflicts = _merge(wt, rev, message)
             if rc != 0 and not conflicts:
                 raise IntegrationError(
                     f"could not try merging {rev} in {wt} — `git merge` exited {rc} with no "

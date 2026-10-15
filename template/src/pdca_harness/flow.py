@@ -918,6 +918,7 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
                 wave: Collection[str] = (),
                 pr_heads: Mapping[str, str] | None = None,
                 holds: dict[str, str] | None = None,
+                clashes: dict[str, tuple[str, dict[str, list[str]], list[str]]] | None = None,
                 ) -> tuple[dict[tuple[str, str], tuple[str, Path | None]],
                            dict[tuple[str, str], str | None], tuple[str, str] | None]:
     """ONE :func:`integrate.fold` of ``bundles`` and, with ``[driver].regate_between_waves``,
@@ -935,7 +936,9 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
     ``held_out``, not stopped on; the carry passes none. ``pr_heads`` / ``holds`` (#672):
     the carry passes each finished id's PR head, so a skipped id's work counts from it
     too, and gets back, for each id left out for holding a skipped id's work, that id;
-    the in-run folds pass neither.
+    the in-run folds pass neither. ``clashes`` (#694): the carry gets back what each id
+    skipped for a textual conflict conflicts with (:func:`integrate._clash`); the in-run
+    folds pass none.
 
     Returns ``(folded, tips, red)``: the fold's result, each folded target's pushed tip
     (None in a dry-run, which pushes nothing), and the first target whose re-gate is red
@@ -945,7 +948,7 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
         folded = integrate.fold(cfg, bundles, dry_run=dry, locks=locks,
                                 folded_this_run=folded_this_run, batch=batch, skipped=skipped,
                                 carried=carried, held_out=held_out, wave=wave,
-                                pr_heads=pr_heads, holds=holds)
+                                pr_heads=pr_heads, holds=holds, clashes=clashes)
         tips = {tgt: integrate.pushed_tip(wt) if wt is not None else None
                 for tgt, (_branch, wt) in folded.items()}
         # hold_lock=False: the locks stack already holds each tree's lock (re-acquiring
@@ -994,6 +997,13 @@ def _finished_head(d: Path, ref: tuple[str, str, bool] | None, repo: Path, base_
     return head
 
 
+# The step for a bundle whose branch conflicts with finished bundles of its batch,
+# ``{partners}`` (``{ids}``: their ids): a proposal for the human, no brief is written. The
+# same whichever step reports it (#694): the end of the run, for a same-wave conflict hold
+# (:func:`_report_conflict_holds`, #674), and the carry of a re-issue (``_CARRY_HINTS``).
+_CONFLICT_STEP = ("declare `Conflicts with: {ids}` in {name}'s brief, then rebuild {name} "
+                  "on a base that holds {partners}")
+
 _CARRY_HINTS = {
     "open": "get {name}'s PR open with its branch on origin (re-open it, `pdca publish {iid}`, "
             "or re-drive {name}), then re-issue",
@@ -1002,7 +1012,50 @@ _CARRY_HINTS = {
             "re-issue",
     "built_on": "{name} was built on {cause}, which is not carried (see its line): get "
                 "{cause} carried, or re-drive {name} on a base without it, then re-issue",
+    # A branch that conflicts with the line (#694, :func:`_clash_why`): with finished ids
+    # of the batch the line carries, or ones it does not; the base; or other work on it.
+    "conflict": "proposed, for you to confirm: " + _CONFLICT_STEP + ", then re-issue",
+    "conflict_off": "proposed, for you to confirm, once a line carries {partners}: "
+                    + _CONFLICT_STEP + ", then re-issue",
+    "off_line": "re-issue once those bundles are carried, or out of the batch",
+    "retry": "re-issue: the carry tries it again on that line",
+    "base_conflict": "update {name}'s branch from {base}, resolving the conflict (or re-drive "
+                     "{name}), then re-issue",
+    "line_conflict": "rebuild {name} on a base that holds the work it conflicts with, then "
+                     "re-issue",
 }
+
+
+def _clash_why(clash: tuple[str, dict[str, list[str]], list[str]], ref: str,
+               base_ref: str) -> tuple[str, str]:
+    """``(reason, hint)`` for a finished id the carry's fold skipped because its branch
+    ``ref`` does not merge cleanly onto the line (#694), from what
+    :func:`integrate._clash` found it conflicts with: finished ids of the batch the line
+    carries, each named with its files; the base, ``base_ref``; other work on the line,
+    with no id named; work the fold took back off the line — the finished ids it does not
+    carry, each named with its files, so the step waits until a line carries them (never
+    a rebuild on a base no line is), else none named; or nothing on the line it pushes (a
+    later merge changed it), so a re-issue tries it again there."""
+    kind, partners, paths = clash
+    lead = f"its branch {ref} does not merge cleanly onto the line — its change conflicts with"
+    then = f"its branch {ref} did not merge cleanly onto the line as the fold had it then"
+    each = ", ".join(f"{p}'s ({', '.join(fs)})" for p, fs in partners.items())
+    if kind == "batch":
+        return f"{lead} {each}, finished in this batch", "conflict"
+    if kind == "base":
+        return f"{lead} {base_ref} itself ({', '.join(paths)})", "base_conflict"
+    if kind == "off" and partners:
+        see = "its line" if len(partners) == 1 else "their lines"
+        return (f"{then} — its change conflicts with {each}, finished in this batch, which "
+                f"this run does not carry (see {see})", "conflict_off")
+    if kind == "off":
+        return (f"{then} ({', '.join(paths)}), but merges onto the line it pushes: its change "
+                f"conflicts with work that bundles the fold then took back off the line "
+                f"brought onto it (see their lines)", "off_line")
+    if kind == "moved":
+        return f"{then} ({', '.join(paths)}), but merges onto the line it pushes", "retry"
+    return (f"{lead} work already on the line ({', '.join(paths)}) that no other finished "
+            f"bundle of this batch was found to account for", "line_conflict")
 
 
 def _cascade_not_clean(cfg: Config, ids: list[Path],
@@ -1062,11 +1115,19 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
     and so on through the ids held this way, their dependents with them; the fold takes
     them off the line before its one push. So the carry adds none of a skipped id's
     commits to the line; ones an earlier run already put on a line it continues stay
-    there. A target the carry did not put to use is not seeded, so the run's first fold of
-    it starts fresh, as today. A dry-run (stub publisher) asks no host and holds nothing: it
-    prints the plan. A prerequisite that is no requested id, such as a split child an
-    earlier run adopted, is not carried: :func:`_runnable` holds its plain ``Depends on``
-    dependents until its PR merges into their base (#647)."""
+    there. One skipped because its branch conflicts with the line is named with what it
+    conflicts with (:func:`integrate._clash`, #694), judged on the line the fold pushes:
+    the finished ids it carries whose own change it conflicts with, each with its files,
+    and the step the end of a run gives a same-wave conflict hold (``_CONFLICT_STEP``,
+    #674); else the base, or other work on the line, with no id named; else, when it merges
+    onto that line, the ids the fold took back off it that it conflicts with, said not to
+    be carried, with that step for once a line carries them (or, when it took none off, a
+    plain re-issue) — never the ``open`` hint, which cannot change the outcome. A target
+    the carry did not put to use is not seeded, so the run's first fold of it starts
+    fresh, as today. A dry-run (stub publisher) asks no host and holds nothing: it prints
+    the plan. A prerequisite that is no requested id, such as a split child an earlier run
+    adopted, is not carried: :func:`_runnable` holds its plain ``Depends on`` dependents
+    until its PR merges into their base (#647)."""
     cands = {d.name: (d, (repo, base), ref)
              for d, repo, base, _slug, ref in integrate._fold_candidates(finished)}
     dependents: dict[str, list[str]] = {}
@@ -1086,6 +1147,7 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
         why: dict[str, tuple[str, str]] = {}    # not clean: name → (reason, hint)
         heads: dict[str, str] = {}              # state-clean: name → its PR head
         causes: dict[str, str] = {}             # built on a not-clean id: name → that id
+        partners: dict[str, list[str]] = {}     # conflicts with these finished ids (#694)
         base_ref, tip, bad = f"{cfg.base_remote}/{tgt[1]}", None, None
         try:
             repo, tip = integrate.carry_view(cfg, tgt[0], line, [
@@ -1114,16 +1176,27 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
         if clean:
             skipped: dict[str, str] = {}
             holds: dict[str, str] = {}      # left out for a skipped id's work → that id
+            # skipped for a textual conflict → (kind, partners, files) (#694)
+            clashes: dict[str, tuple[str, dict[str, list[str]], list[str]]] = {}
             try:
                 folded, tips, red = _fold_lines(cfg, clean, dry=False, batch=batch,
                                                 folded_this_run={tgt: tip} if tip else {},
-                                                skipped=skipped, pr_heads=heads, holds=holds)
+                                                skipped=skipped, pr_heads=heads, holds=holds,
+                                                clashes=clashes)
             except integrate.IntegrationError as exc:
                 folded, tips, red = {}, {}, None
                 skipped.update({d.name: str(exc) for d in clean})
                 holds.clear()
+                clashes.clear()
             carried = [d.name for d in clean if d.name not in skipped]
             why.update({name: (msg, "open") for name, msg in skipped.items()})
+            # One whose branch conflicts with the line (#694): named with what it conflicts
+            # with — finished ids of the batch the line carries, or ones it does not, the
+            # base, or other work on the line — and the step that resolves that. The `open`
+            # hint cannot: its PR is open already. The fold judges no id it held (#672).
+            why.update({name: _clash_why(clash, cands[name][2][1], base_ref)
+                        for name, clash in clashes.items()})
+            partners.update({name: list(clash[1]) for name, clash in clashes.items()})
             # One whose branch holds a skipped id's work never reached the push (#672): held
             # for that id, as one built on it, and its dependents wait.
             why.update({name: (skipped[name], "built_on") for name in holds})
@@ -1140,9 +1213,11 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
             if d.name in why:
                 held.add(d.name)
                 reason, hint = why[d.name]
-                advice = _CARRY_HINTS[hint].format(name=d.name, line=line,
-                                                   iid=d.name.removeprefix("issue_"),
-                                                   cause=causes.get(d.name, ""))
+                with_ = partners.get(d.name, [])
+                advice = _CARRY_HINTS[hint].format(
+                    name=d.name, line=line, iid=d.name.removeprefix("issue_"),
+                    cause=causes.get(d.name, ""), base=base_ref, partners=", ".join(with_),
+                    ids=", ".join(p.removeprefix("issue_") for p in with_))
                 print(f"flow: {d.name} (finished in an earlier run) is not carried onto "
                       f"{line}: {reason} — holding "
                       f"{', '.join(dependents.get(d.name, [])) or 'no bundle'} this run; "
@@ -1190,11 +1265,11 @@ def _report_conflict_holds(held: Mapping[str, tuple[list[str], list[str]]]) -> N
     same-wave conflict (#674), with the step to take. The ``Conflicts with`` declaration is
     a proposal for the human: no brief is written."""
     for name, (partners, paths) in held.items():
-        ids = ", ".join(p.removeprefix("issue_") for p in partners)
+        step = _CONFLICT_STEP.format(ids=", ".join(p.removeprefix("issue_") for p in partners),
+                                     name=name, partners=", ".join(partners))
         print(f"flow: {name} was held out of this run's integration line — its change "
               f"conflicts with {_conflict_partners(partners)} ({', '.join(paths)}). Proposed, "
-              f"for you to confirm: declare `Conflicts with: {ids}` in {name}'s brief, then "
-              f"rebuild {name} on a base that holds {', '.join(partners)}.", file=sys.stderr)
+              f"for you to confirm: {step}.", file=sys.stderr)
 
 
 # Terminal: finished (COMPLETE), deliberately abandoned (DISCONTINUED), or settled in the
