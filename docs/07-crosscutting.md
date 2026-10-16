@@ -708,6 +708,19 @@ wave builds on, via `[driver].wave_mode`:
   so does one that conflicts only with a newer base the fold merged in during
   the wave (a PR of the wave merged and its branch was deleted meanwhile).
 
+  A held bundle is still COMPLETE, so the results `pdca flow` prints list it as
+  COMPLETE. The exit code tells the two runs apart: a run in which every bundle
+  finished, but a fold held one or more of them out of the line for either
+  reason above (it pushed no branch, or it conflicts with a bundle of its wave),
+  exits **3**, not 0. That holds with one id too (a run over a split parent
+  folds between the waves of the children it adopts), where a bundle stopped
+  for sign-off still counts as finished. A bundle that did not finish still
+  exits 1, which wins over 3 (a held bundle's dependent is left unbuilt, so a
+  hold with a dependent in the run exits 1). So 0 means every bundle finished
+  and none was held out of a fold the run performed. An accepted bundle of the
+  last wave that pushed no branch is not covered: no fold runs after it, so the
+  run holds nothing.
+
   To recover a run that stopped part-way (an integrity stop, the pass budget, a
   crash, Ctrl-C), re-issue the same `pdca flow <ids>`. The ids the earlier run
   finished are skipped, and if a bundle the new run drives names one of them in

@@ -2242,6 +2242,7 @@ def _drive_and_act(
     adopt_seeds: list[Path] | None = None,
     claims: drive_claim.Run | None = None,
     batch: Collection[str] | None = None,
+    holds: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Drive a set of in-flight bundles through the full cycle to Act, in waves.
 
@@ -2290,6 +2291,13 @@ def _drive_and_act(
     finished bundles on that line when a bundle it drives depends on one, or holds that
     bundle, loudly (:func:`_carry_finished`, #646). ``None`` — a library call — scopes by
     the drive set as passed.
+
+    ``holds`` (#693) is the caller's collector for the accepted bundles a fold of this run
+    held out of the integration line: filled at the end of the run with ``{id: reason}``,
+    ``"unpushed"`` for one that pushed no branch (#593) and ``"conflict"`` for one whose
+    branch conflicts with a same-wave bundle merged before it (#674). Such a bundle is
+    COMPLETE in the returned map, which therefore cannot say it was held; ``cli._flow``
+    reads this to exit 3 instead of 0 (``cli._results_rc``). ``None`` — nobody listens.
     """
     bundles = list(bundles)          # the drive set — split adoption extends it (#469)
     allowance = cfg.max_passes if max_passes is None else max_passes
@@ -2587,6 +2595,11 @@ def _drive_and_act(
     _warn_stranded_split_children(cfg, bundles, adopt_seeds)
     # Each bundle a fold held for a same-wave conflict, again, with the step to take (#674).
     _report_conflict_holds(held_conflict)
+    # The run's holds, for the caller's exit code (#693): a held bundle reads COMPLETE above.
+    # Keyed exactly as `results` is, so each held id is a key of the map returned beside it.
+    if holds is not None:
+        holds.update({n.replace("issue_", ""): "unpushed" for n in sorted(held_unpushed)})
+        holds.update({n.replace("issue_", ""): "conflict" for n in held_conflict})
     return results
 
 
@@ -2603,6 +2616,7 @@ def flow_batch(
     today: str | None = None,
     max_passes: int | None = None,
     claims: drive_claim.Run | None = None,
+    holds: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Plan many → drive every in-flight bundle to sign-off → publish → Act once. **Resumable.**
 
@@ -2627,6 +2641,8 @@ def flow_batch(
     claimed yet, since the sweep pulls in EVERY in-flight bundle, that includes whatever it
     just split. Best-effort and never gates the batch: a marker this cannot record still
     leaves the ordinary per-bundle claims to refuse or exclude correctly, exactly as before.
+
+    ``holds`` is handed to :func:`_drive_and_act` unchanged (#693).
     """
     today = today or datetime.date.today().isoformat()
     marker = drive_claim.sweep_marker(cfg) if claims is not None else None
@@ -2687,7 +2703,7 @@ def flow_batch(
             return {}
         return _drive_and_act(cfg, bundles, do_publish=do_publish, do_act=do_act, by=by,
                               today=today, max_passes=max_passes, claims=claims,
-                              batch=swept)
+                              batch=swept, holds=holds)
     finally:
         # The sweep is fully decided by every return above (and by a raise, which leaves
         # nothing further for `cli._split` to promise about either) — released here so the
@@ -2726,6 +2742,7 @@ def flow_ids(
     today: str | None = None,
     max_passes: int | None = None,
     claims: drive_claim.Run | None = None,
+    holds: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Drive specific bundles by id through the FULL cycle to Act.
 
@@ -2757,6 +2774,9 @@ def flow_ids(
     split parent handed on as an adoption SEED, which is held until its adoption pre-pass
     has read it (:func:`_drive_and_act`). The rest reach adoption through
     :func:`_drive_and_act`.
+
+    ``holds`` is handed to :func:`_drive_and_act` unchanged (#693); an id skipped here is
+    never held.
     """
     today = today or datetime.date.today().isoformat()
 
@@ -2841,7 +2861,7 @@ def flow_ids(
     return skipped | _drive_and_act(cfg, bundles, adopt_seeds=seeds, do_publish=do_publish,
                                     do_act=do_act, by=by, today=today,
                                     max_passes=max_passes, claims=claims,
-                                    batch=list(ids))
+                                    batch=list(ids), holds=holds)
 
 
 def _bundle_dirs(cfg: Config) -> set[str]:
