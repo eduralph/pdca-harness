@@ -672,7 +672,17 @@ wave builds on, via `[driver].wave_mode`:
   rewritten instead (re-published with `pdca publish`, force-pushed, or updated
   with "Update with rebase"), the next fold stops the run before it merges or
   pushes anything. Restore the branch so it contains what the line took from it
-  and re-issue the run, or let the run stop and re-issue it. If a PR merges and its
+  and re-issue the run, or let the run stop and re-issue it. A rewrite after the
+  run's last fold read the branch (during that fold, or while the last wave
+  builds, publishes, or Act runs) has no next fold to stop: the run checks every
+  branch it carried once more at its end, names each rewritten one on stderr with
+  the commit the line took from it and what to do, and exits 1. A branch that
+  check cannot judge (say the fetch of its checkout fails) is named too, with
+  that commit, for you to check by hand, and the run exits 1 as well; the other
+  branches are still checked. A branch deleted by then is not judged there. Both
+  checks fetch while no integration lock is held, so another git process in the
+  same checkout (a held ref lock) can fail the fetch: it is tried twice, a second
+  apart, before it counts as failed. If a PR merges and its
   branch is deleted, the fold looks up the commit the PR merged with: a line
   that has it already carries the PR; one that does not (say a fixup was pushed
   after the fold) merges your base in, after checking that your base has that
