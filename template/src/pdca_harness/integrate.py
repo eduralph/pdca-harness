@@ -48,7 +48,13 @@ commit message: a line that already has that commit skips it; one that does not 
 pushed after the fold) takes the base in, once the base is checked to have that commit —
 a PR merged somewhere else (its base edited on the host, a squash or rebase merge) stops
 the run instead, and so does a base that would undo work already on the line (a revert of
-a merged PR, #623). A branch that does not merge cleanly (an undeclared cross-wave overlap)
+a merged PR, #623). So does a bundle's own branch whose merge would undo it: one cut from,
+or updated from, a base with such a revert brings the revert along (#673). A removal the
+branch's own commits make is its change, never counted. Both checks judge each path
+against where the line leaves the base, so they do not see a partial revert inside a file
+the line also changed in other ways, nor a revert of work below that point, which the base
+already has (a later wave's merged PR brings the line commits under it there): an accepted
+limit. A branch that does not merge cleanly (an undeclared cross-wave overlap)
 is a loud :class:`IntegrationError` that stops the run before the next wave builds on a
 broken base — unless its conflict is with bundles of its own wave merged before it (it
 merges cleanly onto the line as the wave found it, but not onto that line plus them): the
@@ -352,7 +358,10 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     host, a squash or rebase merge) raises, and so does an ``Onto branch`` record, whose
     PR may have merged into another base. So does a base that would remove work a bundle
     put on the line (#623): the line is reset to its tip before the base merge, and the
-    bundles of ``accepted`` and ``batch`` are what the message names.
+    bundles of ``accepted`` and ``batch`` are what the message names. A bundle's branch
+    whose merge would remove such work is refused the same way, unless the branch's own
+    commits make the removal (#673, :func:`_keep_merge`): one cut from, or updated from, a
+    base with a revert brings that revert along.
 
     Dry-run (offline rehearse / CI, where the publisher leaf is stubbed) prints each group's
     git plan and returns the branches with ``None`` worktrees — no worktree, no push — so the
@@ -669,16 +678,26 @@ def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, 
     is the branch's tip as :func:`fold` read it — None: it does not resolve (gone). It is
     the CURRENT tip, so commits pushed onto the branch after an earlier fold carried it
     reach the line too; for a branch the run carried, the tip checked to extend what the
-    line took from it (:func:`_carried_tips`, #633). ``owners``: the bundles a refusal to
-    take the base in may name (:func:`_take_in_base`)."""
+    line took from it (:func:`_carried_tips`, #633). ``owners``: the bundles a refusal may
+    name — to take the base in (:func:`_take_in_base`), or to keep this merge.
+
+    A merge that would remove work from the line, by a change none of the branch's own
+    commits makes (#673: the branch was cut from, or updated from, a base that reverted
+    work the line carries), is undone and raises (:func:`_keep_merge`)."""
     _remote, ref, onto = published
     if head is None:
         _gone_branch(cfg, wt, d, ref, onto, branch=branch, base=base, owners=owners)
         return
     if _in_line(wt, head, f"{d.name}'s branch {ref}", branch):
         return  # already in the line (an earlier fold carried it) — never merged twice
+    before = _rev(wt, "HEAD")
+    if before is None:
+        raise IntegrationTreeError(f"could not read the tip of {branch} in {wt} — check that "
+                                   f"checkout, then re-run")
     rc, conflicts = _merge(wt, head, f"pdca-integrate: {d.name}")
     if rc == 0:
+        _keep_merge(cfg, wt, d, ref, head, before, branch=branch,
+                    base_ref=f"{cfg.base_remote}/{base}", owners=owners)
         return
     if conflicts:
         raise _Conflict(
@@ -689,6 +708,38 @@ def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, 
         f"could not merge {d.name}'s branch {ref} onto {branch} — `git merge` exited {rc} "
         f"with no conflicting path in {wt}, so a git step failed (not an overlap): check "
         f"that checkout and the branch, then re-run")
+
+
+def _keep_merge(cfg: Config, wt: Path, d: Path, ref: str, head: str, before: str, *,
+                branch: str, base_ref: str, owners: Sequence[Path]) -> None:
+    """``d``'s branch ``ref`` at ``head`` just merged cleanly onto the line in ``wt``, whose
+    tip was ``before`` (#673). Keep that merge unless it removes work from the line, judged
+    as :func:`_take_in_base` judges the base merge (#623, :func:`_undone_paths`): a path
+    the line changed since its cut point is back to its content there. A removal the
+    branch's own commits make is the bundle's change and never counts
+    (:func:`_own_removals`). Any other removal came in with the branch from a base that
+    reverted the work (the branch was cut from it, or updated from it): the merge is undone
+    (the line reset to ``before``) and this raises, naming each path, the bundles of
+    ``owners`` whose work it is, and ``d`` (worded by :func:`_branch_removed`). A plain
+    :class:`IntegrationError`, so under the carry's ``skipped`` only ``d`` is left out; a
+    line that will not go back raises :class:`_LineBroken`, which stops even the carry."""
+    merge = f"{d.name}'s branch {ref}"
+    try:
+        undone = _undone_paths(cfg, wt, before, base_ref, branch, owners, head=head)
+    except IntegrationError:
+        _reset_line(wt, before, branch, merge)
+        raise
+    if not undone:
+        return
+    _reset_line(wt, before, branch, merge)
+    work, paths = _branch_removed(undone, branch, d.name)
+    raise IntegrationError(
+        f"merging {merge} would remove {work} from {branch}: {paths} would go back to how "
+        f"{base_ref} had it before the line changed it, and that change is not one of "
+        f"{d.name}'s own commits: its branch brings it in (cut from, or updated from, "
+        f"{base_ref} after a revert there?). Not building the next wave on a line without "
+        f"that work — put it back on {ref} (revert the revert there, or update it from "
+        f"{base_ref} once {base_ref} has the work again), then re-run")
 
 
 def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch: str,
@@ -782,14 +833,11 @@ def _take_in_base(cfg: Config, wt: Path, d: Path, ref: str, branch: str, base_re
         try:
             undone = _undone_paths(cfg, wt, before, base_ref, branch, owners)
         except IntegrationError:
-            _reset_line(wt, before, branch)
+            _reset_line(wt, before, branch, base_ref)
             raise
         if undone:
-            _reset_line(wt, before, branch)
-            whose = sorted({n for _p, names, _note in undone for n in names})
-            work = f"{', '.join(whose)}'s work" if whose else "folded work"
-            paths = "; ".join(f"{p} ({', '.join(names) or f'{note} on {branch}'})"
-                              for p, names, note in undone)
+            _reset_line(wt, before, branch, base_ref)
+            work, paths = _removed(undone, branch)
             raise IntegrationError(
                 f"{d.name}'s branch {ref} is gone and its PR merged at {head[:12]}, which "
                 f"{branch} does not have, but taking {base_ref} in would remove {work} from "
@@ -800,6 +848,43 @@ def _take_in_base(cfg: Config, wt: Path, d: Path, ref: str, branch: str, base_re
     print(f"integrate: {d.name}'s branch {ref} is gone and its PR merged at {head[:12]}, "
           f"which {branch} did not have — the merged work reaches {branch} through "
           f"{base_ref}.", file=sys.stderr)
+
+
+def _removed(undone: Sequence[tuple[str, list[str], str, list[tuple[str, ...]]]],
+             branch: str) -> tuple[str, str]:
+    """How a refusal names what :func:`_undone_paths` found (#623, #673): ``(work, paths)``
+    — whose work would go (``"issue_A's work"``; ``"folded work"`` when no bundle is known
+    for it), and each path with the bundles that brought it, or else the line commit that
+    last changed it. A bundle's branch merge words it as :func:`_branch_removed` does."""
+    whose = sorted({n for _p, names, _note, _groups in undone for n in names})
+    work = f"{', '.join(whose)}'s work" if whose else "folded work"
+    paths = "; ".join(f"{p} ({', '.join(names) or f'{note} on {branch}'})"
+                      for p, names, note, _groups in undone)
+    return work, paths
+
+
+def _branch_removed(undone: Sequence[tuple[str, list[str], str, list[tuple[str, ...]]]],
+                    branch: str, incoming: str) -> tuple[str, str]:
+    """``(work, paths)`` for the refusal to keep the merge of bundle ``incoming``'s branch
+    (#673). While each commit that changed a path is the own commit of one bundle other
+    than ``incoming``, it is worded as :func:`_removed` words it. Otherwise ``work`` is just
+    "work" and each path says whose, never naming ``incoming`` as it names the others,
+    which would read as if its merge removed its own work: a commit several bundles share
+    (neither branch holds the other's tip) is work from one or the other, and git cannot
+    tell which branch made it; a commit only ``incoming`` has is its earlier work, which
+    its branch no longer has."""
+    if all(len(g) == 1 and g[0] != incoming for _p, _n, _note, groups in undone
+           for g in groups):
+        return _removed(undone, branch)
+    paths: list[str] = []
+    for p, names, note, groups in undone:
+        whose = [", ".join(n for n in names if n != incoming and (n,) in groups)]
+        if (incoming,) in groups:
+            whose.append(f"{incoming}'s earlier work, which its branch no longer has")
+        whose += [f"work from {', '.join(g[:-1])} or {g[-1]} — git cannot tell which branch "
+                  f"made it" for g in groups if len(g) > 1]
+        paths.append(f"{p} ({', and '.join(w for w in whose if w) or f'{note} on {branch}'})")
+    return "work", "; ".join(paths)
 
 
 def _out(wt: Path, *args: str, what: str, stdin: str | None = None) -> str:
@@ -857,15 +942,58 @@ def _own_commits(wt: Path, tip: str, since: Sequence[str], skip: Collection[str]
     return own
 
 
+def _own_removals(wt: Path, head: str, before: str, skip: Collection[str],
+                  paths: Sequence[str]) -> set[str]:
+    """Which of ``paths`` the branch's OWN commits put back (#673): a removal that is the
+    bundle's change. Each path is one the merge of branch tip ``head`` onto the line at
+    ``before`` just put back to its content at the line's cut point (:func:`_undone_paths`).
+
+    Judged by the commit that gave ``head`` its content at the path, as git's history
+    simplification finds it (``git rev-list -n 1 <head> -- <path>``): through a merge that
+    took the path from one parent, it follows that parent. The removal is the branch's own
+    when that commit is one of the branch's own commits the merge brings
+    (:func:`_own_commits` from ``head`` down to ``before``, which stops at the base's
+    first-parent chain): a commit of the branch, or of a topic merged into it, that deletes
+    the file or puts its old content back. It is not when that commit is the base's revert,
+    which a branch cut from the base, or updated from it, carries: an "Update branch" merge
+    takes the path from the base, so the walk goes past it to the revert. Nor is it when no
+    commit of the branch changed the path. An earlier commit of the branch that changed the
+    path counts for nothing when the content ``head`` has came from elsewhere."""
+    own = _own_commits(wt, head, ("--not", before), skip,
+                       what=f"the commits {head[:12]} brings onto the line")
+    mine: set[str] = set()
+    for p in paths:
+        last = _out(wt, "rev-list", "-n", "1", head, "--", f":(literal){p}",
+                    what=f"the commit that last changed {p} on {head[:12]}").strip()
+        if last in own:
+            mine.add(p)
+    return mine
+
+
 def _undone_paths(cfg: Config, wt: Path, before: str, base_ref: str, branch: str,
-                  owners: Sequence[Path]) -> list[tuple[str, list[str], str]]:
-    """``(path, bundles, note)`` for each path the base merge just made in ``wt`` undoes
-    (#623): one the line at ``before`` changed since its cut point (:func:`_cut_point`),
-    which is back to its content there now (absent, where the cut point had none). An edit
-    that leaves the path with NEW content removes nothing. ``bundles`` are the ``owners``
-    that brought the change: each one with a commit of its own (:func:`_own_commits`, from
-    its published branch or, gone, the head its PR merged with) among the commits that
-    changed the path on the line; ``note`` names the line commit that last changed it."""
+                  owners: Sequence[Path], *, head: str | None = None
+                  ) -> list[tuple[str, list[str], str, list[tuple[str, ...]]]]:
+    """``(path, bundles, note, groups)`` for each path the merge just made in ``wt`` undoes
+    — of the base (#623), or of a bundle's branch at ``head`` (#673): one the line at
+    ``before`` changed since its cut point (:func:`_cut_point`), which is back to its
+    content there now (absent, where the cut point had none). An edit that leaves the path
+    with NEW content removes nothing, and neither does a removal ``head``'s own commits
+    make (:func:`_own_removals`): that is the bundle's change. ``bundles`` are the
+    ``owners`` that brought the change: each one with a commit of its own
+    (:func:`_own_commits`, from its published branch or, gone, the head its PR merged with)
+    among the commits that changed the path on the line; ``note`` names the line commit
+    that last changed it. A branch that holds another bundle's tip (cut from that bundle's
+    branch, or updated from a base that merged it) holds that bundle's own commits, which
+    are not its work: they are left out of its own, whatever path its walk reaches them by
+    (#673). A commit two branches share while neither holds the other's tip counts for
+    both: git cannot tell which branch it was made on, and naming both never leaves out the
+    one whose work it is. ``groups`` keeps them apart for the bundle-branch refusal
+    (:func:`_branch_removed`): for each of those commits a bundle has as its own, the
+    bundles that have it — one, or the several that share it.
+
+    Judged per path from the line's cut point, so it does not see a partial revert inside a
+    file the line also changed in other ways, nor a revert of work below the cut point
+    (already on the base): an accepted limit (#673)."""
     cut, chain = _cut_point(wt, before, base_ref)
     since = ("--not", cut) if cut else ()
     old = cut or _out(wt, "hash-object", "-t", "tree", "--stdin", stdin="",
@@ -876,30 +1004,46 @@ def _undone_paths(cfg: Config, wt: Path, before: str, base_ref: str, branch: str
         return []
     skip = {*chain, *_out(wt, "rev-list", "--first-parent", base_ref, *since,
                           what=f"the first-parent chain of {base_ref}").split()}
-    own: list[tuple[str, set[str]]] = []      # (bundle name, the commits it adds)
+    if head is not None:
+        mine = _own_removals(wt, head, before, skip, undone)
+        undone = [p for p in undone if p not in mine]
+        if not undone:
+            return []
+    tips: dict[str, str] = {}                 # bundle name → its branch tip (or merged head)
     for o in owners:
         pub = _published_ref(o)
         if pub is None:
             continue
         tip = _rev(wt, pub[1]) or merged.merged_head(cfg, o.name.removeprefix("issue_"))
         if tip and _git(wt, "cat-file", "-e", f"{tip}^{{commit}}") == 0:
-            own.append((o.name, _own_commits(wt, tip, since, skip,
-                                             what=f"{o.name}'s commits")))
-    out: list[tuple[str, list[str], str]] = []
+            tips[o.name] = tip
+    walks = {name: _own_commits(wt, tip, since, skip, what=f"{name}'s commits")
+             for name, tip in tips.items()}
+    own: list[tuple[str, set[str]]] = []      # (bundle name, the commits it adds)
+    for name, tip in tips.items():
+        mine = walks[name]
+        held = [walks[n] for n, t in tips.items() if t != tip and not walks[n].isdisjoint(mine)
+                and _in_line(wt, t, f"{n}'s branch tip {t[:12]}", f"{name}'s branch", of=tip)]
+        own.append((name, mine.difference(*held)))
+    out: list[tuple[str, list[str], str, list[tuple[str, ...]]]] = []
     for path in undone:
         touched = _out(wt, "rev-list", before, *since, "--", f":(literal){path}",
                        what=f"the commits on {branch} that changed {path}").split()
+        groups = [tuple(name for name, commits in own if c in commits) for c in touched]
         out.append((path, [name for name, commits in own if commits.intersection(touched)],
-                    f"last changed by {touched[0][:12]}" if touched else "changed"))
+                    f"last changed by {touched[0][:12]}" if touched else "changed",
+                    list(dict.fromkeys(g for g in groups if g))))
     return out
 
 
-def _reset_line(wt: Path, tip: str, branch: str) -> None:
-    """Put the line in ``wt`` back at ``tip`` (#623); one that will not go back stops the
-    fold even under ``skipped`` (:class:`_LineBroken`) — never merged onto and pushed."""
+def _reset_line(wt: Path, tip: str, branch: str, merged_in: str) -> None:
+    """Put the line in ``wt`` back at ``tip``, undoing the merge of ``merged_in`` — the base
+    (#623) or a bundle's branch (#673) — that the fold refused to keep; one that will not
+    go back stops the fold even under ``skipped`` (:class:`_LineBroken`) — never merged onto
+    and pushed."""
     if _git(wt, "reset", "-q", "--hard", tip) != 0 or _rev(wt, "HEAD") != tip:
-        raise _LineBroken(f"could not reset {branch} in {wt} back to {tip} after refusing "
-                          f"to take the base in — check that checkout, then re-run")
+        raise _LineBroken(f"could not reset {branch} in {wt} back to {tip} to undo the merge "
+                          f"of {merged_in} — check that checkout, then re-run")
 
 
 def _in_line(wt: Path, rev: str, what: str, branch: str, *, of: str = "HEAD") -> bool:
