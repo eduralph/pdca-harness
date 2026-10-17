@@ -23,7 +23,9 @@ run carries (#647): is it merged into the DEPENDENT's target base — that repo 
 not just some branch?
 :func:`merge_and_head` answers the follow-up when the dependent is cut from the run's line
 for that base (#655): which commit did the merge put on the base, and which head did it
-merge — so the flow can ask whether the line has either?
+merge — so the flow can ask whether the line has either? Only a dependent built on the line
+— one a seam keeps there (#727) — is asked it (#729): one on a base of its own, or on the
+real base, is built from the base as fetched, so :func:`merged_into` is the whole answer.
 """
 
 from __future__ import annotations
@@ -185,7 +187,8 @@ def pr_state(pr_url: str) -> tuple[str, str] | None:
 def _pr_view(pr_url: str, fields: str) -> dict | None:
     """``gh pr view <pr_url> --json <fields>`` read as a JSON object, or ``None`` when it
     cannot be: ``gh`` missing (``OSError``), ``gh`` failing, or output that is not a JSON
-    object. Silent — :func:`pr_state` and :func:`merge_and_head` share it (#655)."""
+    object. Silent — :func:`pr_state` and :func:`merge_and_head` share it (#655; the latter
+    is asked only for a dependent built on the run's line, #729)."""
     try:
         r = subprocess.run(["gh", "pr", "view", pr_url, "--json", fields],
                            capture_output=True, text=True)

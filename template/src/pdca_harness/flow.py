@@ -685,7 +685,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
               unpushed: Collection[str] = frozenset(),
               conflicts: Mapping[str, Collection[str]] | None = None,
               conflict_held: Mapping[str, Collection[str]] | None = None,
-              lines: Mapping[tuple[str, str], tuple[str, str | None]] | None = None
+              lines: Mapping[tuple[str, str], tuple[str, str | None]] | None = None,
+              on_line: Collection[str] | None = None
               ) -> list[Path]:
     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
 
@@ -733,15 +734,20 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     cascades).
 
     ``lines`` maps a target ``(repo, base)`` to the run's line for it — ``(branch, the tip
-    the run recorded)`` — once the run has folded (or carried) that target: a dependent of
-    it is cut from that line, not from the freshly fetched base (#655), and the line does
-    not follow the base. So an out-of-batch prerequisite judged merged into d's base above
-    counts only when the line has its work: the commit its PR merge put on the base, or
-    the PR's head, which the carry may have put on the line (:func:`_line_lacks_merge`).
-    Else d is held, named on ONE stderr line with the line's tip and the way out — once
-    the run ends, delete the line on origin, then re-run: a re-run whose carry finds the
-    line continues it, and holds d again. A target with no line (or no recorded tip: a
-    dry-run) is judged as before."""
+    the run recorded)`` — once the run has folded (or carried) that target. ``on_line``
+    names the bundles built on that line — those a seam keeps there (#727, the answer
+    :func:`_base_plans` gives) — and ``None`` is every bundle, as where none gets a base of
+    its own. Such a d is cut from the line, not from the freshly fetched base (#655), and
+    the line does not follow the base. So for it an out-of-batch prerequisite judged merged
+    into d's base above counts only when the line has its work: the commit its PR merge put
+    on the base, or the PR's head, which the carry may have put on the line
+    (:func:`_line_lacks_merge`). Else d is held, named on ONE stderr line with the line's
+    tip and the way out — once the run ends, delete the line on origin, then re-run: a
+    re-run whose carry finds the line continues it, and holds d again. Any other d — on a
+    base of its own (:func:`integrate.build_bundle_base`) or on the real base — is built
+    from the base as fetched after this check, which has the merge judged here: the merge
+    is enough, and the line is not read (#729). A target with no line (or no recorded tip:
+    a dry-run) is judged as before."""
     asked = set(requested) if requested is not None else set(batch_names)
     unpushed_set = set(unpushed)
     views: dict[str, Path | str] = {}   # repo → its fetched checkout, or why not (#655)
@@ -783,8 +789,11 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                 # and its "not ready" line stand.
                 if merged.merged_into(cfg, dep, repo, base):
                     # … and when d is cut from this run's line, that line must have it too
-                    # (#655). A close/no-fix prereq merged nothing.
-                    line = (lines or {}).get((repo, base)) if targeted else None
+                    # (#655); a d on a base of its own, or on the real base, is built from
+                    # the base as fetched, which has it (#729). A close/no-fix prereq merged
+                    # nothing.
+                    line = ((lines or {}).get((repo, base))
+                            if targeted and (on_line is None or d.name in on_line) else None)
                     if line is None or line[1] is None or not integrate._has_patch(p):
                         continue
                     key = (p.name, repo, base)
@@ -958,32 +967,45 @@ def _closure_members(cfg: Config, d: Path, *, built: Mapping[str, tuple[Path, in
     return f"{seam} was pointed at a seam itself" if seam else members
 
 
-def _bundle_bases(cfg: Config, runnable: list[Path], *, built: Mapping[str, tuple[Path, int]],
-                  finished: list[Path], bundles: list[Path],
+def _base_plans(cfg: Config, ds: list[Path], *, built: Mapping[str, tuple[Path, int]],
+                finished: list[Path], bundles: list[Path], seams: Collection[str]
+                ) -> dict[str, tuple[set[str], list[Path] | str]]:
+    """What each bundle of ``ds`` is built on in stack mode (#727), by name: the names of
+    the bundles of ``built`` whose branch the fold carries on its target, and
+    :func:`_closure_members`' answer — the members of a base of its own, ``[]`` for the
+    real base, or a str, the seam that keeps it on the run's line. ``seams``: the bundles
+    pointed at a seam so far. A wave asks it once, so :func:`_runnable` judges a merged
+    prerequisite on the line for exactly the bundles :func:`_bundle_bases` points there
+    (#729)."""
+    conflicts = waves.conflict_map(cfg, [*bundles, *finished])
+    cands = integrate._fold_candidates([p for p, _w in built.values()])
+    plans: dict[str, tuple[set[str], list[Path] | str]] = {}
+    for d in ds:
+        target = publish._resolve_target(d)[:2]
+        mine = {m.name for m, repo, base, _s, _r in cands if (repo, base) == target}
+        plans[d.name] = (mine, _closure_members(
+            cfg, d, built=built, on_target=mine, finished={f.name for f in finished},
+            conflicts=conflicts, seams=set(seams)))
+    return plans
+
+
+def _bundle_bases(cfg: Config, runnable: list[Path], *,
+                  plans: Mapping[str, tuple[set[str], list[Path] | str]],
                   integ: dict[tuple[str, str], str],
                   folded_tips: Mapping[tuple[str, str], str | None],
                   carried_heads: Mapping[str, str], batch: list[str],
                   bases: dict[str, tuple[str, dict[str, str]]],
                   line_cut: dict[str, dict[str, str]],
                   taken: tuple[integrate.Bases, integrate.LinePrs]) -> None:
-    """Point each bundle of ``runnable`` at what it is built on (#727,
-    :func:`_closure_members`): a base of its own, the real base, or — a seam — the run's
-    line, as before (:func:`_point_at_integration`). A base of its own is
+    """Point each bundle of ``runnable`` at what its plan says it is built on (#727,
+    ``plans``: :func:`_base_plans`): a base of its own, the real base, or — a seam — the
+    run's line, as before (:func:`_point_at_integration`). A base of its own is
     :func:`integrate.build_bundle_base` of the members, held to the heads the line took
     (``carried_heads``) and the run's PRs hold (``taken``, :func:`_heads_taken`). Every base
     of the wave is built before any bundle is pointed; an :class:`integrate.IntegrationError`
     names the bundle and its members and propagates (the caller stops the run). Then
     ``bases`` gets ``(branch, {member: head})`` per base, and ``line_cut`` the heads of its
     target's branches the line held (none: no line yet) per bundle pointed at a seam."""
-    conflicts = waves.conflict_map(cfg, [*bundles, *finished])
-    cands = integrate._fold_candidates([p for p, _w in built.values()])
-    plans: dict[str, tuple[set[str], list[Path] | str]] = {}
-    for d in runnable:
-        target = publish._resolve_target(d)[:2]
-        mine = {m.name for m, repo, base, _s, _r in cands if (repo, base) == target}
-        plans[d.name] = (mine, _closure_members(
-            cfg, d, built=built, on_target=mine, finished={f.name for f in finished},
-            conflicts=conflicts, seams=set(line_cut)))
     made: dict[str, tuple[str, str, dict[str, str]]] = {}
     for d in runnable:
         members = plans[d.name][1]
@@ -2665,6 +2687,15 @@ def _drive_and_act(
     # the end-of-run check still runs, without the branch whose rewrite that stop named.
     stop_named: set[str] = set()
     for k, wave in enumerate(wave_list):
+        # What each bundle of the wave is built on (#727), asked once: `_bundle_bases` points
+        # it there below, and `_runnable` judges a merged prerequisite on the run's line for
+        # just the bundles a seam keeps on it (#729). Where no bundle gets a base of its own,
+        # every one is on the line (`on_line` None).
+        built = {d.name: (d, wave_of[d.name]) for d in accepted}
+        plans = (_base_plans(cfg, wave, built=built, finished=finished, bundles=bundles,
+                             seams=line_cut) if own_bases else {})
+        on_line = ({n for n, (_mine, plan) in plans.items() if isinstance(plan, str)}
+                   if own_bases else None)
         # `Conflicts with` partners of `held_unpushed` are held too (#629), and so are those
         # of `held_conflict` (#674). The relation is read off the LIVE `bundles` each wave:
         # an adopted split child adds its edges.
@@ -2675,9 +2706,11 @@ def _drive_and_act(
                              conflicts=(waves.conflict_map(cfg, bundles)
                                         if held_unpushed or held_conflict else None),
                              conflict_held={n: ps for n, (ps, _paths) in held_conflict.items()},
-                             # The line each target's bundles are cut from, if any (#655).
+                             # The line each target's bundles are cut from, if any (#655),
+                             # and the bundles cut from it (#729).
                              lines={tgt: (branch, folded_tips.get(tgt))
-                                    for tgt, branch in integ.items()})
+                                    for tgt, branch in integ.items()},
+                             on_line=on_line)
         if not runnable:
             continue
         # The pool, read off the schedule as it stands NOW — so a splice below has already
@@ -2725,9 +2758,7 @@ def _drive_and_act(
         # the real base. A base that cannot be built stops the run, as a failed fold does.
         if own_bases:
             try:
-                _bundle_bases(cfg, runnable,
-                              built={d.name: (d, wave_of[d.name]) for d in accepted},
-                              finished=finished, bundles=bundles, integ=integ,
+                _bundle_bases(cfg, runnable, plans=plans, integ=integ,
                               folded_tips=folded_tips, carried_heads=carried_heads,
                               batch=run_batch, bases=bases_took, line_cut=line_cut,
                               taken=_heads_taken(bases_took, line_cut, pushed))
