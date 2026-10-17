@@ -189,11 +189,23 @@ class MergedPrereqOnTheLine(unittest.TestCase):
         return line
 
     def _built_on_line(self) -> str:
-        """D was built, on the run's line; returns the tip it was built on."""
+        """D was built; returns the tip it was built on. Where this run built W (D's
+        `Depends on: W`), D is built on a base of its own (#727): the run line's per-bundle
+        branch (``integrate.bundle_base_branch``: the line's name, ``-b``, then the id), at
+        that tip, holding W's branch and, beyond origin's main, nothing but the merge
+        commits that built it. Otherwise D's prerequisite was carried, a seam, and D is
+        built on the run's line, as before."""
         self.assertIn("issue_D", self.seen, self.err)
         base, tip = self.seen["issue_D"]
-        self.assertEqual(base, self.line, self.err)
         self.assertTrue(tip)
+        if "issue_W" in self.seen:
+            self.assertEqual(base, f"{self.line}-bD", self.err)
+            self.assertEqual(self.fx._tip(base), tip, self.err)
+            self.assertTrue(self.fx._ancestor(self.fx._tip("fix/W"), tip))
+            self.assertEqual(sb._git(self.fx.origin, "rev-list", "--no-merges", tip, "--not",
+                                     "main", "fix/W").split(), [], self.err)
+        else:
+            self.assertEqual(base, self.line, self.err)
         self.assertEqual(self.results["D"], state.COMPLETE)
         return tip
 

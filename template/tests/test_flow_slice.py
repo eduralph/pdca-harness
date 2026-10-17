@@ -1335,7 +1335,8 @@ class StackModeFlow(unittest.TestCase):
         """Patches for a NON-dry run: a non-stub publisher, the text pre-pass spied (no
         leaf; ``fail_texts`` bundle names fail it, as a failed draft/T4 does), publish spied
         (``fail_publish`` ids fail: rc 1, nothing recorded — the real path's failure
-        shape), and optionally the fold."""
+        shape), and optionally the fold — and with it the other git step that merges pushed
+        branches, a bundle's own base (#727), answered with a branch named for it."""
         self.cfg.publisher = LeafConfig(mode="command", family="claude", interactive=True)
         real_publish = flow.publish.publish
 
@@ -1358,6 +1359,9 @@ class StackModeFlow(unittest.TestCase):
         stack.enter_context(mock.patch.object(flow.publish, "publish", fake_publish))
         if fold is not None:
             stack.enter_context(mock.patch.object(flow.integrate, "fold", fold))
+            stack.enter_context(mock.patch.object(
+                flow.integrate, "build_bundle_base",
+                lambda cfg, d, members, **kw: (f"pdca-integration/main-b{d.name}", "0" * 40)))
         return stack
 
     def test_each_later_fold_continues_the_tip_the_runs_last_fold_pushed(self) -> None:
@@ -1569,13 +1573,19 @@ class StackModeFlow(unittest.TestCase):
         self._git("merge", "-q", "--no-ff", "--no-edit", f"origin/{branch}")
         self._git("push", "-q", "origin", "main")
 
-    def _update_from_main(self, branch: str) -> None:
-        """GitHub's "Update branch": merge main into ``branch``."""
-        self._git("fetch", "-q", "origin")
-        self._git("checkout", "-q", "-B", branch, f"origin/{branch}")
-        self._git("merge", "-q", "--no-ff", "--no-edit", "origin/main")
-        self._git("push", "-q", "origin", branch)
-        self._git("checkout", "-q", "main")
+    def _own_base(self, iid: str, *closure: str) -> None:
+        """``issue_<iid>`` was cut from a base of its own (#727) holding the branch of each
+        bundle of ``closure`` and, beyond ``main``, nothing but the merge commits that built
+        it."""
+        ref = self.cut_from[f"issue_{iid}"].removeprefix("origin/")
+        self.assertEqual(ref, flow.integrate.bundle_base_branch(
+            self.cfg, "main", self.ids, f"issue_{iid}"))
+        heads = [self._origin_rev(f"fix/issue_{c}") for c in closure]
+        for c, h in zip(closure, heads):
+            self.assertTrue(self._ancestor(h, ref), (iid, c))
+        self.assertEqual(subprocess.run(
+            ["git", "-C", str(self.origin), "rev-list", "--no-merges", ref, "--not", "main",
+             *heads], check=True, capture_output=True, text=True).stdout.split(), [], iid)
 
     def test_a_three_wave_run_folds_append_only_onto_a_real_origin(self) -> None:
         # Origin refuses non-fast-forwards; the second fold must continue the line and carry
@@ -1586,8 +1596,10 @@ class StackModeFlow(unittest.TestCase):
         self._real_origin()
         for iid, dep in (("EA", ""), ("EB", "EA"), ("EC", "EB")):
             self._brief(iid, depends_on=dep)
-        self.line = self._line("EA", "EB", "EC")
+        self.ids = ["EA", "EB", "EC"]
+        self.line = self._line(*self.ids)
         pushes: list[list[str]] = []
+        tips: list[str] = []                # the line's tip after each fold of it
         real_fold, real_git = flow.integrate.fold, flow.integrate._git
         clock = iter(range(1_790_000_000, 1_800_000_000, 60))
 
@@ -1595,7 +1607,9 @@ class StackModeFlow(unittest.TestCase):
             stamp = f"@{next(clock)} +0000"
             with mock.patch.dict(os.environ, {"GIT_AUTHOR_DATE": stamp,
                                               "GIT_COMMITTER_DATE": stamp}):
-                return real_fold(cfg, accepted, **kwargs)
+                out = real_fold(cfg, accepted, **kwargs)
+            tips.append(self._origin_rev(self.line))
+            return out
 
         def spy_git(repo: Path, *args: str) -> int:
             if args[:1] == ("push",):
@@ -1612,25 +1626,31 @@ class StackModeFlow(unittest.TestCase):
         self.assertNotIn("STOPPING", err.getvalue())
         self.assertEqual(results, {"EA": state.COMPLETE, "EB": state.COMPLETE,
                                    "EC": state.COMPLETE})
-        self.assertEqual(self.cut_from["issue_EB"], f"origin/{self.line}")
+        self._own_base("EB", "EA")          # B is cut from a base holding A alone (#727)
+        self._own_base("EC", "EB", "EA")
         self.assertTrue(self._in_line(self._origin_rev("fix/issue_EA")))   # A's own commit
         self.assertTrue(self._in_line(self._origin_rev("fix/issue_EB")))   # B's own commit
-        # B was cut from the first fold's tip, and that tip is still in the line.
-        self.assertTrue(self._in_line(self._origin_rev("fix/issue_EB~1")))
+        # The first fold's tip is still in the line: the second continued it.
+        self.assertTrue(self._in_line(tips[0]))
+        # The line's own folds merged EA once: the merges on its first-parent chain (B's
+        # branch brings the merge of EA its own base made, #727).
         merges = subprocess.run(
-            ["git", "-C", str(self.origin), "log", "--merges", "--format=%s",
-             self.line], check=True, capture_output=True,
+            ["git", "-C", str(self.origin), "log", "--merges", "--first-parent",
+             "--format=%s", self.line], check=True, capture_output=True,
             text=True).stdout.splitlines()
         self.assertEqual(merges.count("pdca-integrate: issue_EA"), 1, merges)
+        pushes = [x for x in pushes if x[-1] == self.line]  # the line's, not the bases'
         self.assertEqual(len(pushes), 2, pushes)            # a fold after waves 0 and 1
         self.assertIn("--force", pushes[0])                 # the run's first fold only
         self.assertEqual([x for x in pushes[1] if x.startswith("--force")], [], pushes[1])
 
-    def test_a_dependent_carries_every_earlier_wave_branch_not_only_its_prerequisite(
+    def test_a_dependent_carries_only_its_prerequisite_not_every_earlier_wave_branch(
             self) -> None:
-        # Wave 0 = {ZA, ZZ}; ZB depends on ZA alone, yet carries ZZ too (the line holds every
-        # published branch) and shows its change until ZZ merges. Once both merge, the fold
-        # commit joining them never reaches main: two merge bases, until "Update branch".
+        # Wave 0 = {ZA, ZZ}; ZB depends on ZA alone, so its base is built from ZA's branch
+        # alone, never the line, which holds every published branch (#727). Before, it
+        # carried ZZ too and showed ZZ's change until ZZ merged; once both merged, the fold
+        # commit joining them never reached main (two merge bases, until "Update branch").
+        # Now its diff is its own change once ZA merges, and ZZ's merge changes nothing.
         self._real_origin()
         self._brief("ZA")
         self._brief("ZZ")
@@ -1642,22 +1662,21 @@ class StackModeFlow(unittest.TestCase):
                                     today="2026-10-02")
         self.assertEqual(results, {"ZA": state.COMPLETE, "ZZ": state.COMPLETE,
                                    "ZB": state.COMPLETE}, err.getvalue())
-        self.assertEqual(self.cut_from["issue_ZB"],
-                         f"origin/{self._line('ZA', 'ZZ', 'ZB')}")
+        self.ids = ["ZA", "ZZ", "ZB"]
+        self._own_base("ZB", "ZA")
         za, zz = self._origin_rev("fix/issue_ZA"), self._origin_rev("fix/issue_ZZ")
         self.assertTrue(self._ancestor(za, "fix/issue_ZB"))
-        self.assertTrue(self._ancestor(zz, "fix/issue_ZB"))   # though ZB never named ZZ
+        self.assertFalse(self._ancestor(zz, "fix/issue_ZB"))  # ZB never named ZZ
         self.assertEqual(self._diff("main", "fix/issue_ZB"),
-                         ["issue_ZA.txt", "issue_ZB.txt", "issue_ZZ.txt"])
+                         ["issue_ZA.txt", "issue_ZB.txt"])
         self._merge_into_main("fix/issue_ZA")
         self.assertEqual(self._diff("main", "fix/issue_ZB"),
-                         ["issue_ZB.txt", "issue_ZZ.txt"])     # ZZ rides until it merges
+                         ["issue_ZB.txt"])                    # its own change, at once
         self._merge_into_main("fix/issue_ZZ")
         bases = subprocess.run(
             ["git", "-C", str(self.origin), "merge-base", "--all", "main", "fix/issue_ZB"],
             check=True, capture_output=True, text=True).stdout.split()
-        self.assertEqual(sorted(bases), sorted([za, zz]))
-        self._update_from_main("fix/issue_ZB")
+        self.assertEqual(bases, [za])                         # one merge base: no update
         self.assertEqual(self._diff("main", "fix/issue_ZB"), ["issue_ZB.txt"])
 
     def test_a_failed_re_publish_is_held_though_an_earlier_record_survives(self) -> None:
@@ -1720,9 +1739,11 @@ class StackModeFlow(unittest.TestCase):
             self) -> None:
         # Waves {LA} → {LU, LJ} → {LK} → {LL}. LU's publish fails, so it is held while the
         # run folds LJ and then LK onto the line. Publishing LU afterwards (what the flow
-        # tells the human to do) must cut its PR branch from the line commit LU was built
-        # on: cut from the line as later waves left it, its PR against main would carry
-        # LJ's and LK's work, and merging it would land them unreviewed.
+        # tells the human to do) must cut its PR branch from the commit LU was built on —
+        # since #727 its own base, holding LA alone: cut from the line as later waves left
+        # it, its PR against main would carry LJ's and LK's work, and merging it would land
+        # them unreviewed. A bundle kept on the line: cases 14 and 15 of
+        # tests/test_integrate_stack_bases.py.
         self._real_origin()
         for iid, dep in (("LA", ""), ("LU", "LA"), ("LJ", "LA"), ("LK", "LJ"), ("LL", "LK")):
             self._brief(iid, depends_on=dep)
