@@ -143,6 +143,7 @@ class SameWaveConflict(unittest.TestCase):
 
     def _run(self, ids: list[str]) -> None:
         """One stack-mode run asked for ``ids``, driving all of them."""
+        self.ids = list(ids)
         self.line = integrate.integration_branch(self.cfg, "main", ids)
         drive = [self.cfg.bundle(i) for i in ids]
         self._err, out = io.StringIO(), io.StringIO()
@@ -166,16 +167,31 @@ class SameWaveConflict(unittest.TestCase):
     def _head(self, iid: str) -> str:
         return self.fx._tip(f"fix/{iid}")
 
-    def _built_on_line(self, iid: str) -> str:
-        """``iid`` was built on the run's line and is COMPLETE; returns the line commit it
-        was built on (its recorded tip, which is origin's line tip at the time)."""
+    def _built_on(self, iid: str, *closure: str) -> str:
+        """``iid`` was built on a base of its own (#727) and is COMPLETE; returns the commit
+        it was built on (its recorded tip, which is origin's tip of that base). That commit
+        holds the branch of each bundle of ``closure`` (the ones it is ordered after) and,
+        beyond origin's main, nothing but the merge commits that built it."""
         self.assertIn(f"issue_{iid}", self.seen, self.err)
-        base, tip, line_tip = self.seen[f"issue_{iid}"]
-        self.assertEqual(base, self.line, self.err)
-        self.assertIsNotNone(line_tip, self.err)
-        self.assertEqual(tip, line_tip, self.err)
+        base, tip, _line_tip = self.seen[f"issue_{iid}"]
+        self.assertEqual(base, integrate.bundle_base_branch(self.cfg, "main", self.ids,
+                                                            f"issue_{iid}"), self.err)
+        self.assertEqual(tip, self.fx._tip(base), self.err)
+        heads = [self._head(c) for c in closure]
+        for c, h in zip(closure, heads):
+            self.assertTrue(self.fx._ancestor(h, tip), (iid, c))
+        self.assertEqual(sb._git(self.fx.origin, "rev-list", "--no-merges", tip, "--not",
+                                 "main", *heads).split(), [], (iid, self.err))
         self.assertEqual(self.results[iid], state.COMPLETE, self.err)
         return tip
+
+    def _on_line(self, at: str, *ids: str) -> None:
+        """The run's line, as origin had it when ``at`` was built, holds each of ``ids``'
+        branches."""
+        line_tip = self.seen[f"issue_{at}"][2]
+        self.assertIsNotNone(line_tip, self.err)
+        for iid in ids:
+            self.assertTrue(self.fx._ancestor(self._head(iid), line_tip), (at, iid))
 
     def _holds(self, iid: str) -> list[str]:
         """The stderr lines saying ``issue_<iid>`` was held out of the fold."""
@@ -205,16 +221,14 @@ class SameWaveConflict(unittest.TestCase):
         # (1) Held, not stopped.
         self.assertNotIn("did not integrate", self.err)
         self.assertNotIn("STOPPING", self.err)
-        on21 = self._built_on_line("21")
-        for iid in ("10", "12"):
-            self.assertTrue(self.fx._ancestor(self._head(iid), on21), iid)
+        on21 = self._built_on("21", "12")
+        self._on_line("21", "10", "12")
         self.assertFalse(self.fx._ancestor(self._head("11"), on21))
         self.assertNotIn("issue_20", self.seen, self.err)        # its prerequisite is held
         self.assertEqual(self.results["20"], state.PLANNED)
         # The wave-1 fold leaves 11 out too: the hold lasts the whole run.
-        on30 = self._built_on_line("30")
-        for iid in ("10", "12", "21"):
-            self.assertTrue(self.fx._ancestor(self._head(iid), on30), iid)
+        on30 = self._built_on("30", "21", "12")
+        self._on_line("30", "10", "12", "21")
         self.assertFalse(self.fx._ancestor(self._head("11"), on30))
         self.assertFalse(self.fx._ancestor(self._head("11"), self.fx._tip(self.line)))
 
@@ -250,11 +264,11 @@ class SameWaveConflict(unittest.TestCase):
 
         self.assertNotIn("did not integrate", self.err)
         self.assertNotIn("held", self.err)
+        self._built_on("20", "11")
+        self._built_on("21", "12")
         for iid in ("20", "21"):
-            on = self._built_on_line(iid)
-            for prereq in ("10", "11", "12"):
-                self.assertTrue(self.fx._ancestor(self._head(prereq), on), (iid, prereq))
-        self._built_on_line("30")
+            self._on_line(iid, "10", "11", "12")
+        self._built_on("30", "21", "12")
         # Nothing new on stderr about the pair beyond the overlap audit's warning.
         about = [x for x in self.err.splitlines() if "issue_11" in x]
         self.assertEqual(len(about), 1, self.err)
@@ -272,10 +286,10 @@ class SameWaveConflict(unittest.TestCase):
         self._run(ids)
 
         self.assertNotIn("did not integrate", self.err)
-        on50 = self._built_on_line("50")
-        for iid in ("40", "42"):
-            self.assertTrue(self.fx._ancestor(self._head(iid), on50), iid)
+        on50 = self._built_on("50", "42")
+        self._on_line("50", "40", "42")
         self.assertFalse(self.fx._ancestor(self._head("41"), on50))
+        self.assertFalse(self.fx._ancestor(self._head("41"), self.fx._tip(self.line)))
         held = self._holds("41")
         self.assertEqual(len(held), 1, self.err)
         self.assertIn("conflicts with issue_40's", held[0])
@@ -306,7 +320,7 @@ class SameWaveConflict(unittest.TestCase):
         self._run(ids)
 
         self.assertNotIn("did not integrate", self.err)
-        on21 = self._built_on_line("21")
+        on21 = self._built_on("21", "12")
         self.assertFalse(self.fx._ancestor(self._head("11"), on21))
         for iid in ("25", "26"):
             self.assertNotIn(f"issue_{iid}", self.seen, self.err)      # never built
@@ -422,9 +436,10 @@ class SameWaveConflict(unittest.TestCase):
         self.assertIn("conflicts with issue_20's", held[0])
         self.assertIn("(conflicts in shared.txt)", held[0])
         self.assertNotIn("issue_21", held[0])
-        on30 = self._built_on_line("30")
-        self.assertTrue(self.fx._ancestor(self._head("20"), on30))
+        on30 = self._built_on("30", "20", "10")
+        self._on_line("30", "20")
         self.assertFalse(self.fx._ancestor(self._head("22"), on30))
+        self.assertFalse(self.fx._ancestor(self._head("22"), self.fx._tip(self.line)))
         self.assertIn("`Conflicts with: 20`", self.err)
         self._briefs_unchanged(ids)
 

@@ -149,8 +149,13 @@ class ConflictPartnerHold(unittest.TestCase):
             if stub_fold:
                 # A pushed branch would make the REAL fold look for a git checkout, and there
                 # is none in the temp dir: the fold folds nothing here, and stops nothing.
+                # Nor does the other git step that merges pushed branches, a bundle's own
+                # base (#727): a branch named for the bundle.
                 stack.enter_context(mock.patch.object(flow, "_fold_lines",
                                                       lambda *a, **k: ({}, {}, None)))
+                stack.enter_context(mock.patch.object(
+                    flow.integrate, "build_bundle_base",
+                    lambda cfg, d, members, **k: (f"pdca-integration/main-b{d.name}", "0" * 40)))
             stack.enter_context(mock.patch.object(publish, "draft_texts",
                                                   lambda *a, **k: True))
             stack.enter_context(mock.patch.object(leaves, "do_plan_batch",
