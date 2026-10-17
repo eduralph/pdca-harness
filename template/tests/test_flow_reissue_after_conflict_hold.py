@@ -147,19 +147,20 @@ class ReissueAfterConflictHold(unittest.TestCase):
         self.assertEqual(len(lines), 1, self.err)
         return lines[0]
 
-    def _held_for_10(self, ids: list[str], twenty_one: dict[str, str] | None = None) -> str:
+    def _held_for_10(self, ids: list[str], twenty_one: dict[str, str] | None = None,
+                     on: str = "12") -> str:
         """Run 1 of criterion (1), asked for ``ids``: on a base where ``shared.txt`` is
         ``x``, 10 and 11 change its line two ways, 12 adds a file, 20 depends on 11 and 21
-        (``twenty_one``: its files, a file of its own by default) on 12. The wave-0 fold
+        (``twenty_one``: its files, a file of its own by default) on ``on``. The wave-0 fold
         holds 11 for its clash with 10 (#674), so 20 is never built; 10, 11, 12 and 21
-        finish with their PRs open, 21 built on the line and on no line itself. Returns the
-        step the end of the run gave for 11."""
+        finish with their PRs open, 21 built on a base holding what ``on`` names (#727) and
+        on no line itself. Returns the step the end of the run gave for 11."""
         self._on_base({"shared.txt": "x\n"})
         self._plan("10", {"shared.txt": "ten\n"})
         self._plan("11", {"shared.txt": "eleven\n"})        # same line, other text
         self._plan("12", {"twelve.txt": "twelve\n"})
         self._plan("20", {"twenty.txt": "twenty\n"}, "11")
-        self._plan("21", twenty_one or {"twenty-one.txt": "twenty-one\n"}, "12")
+        self._plan("21", twenty_one or {"twenty-one.txt": "twenty-one\n"}, on)
         self._run(ids, ids)
         held = [x for x in self.err.splitlines()
                 if "issue_11 held out of the integration fold" in x]
@@ -193,17 +194,21 @@ class ReissueAfterConflictHold(unittest.TestCase):
                       "issue_21", "account for"):
             self.assertNotIn(wrong, said)
 
-    def _carried_but_11(self) -> None:
-        """20 waits, unbuilt; 10, 12 and 21 are carried onto the line, and 11 is not."""
+    def _carried_but_11(self, *also: str) -> None:
+        """20 waits, unbuilt; 10, 12 and 21 are carried onto the line, and 11 is not — nor
+        is any id of ``also``."""
         self.assertNotIn("issue_20", self.seen, self.err)
         self.assertEqual(self.results["20"], state.PLANNED, self.err)
         carried = [x for x in self.err.splitlines() if x.startswith("flow: carried ")]
         self.assertEqual(len(carried), 1, self.err)
         for iid in ("10", "12", "21"):
-            self.assertIn(f"issue_{iid}", carried[0])
-            self.assertTrue(self.fx._ancestor(self._head(iid), self.fx._tip(self.line)), iid)
-        self.assertNotIn("issue_11", carried[0])
-        self.assertFalse(self.fx._ancestor(self._head("11"), self.fx._tip(self.line)))
+            if iid not in also:
+                self.assertIn(f"issue_{iid}", carried[0])
+                self.assertTrue(self.fx._ancestor(self._head(iid), self.fx._tip(self.line)),
+                                iid)
+        for iid in ("11", *also):
+            self.assertNotIn(f"issue_{iid}", carried[0])
+            self.assertFalse(self.fx._ancestor(self._head(iid), self.fx._tip(self.line)), iid)
 
     # -- (1) a #674 hold, re-issued: the partner is named, with the #674 step ---------------
 
@@ -238,10 +243,31 @@ class ReissueAfterConflictHold(unittest.TestCase):
         self._carried_but_11()
 
     def test_one_the_fold_merges_after_it_is_named_too(self):
-        # 21's own change sets shared.txt's line as well (on top of 10's). It is on no line
-        # after run 1, and the re-issue's fold merges it after it skips 11: 21 is on the line
-        # the fold pushes, so it is named beside 10, with its file.
-        self._held_for_10(ORDER, {"shared.txt": "twenty-one\n"})
+        # 21's own change sets shared.txt's line as well. Before #727 it was cut from the
+        # line holding 10, on top of 10's change, and the re-issue's fold merged it after it
+        # skipped 11, naming it beside 10 — that is the case below, where 21 declares 10.
+        # 21 declares only 12, so it is built on a base without 10 (#727): its change and
+        # 10's are an undeclared overlap, and the fold skips it as well, naming 10 with the
+        # step for 21 itself. Neither is carried, and 11 is named with 10 alone.
+        step = self._held_for_10(ORDER, {"shared.txt": "twenty-one\n"})
+        self.assertFalse(self.fx._ancestor(self._head("10"), self._head("21")))
+        self._reissue(ORDER)
+        self._named_with_10(self._not_carried("11"), step)
+        said = self._not_carried("21")
+        self.assertIn("its change conflicts with issue_10's (shared.txt), finished in this "
+                      "batch", said)
+        self.assertIn("declare `Conflicts with: 10` in issue_21's brief, then rebuild issue_21 "
+                      "on a base that holds issue_10", said)
+        for wrong in ("issue_11", "issue_12", "cross-wave"):
+            self.assertNotIn(wrong, said)
+        self._carried_but_11("21")
+
+    def test_one_built_on_the_partner_the_fold_merges_after_it_is_named_too(self):
+        # As above, but 21 declares 10 as well (`Depends on: 12, 10`), so its own base holds
+        # 10 and its change sits on top of 10's (#727): the fold merges it after it skips 11,
+        # and 21 is on the line the fold pushes, so it is named beside 10, with its file.
+        self._held_for_10(ORDER, {"shared.txt": "twenty-one\n"}, on="12, 10")
+        self.assertTrue(self.fx._ancestor(self._head("10"), self._head("21")))
         self._reissue(ORDER)
         said = self._not_carried("11")
         self.assertIn("its change conflicts with issue_10's (shared.txt), issue_21's "
@@ -280,10 +306,22 @@ class ReissueAfterConflictHold(unittest.TestCase):
         self.assertEqual(self.results["20"], state.PLANNED, self.err)
 
     def test_one_built_on_the_partner_is_not_named_for_the_partners_change(self):
-        # 21 is cut from the line that holds 10 and 12, so its branch holds 10's change.
-        # Asked for before 11, it is merged onto the line first; its own change (a file of
-        # its own) does not conflict with 11's, so only 10 is named.
+        # 21 (`Depends on: 12`) is built on a base holding 12 alone (#727), so its branch
+        # does not hold 10's change; before #727 it was cut from the line holding 10 and 12
+        # (that is the case below). Asked for before 11, it is merged onto the line first;
+        # its own change (a file of its own) does not conflict with 11's: only 10 is named.
         step = self._held_for_10(ORDER)
+        self.assertFalse(self.fx._ancestor(self._head("10"), self._head("21")))
+        self._reissue(["10", "12", "21", "11", "20"])
+        self._named_with_10(self._not_carried("11"), step)
+        self._carried_but_11()
+
+    def test_one_built_on_the_partner_by_its_own_base_is_not_named_for_its_change(self):
+        # As above, but 21 also declares 10: its own base holds 10 and 12, so its branch
+        # holds 10's change. Its own change still does not conflict with 11's: only 10 is
+        # named.
+        step = self._held_for_10(ORDER, on="12, 10")
+        self.assertTrue(self.fx._ancestor(self._head("10"), self._head("21")))
         self._reissue(["10", "12", "21", "11", "20"])
         self._named_with_10(self._not_carried("11"), step)
         self._carried_but_11()
@@ -292,7 +330,7 @@ class ReissueAfterConflictHold(unittest.TestCase):
 
     def _stacked_on_10(self, base: dict[str, str], files: dict[str, dict[str, str]], *,
                        cut_12_from: str = "") -> str:
-        """10 changes the base; 12 (``Depends on: 10``) is built on the line holding 10 (or
+        """10 changes the base; 12 (``Depends on: 10``) is built on a base holding 10 (or
         cut from ``cut_12_from``); 11 conflicts with 10, so run 1 holds it and never builds
         20 (``Depends on: 11``). Run 2 re-issues the batch driving 20, with 10 and 12 on the
         line before 11 is tried. ``files``: each id's files, written in full where it is
@@ -307,8 +345,12 @@ class ReissueAfterConflictHold(unittest.TestCase):
         ids = ["10", "12", "11", "20"]
         self._run(ids, ids)
         self.assertEqual(self.results["20"], state.PLANNED, self.err)
-        self.assertEqual(self.seen["issue_12"][0], self.line, self.err)    # its stack base
-        self.line_under_12 = self.seen["issue_12"][1]       # the line tip 12 was built on
+        # Its stack base: a base of its own (#727), at origin's tip of it, holding 10.
+        self.assertEqual(self.seen["issue_12"][0],
+                         integrate.bundle_base_branch(self.cfg, "main", ids, "issue_12"))
+        self.line_under_12 = self.seen["issue_12"][1]       # the commit 12 was built on
+        self.assertEqual(self.fx._tip(self.seen["issue_12"][0]), self.line_under_12)
+        self.assertTrue(self.fx._ancestor(self._head("10"), self.line_under_12))
         for iid in ("10", "11", "12"):
             self._finished_open(iid)
         self.assertTrue(self.fx._ancestor(self._head("10"), self._head("12")))
@@ -331,7 +373,7 @@ class ReissueAfterConflictHold(unittest.TestCase):
                       "issue_11 on a base that holds issue_10, issue_12", said)
 
     def test_a_partner_cut_from_anothers_branch_is_named_for_its_own_file(self):
-        # As above, but 12's branch is cut from fix/10 itself, not from the line: 10's
+        # As above, but 12's branch is cut from fix/10 itself, not from its base: 10's
         # commit is on 12's branch, and is still 10's.
         said = self._stacked_on_10({"a.txt": "x\n", "b.txt": "x\n"}, {
             "10": {"a.txt": "ten\n"},
@@ -365,7 +407,7 @@ class ReissueAfterConflictHold(unittest.TestCase):
         self.assertNotIn("issue_12", said)
 
     def test_a_partner_built_on_a_deletion_is_not_named_for_it(self):
-        # 10 deletes shared.txt, which 11 changes; 12, built on the line holding 10, only
+        # 10 deletes shared.txt, which 11 changes; 12, built on a base holding 10, only
         # adds a file. 12's branch holds 10's deletion, so 11 does not merge onto base + 12,
         # but none of 12's own change touches shared.txt: only 10 is named. (11 is tried on
         # what 12 was built on with its side winning, the deleted file included, and 12's
@@ -383,7 +425,7 @@ class ReissueAfterConflictHold(unittest.TestCase):
         self.assertNotIn("issue_12", said)
 
     def test_a_partner_built_on_a_deletion_is_named_for_its_own_file(self):
-        # 10 deletes a.txt; 12, built on the line holding 10, changes b.txt; 11 changes both.
+        # 10 deletes a.txt; 12, built on a base holding 10, changes b.txt; 11 changes both.
         # Trying 11 on what 12 was built on leaves a.txt conflicting in a way no hunk can
         # settle (one side deleted it), so 11's version of it is taken, and the trial gets
         # to 12's own change: that conflicts over b.txt. Each is named for its own file.
@@ -399,8 +441,8 @@ class ReissueAfterConflictHold(unittest.TestCase):
                       "issue_11 on a base that holds issue_10, issue_12", said)
 
     def test_a_partner_two_deep_on_a_deletion_is_named_for_its_own_file(self):
-        # 10 deletes a.txt; 12, built on the line holding 10, adds a file; 13, built on the
-        # line holding 12, changes b.txt; 11 changes a.txt and b.txt. 10 is named for a.txt
+        # 10 deletes a.txt; 12, built on a base holding 10, adds a file; 13, built on a base
+        # holding 12 and 10, changes b.txt; 11 changes a.txt and b.txt. 10 is named for a.txt
         # and 13 for b.txt, its own change; 12, whose own change 11 does not touch, is not.
         self._on_base({"a.txt": "x\n", "b.txt": "x\n"})
         self._plan("10", {"a.txt": None})

@@ -178,6 +178,20 @@ class ResumeStackPrereqs(unittest.TestCase):
         self.assertEqual(self._built(iid)[:2], ("", ""), self.err)
         self.assertEqual(self.results[iid], state.COMPLETE)
 
+    def _on_own_base(self, iid: str, batch: list[str], *prereqs: str) -> str:
+        """``iid`` was built on a base of its own (#727) — the branch
+        ``integrate.bundle_base_branch`` names for it, at the tip origin has — holding the
+        branch of each of ``prereqs``, its prerequisites this run built, and is COMPLETE.
+        Returns that tip."""
+        base, tip, _line_tip = self._built(iid)
+        self.assertEqual(base, integrate.bundle_base_branch(self.cfg, "main", batch,
+                                                            f"issue_{iid}"), self.err)
+        self.assertEqual(tip, self.fx._tip(base), self.err)
+        for p in prereqs:
+            self.assertTrue(self.fx._ancestor(self.fx._tip(f"fix/{p}"), tip), (iid, p))
+        self.assertEqual(self.results[iid], state.COMPLETE)
+        return tip
+
     # -- (1)-(3): a clean finished prerequisite is carried ----------------------------------
 
     def test_a_clean_finished_prerequisite_is_on_the_line_its_dependent_builds_on(self):
@@ -278,10 +292,8 @@ class ResumeStackPrereqs(unittest.TestCase):
         self._on_base("U")
         self.assertEqual(self._built("U")[2], rejected)        # the carry pushed nothing
         self.assertFalse(self.fx._ancestor(rejected, line))    # the wave-0 fold replaced it
-        w_base, w_tip, w_line = self._built("W")
-        self.assertEqual((w_base, w_tip), (line, w_line))
-        self.assertFalse(self.fx._ancestor(rejected, w_line))
-        self.assertEqual(self.results["W"], state.COMPLETE)
+        w_tip = self._on_own_base("W", batch, "U")             # W `Depends on: U` (#727)
+        self.assertFalse(self.fx._ancestor(rejected, w_tip))
 
     # -- (6): the trigger -------------------------------------------------------------------
 
@@ -314,7 +326,7 @@ class ResumeStackPrereqs(unittest.TestCase):
         self._on_base("D")                                   # the stale stack base cleared
         self.assertEqual(self.events, ["wave:issue_D", "fold", "wave:issue_E"])
         self.assertEqual(self.gh_calls, [])
-        self.assertEqual(self._built("E")[0], self.line)
+        self._on_own_base("E", ["D", "E"], "D")              # E `Depends on: D` (#727)
 
     def test_a_dry_run_asks_no_host_holds_nothing_and_prints_the_plan(self):
         self._finished("P", {"p.txt": "p\n"})
@@ -344,10 +356,9 @@ class ResumeStackPrereqs(unittest.TestCase):
         self._held("P", "D", "re-gate")
         self._on_base("U")
         self.assertNotIn("STOPPING", self.err)
-        w_base, w_tip, w_line = self._built("W")
-        self.assertEqual((w_base, w_tip), (self.line, w_line))
-        self.assertFalse(self.fx._ancestor(p_head, w_line))
-        self.assertEqual(self.results["W"], state.COMPLETE)
+        w_tip = self._on_own_base("W", ["P", "D", "U", "W"], "U")   # W `Depends on: U` (#727)
+        self.assertFalse(self.fx._ancestor(p_head, w_tip))
+        self.assertFalse(self.fx._ancestor(p_head, self._built("W")[2]))   # nor the line then
 
     # -- fold(skipped=…) ----------------------------------------------------------------------
 
@@ -444,13 +455,13 @@ class ResumeStackPrereqs(unittest.TestCase):
         self._held("Q", "D", "issue_P", "built on")
         self.assertIn("flow: carried issue_X (finished", self.err)
         self.assertTrue(self.fx._has(self.line), self.err)
-        for iid in ("E", "U"):
-            base, tip, line_tip = self._built(iid)
-            self.assertEqual((base, tip), (self.line, line_tip), self.err)
-            self.assertTrue(self.fx._ancestor(self.fx._tip("fix/X"), tip))
-            for gone in ("P", "Q"):
-                self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), tip), gone)
-            self.assertEqual(self.results[iid], state.COMPLETE)
+        base, tip, line_tip = self._built("E")      # E `Depends on` carried X: the line
+        self.assertEqual((base, tip), (self.line, line_tip), self.err)
+        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/X"), tip))
+        for gone in ("P", "Q"):
+            self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), tip), gone)
+        self.assertEqual(self.results["E"], state.COMPLETE)
+        self._on_base("U")                          # U declares no edge (#727): the base
         for gone in ("P", "Q"):
             self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), self.line), gone)
 
@@ -472,11 +483,10 @@ class ResumeStackPrereqs(unittest.TestCase):
         self._held("X", "E", line, "delete")
         self._on_base("U")
         self.assertEqual(self._built("U")[2], old)              # the carry pushed nothing
-        w_base, w_tip, w_line = self._built("W")
-        self.assertEqual((w_base, w_tip), (line, w_line))
-        for gone in ("P", "Q"):
-            self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), w_line), gone)
-        self.assertEqual(self.results["W"], state.COMPLETE)
+        w_tip = self._on_own_base("W", batch, "U")             # W `Depends on: U` (#727)
+        for gone in ("P", "Q"):                                # nor the line W was built beside
+            for tip in (w_tip, self._built("W")[2]):
+                self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), tip), gone)
 
     # -- (10): a skip in the carry's fold holds the finished ids holding its work (#672) ----
 
