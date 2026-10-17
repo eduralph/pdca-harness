@@ -1,15 +1,20 @@
-"""A prerequisite merged into the base counts only when the run's line has its work (#655).
+"""For a dependent built on the run's line, a prerequisite merged into the base counts only
+when that line has its work (#655).
 
 In stack mode a dependent of an out-of-batch prerequisite ``P`` — a ``Depends on (merged):
 P``, or a plain ``Depends on: P`` the run was not asked for (#647) — waits until ``P``'s PR
-merges into the dependent's own target base. Once the run has a line for that target, the
-dependent is cut from the line, not from the base, and the line does not follow the base.
-So a merge after the line was started may not be on it, and the dependent must be held,
-named, with a way out that works: a re-run whose carry (#646) finds the line on origin
-continues it and holds the dependent again, so the line is deleted on origin first. The
-line has ``P``'s work when it has the commit the merge put on the base (``mergeCommit``,
-which a squash merge has and ``headRefOid`` does not) or ``P``'s PR head (which the carry
-puts on a line it carries ``P`` onto).
+merges into the dependent's own target base. The rule here covers only a dependent built on
+the run's line: one a seam keeps there (#727) — in these cases a ``Stacks on: W`` beside its
+``Depends on: W``, or a prerequisite the run carried. A dependent on a base of its own, or
+on the real base, is built from the base as fetched, which has the merge: for it the merge
+is enough (#729, tests/test_flow_merged_prereq_dependency_base.py). A dependent on the line
+is cut from the line, not from the base, and the line does not follow the base. So a merge
+after the line was started may not be on it, and the dependent must be held, named, with a
+way out that works: a re-run whose carry (#646) finds the line on origin continues it and
+holds the dependent again, so the line is deleted on origin first. The line has ``P``'s
+work when it has the commit the merge put on the base (``mergeCommit``, which a squash merge
+has and ``headRefOid`` does not) or ``P``'s PR head (which the carry puts on a line it
+carries ``P`` onto).
 
 These cases drive ``flow._drive_and_act`` against real git: the ``StackFoldGit`` fixture of
 tests/test_integrate_stack_bases.py (a bare ``origin``, a primary checkout and a scratch
@@ -46,6 +51,9 @@ _SPEC.loader.exec_module(sb)
 TODAY = "2026-10-14"
 MERGED_EDGE = "- **Depends on:** W\n- **Depends on (merged):** P\n"
 PLAIN_EDGE = "- **Depends on:** W, P\n"
+# A legacy edge to W beside D's `Depends on: W`: a seam, so D is built on the run's line
+# (#727) and judged on it (#729).
+ON_LINE = "- **Stacks on:** W\n"
 
 
 class MergedPrereqOnTheLine(unittest.TestCase):
@@ -166,8 +174,10 @@ class MergedPrereqOnTheLine(unittest.TestCase):
         self.err = err.getvalue()
         self.assertNotIn("Traceback", self.err)
 
-    def _wd(self, edge: str) -> list[Path]:
-        return [self._planned("W"), self._planned("D", edge)]
+    def _wd(self, edge: str, *, on_line: bool = False) -> list[Path]:
+        """W, and D with ``edge``; ``on_line``: D also ``Stacks on: W``, a seam, so it is
+        built on the run's line (#727), not on a base of its own."""
+        return [self._planned("W"), self._planned("D", edge + (ON_LINE if on_line else ""))]
 
     # -- assertions ------------------------------------------------------------------------
 
@@ -215,7 +225,7 @@ class MergedPrereqOnTheLine(unittest.TestCase):
         # (1) Pre-fix: D passes the gate and is built on a line without P's merge.
         self._prereq()
         self.after_first_fold = self._merge
-        self._run(self._wd(MERGED_EDGE), ["W", "D"])
+        self._run(self._wd(MERGED_EDGE, on_line=True), ["W", "D"])
         self.assertEqual(self.results["W"], state.COMPLETE)
         self.assertFalse(self.fx._ancestor(self.merge_oid["P"], self.line))
         self.assertFalse(self.fx._ancestor(self.fx._tip("fix/P"), self.line))
@@ -225,7 +235,7 @@ class MergedPrereqOnTheLine(unittest.TestCase):
         # (2) The #647 edge: a plain `Depends on: P`, P not requested.
         self._prereq()
         self.after_first_fold = self._merge
-        self._run(self._wd(PLAIN_EDGE), ["W", "D"])
+        self._run(self._wd(PLAIN_EDGE, on_line=True), ["W", "D"])
         self.assertEqual(self.results["W"], state.COMPLETE)
         self._held("does not have that merge")
 
@@ -255,7 +265,7 @@ class MergedPrereqOnTheLine(unittest.TestCase):
         self._prereq()
         self._merge()
         self.gh_fail_merge_commit = True
-        self._run(self._wd(MERGED_EDGE), ["W", "D"])
+        self._run(self._wd(MERGED_EDGE, on_line=True), ["W", "D"])
         self._held("is not known to have that merge", "could not be read")
 
     def test_a_checkout_that_cannot_be_fetched_holds_the_dependent(self):
@@ -263,7 +273,7 @@ class MergedPrereqOnTheLine(unittest.TestCase):
         self._prereq()
         self._merge()
         self.after_first_fold = lambda: self._origin(self.fx.tmp / "gone.git")
-        self._run(self._wd(MERGED_EDGE), ["W", "D"])
+        self._run(self._wd(MERGED_EDGE, on_line=True), ["W", "D"])
         self._held("is not known to have that merge", "could not be fetched")
 
     def test_a_target_with_no_line_builds_the_dependent_from_the_base(self):
@@ -309,7 +319,7 @@ class MergedPrereqOnTheLine(unittest.TestCase):
         # origin, the carry starts it from main, which has P's merge, and D is built on it.
         self._prereq()
         self.after_first_fold = self._merge
-        w, d = self._wd(MERGED_EDGE)
+        w, d = self._wd(MERGED_EDGE, on_line=True)
         self._run([w, d], ["W", "D"])
         self._held("does not have that merge")
         old = self.fx._tip(self.line)
