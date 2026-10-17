@@ -910,6 +910,123 @@ def _point_at_integration(integ: dict[tuple[str, str], str], runnable: list[Path
             publish.clear_stack_base(d)
 
 
+def _closure_members(cfg: Config, d: Path, *, built: Mapping[str, tuple[Path, int]],
+                     on_target: Collection[str], finished: Collection[str],
+                     conflicts: Mapping[str, Collection[str]],
+                     seams: Collection[str]) -> list[Path] | str:
+    """What bundle ``d`` is built on in stack mode (#727): the members of a base of its own
+    (``[]``: the real base), or, as a str, the seam that keeps it on the run's line.
+
+    ``d`` is ordered after a bundle by ``Depends on`` / ``Depends on (merged)``,
+    transitively, and by a ``Conflicts with`` partner (``conflicts``) built in an earlier
+    wave. The walk follows those edges from ``d`` and from each bundle it reaches, only
+    through bundles this run built (``built``: accepted → ``(directory, wave)``, in wave
+    then name order) — one with no patch as one with a patch, so ``d`` holds what that one
+    was built on — and never to a partner built after the bundle it is reached from (that
+    one's base did not hold it). Another edge out of the drive set is an out-of-batch
+    prerequisite, on the real base once merged (:func:`_runnable`). A bundle kept off the
+    line (no branch pushed, a same-wave conflict) is never reached: :func:`_runnable` holds
+    each bundle with an edge to one. The members are those reached whose branch the fold
+    carries on ``d``'s target (``on_target``), in ``built``'s order. A seam: a walked bundle
+    declaring ``Stacks on`` or ``Onto branch``; an edge to one of ``finished`` (finished
+    named ids: carried, or with no patch — #728); a member pointed at a seam itself
+    (``seams``)."""
+    found: set[str] = set()
+    todo = [d]
+    while todo:
+        m = todo.pop()
+        bp = m / "brief.md"
+        legacy = next((f for f, on in (("Stacks on", brief.stacks_on(bp)),
+                                       ("Onto branch", brief.onto_branch(bp))) if on), None)
+        if legacy:
+            return f"{m.name} declares `{legacy}`"
+        wave = built[m.name][1] if m.name in built else None   # None: d, after every one
+        edges = [(cfg.bundle(x).name, True)
+                 for x in brief.depends_on(bp) + brief.depends_on_merged(bp)]
+        for n, prereq in edges + [(n, False) for n in sorted(conflicts.get(m.name, ()))]:
+            if n in finished:
+                how = "depends on" if prereq else "`Conflicts with`"
+                return f"{m.name} {how} {n}, finished in an earlier run"
+            if n not in built or n in found:
+                continue
+            if not prereq and wave is not None and built[n][1] >= wave:
+                continue               # a partner built after m: m's base did not hold it
+            found.add(n)
+            todo.append(built[n][0])
+    members = [p for n, (p, _w) in built.items() if n in found and n in on_target]
+    seam = next((m.name for m in members if m.name in seams), None)
+    return f"{seam} was pointed at a seam itself" if seam else members
+
+
+def _bundle_bases(cfg: Config, runnable: list[Path], *, built: Mapping[str, tuple[Path, int]],
+                  finished: list[Path], bundles: list[Path],
+                  integ: dict[tuple[str, str], str],
+                  folded_tips: Mapping[tuple[str, str], str | None],
+                  carried_heads: Mapping[str, str], batch: list[str],
+                  bases: dict[str, tuple[str, dict[str, str]]],
+                  line_cut: dict[str, dict[str, str]],
+                  taken: tuple[integrate.Bases, integrate.LinePrs]) -> None:
+    """Point each bundle of ``runnable`` at what it is built on (#727,
+    :func:`_closure_members`): a base of its own, the real base, or — a seam — the run's
+    line, as before (:func:`_point_at_integration`). A base of its own is
+    :func:`integrate.build_bundle_base` of the members, held to the heads the line took
+    (``carried_heads``) and the run's PRs hold (``taken``, :func:`_heads_taken`). Every base
+    of the wave is built before any bundle is pointed; an :class:`integrate.IntegrationError`
+    names the bundle and its members and propagates (the caller stops the run). Then
+    ``bases`` gets ``(branch, {member: head})`` per base, and ``line_cut`` the heads of its
+    target's branches the line held (none: no line yet) per bundle pointed at a seam."""
+    conflicts = waves.conflict_map(cfg, [*bundles, *finished])
+    cands = integrate._fold_candidates([p for p, _w in built.values()])
+    plans: dict[str, tuple[set[str], list[Path] | str]] = {}
+    for d in runnable:
+        target = publish._resolve_target(d)[:2]
+        mine = {m.name for m, repo, base, _s, _r in cands if (repo, base) == target}
+        plans[d.name] = (mine, _closure_members(
+            cfg, d, built=built, on_target=mine, finished={f.name for f in finished},
+            conflicts=conflicts, seams=set(line_cut)))
+    made: dict[str, tuple[str, str, dict[str, str]]] = {}
+    for d in runnable:
+        members = plans[d.name][1]
+        if isinstance(members, str) or not members:
+            continue
+        took: dict[str, str] = {}
+        try:
+            branch, tip = integrate.build_bundle_base(
+                cfg, d, members, batch=batch, carried=carried_heads, excluded=carried_heads,
+                merged_heads=took, bases=taken[0], line_prs=taken[1])
+        except integrate.IntegrationError as exc:   # the same error, saying whose base it is
+            exc.args = (f"could not build {d.name}'s own base from "
+                        f"{', '.join(m.name for m in members)}: {exc}",)
+            raise
+        made[d.name] = (branch, tip, took)
+    for d in runnable:
+        mine, plan = plans[d.name]
+        if isinstance(plan, str):      # a seam: the run's line, as before #727
+            _point_at_integration(integ, [d], folded_tips)
+            line_cut[d.name] = {n: h for n, h in carried_heads.items() if n in mine}
+        elif d.name in made:
+            branch, tip, took = made[d.name]
+            publish.write_stack_base(d, branch, tip)
+            bases[d.name] = (branch, took)
+        else:
+            publish.clear_stack_base(d)
+
+
+def _heads_taken(bases: Mapping[str, tuple[str, Mapping[str, str]]],
+                 line_cut: Mapping[str, Mapping[str, str]], pushed: Collection[str]
+                 ) -> tuple[integrate.Bases, integrate.LinePrs]:
+    """What the run's published PRs hold beside the line (#727), which each check holds the
+    branches to (#633, #695): each one's own base (:data:`integrate.Bases`), and each one
+    cut from its target's line, with the head of each branch that line held then
+    (:data:`integrate.LinePrs`). A bundle that pushed no branch (``pushed``) has no PR."""
+    prs: dict[str, list[tuple[str, str]]] = {}
+    for owner, had in line_cut.items():
+        for name, head in had.items():
+            if owner in pushed:
+                prs.setdefault(name, []).append((owner, head))
+    return {n: b for n, b in bases.items() if n in pushed}, prs
+
+
 def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
                 folded_this_run: Mapping[tuple[str, str], str | None], batch: list[str],
                 skipped: dict[str, str] | None = None,
@@ -919,6 +1036,8 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
                 pr_heads: Mapping[str, str] | None = None,
                 holds: dict[str, str] | None = None,
                 clashes: dict[str, tuple[str, dict[str, list[str]], list[str]]] | None = None,
+                bases: integrate.Bases | None = None,
+                line_prs: integrate.LinePrs | None = None,
                 ) -> tuple[dict[tuple[str, str], tuple[str, Path | None]],
                            dict[tuple[str, str], str | None], tuple[str, str] | None]:
     """ONE :func:`integrate.fold` of ``bundles`` and, with ``[driver].regate_between_waves``,
@@ -938,7 +1057,8 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
     too, and gets back, for each id left out for holding a skipped id's work, that id;
     the in-run folds pass neither. ``clashes`` (#694): the carry gets back what each id
     skipped for a textual conflict conflicts with (:func:`integrate._clash`); the in-run
-    folds pass none.
+    folds pass none. ``bases`` / ``line_prs`` (#727): the in-run folds pass what the run's
+    PRs hold (:func:`_heads_taken`), which the same check holds each branch to too.
 
     Returns ``(folded, tips, red)``: the fold's result, each folded target's pushed tip
     (None in a dry-run, which pushes nothing), and the first target whose re-gate is red
@@ -948,7 +1068,8 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
         folded = integrate.fold(cfg, bundles, dry_run=dry, locks=locks,
                                 folded_this_run=folded_this_run, batch=batch, skipped=skipped,
                                 carried=carried, held_out=held_out, wave=wave,
-                                pr_heads=pr_heads, holds=holds, clashes=clashes)
+                                pr_heads=pr_heads, holds=holds, clashes=clashes,
+                                bases=bases, line_prs=line_prs)
         tips = {tgt: integrate.pushed_tip(wt) if wt is not None else None
                 for tgt, (_branch, wt) in folded.items()}
         # hold_lock=False: the locks stack already holds each tree's lock (re-acquiring
@@ -2410,6 +2531,11 @@ def _drive_and_act(
     # Bundle name → the head of its branch an in-run fold put on the line (#633), filled by
     # `integrate.fold`: a later fold refuses a carried branch rewritten since.
     carried_heads: dict[str, str] = {}
+    # What each bundle's PR holds (#727, `_bundle_bases`): a base of its own → (its branch,
+    # {member: head}); the run's line (a seam) → the heads that line had taken.
+    bases_took: dict[str, tuple[str, dict[str, str]]] = {}
+    line_cut: dict[str, dict[str, str]] = {}
+    wave_of: dict[str, int] = {}     # accepted bundle → the wave it was built in (#727)
     preflighted = False              # per-lane preflight runs at most once, before the first pool
     # The batch the caller NAMED is levelled first and strictly: `compute_waves` raises on a
     # cycle or an unresolvable dependency. That contract belongs to the request
@@ -2469,8 +2595,9 @@ def _drive_and_act(
     # clean, else named in `held_finished`, which holds only their plain `Depends on`
     # dependents. Only where a fold would run: stack mode, publishing on.
     held_finished: set[str] = set()
+    finished = _finished_named(cfg, batch, batch_names)
     if do_publish and cfg.wave_mode != "merge":
-        _carry_finished(cfg, bundles, _finished_named(cfg, batch, batch_names),
+        _carry_finished(cfg, bundles, finished,
                         batch=run_batch, integ=integ, folded_tips=folded_tips,
                         held=held_finished)
     # `wave_list` is iterated by a LIST iterator on purpose (#469): adoption splices the
@@ -2484,11 +2611,17 @@ def _drive_and_act(
     # and holds nothing. The ids asked for are normalised as `_finished_named` does.
     hold_unmerged = (do_publish and cfg.wave_mode != "merge"
                      and cfg.publisher.mode != "stub")
+    # Where a bundle can get a base of its own (#727): where the line folds for real — the
+    # same three conditions. Elsewhere every bundle is pointed as before.
+    own_bases = hold_unmerged
     requested = set(named) | {cfg.bundle(str(i).removeprefix("issue_")).name
                               for i in (batch or ())}
     # The loop stopped on a fold error or a red re-gate: that run already ends non-zero, and
     # a rewrite the fold refused is reported there — so no end-of-run check (#695).
     line_stopped = False
+    # A bundle's own base stopped the loop (#727): it checks only its members' branches, so
+    # the end-of-run check still runs, without the branch whose rewrite that stop named.
+    stop_named: set[str] = set()
     for k, wave in enumerate(wave_list):
         # `Conflicts with` partners of `held_unpushed` are held too (#629), and so are those
         # of `held_conflict` (#674). The relation is read off the LIVE `bundles` each wave:
@@ -2545,8 +2678,25 @@ def _drive_and_act(
         # point it at its OWN (repo, base) target's branch, and the line commit it builds on
         # (#593), or clear a stale marker a prior/resumed run left so it builds off its own
         # base (#187). Unconditional — the stale-clear must run even before any wave has
-        # folded (integ still empty).
-        _point_at_integration(integ, runnable, folded_tips)
+        # folded (integ still empty). Where the line folds for real, a bundle gets the line
+        # only at a seam (#727): else a base of its own holding exactly what it declares, or
+        # the real base. A base that cannot be built stops the run, as a failed fold does.
+        if own_bases:
+            try:
+                _bundle_bases(cfg, runnable,
+                              built={d.name: (d, wave_of[d.name]) for d in accepted},
+                              finished=finished, bundles=bundles, integ=integ,
+                              folded_tips=folded_tips, carried_heads=carried_heads,
+                              batch=run_batch, bases=bases_took, line_cut=line_cut,
+                              taken=_heads_taken(bases_took, line_cut, pushed))
+            except integrate.IntegrationError as exc:
+                print(f"flow: wave {k} — {exc}; STOPPING — wave {k} and later waves not run.",
+                      file=sys.stderr)
+                if isinstance(exc, integrate._Rewritten):
+                    stop_named.add(exc.name)
+                break
+        else:
+            _point_at_integration(integ, runnable, folded_tips)
         # This wave's allowance is its own cap AND what is left of the run's pool, whichever
         # is smaller — the second term is the admission rule again, applied to the wave that
         # was let in (#469); with the pool covering the live schedule (#473) it can only bite
@@ -2602,6 +2752,7 @@ def _drive_and_act(
                           f"{d.name.removeprefix('issue_')}`.", file=sys.stderr)
                 published.add(d.name)
         accepted += complete
+        wave_of.update({d.name: k for d in complete})
         # Carry this wave's accepted work to the NEXT wave's base (skipped on the final
         # wave, and by --no-publish). Default "stack": fold onto a run-scoped integration
         # branch the next wave builds on (fork-safe, no merge). Opt-in "merge": gh-merge the
@@ -2636,13 +2787,14 @@ def _drive_and_act(
                 # with the line the wave found, is held, not stopped on (#674): left out of
                 # this and every later fold.
                 had = set(held_conflict)
+                taken = _heads_taken(bases_took, line_cut, pushed)   # #727
                 try:
                     folded, tips, red = _fold_lines(
                         cfg, [d for d in accepted
                               if d.name not in held_unpushed and d.name not in held_conflict],
                         dry=dry, folded_this_run=dict(folded_tips), batch=run_batch,
                         carried=carried_heads, held_out=None if dry else held_conflict,
-                        wave=[d.name for d in complete])
+                        wave=[d.name for d in complete], bases=taken[0], line_prs=taken[1])
                 except integrate.IntegrationError as exc:
                     _announce_conflict_holds(held_conflict,
                                              [n for n in held_conflict if n not in had], k)
@@ -2684,8 +2836,10 @@ def _drive_and_act(
     # Only where a fold ran: `carried_heads` is filled by a stack-mode fold that pushed, so
     # it is empty with publishing off, in merge mode and in a dry-run. Not after the loop
     # stopped on the line: that run already ends non-zero, and reported the rewrite a fold
-    # refused.
-    late = (_report_late_rewrites(cfg, accepted, carried_heads, run_batch)
+    # refused. What the run's PRs hold is checked too (#727).
+    taken = _heads_taken(bases_took, line_cut, pushed)
+    late = (_report_late_rewrites(cfg, [d for d in accepted if d.name not in stop_named],
+                                  carried_heads, run_batch, bases=taken[0], line_prs=taken[1])
             if carried_heads and not line_stopped else {})
     # The run's holds, for the caller's exit code (#693): a held bundle reads COMPLETE above.
     # Keyed exactly as `results` is, so each held id is a key of the map returned beside it.
@@ -2699,7 +2853,8 @@ def _drive_and_act(
 
 
 def _report_late_rewrites(cfg: Config, accepted: list[Path], carried: Mapping[str, str],
-                          batch: Collection[str]) -> dict[str, str]:
+                          batch: Collection[str], *, bases: integrate.Bases | None = None,
+                          line_prs: integrate.LinePrs | None = None) -> dict[str, str]:
     """Check, once more at the end of the run, every branch a fold of this run carried
     (#695), and name each one rewritten since on stderr — one line per bundle, the facts
     and remedy :func:`integrate.rewritten_carried` gives. A fold checks the branches it
@@ -2714,23 +2869,49 @@ def _report_late_rewrites(cfg: Config, accepted: list[Path], carried: Mapping[st
     to do for one that no longer holds it. The cause is what failed
     (``integrate.IntegrationError.cause``), never the step a fold's error gives (re-run):
     this run has already pushed its line. Each target and each branch is judged on its own,
-    so a branch that cannot be checked never hides a rewrite found on another."""
-    rewritten, unchecked = integrate.rewritten_carried(cfg, accepted, carried, batch)
+    so a branch that cannot be checked never hides a rewrite found on another.
+
+    ``bases`` / ``line_prs`` (#727, :func:`_heads_taken`): what the run's PRs hold is checked
+    too; a bundle's own base is named on lines of its own, and the line's name the PRs cut
+    from it holding a lost head (unchecked: any head) of the branch. A branch both rewritten
+    and unchecked (two heads) is "rewritten"."""
+    rewritten, unchecked = integrate.rewritten_carried(cfg, accepted, carried, batch,
+                                                       bases=bases, line_prs=line_prs)
     for name in sorted(rewritten):
-        print(f"flow: {rewritten[name]}.", file=sys.stderr)
-    causes: dict[str, list[str]] = {}    # what failed → the branches it left unchecked
-    for name, (ref, why) in sorted(unchecked.items()):
-        causes.setdefault(why, []).append(f"{name}'s {ref} ({carried[name][:12]})")
-    for why, branches in causes.items():
+        for report in rewritten[name]:
+            print(f"flow: {report}.", file=sys.stderr)
+    on_line: dict[str, list[str]] = {}   # what failed → the line's branches it left unchecked
+    cut: dict[str, list[str]] = {}       # … → the PRs cut from the line holding one of them
+    on_base: dict[str, list[str]] = {}   # … → the heads bundles' own bases took (#727)
+    for name, items in sorted(unchecked.items()):
+        for ref, why, took, by in items:
+            if by is None:
+                on_line.setdefault(why, []).append(f"{name}'s {ref} ({took[:12]})")
+                cut.setdefault(why, []).extend(o for o, _h in (line_prs or {}).get(name, ()))
+            else:
+                on_base.setdefault(why, []).append(
+                    f"{name}'s {ref} ({took[:12]}), which {by[0]}'s own base {by[1]} took")
+    for why, branches in on_line.items():
+        prs = ", ".join(dict.fromkeys(cut[why]))
         print(f"flow: could not check whether a branch this run folded onto its line was "
               f"rewritten since ({why}), so the line may carry commits no PR holds any "
               f"more. Check by hand that each of these branches still contains the commit "
               f"the line took from it: {'; '.join(branches)}. Restore one that does not to "
-              f"that commit or a commit that contains it, or rebuild on that branch every PR "
-              f"this run cut from the line after it took that commit, before any of them "
-              f"merges.", file=sys.stderr)
-    return ({name: "rewritten" for name in sorted(rewritten)}
-            | {name: "unchecked" for name in sorted(unchecked)})
+              f"that commit or a commit that contains it"
+              + (f", or rebuild on that branch every PR this run cut from the line while it "
+                 f"held a commit of that branch ({prs}), before any of them merges." if prs
+                 else "; no PR this run cut from the line holds a commit of these branches."),
+              file=sys.stderr)
+    for why, branches in on_base.items():
+        print(f"flow: could not check whether a branch a bundle's own base took a commit "
+              f"from was rewritten since ({why}), so that bundle's PR may hold commits the "
+              f"branch no longer has. Check by hand that each of these branches still "
+              f"contains the commit named with it: {'; '.join(branches)}. Restore one that "
+              f"does not to that commit or a commit that contains it, or rebuild on that "
+              f"branch the PR of the bundle whose base took it, before it merges.",
+              file=sys.stderr)
+    return ({name: "unchecked" for name in sorted(unchecked)}
+            | {name: "rewritten" for name in sorted(rewritten)})
 
 
 # ----------------------------------------------------------------------------
