@@ -125,8 +125,12 @@ class _Conflict(IntegrationError):
 
 class _Rewritten(IntegrationError):
     """What :func:`build_bundle_base` refuses a member's rewritten branch with (#727):
-    bundle ``name``'s, every PR holding a head it lost named in the message — so the flow's
-    end-of-run check (#695) does not report that branch again."""
+    bundle ``name``'s, every PR holding a head it lost named in the message. The flow holds
+    the bundle whose base it is, not the run (#738); when a fold follows that bundle's wave,
+    that hold's line says the next fold stops the run unless the branch is restored first
+    (#633). The flow's end-of-run check (#695) still judges that branch: a hold does not
+    take it out, so a rewrite the line still carries at the end of the run is reported
+    again there, and fails the run."""
 
     def __init__(self, message: str, name: str) -> None:
         super().__init__(message)

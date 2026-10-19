@@ -500,12 +500,16 @@ class DependencyScopedBases(unittest.TestCase):
             self.assertEqual(stop[0].lower().count(words.lower()), 1, stop[0])
         self.assertNotIn("issue_D", self.seen, self.err)
 
-    def test_a_later_base_that_reads_the_rewrite_stops_naming_each_base_and_pr(self):
+    def test_a_later_base_that_reads_the_rewrite_holds_its_bundle_naming_each_base_and_pr(
+            self):
         # The rewrite comes after the fold after wave 1: D's own base, built next, reads it
-        # and stops the run on ONE line naming the line's PR and each base's, as a fold does.
+        # and holds D — not the run (#738) — on ONE line naming the line's PR and each
+        # base's, as a fold does. The end of the run still judges fix/A (#695 wins), and
+        # names its rewrite again: the line still carries the old commits.
         _h1, h2 = self._two_bases_and_the_line("D", after_fold=True)
-        stop = self._lines("STOPPING")
-        self.assertEqual(len(stop), 1, self.err)
+        self.assertNotIn("STOPPING", self.err)
+        held = self._lines("flow: issue_D held — ")
+        self.assertEqual(len(held), 1, self.err)
         for part in ("could not build issue_D's own base from issue_A, issue_B",
                      f"was rewritten after this run folded it onto {self.line}",
                      f"Every PR this run cut from {self.line} after it took {h2[:12]} (issue_S)",
@@ -514,14 +518,21 @@ class DependencyScopedBases(unittest.TestCase):
                      f"Restore origin/fix/A to {h2[:12]} or a commit that contains it, then "
                      f"re-run; or rebuild the PRs of issue_S, issue_B, issue_C on the "
                      f"rewritten branch"):
-            self.assertIn(part, stop[0])
+            self.assertIn(part, held[0])
+        self.assertNotIn("next fold", held[0])            # D's wave is the last: none follows
         self.assertNotIn("issue_D", self.seen, self.err)
-        self.assertEqual(self._lines("No fold of this run ran after"), [], self.err)  # once
+        self.assertEqual(self.results["D"], state.PLANNED, self.err)
+        late = [x for x in self._lines(f"was rewritten after this run folded it onto {self.line}")
+                if "No fold of this run ran after the rewrite" in x]
+        self.assertEqual(len(late), 1, self.err)
+        self.assertIn(f"after it took {h2[:12]} (issue_S)", late[0])
+        self.assertEqual(self.holds, {"D": "base", "A": "rewritten"})
 
-    def test_a_base_that_stops_the_run_for_a_clash_leaves_the_end_check_on(self):
+    def test_a_base_that_cannot_be_built_for_a_clash_leaves_the_end_check_on(self):
         # After the fold after wave 1, fix/Z goes back a commit and main gains a file that
-        # clashes with A's. C's base (A, B) stops the run on the clash; it never read fix/Z,
-        # so the end of the run still names Z's rewrite, with S, cut from the line holding it.
+        # clashes with A's. C's base (A, B) is refused for the clash, and C is held — not the
+        # run (#738); that build never read fix/Z, so the end of the run still names Z's
+        # rewrite, with S, cut from the line holding it.
         self._plan("A")
         self._plan("Z", TWO)
         self._plan("S", stacks_on="Z")
@@ -534,15 +545,16 @@ class DependencyScopedBases(unittest.TestCase):
 
         self.during["B"] = lambda: setattr(self, "after_line_fold", back_and_clash)
         self._run(["A", "Z", "S", "B", "C"])
-        stop = self._lines("STOPPING")
-        self.assertEqual(len(stop), 1, self.err)
-        self.assertIn("could not build issue_C's own base from issue_A, issue_B", stop[0])
-        self.assertNotIn("issue_Z", stop[0])
+        self.assertNotIn("STOPPING", self.err)
+        held = self._lines("flow: issue_C held — ")
+        self.assertEqual(len(held), 1, self.err)
+        self.assertIn("could not build issue_C's own base from issue_A, issue_B", held[0])
+        self.assertNotIn("issue_Z", held[0])
         said = self._lines(f"issue_Z's branch origin/fix/Z was rewritten after this run folded "
                            f"it onto {self.line}")
         self.assertEqual(len(said), 1, self.err)
         self.assertIn("(issue_S)", said[0])
-        self.assertEqual(self.holds, {"Z": "rewritten"})
+        self.assertEqual(self.holds, {"Z": "rewritten", "C": "base"})
 
     def _a_taken_twice(self, rewrite: Callable[[dict[str, str]], None],
                        git: Callable | None = None) -> dict[str, str]:

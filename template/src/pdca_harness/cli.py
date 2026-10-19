@@ -689,8 +689,14 @@ def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run
 _FLOW_OK = (state.COMPLETE, state.RESOLVED)
 
 
-#: Exit code of a flow run that finished every bundle but held one out of its line (#693).
+#: Exit code of a flow run whose every bundle finished, or was held: held out of its line
+#: once finished (#693), or held before it was built, its own base not buildable (#738).
 _RC_HELD = 3
+
+#: The ``holds`` reason of a bundle held before it was built, because its own base could
+#: not be built (#738): not finished in the results map (PLANNED, for one not built yet),
+#: and still a hold, not a failure.
+_BASE_HOLD = "base"
 
 #: ``holds`` reasons that FAIL the run (exit 1) rather than hold a bundle (#695): a branch a
 #: fold of the run carried, rewritten after the run's last fold read it — or one the run
@@ -702,18 +708,25 @@ def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
                 holds: Mapping[str, str] | None = None) -> int:
     """The ONE exit-code rule over a flow results map (issue #468), in precedence order:
 
-    - **1** — a bundle in the map did not reach a successful terminal; or ``holds`` names a
-      bundle whose branch a fold of this run carried and that was rewritten after the run's
-      last fold read it (``"rewritten"``, #695) — the line carries commits no PR holds any
-      more, though every bundle reached a successful terminal — or that the end-of-run
-      check could not judge (``"unchecked"``: the line may). This wins over 3.
-    - **3** — every bundle did, but ``holds`` is not empty (#693): a fold of this run held
-      an accepted bundle out of the integration line — it pushed no branch (#593,
-      ``"unpushed"``) or its branch conflicts with a same-wave bundle merged before it
-      (#674, ``"conflict"``). Such a bundle is COMPLETE in the map, so the map alone read
-      it as success while its work is on no line of the run; 3 lets a script or CI job
-      tell that run from a clean one without parsing stderr. ``holds`` is the collector
-      ``_flow`` passes to :func:`flow.flow_ids` / :func:`flow.flow_batch`.
+    - **1** — a bundle in the map did not reach a successful terminal, other than one
+      ``holds`` names as held before it was built (``"base"``, below): a bundle that
+      depends on one, or is its ``Conflicts with`` partner, left PLANNED with no hold of
+      its own, is such a failure. Or ``holds`` names a bundle whose branch a fold of this
+      run carried and that was rewritten after the run's last fold read it
+      (``"rewritten"``, #695) — the line carries commits no PR holds any more, though every
+      bundle reached a successful terminal; so too when a base's refusal named that
+      rewrite on a hold line (#738) — or that the end-of-run check could not judge
+      (``"unchecked"``: the line may). This wins over 3.
+    - **3** — every bundle did, or was held before it was built, but ``holds`` is not empty
+      (#693): the run held a bundle. A fold held an accepted bundle out of the integration
+      line — it pushed no branch (#593, ``"unpushed"``) or its branch conflicts with a
+      same-wave bundle merged before it (#674, ``"conflict"``). Such a bundle is COMPLETE
+      in the map, so the map alone read it as success while its work is on no line of the
+      run. Or a bundle was held before it was built, because its own base could not be
+      built (#738, ``"base"``): it is not COMPLETE in the map (PLANNED, for one not built
+      yet), but held, with the cause and the fix named on stderr — not failed. 3 lets a
+      script or CI job tell that run from a clean one without parsing stderr. ``holds`` is
+      the collector ``_flow`` passes to :func:`flow.flow_ids` / :func:`flow.flow_batch`.
     - **0** — every bundle reached a successful terminal and nothing was held.
 
     An EMPTY map — nothing was asked for, or nothing driven — is 0: a no-op is not a
@@ -725,7 +738,8 @@ def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
     because stopping for the human who just typed the command is the intended end of that
     run, not a failure. A multi-id set keeps the batch rule (rc 0 iff all COMPLETE/RESOLVED).
     """
-    if not all(s in ok for s in results.values()):
+    held_unbuilt = {k for k, why in (holds or {}).items() if why == _BASE_HOLD}
+    if not all(s in ok or k in held_unbuilt for k, s in results.items()):
         return 1
     if holds and any(why in _FAILED_REASONS for why in holds.values()):
         return 1
