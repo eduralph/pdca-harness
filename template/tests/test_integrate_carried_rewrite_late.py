@@ -34,7 +34,9 @@ spy failing fetches; a fold stopped by its own check still gives its error word 
 Since #727 the dependent ``B`` is built on a base of its own, built from ``fix/A`` after the
 line's fold: in a two-wave run that build, not the line's fold, is the run's last read of
 ``fix/A``. So a fault meant to come after the last read is armed by B's base's push; the
-same fault armed by the line's push, as before, stops the run at B's base (1d, 1e).
+same fault armed by the line's push, as before, holds B at its base (1d, 1e) — not the run
+(#738) — and the end-of-run check still judges ``fix/A``: a rewrite the line carries, or a
+branch it cannot judge, still exits 1.
 
 Only modules are imported (never a symbol the fix adds), and the fix's retry pause is
 patched to 0 with ``create=True``, so with the production change reverted these cases still
@@ -204,13 +206,16 @@ class LateRewrite(unittest.TestCase):
         self.base_b = integrate.bundle_base_branch(self.cfg, "main", ["A", "B"], "issue_B")
         return ["A", "B"]
 
-    def _stopped_at_b(self, *parts: str) -> None:
-        """The run stopped before building B, on ONE line naming B's base and ``parts``."""
+    def _held_at_b(self, *parts: str) -> str:
+        """B was held before it was built (#738), on ONE line naming B's base and ``parts``;
+        the run did not stop. Returns that line."""
         self.assertEqual(state.state(self.cfg.bundle("B")), state.PLANNED, self.err)
-        stop = [ln for ln in self.err.splitlines() if "STOPPING" in ln]
-        self.assertEqual(len(stop), 1, self.err)
+        self.assertNotIn("STOPPING", self.err)
+        held = [ln for ln in self.err.splitlines() if ln.startswith("flow: issue_B held — ")]
+        self.assertEqual(len(held), 1, self.err)
         for part in ("could not build issue_B's own base", *parts):
-            self.assertIn(part, stop[0])
+            self.assertIn(part, held[0])
+        return held[0]
 
     def _rewrite_lines(self, iid: str = "A") -> list[str]:
         return [ln for ln in self.err.splitlines() if _rewritten(iid) in ln]
@@ -290,11 +295,13 @@ class LateRewrite(unittest.TestCase):
         self._assert_reported()
         self.assertEqual(rc, 1, self.err)
 
-    # -- (1d) the same rewrite racing the line's own push → stopped at B's base, exit 1 ----
+    # -- (1d) the same rewrite racing the line's own push → B held at its base, exit 1 -----
 
-    def test_a_rewrite_during_the_lines_fold_stops_the_run_at_the_dependents_base(self):
+    def test_a_rewrite_during_the_lines_fold_holds_the_dependent_at_its_base(self):
         # (1c)'s race as it was before #727. B is not cut from the line: its own base, built
-        # next, reads fix/A again and refuses the rewrite (#633), so B is never built.
+        # next, reads fix/A again and refuses the rewrite (#633), so B is never built — held,
+        # not a stop (#738). The rewrite is named twice: on B's hold line, as why B was not
+        # built, and by the end-of-run check, as what the line still carries (#695 wins).
         ids = self._two_waves()
         line = integrate.integration_branch(self.cfg, "main", ids)
         real, rewrote = integrate._git, []
@@ -306,8 +313,12 @@ class LateRewrite(unittest.TestCase):
 
         rc = self._flow(ids, git=racing)
         self.assertEqual(len(rewrote), 1, self.err)
-        self.assertEqual(len(self._rewrite_lines()), 1, self.err)   # by the stop, not again
-        self._stopped_at_b(_rewritten("A"), self.heads["A"][:12])
+        held = self._held_at_b(_rewritten("A"), self.heads["A"][:12])
+        late = [ln for ln in self._rewrite_lines() if ln != held]
+        self.assertEqual(len(late), 1, self.err)       # the end-of-run check's, once
+        for part in (self.heads["A"][:12], "No fold of this run ran after the rewrite",
+                     "Restore origin/fix/A"):
+            self.assertIn(part, late[0])
         self.assertEqual(self._unchecked_lines(), [], self.err)
         self.assertEqual(rc, 1, self.err)
 
@@ -347,10 +358,11 @@ class LateRewrite(unittest.TestCase):
             integrate.integration_branch(self.cfg, "main", ids), self.base_b], self.err)
         self.assertEqual(len(failed), 2, failed)      # the check's fetch, tried twice
 
-    def test_a_fetch_failing_after_the_lines_fold_stops_the_run_at_the_dependents_base(self):
+    def test_a_fetch_failing_after_the_lines_fold_holds_the_dependent_at_its_base(self):
         # The fault above armed as before #727, by the line's push: B's own base fetches
-        # before it is built, so the run stops there, naming B and the fetch. The end check
-        # still runs and cannot fetch either: A's branch is named to check by hand; exit 1.
+        # before it is built, so B is held there (#738), named with the fetch and the step.
+        # The end check still runs and cannot fetch either: A's branch is named to check by
+        # hand; exit 1.
         ids = self._two_waves()
         real, pushed, failed = integrate._git, [], []
 
@@ -365,7 +377,7 @@ class LateRewrite(unittest.TestCase):
 
         rc = self._flow(ids, git=flaky)
         cause = f"could not fetch origin in {self.fx.primary.resolve()}"
-        self._stopped_at_b(cause)
+        self._held_at_b(cause, "check the remote", "then re-run")
         self._assert_unchecked("A", cause, not_named="issue_B")
         self.assertEqual(rc, 1, self.err)
         self.assertEqual(len(pushed), 1, self.err)    # the line's; B's base never pushed
