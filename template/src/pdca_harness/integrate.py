@@ -78,7 +78,7 @@ import time
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
 
-from . import brief, merged, publish
+from . import brief, merged, publish, waves
 from .config import Config
 
 
@@ -363,6 +363,7 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
          holds: dict[str, str] | None = None,
          clashes: dict[str, tuple[str, dict[str, list[str]], list[str]]] | None = None,
          bases: Bases | None = None, line_prs: LinePrs | None = None,
+         finished_heads: Mapping[str, str] | None = None,
          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
     """Fold the cumulative accepted bundles' published branches onto a per-target
     integration branch.
@@ -476,9 +477,15 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     (:func:`_held_by`). ``partners`` are the ones of those it conflicts with, ``paths`` the
     conflicting files. So a bundle is judged against the bundles actually kept, in merge
     order, never against one already held; a branch that merges cleanly is never held,
-    whatever files it shares; and one whose conflict is not with them — with earlier-wave
-    work, or with a base the line took in for a gone branch — raises, as before. Nothing
-    is pushed for a held bundle, and the caller leaves it out of its later folds.
+    whatever files it shares. A conflict that is not with them is left out the same way
+    when bundles already on the line explain it (#747, :func:`_held_by_line`): its branch
+    merges cleanly onto ``<base_remote>/<base>`` alone, :func:`_clash` names the bundles on
+    the line whose own change it conflicts with — of an earlier wave or of this one, or
+    finished ids the carry put there (``finished_heads``) — and the line without them
+    merges it cleanly (rebuilt on those of them it says it builds on, which stay). Any
+    other conflict — with the base, with work on the line no bundle's own change accounts
+    for, or one the named bundles do not explain alone — raises, as before. Nothing is
+    pushed for a held bundle, and the caller leaves it out of its later folds.
     The trial merges run in the integration worktree under the fold's lock and leave it
     clean on the line. ``None`` (the carry, a direct caller): every conflict raises (or,
     under ``skipped``, is skipped) as before; a dry-run merges nothing, so holds nothing.
@@ -496,6 +503,12 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     the line). Filled in place; its trial merges run in the integration worktree under the
     fold's lock and leave it clean on the line, as ``held_out``'s do. ``None`` records
     nothing and tries nothing.
+
+    ``finished_heads`` (#747, the flow's in-run folds): each finished id the pre-wave carry
+    (#646) put on the run's line → the head it put there. Used only as more bundles a
+    ``held_out`` conflict may be pinned on, and only while that head is on the line being
+    built: never merged, never put in ``carried``, never checked for a rewrite. ``None``:
+    none.
     """
     candidates = _fold_candidates(accepted)
     if not candidates:
@@ -639,10 +652,17 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                         _merge_published(cfg, wt, d, refs[d.name], head, branch=branch,
                                          base=base, owners=tuple(owners.values()))
                     except IntegrationError as exc:
-                        if (held_out is not None and ours and kept and head is not None
+                        if (held_out is not None and ours and head is not None
                                 and pre is not None and isinstance(exc, _Conflict)):
-                            clash = _held_by(wt, branch, head, pre, kept)
-                            if clash:   # a same-wave conflict: this bundle only (#674)
+                            # A same-wave conflict (#674), else one that bundles already
+                            # on the line explain (#747): this bundle only.
+                            clash = (_held_by(wt, branch, head, pre, kept) if kept else None)
+                            if not clash:
+                                clash = _held_by_line(
+                                    cfg, wt, branch, d, head, f"{base_remote}/{base}",
+                                    exc.paths, list(took.items()), finished_heads or {},
+                                    {n: h for n, h in read.items() if h})
+                            if clash:
                                 held_out[d.name] = clash
                                 dropped.add(d.name)
                                 continue
@@ -1771,6 +1791,82 @@ def _held_by(wt: Path, branch: str, head: str, pre: str,
     return (partners or [name for name, _its in kept]), paths
 
 
+def _held_by_line(cfg: Config, wt: Path, branch: str, d: Path, head: str, base_ref: str,
+                  paths: Sequence[str], took: Sequence[tuple[str, str]],
+                  finished: Mapping[str, str], tips: Mapping[str, str]
+                  ) -> tuple[list[str], list[str]] | None:
+    """Whether bundle ``d``'s branch tip ``head``, which just failed to merge onto the line
+    checked out in ``wt`` (``paths``: the files it left conflicting) and is not held for a
+    same-wave conflict (:func:`_held_by`), is held for a conflict that bundles already on
+    the line explain (#747), and if so ``(partners, paths)``, as :func:`_held_by` gives
+    them. The bundles on the line: each finished id of ``finished`` (name → the head the
+    pre-wave carry put on the line) whose head the line has, then ``took`` (``(name,
+    head)``: the ones the fold took before ``head``, in merge order). ``tips``: the head of
+    each bundle the fold has read, by name (:func:`_built_on`).
+
+    Decided by trial merges, never by which branch touched a path. Held exactly when both
+    of these hold; None otherwise, and the fold stops on it as before:
+
+    * :func:`_clash` says ``"batch"``: ``head`` merges cleanly onto ``base_ref`` alone, and
+      ``partners``, the bundles on the line whose own change it conflicts with
+      (:func:`_partners`), are not empty. So each partner's own head merges cleanly onto
+      ``base_ref`` alone: the trial that names it merges that head there first.
+    * The partners explain the whole clash: ``head``, merged last, merges cleanly onto
+      ``base_ref`` plus the line without them (every other bundle on it, in merge order).
+      A partner ``d``'s brief says it builds on (:func:`_prerequisites`) is not taken off:
+      ``d`` is to be rebuilt on it, so it stays on the line, and what is merged last is
+      ``head`` as rebuilt on those partners — merged onto ``base_ref`` after them, its side
+      winning every clash with them, as :func:`_partners` tries a bundle on what it was
+      built on. Last, never first: a clash the rest of the line makes only together (a
+      rename and an edit of the file it renames, say) shows only in that order. A bundle
+      left on the line, such a partner too, built on a partner taken off (what
+      :func:`_built_on` says it was built on holds that partner's head) would bring that
+      partner back, so the clash is not explained: the fold stops.
+
+    A git step that fails in a trial gives None; a tree that will not go back raises. The
+    trials never move the line (:func:`_trial`)."""
+    try:
+        taken = dict(took)
+        on = [*((n, h) for n, h in finished.items()
+                if n not in taken and _carries(wt, h, f"{n}'s head {h}", branch)), *took]
+        under = _built_on(wt, base_ref, {**dict(on), **tips, d.name: head},
+                          [n for n, _h in on])
+        kind, partners, _files = _clash(wt, branch, head, base_ref, paths, on, (), under)
+        if kind != "batch":
+            return None
+        own = _prerequisites(cfg, d)
+        off = [(n, h) for n, h in on if n in partners and n not in own]   # taken off the line
+        left = [(n, h) for n, h in on if n not in partners or n in own]
+        if any(_in_line(wt, ph, f"{p}'s head", f"what {n} was built on", of=u)
+               for n, _h in left for u in under.get(n, ()) for p, ph in off):
+            return None     # a bundle left on the line brings a partner back
+        last = head
+        pre = [h for n, h in left if n in partners]     # its prerequisites: rebuilt on them
+        if pre:
+            made: list[str] = []
+            if _trial(wt, branch, base_ref, [*pre, head], wins=len(pre),
+                      made=made)[0] is not None:
+                return None
+            last = made[0]
+        if _trial(wt, branch, base_ref, [*(h for _n, h in left), last])[0] is not None:
+            return None     # the partners alone do not explain the clash
+    except (IntegrationTreeError, _LineBroken):
+        raise
+    except IntegrationError:
+        return None
+    return list(partners), list(paths)
+
+
+def _prerequisites(cfg: Config, d: Path) -> set[str]:
+    """The bundles that bundle ``d``'s brief says it builds on (#747), by name: each one
+    its ``Depends on``, ``Depends on (merged)`` or ``Stacks on`` names
+    (:func:`waves.declared_deps`), found as the flow finds a prerequisite, an archived one
+    too (``find_bundle``). None for a bundle with no brief."""
+    bp = d / "brief.md"
+    return ({cfg.find_bundle(i).name for i in waves.declared_deps(bp)} if bp.exists()
+            else set())
+
+
 def _clash(wt: Path, branch: str, head: str, base_ref: str, paths: Sequence[str],
            on: Sequence[tuple[str, str]], off: Sequence[tuple[str, str]],
            under: Mapping[str, Sequence[str]]) -> tuple[str, dict[str, list[str]], list[str]]:
@@ -1882,7 +1978,8 @@ def _built_on(wt: Path, base_ref: str, tips: Mapping[str, str],
 
 
 def _trial(wt: Path, branch: str, onto: str, revs: Sequence[str], *,
-           wins: int | None = None) -> tuple[int | None, list[str]]:
+           wins: int | None = None, made: list[str] | None = None
+           ) -> tuple[int | None, list[str]]:
     """Merge ``revs`` one after another onto commit ``onto`` in ``wt``, as a trial (#674):
     ``(i, paths)`` for the first that does not merge cleanly — its index and the files it
     left conflicting — or ``(None, [])`` when all do. It runs on a detached HEAD, so
@@ -1891,7 +1988,8 @@ def _trial(wt: Path, branch: str, onto: str, revs: Sequence[str], *,
     merge that fails with no conflicting path is a failed git step and raises. The caller
     holds the worktree's lock (:func:`fold`). ``wins`` (#694): the index of the rev merged
     with its side winning every clash with what came before it (:func:`_merge_over`), so it
-    never stops the trial."""
+    never stops the trial. ``made`` (#747): when all merge cleanly, gets the commit the
+    trial ended on — on no branch, for a later trial to merge."""
     tip = _rev(wt, "HEAD")
     if tip is None:
         raise IntegrationTreeError(f"could not read the tip of {branch} in {wt} — check that "
@@ -1912,6 +2010,9 @@ def _trial(wt: Path, branch: str, onto: str, revs: Sequence[str], *,
                     f"conflicting path, so a git step failed: check that checkout, then re-run")
             if rc != 0:
                 return i, conflicts
+        if made is not None:
+            made.append(_out(wt, "rev-parse", "--verify", "HEAD",
+                             what="the commit a trial merge made").strip())
         return None, []
     finally:
         _reset_tree(wt, "HEAD")
