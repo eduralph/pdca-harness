@@ -26,6 +26,7 @@ from __future__ import annotations
 import importlib.util
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from pdca_harness import integrate, publish, state
 
@@ -125,6 +126,31 @@ class MergedPrereqOffTheLine(unittest.TestCase):
         self.assertEqual(publish.read_stack_base(d), "")
         self.assertTrue(h.fx._ancestor(h.merge_oid["P"], "main"))
         self.assertEqual(h.results["D"], state.COMPLETE, h.err)
+
+    def test_a_base_that_cannot_be_fetched_to_check_holds_the_dependent(self):
+        # As the real-base case, but the fetch that checks the base fails. Do and Check
+        # refresh the base best-effort, so they could build D on an older base without P's
+        # merge: D is held, naming the base and the failed fetch, and is not built.
+        h = self.h
+        self._closes_with_no_patch("N")
+        d = h._planned("D", "- **Depends on:** N\n- **Depends on (merged):** P\n")
+        real = integrate.carry_view
+
+        def carry_view(cfg, repo_spec, line, remotes=()):
+            if line == "origin/main":
+                raise integrate.IntegrationError("fetch failed (stub)")
+            return real(cfg, repo_spec, line, remotes)
+
+        with mock.patch.object(integrate, "carry_view", carry_view):
+            self._merged_after_the_first_fold([h._planned("W"), h._planned("N"), d],
+                                              ["W", "N", "D"])
+        self.assertNotIn("issue_D", h.seen, h.err)
+        self.assertEqual(h.results["D"], state.PLANNED)
+        lines = [x for x in h.err.splitlines() if "issue_D held" in x and "issue_P" in x]
+        self.assertEqual(len(lines), 1, h.err)
+        for part in ("fetch failed (stub)", "origin/main as fetched here",
+                     "is not known to have that merge"):
+            self.assertIn(part, lines[0])
 
     # -- (2) not merged: still held (#647) -------------------------------------------------
 
