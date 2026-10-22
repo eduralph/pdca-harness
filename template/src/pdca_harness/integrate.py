@@ -793,8 +793,9 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
     * A result holding work that is neither the base's nor a member's own
       (:func:`_unowned_work`). A member's own work is each non-merge commit its head (the one
       merged, or found on the branch already) reaches that neither the fetched base nor its
-      cut point does: the commit its branch was cut from, as recorded when it was published,
-      or nothing for a member never stacked. So work merged by hand into a member's branch
+      cut point does: the commit its branch was cut from, as recorded when it was published
+      (its stack-base tip, or for a member never stacked its ``cut_from``). So work merged
+      by hand into a member's branch
       above its cut point is its own, and ownership comes only from what was recorded for
       each member, never from which integration refs exist on origin: rebuilding or moving a
       ref cannot change who owns a member's unchanged history. The message names the first
@@ -868,7 +869,7 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
             if gone:
                 raise _Rewritten(_rewrite_stop(m.name, ref, tip, line, gone, onto=branch),
                                  m.name)
-        cuts: dict[str, str | None] = {}           # member → its cut point (None: never stacked)
+        cuts: dict[str, str | None] = {}           # member → its recorded cut point
         for m in mine:
             head = heads[m.name]
             if head is not None:                   # a gone branch is judged by _gone_branch
@@ -916,9 +917,11 @@ def _member_cut_point(wt: Path, d: Path, m: Path, published: tuple[str, str, boo
     as recorded when it was published (#723): the commit its own work on ``d``'s base is
     counted above (:func:`build_bundle_base`). Its ``stack-base-tip``
     (``publish.read_stack_base_tip``) when it has a ``stack-base`` record
-    (``publish.read_stack_base``); None, nothing below its own commits but the base, for a
-    member never stacked. Read from the bundle's own files only, never from which
-    integration refs exist on origin.
+    (``publish.read_stack_base``); for a member never stacked, the base commit its branch
+    was cut from (``publish.json``'s ``cut_from``, or its ``host_ci_base``, the same commit),
+    so base commits a later rewind or force-push of the base dropped are never its own.
+    Read from the bundle's own files only, never from which integration refs exist on
+    origin.
 
     Raises :class:`IntegrationError`, naming ``m`` and the fix (re-publish it), when the cut
     point cannot be trusted:
@@ -933,7 +936,9 @@ def _member_cut_point(wt: Path, d: Path, m: Path, published: tuple[str, str, boo
     4. no ``stack-base`` record, but published stacked: its ``publish.json`` ``mode`` is
        ``"stacked-pr"`` (publish cut it from a stack branch: a wave's line, whose record a
        later run cleared, or a legacy ``Stacks on:`` parent's PR branch), or its brief
-       declares ``Stacks on:``.
+       declares ``Stacks on:``;
+    5. never stacked, but with no recorded cut point (a ``publish.json`` older than
+       ``cut_from``), or one that is not an ancestor of ``head``, as in 2.
 
     A git failure raises."""
     _remote, ref, onto = published
@@ -962,7 +967,8 @@ def _member_cut_point(wt: Path, d: Path, m: Path, published: tuple[str, str, boo
                          "(publish cuts its branch from its recorded tip)")
         return tip
     why: list[str] = []
-    if (publish._publish_record(m) or {}).get("mode") == "stacked-pr":
+    record = publish._publish_record(m) or {}
+    if record.get("mode") == "stacked-pr":
         why.append('its publish.json records "mode": "stacked-pr"')
     parents = brief.stacks_on(m / "brief.md")
     if parents:
@@ -974,7 +980,17 @@ def _member_cut_point(wt: Path, d: Path, m: Path, published: tuple[str, str, boo
                      "from a run that records where its branch is cut from"
                      + (" (plan its parent as a `Depends on`, not `Stacks on:`)"
                         if parents else ""))
-    return None
+    cut = str(record.get("cut_from") or record.get("host_ci_base") or "")
+    if not cut:
+        raise refuse(f"{m.name}'s publish.json records no commit its branch {ref} was cut "
+                     f"from (no `cut_from`: published before that was recorded)",
+                     "from a run that records where its branch is cut from")
+    if not _carries(wt, cut, f"{m.name}'s recorded cut point {cut[:12]}", ref, of=head):
+        raise refuse(f"{m.name}'s recorded cut point {cut[:12]} (its publish.json "
+                     f"`cut_from`) is not in its branch {ref} at {head[:12]}: the branch was "
+                     f"cut again from somewhere else since it was published",
+                     "(publish records where it cuts its branch from)")
+    return cut
 
 
 def _member_clash(wt: Path, d: Path, branch: str, base_ref: str, name: str, ref: str,

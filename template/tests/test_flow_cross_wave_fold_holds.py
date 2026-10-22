@@ -131,11 +131,12 @@ class CrossWaveFoldHolds(unittest.TestCase):
         (d / "patch.diff").write_text(sb._git(primary, "diff", "HEAD~1", "HEAD"),
                                       encoding="utf-8")
         sb._git(primary, "push", "-q", "origin", branch)
+        cut = sb._git(primary, "rev-parse", "HEAD~1").strip()   # publish's `cut_from` (#723)
         sb._git(primary, "checkout", "-q", "main")
         mode = "new-pr" if cut_from == "origin/main" else "stacked-pr"
         (d / "publish.json").write_text(json.dumps(
             {"mode": mode, "branch": branch, "base": "main", "repo": "org/repo",
-             "pr_url": f"https://example.test/pr/{iid}"}), encoding="utf-8")
+             "pr_url": f"https://example.test/pr/{iid}", "cut_from": cut}), encoding="utf-8")
 
     def _finished(self, iid: str, files: dict[str, str]) -> None:
         """``iid`` finished in an earlier run of the batch: published off main, accepted."""
