@@ -81,6 +81,7 @@ class ReissueAfterConflictHold(unittest.TestCase):
         repo = self.fx.primary
         sb._git(repo, "fetch", "-q", "origin")
         sb._git(repo, "checkout", "-q", "-B", f"fix/{iid}", cut)
+        start = sb._git(repo, "rev-parse", "HEAD").strip()   # publish's `cut_from` (#723)
         for name, text in files.items():
             if text is None:
                 sb._git(repo, "rm", "-q", "--", name)
@@ -93,7 +94,8 @@ class ReissueAfterConflictHold(unittest.TestCase):
         (d / "publish.json").write_text(json.dumps(
             {"mode": "new-pr" if cut == "origin/main" else "stacked-pr",
              "branch": f"fix/{iid}", "base": "main", "repo": "org/repo",
-             "pr_url": f"https://example.test/pr/{iid}"}), encoding="utf-8")
+             "pr_url": f"https://example.test/pr/{iid}", "cut_from": start}),
+            encoding="utf-8")
         return True
 
     def _gh_stub(self, args, *a, **kw):
