@@ -1,0 +1,43 @@
+{
+  "_comment": "Labels for issue priority triage (ADR-0017). The triage workflow creates any that are missing; it never edits or deletes an existing label. Descriptions stay within GitHub's 100-character limit. Owners map an area to the GitHub login assigned when an issue has no assignee; \"*\" is the fallback.",
+  "severity": {
+    "sev:critical": {"color": "B60205", "description": "A model writes the decision, unevidenced sign-off, gate reports a pass it did not run (ADR-0017)"},
+    "sev:major": {"color": "D93F0B", "description": "Bundle state misread, guard or decorrelation off, update breaks an instance, driver crash"},
+    "sev:minor": {"color": "FBCA04", "description": "Wrong behaviour with a workaround, cost or time regression, misleading output (ADR-0017)"},
+    "sev:trivial": {"color": "C2E0C6", "description": "Cosmetic, wording, docs, or a test-only gap (ADR-0017)"}
+  },
+  "reach": {
+    "reach:common": {"color": "5319E7", "description": "A normal cycle with a default or documented configuration triggers it (ADR-0017)"},
+    "reach:edge": {"color": "8A63D2", "description": "Needs an unusual configuration, project, bundle shape, model behaviour or timing"},
+    "reach:adversarial": {"color": "C5B7E8", "description": "Only when someone sets it up: hostile tracker text, a leaf acting against its role"}
+  },
+  "area": {
+    "area:records": {"color": "BFDADC", "description": "Bundle state, briefs, §6/§9 and SUMMARY assembly (architecture 5.1)"},
+    "area:machine": {"color": "BFDADC", "description": "The driver and flow: advancing bundles beat by beat (architecture 5.1)"},
+    "area:leaves": {"color": "BFDADC", "description": "Model CLI invocation, heartbeat, memory caps, sandboxes (architecture 5.1)"},
+    "area:gates": {"color": "BFDADC", "description": "Gates and their evidence, red-green, unverifiable results (ADR-0006)"},
+    "area:publish": {"color": "BFDADC", "description": "Worktrees, draft PRs and tracker sources (architecture 5.1)"},
+    "area:roles": {"color": "BFDADC", "description": "What each leaf is told and may see: prompts and agents (ADR-0005)"},
+    "area:policies": {"color": "BFDADC", "description": "Sizing, auto-iterate, Plan-exit, dependency halts, splitting (architecture 5.1)"},
+    "area:orchestration": {"color": "BFDADC", "description": "Waves, lanes, integration lines, merge and revert (architecture 5.1)"},
+    "area:act": {"color": "BFDADC", "description": "Act index and log, review-finding triage, cleanup, hand-off (architecture 5.1)"},
+    "area:cli": {"color": "BFDADC", "description": "The pdca command, pdca.toml, doctor and the STOP-discipline guard"},
+    "area:template": {"color": "BFDADC", "description": "copier.yml, the Jinja template and copier update (ADR-0007)"},
+    "area:spec": {"color": "BFDADC", "description": "The vendored quality-cycle model specification"},
+    "area:docs": {"color": "BFDADC", "description": "Documentation, the pdca.dev site and design records"},
+    "area:tests": {"color": "BFDADC", "description": "The offline driver suite and the root render suite"},
+    "area:ci": {"color": "BFDADC", "description": "CI, workflows and repository tooling"}
+  },
+  "priority": {
+    "priority:P0": {"color": "B60205", "description": "Drop other work, fix now, block the release (ADR-0017)"},
+    "priority:P1": {"color": "D93F0B", "description": "Current milestone (ADR-0017)"},
+    "priority:P2": {"color": "FBCA04", "description": "Next milestone, or whenever it fits (ADR-0017)"},
+    "priority:P3": {"color": "C2E0C6", "description": "Backlog (ADR-0017)"}
+  },
+  "other": {
+    "needs-triage": {"color": "EDEDED", "description": "Severity or reach could not be placed; see the triage comment (ADR-0017)"}
+  },
+  "owners": {
+    "*": "eduralph"
+  }
+}
