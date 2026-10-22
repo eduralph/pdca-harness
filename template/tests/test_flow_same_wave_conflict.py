@@ -31,7 +31,7 @@ from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from pdca_harness import flow, integrate, publish, state
+from pdca_harness import cli, flow, integrate, publish, state
 
 _SPEC = importlib.util.spec_from_file_location(
     "stack_bases_fixture", Path(__file__).with_name("test_integrate_stack_bases.py"))
@@ -147,6 +147,7 @@ class SameWaveConflict(unittest.TestCase):
         self.line = integrate.integration_branch(self.cfg, "main", ids)
         drive = [self.cfg.bundle(i) for i in ids]
         self._err, out = io.StringIO(), io.StringIO()
+        self.holds: dict[str, str] = {}
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(subprocess, "run", self._gh_stub))
             stack.enter_context(mock.patch.object(flow, "_drive_wave", self._drive_wave))
@@ -158,8 +159,9 @@ class SameWaveConflict(unittest.TestCase):
             stack.enter_context(redirect_stderr(self._err))
             self.results = flow._drive_and_act(self.cfg, drive, do_publish=True,
                                                do_act=False, by="T", today=TODAY,
-                                               batch=ids)
+                                               batch=ids, holds=self.holds)
         self.err = self._err.getvalue()
+        self.rc = cli._results_rc(self.results, holds=self.holds)
         self.assertNotIn("Traceback", self.err)
 
     # -- helpers ---------------------------------------------------------------------------
@@ -360,11 +362,15 @@ class SameWaveConflict(unittest.TestCase):
             self.assertTrue(self.fx._ancestor(self._head(iid), branch), iid)
         self.assertFalse(self.fx._ancestor(self._head("Q"), branch))
 
-    # -- a conflict with earlier-wave work still stops the fold, as before -----------------
+    # -- a conflict with its own prerequisite, on the line from an earlier wave, holds it ---
 
-    def test_a_conflict_with_earlier_wave_work_still_stops_the_run(self):
-        # 21 is cut from the plain base, not the line, so it conflicts with 10's change
-        # already on the line — not with 20, the same-wave bundle merged before it.
+    def test_a_conflict_with_its_own_prerequisite_on_the_line_holds_it(self):
+        # 21 depends on 10 but is cut from the plain base, not the line, so it conflicts with
+        # 10's change already on the line from wave 0 — not with 20, the same-wave bundle
+        # merged before it. 10 alone explains the clash (#747): 21 is held, not the run, and
+        # as 10 is its own prerequisite its owner is told to rebuild its branch on 10's —
+        # never to declare `Conflicts with: 10`. 20 was built on 10 too, which does not stop
+        # it: 21 is to be built on 10 as well. 30, which depends on 21, is not built.
         self._on_base({"shared.txt": "x\n"})
         self._plan("10", {"shared.txt": "ten\n"})
         self._plan("20", {"twenty.txt": "twenty\n"}, "10")
@@ -373,11 +379,27 @@ class SameWaveConflict(unittest.TestCase):
         self.cut_from["21"] = "origin/main"
         self._run(["10", "20", "21", "30"])
 
-        self.assertIn("wave 1 did not integrate", self.err)
-        self.assertIn("issue_21's branch", self.err)
-        self.assertIn("STOPPING", self.err)
-        self.assertEqual(self._holds("21"), [])
+        self.assertTrue(self.fx._ancestor(self._head("10"), self._head("20")))   # the facts
+        self.assertFalse(self.fx._ancestor(self._head("10"), self._head("21")))
+        self.assertNotIn("did not integrate", self.err)
+        self.assertNotIn("STOPPING", self.err)
+        held = self._holds("21")
+        self.assertEqual(len(held), 1, self.err)
+        self.assertIn("issue_10", held[0])
+        self.assertIn("(conflicts in shared.txt)", held[0])
+        self.assertIn("rebuild issue_21's branch on issue_10's", held[0])
+        self.assertNotIn("issue_20", held[0])
+        self.assertFalse(self.fx._ancestor(self._head("21"), self.fx._tip(self.line)))
+        end = [x for x in self.err.splitlines()
+               if x.startswith("flow: issue_21 was held out of this run's integration line")]
+        self.assertEqual(len(end), 1, self.err)
+        self.assertIn("rebuild issue_21's branch on issue_10's", end[0])
+        self.assertNotIn("Conflicts with: 10", self.err)     # 10 is 21's own prerequisite
+        self.assertNotIn("same wave", self.err)
         self.assertNotIn("issue_30", self.seen, self.err)
+        self.assertEqual(self.results["30"], state.PLANNED, self.err)
+        self.assertEqual(self.holds, {"21": "conflict"})
+        self.assertEqual(self.rc, 1, self.err)               # 30 is left PLANNED, with no hold
 
     # -- a base the fold takes in mid-wave is never blamed on a bundle of the wave ----------
 

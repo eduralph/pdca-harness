@@ -1218,6 +1218,7 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
                 clashes: dict[str, tuple[str, dict[str, list[str]], list[str]]] | None = None,
                 bases: integrate.Bases | None = None,
                 line_prs: integrate.LinePrs | None = None,
+                finished_heads: Mapping[str, str] | None = None,
                 ) -> tuple[dict[tuple[str, str], tuple[str, Path | None]],
                            dict[tuple[str, str], str | None], tuple[str, str] | None]:
     """ONE :func:`integrate.fold` of ``bundles`` and, with ``[driver].regate_between_waves``,
@@ -1229,16 +1230,21 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
     ``carried`` is the run's record of the head each bundle's branch had when a fold of
     this run put it on the line (:func:`integrate.fold`, #633): the in-run folds pass the
     run's one mapping, so a carried branch rewritten mid-run stops the fold; the carry
-    passes none. ``held_out`` / ``wave`` (#674): the in-run folds pass the wave just
-    published, so a bundle of it whose branch conflicts with ones of its own wave merged
-    before it (and not with the line as the wave found it) is left out and recorded in
-    ``held_out``, not stopped on; the carry passes none. ``pr_heads`` / ``holds`` (#672):
-    the carry passes each finished id's PR head, so a skipped id's work counts from it
-    too, and gets back, for each id left out for holding a skipped id's work, that id;
-    the in-run folds pass neither. ``clashes`` (#694): the carry gets back what each id
-    skipped for a textual conflict conflicts with (:func:`integrate._clash`); the in-run
-    folds pass none. ``bases`` / ``line_prs`` (#727): the in-run folds pass what the run's
-    PRs hold (:func:`_heads_taken`), which the same check holds each branch to too.
+    passes an empty mapping of its own, so it checks nothing and gets back the head it put
+    on the line for each finished id it folded (#747). ``held_out`` / ``wave`` (#674): the
+    in-run folds pass the wave just published, so a bundle of it whose branch conflicts
+    with ones of its own wave merged before it (and not with the line as the wave found
+    it), or whose conflict bundles already on the line explain (#747), is left out and
+    recorded in ``held_out``, not stopped on; the carry passes none. ``finished_heads``
+    (#747): the in-run folds pass the heads the carry put on the line, so such a conflict
+    can be pinned on a finished id there too; the carry passes none. ``pr_heads`` /
+    ``holds`` (#672): the carry passes each finished id's PR head, so a skipped id's work
+    counts from it too, and gets back, for each id left out for holding a skipped id's
+    work, that id; the in-run folds pass neither. ``clashes`` (#694): the carry gets back
+    what each id skipped for a textual conflict conflicts with (:func:`integrate._clash`);
+    the in-run folds pass none. ``bases`` / ``line_prs`` (#727): the in-run folds pass what
+    the run's PRs hold (:func:`_heads_taken`), which the same check holds each branch to
+    too.
 
     Returns ``(folded, tips, red)``: the fold's result, each folded target's pushed tip
     (None in a dry-run, which pushes nothing), and the first target whose re-gate is red
@@ -1249,7 +1255,7 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
                                 folded_this_run=folded_this_run, batch=batch, skipped=skipped,
                                 carried=carried, held_out=held_out, wave=wave,
                                 pr_heads=pr_heads, holds=holds, clashes=clashes,
-                                bases=bases, line_prs=line_prs)
+                                bases=bases, line_prs=line_prs, finished_heads=finished_heads)
         tips = {tgt: integrate.pushed_tip(wt) if wt is not None else None
                 for tgt, (_branch, wt) in folded.items()}
         # hold_lock=False: the locks stack already holds each tree's lock (re-acquiring
@@ -1300,8 +1306,10 @@ def _finished_head(d: Path, ref: tuple[str, str, bool] | None, repo: Path, base_
 
 # The step for a bundle whose branch conflicts with finished bundles of its batch,
 # ``{partners}`` (``{ids}``: their ids): a proposal for the human, no brief is written. The
-# same whichever step reports it (#694): the end of the run, for a same-wave conflict hold
-# (:func:`_report_conflict_holds`, #674), and the carry of a re-issue (``_CARRY_HINTS``).
+# same whichever step reports it (#694): the end of the run, for a conflict hold
+# (:func:`_report_conflict_holds`, #674 — there ``{ids}`` leaves out a partner that is the
+# held bundle's own prerequisite, which ``{partners}`` keeps, #747), and the carry of a
+# re-issue (``_CARRY_HINTS``).
 _CONFLICT_STEP = ("declare `Conflicts with: {ids}` in {name}'s brief, then rebuild {name} "
                   "on a base that holds {partners}")
 
@@ -1416,7 +1424,8 @@ def _cascade_not_clean(cfg: Config, ids: list[Path], why: dict[str, tuple[str, s
 
 def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
                     batch: list[str], integ: dict[tuple[str, str], str],
-                    folded_tips: dict[tuple[str, str], str | None], held: set[str]) -> None:
+                    folded_tips: dict[tuple[str, str], str | None], held: set[str],
+                    finished_heads: dict[str, str] | None = None) -> None:
     """Before wave 0, put a re-issued run's finished named ids on its line (#646).
 
     ``finished`` (:func:`_finished_named`) are ids the run was asked for that an earlier run
@@ -1464,7 +1473,11 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
     is the not-clean id reached, :func:`_cascade_not_clean`), and which bundles wait. One
     that reaches a held id goes into ``held`` too, so its own plain ``Depends on``
     dependents wait, but it has no line of its own (it has no PR to judge): the held id's
-    line names, among the bundles it holds, those that reach it through one."""
+    line names, among the bundles it holds, those that reach it through one.
+
+    ``finished_heads`` (#747), filled in place: each finished id carried onto a line the
+    run uses → the head the fold put there. The in-run folds may pin a conflict on one of
+    them (:func:`integrate.fold`); they never merge it or check it for a rewrite."""
     cands = {d.name: (d, (repo, base), ref)
              for d, repo, base, _slug, ref in integrate._fold_candidates(finished)}
     # No fold candidate, still a node (#728): each walk below goes through one of these.
@@ -1516,11 +1529,12 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
             holds: dict[str, str] = {}      # left out for a skipped id's work → that id
             # skipped for a textual conflict → (kind, partners, files) (#694)
             clashes: dict[str, tuple[str, dict[str, list[str]], list[str]]] = {}
+            put: dict[str, str] = {}        # carried → the head the fold put on the line (#747)
             try:
                 folded, tips, red = _fold_lines(cfg, clean, dry=False, batch=batch,
                                                 folded_this_run={tgt: tip} if tip else {},
                                                 skipped=skipped, pr_heads=heads, holds=holds,
-                                                clashes=clashes)
+                                                clashes=clashes, carried=put)
             except integrate.IntegrationError as exc:
                 folded, tips, red = {}, {}, None
                 skipped.update({d.name: str(exc) for d in clean})
@@ -1544,6 +1558,8 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
                             for name in carried})
             elif tgt in folded:
                 integ[tgt], folded_tips[tgt] = folded[tgt][0], tips[tgt]
+                if finished_heads is not None:
+                    finished_heads.update({n: put[n] for n in carried if n in put})
                 print(f"flow: carried {', '.join(carried)} (finished in an earlier run) onto "
                       f"{line} at {tips[tgt]} before wave 0 — this run's {tgt[0]} @ {tgt[1]} "
                       f"bundles build on it.", file=sys.stderr)
@@ -1590,29 +1606,71 @@ def _conflict_partners(partners: Collection[str]) -> str:
     return ", ".join(f"{p}'s" for p in partners)
 
 
-def _announce_conflict_holds(held: Mapping[str, tuple[list[str], list[str]]],
-                             names: Collection[str], k: int) -> None:
-    """One stderr line per bundle of ``names`` the wave-``k`` fold just held out of the line
-    (#674): its branch conflicts with the same-wave bundle(s) the fold merged before it,
-    named with the files. Printed before the next wave builds."""
+def _own_prereqs(cfg: Config, name: str, partners: Collection[str]) -> list[str]:
+    """The bundles of ``partners`` that held bundle ``name`` says it builds on, as the fold
+    judged them (#747, :func:`integrate._prerequisites`): a clash with one is fixed by
+    rebuilding ``name``'s branch on that one's, never by a ``Conflicts with`` edge to it."""
+    own = integrate._prerequisites(cfg, cfg.find_bundle(name.removeprefix("issue_")))
+    return [p for p in partners if p in own]
+
+
+def _prerequisite(name: str, own: list[str]) -> str:
+    """``issue_10 is issue_21's own prerequisite``: held bundle ``name``'s partners ``own``
+    that it says it builds on (#747, :func:`_own_prereqs`)."""
+    return (f"{', '.join(own)} {'is' if len(own) == 1 else 'are'} {name}'s own "
+            f"prerequisite{'' if len(own) == 1 else 's'}")
+
+
+def _rebuild_on(name: str, own: list[str]) -> str:
+    """The step for held bundle ``name`` whose partners ``own`` are its own prerequisites
+    (#747, :func:`_own_prereqs`)."""
+    return f"{_prerequisite(name, own)}: rebuild {name}'s branch on {_conflict_partners(own)}"
+
+
+def _announce_conflict_holds(cfg: Config, held: Mapping[str, tuple[list[str], list[str]]],
+                             names: Collection[str], k: int, *, wave: Collection[str] = (),
+                             finished: Collection[str] = ()) -> None:
+    """One stderr line per bundle of ``names`` the wave-``k`` fold just held out of the line:
+    its branch conflicts with the bundles named, with the files. Each is said to be where it
+    is: one of ``wave``, merged before it in the same wave (#674); or already on the line
+    (#747), from an earlier wave, or a finished id the carry put there (``finished``). A
+    partner the held bundle says it builds on comes with the step: rebuild its branch on
+    that one's (:func:`_own_prereqs`). Printed before the next wave builds."""
     for name in names:
         partners, paths = held[name]
+        groups = ((f"merged before it in the same wave {k}", [p for p in partners if p in wave]),
+                  ("already on the line from an earlier wave",
+                   [p for p in partners if p not in wave and p not in finished]),
+                  ("already on the line, finished in an earlier run",
+                   [p for p in partners if p not in wave and p in finished]))
+        whose = ", and ".join(f"{_conflict_partners(ps)}, {where}" for where, ps in groups if ps)
+        own = _own_prereqs(cfg, name, partners)
+        fix = f"{_rebuild_on(name, own)}; " if own else ""
         print(f"flow: {name} held out of the integration fold — its change conflicts with "
-              f"{_conflict_partners(partners)}, merged before it in the same wave {k} "
-              f"(conflicts in {', '.join(paths)}); bundles that depend on it or are its "
-              f"`Conflicts with` partners are held this run.", file=sys.stderr)
+              f"{whose} (conflicts in {', '.join(paths)}); {fix}bundles that depend on it or "
+              f"are its `Conflicts with` partners are held this run.", file=sys.stderr)
 
 
-def _report_conflict_holds(held: Mapping[str, tuple[list[str], list[str]]]) -> None:
+def _report_conflict_holds(cfg: Config,
+                           held: Mapping[str, tuple[list[str], list[str]]]) -> None:
     """At the end of the run, one stderr line per bundle a fold held out of the line for a
-    same-wave conflict (#674), with the step to take. The ``Conflicts with`` declaration is
-    a proposal for the human: no brief is written."""
+    conflict (#674, #747), with the step to take: a ``Conflicts with`` declaration of the
+    partners that are not its own prerequisites (:func:`_own_prereqs`), proposed for the
+    human — no brief is written — then a rebuild on a base that holds every partner; with
+    only its own prerequisites, the rebuild of its branch on theirs."""
     for name, (partners, paths) in held.items():
-        step = _CONFLICT_STEP.format(ids=", ".join(p.removeprefix("issue_") for p in partners),
-                                     name=name, partners=", ".join(partners))
+        own = _own_prereqs(cfg, name, partners)
+        others = [p for p in partners if p not in own]
+        if others:
+            step = _CONFLICT_STEP.format(ids=", ".join(p.removeprefix("issue_") for p in others),
+                                         name=name, partners=", ".join(partners))
+            step = (f"{_prerequisite(name, own)}. " if own else "") + (
+                f"Proposed, for you to confirm: {step}.")
+        else:
+            step = f"{_rebuild_on(name, own)}, then re-run."
         print(f"flow: {name} was held out of this run's integration line — its change "
-              f"conflicts with {_conflict_partners(partners)} ({', '.join(paths)}). Proposed, "
-              f"for you to confirm: {step}.", file=sys.stderr)
+              f"conflicts with {_conflict_partners(partners)} ({', '.join(paths)}). {step}",
+              file=sys.stderr)
 
 
 # Terminal: finished (COMPLETE), deliberately abandoned (DISCONTINUED), or settled in the
@@ -2713,8 +2771,9 @@ def _drive_and_act(
     ``holds`` (#693) is the caller's collector for the bundles this run held: filled at the
     end of the run with ``{id: reason}``. A fold held an accepted bundle out of the
     integration line: ``"unpushed"`` for one that pushed no branch (#593) and ``"conflict"``
-    for one whose branch conflicts with a same-wave bundle merged before it (#674). Such a
-    bundle is COMPLETE in the returned map, which therefore cannot say it was held.
+    for one whose branch conflicts with a same-wave bundle merged before it (#674), or with
+    bundles already on the line that explain the whole clash (#747). Such a bundle is
+    COMPLETE in the returned map, which therefore cannot say it was held.
     ``"base"`` (#738) for one held before it was built, because its own base could not be
     built (:func:`_bundle_bases`): not driven this run — PLANNED in the map, for one not
     built yet — and named on stderr with the cause and the fix. ``cli._flow`` reads this to
@@ -2745,9 +2804,10 @@ def _drive_and_act(
     # their in-batch dependents held by `_runnable`, instead of stopping the run.
     held_unpushed: set[str] = set()
     # Accepted bundles a fold left out because their branch conflicts with a bundle of their
-    # own wave merged before it (#674): name → (those bundles, the files). Left out of every
-    # later fold, their in-batch dependents and `Conflicts with` partners held by
-    # `_runnable`, as `held_unpushed`'s are.
+    # own wave merged before it (#674), or with bundles already on the line that explain the
+    # whole clash (#747): name → (those bundles, the files). Left out of every later fold,
+    # their in-batch dependents and `Conflicts with` partners held by `_runnable`, as
+    # `held_unpushed`'s are.
     held_conflict: dict[str, tuple[list[str], list[str]]] = {}
     accepted: list[Path] = []        # cumulative COMPLETE bundles, wave then name order
     integ: dict[tuple[str, str], str] = {}  # per-target (repo, base) → integration branch (#187)
@@ -2821,11 +2881,14 @@ def _drive_and_act(
     # clean, else named in `held_finished`, which holds only their plain `Depends on`
     # dependents. Only where a fold would run: stack mode, publishing on.
     held_finished: set[str] = set()
+    # Each finished id the carry put on the line → the head it put there (#747): an in-run
+    # fold may pin a bundle's conflict on one, as on a bundle it took itself.
+    finished_heads: dict[str, str] = {}
     finished = _finished_named(cfg, batch, batch_names)
     if do_publish and cfg.wave_mode != "merge":
         _carry_finished(cfg, bundles, finished,
                         batch=run_batch, integ=integ, folded_tips=folded_tips,
-                        held=held_finished)
+                        held=held_finished, finished_heads=finished_heads)
     # `wave_list` is iterated by a LIST iterator on purpose (#469): adoption splices the
     # recomputed remainder into `wave_list[k+1:]` after wave k drives, and the iterator —
     # which simply indexes forward — picks the new tail up. So "how many waves are left" is
@@ -3039,25 +3102,30 @@ def _drive_and_act(
                 # shared with the pre-wave carry (`_fold_lines`, #646). A bundle of this wave
                 # whose branch conflicts with ones of the wave the fold merged before it, not
                 # with the line the wave found, is held, not stopped on (#674): left out of
-                # this and every later fold.
+                # this and every later fold. So is one whose conflict bundles already on the
+                # line explain, a finished id the carry put there included (#747).
                 had = set(held_conflict)
                 taken = _heads_taken(bases_took, line_cut, pushed)   # #727
+                wave_names = [d.name for d in complete]
                 try:
                     folded, tips, red = _fold_lines(
                         cfg, [d for d in accepted
                               if d.name not in held_unpushed and d.name not in held_conflict],
                         dry=dry, folded_this_run=dict(folded_tips), batch=run_batch,
                         carried=carried_heads, held_out=None if dry else held_conflict,
-                        wave=[d.name for d in complete], bases=taken[0], line_prs=taken[1])
+                        wave=wave_names, bases=taken[0], line_prs=taken[1],
+                        finished_heads=finished_heads)
                 except integrate.IntegrationError as exc:
-                    _announce_conflict_holds(held_conflict,
-                                             [n for n in held_conflict if n not in had], k)
+                    _announce_conflict_holds(cfg, held_conflict,
+                                             [n for n in held_conflict if n not in had], k,
+                                             wave=wave_names, finished=finished_heads)
                     print(f"flow: wave {k} did not integrate ({exc}); STOPPING — "
                           f"later waves not run.", file=sys.stderr)
                     line_stopped = True
                     break
-                _announce_conflict_holds(held_conflict,
-                                         [n for n in held_conflict if n not in had], k)
+                _announce_conflict_holds(cfg, held_conflict,
+                                         [n for n in held_conflict if n not in had], k,
+                                         wave=wave_names, finished=finished_heads)
                 # The next fold continues from exactly each pushed tip and refuses a line
                 # another run moved (#593). A dry-run pushes nothing (None).
                 folded_tips.update(tips)
@@ -3083,8 +3151,8 @@ def _drive_and_act(
     # produced is either driven by this run or named, with the command that drives it, by
     # the time it ends.
     _warn_stranded_split_children(cfg, bundles, adopt_seeds)
-    # Each bundle a fold held for a same-wave conflict, again, with the step to take (#674).
-    _report_conflict_holds(held_conflict)
+    # Each bundle a fold held for a conflict, again, with the step to take (#674, #747).
+    _report_conflict_holds(cfg, held_conflict)
     # A carried branch rewritten after the run's last fold read it (#695) — after Act on
     # purpose, so the window covers it too (Act never re-decides a bundle's disposition).
     # Only where a fold ran: `carried_heads` is filled by a stack-mode fold that pushed, so
