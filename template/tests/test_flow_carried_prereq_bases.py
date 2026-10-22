@@ -186,6 +186,20 @@ class CarryThroughPatchless(unittest.TestCase):
         self._holds("D", "A")
         self._holds("W", "A")
 
+    def test_a_patchless_id_reaching_nothing_keeps_its_dependent_off_the_line(self):
+        # (4b) W names A, so A is carried onto the line; D names N, finished with no patch
+        # and no prerequisite. Before: an edge to any finished id was a seam, so D was cut
+        # from the line and its PR carried A, which it does not build on.
+        h = self.h
+        h._finished("A", {"a.txt": "a\n"})
+        h._finished("N", None, patch=None)
+        d, w = h._planned("D", "N"), h._planned("W", "A")
+        h._run([d, w], ["A", "N", "D", "W"])
+        self._carried("A")
+        self._holds("W", "A")
+        h._on_base("D")
+        self.assertFalse(h.fx._ancestor(h.fx._tip("fix/A"), h.fx._tip("fix/D")), h.err)
+
     def test_a_clean_resume_through_a_patchless_id_carries_both_and_stops_nothing(self):
         # (4c) A ← N ← P ← D, all clean, P's branch cut from fix/A: D names P, a fold
         # candidate, so this carried before #728 too. The walk through N must not mark P

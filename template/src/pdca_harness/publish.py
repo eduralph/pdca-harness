@@ -396,6 +396,12 @@ def publish(
                     if c[3] == "apply" else ""
                 print(f"publish: step failed: {' '.join(c)}{hint}", file=sys.stderr)
                 return 1
+        # Where the branch was cut from (#723): the parent of the one commit just made on
+        # it. A bundle's own base counts this bundle's work above it, so a base moved since
+        # (rewound, force-pushed) cannot make that base's old commits look like its own.
+        cut = subprocess.run(git("rev-parse", "--verify", "--quiet", f"{branch}^"),
+                             capture_output=True, text=True)
+        cut_from = (cut.stdout or "").strip() if cut.returncode == 0 else ""
     finally:
         _restore_worktree(repo, orig_ref, stashed)
 
@@ -435,6 +441,8 @@ def publish(
         # The base commit the host-CI gate certified — and, via _pin_checkout, the exact
         # parent the pushed branch was built on (#311): auditable certified == pushed.
         record["host_ci_base"] = ci_base
+    if cut_from:
+        record["cut_from"] = cut_from
     if stack_branch:
         record["stacks_on"] = brief.stacks_on(d / "brief.md")
     (d / "publish.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
