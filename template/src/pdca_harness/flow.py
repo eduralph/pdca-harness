@@ -911,7 +911,7 @@ def _point_at_integration(integ: dict[tuple[str, str], str], runnable: list[Path
 
 
 def _closure_members(cfg: Config, d: Path, *, built: Mapping[str, tuple[Path, int]],
-                     on_target: Collection[str], finished: Collection[str],
+                     on_target: Collection[str], finished: Mapping[str, Path],
                      conflicts: Mapping[str, Collection[str]],
                      seams: Collection[str]) -> list[Path] | str:
     """What bundle ``d`` is built on in stack mode (#727): the members of a base of its own
@@ -929,8 +929,13 @@ def _closure_members(cfg: Config, d: Path, *, built: Mapping[str, tuple[Path, in
     each bundle with an edge to one. The members are those reached whose branch the fold
     carries on ``d``'s target (``on_target``), in ``built``'s order. A seam: a walked bundle
     declaring ``Stacks on`` or ``Onto branch``; an edge to one of ``finished`` (finished
-    named ids: carried, or with no patch — #728); a member pointed at a seam itself
-    (``seams``)."""
+    named ids, name → directory) with a patch, which the carry puts on the line; a
+    prerequisite edge to one with no patch whose own plain ``Depends on`` reaches one with a
+    patch, directly or through more with no patch (#728, :func:`_reached`, as the carry
+    walks it); a member pointed at a seam itself (``seams``). A finished id with no patch
+    that reaches none adds nothing to any line, so an edge to it, or a ``Conflicts with``
+    one, is no seam and adds no member."""
+    bare = {n: p for n, p in finished.items() if not integrate._has_patch(p)}
     found: set[str] = set()
     todo = [d]
     while todo:
@@ -944,6 +949,16 @@ def _closure_members(cfg: Config, d: Path, *, built: Mapping[str, tuple[Path, in
         edges = [(cfg.bundle(x).name, True)
                  for x in brief.depends_on(bp) + brief.depends_on_merged(bp)]
         for n, prereq in edges + [(n, False) for n in sorted(conflicts.get(m.name, ()))]:
+            if n in bare:
+                reach = _reached(cfg, bare[n], finished.keys() - bare.keys(), bare) \
+                    if prereq else {}
+                if not reach:
+                    continue           # nothing of it, or of what it builds on, is carried
+                first, via = next(iter(reach.items()))
+                return (f"{m.name} depends on {n}, finished in an earlier run with no patch, "
+                        f"whose `Depends on` reaches {first}"
+                        + (f" through {', '.join(via)}" if via else "")
+                        + ", finished in an earlier run")
             if n in finished:
                 how = "depends on" if prereq else "`Conflicts with`"
                 return f"{m.name} {how} {n}, finished in an earlier run"
@@ -982,7 +997,7 @@ def _bundle_bases(cfg: Config, runnable: list[Path], *, built: Mapping[str, tupl
         target = publish._resolve_target(d)[:2]
         mine = {m.name for m, repo, base, _s, _r in cands if (repo, base) == target}
         plans[d.name] = (mine, _closure_members(
-            cfg, d, built=built, on_target=mine, finished={f.name for f in finished},
+            cfg, d, built=built, on_target=mine, finished={f.name: f for f in finished},
             conflicts=conflicts, seams=set(line_cut)))
     made: dict[str, tuple[str, str, dict[str, str]]] = {}
     for d in runnable:
@@ -1179,22 +1194,44 @@ def _clash_why(clash: tuple[str, dict[str, list[str]], list[str]], ref: str,
             f"bundle of this batch was found to account for", "line_conflict")
 
 
-def _cascade_not_clean(cfg: Config, ids: list[Path],
-                       why: dict[str, tuple[str, str]]) -> dict[str, str]:
+def _reached(cfg: Config, d: Path, stops: Collection[str],
+             through: Mapping[str, Path]) -> dict[str, list[str]]:
+    """The ids of ``stops`` that bundle ``d``'s plain ``Depends on`` reaches (#728), each
+    mapped to the ids of ``through`` on the way there (``[]``: named directly), in the order
+    reached. ``through`` are finished named ids with no patch: no fold carries one, but it
+    is still a node of the graph, so the walk goes on along its own plain ``Depends on``,
+    as the in-run walk goes through a bundle built with no patch (:func:`_closure_members`,
+    #727). The walk stops at an id of ``stops``. An edge to any other id is not followed,
+    and neither is a ``Stacks on``, ``Depends on (merged)`` or ``Conflicts with`` edge."""
+    found: dict[str, list[str]] = {}
+    seen = {d.name}
+    todo: list[tuple[Path, list[str]]] = [(d, [])]
+    while todo:
+        m, via = todo.pop(0)            # breadth first: d's own edges, in brief order, first
+        bp = m / "brief.md"
+        for dep in (brief.depends_on(bp) if bp.exists() else []):
+            n = cfg.bundle(dep).name
+            if n in stops:
+                found.setdefault(n, via)
+            elif n in through and n not in seen:
+                seen.add(n)
+                todo.append((through[n], [*via, n]))
+    return found
+
+
+def _cascade_not_clean(cfg: Config, ids: list[Path], why: dict[str, tuple[str, str]],
+                       through: Mapping[str, Path] | None = None) -> dict[str, str]:
     """Spread "not clean" along the plain ``Depends on`` edges between one target's finished
     ``ids``, as judged before the fold (#652). A finished id whose brief names a not-clean
     one (in ``why``) was built on it, so its branch carries that work: it is not clean
-    either, through any number of finished ids. Each one goes into ``why`` with the
-    ``built_on`` hint. Returns name → the not-clean id its ``Depends on`` names (the cause
-    its held line gives). An edge to an id outside ``ids`` is not followed, and neither is
-    a ``Stacks on`` or ``Depends on (merged)`` edge."""
+    either, through any number of finished ids. The edge may run through finished ids with
+    no patch (``through``, #728, :func:`_reached`): one built on such an id was built on
+    what that id builds on. Each one goes into ``why`` with the ``built_on`` hint. Returns
+    name → the not-clean id its ``Depends on`` reaches (the cause its held line gives). An
+    edge to an id outside ``ids`` and ``through`` is not followed, and neither is a ``Stacks
+    on`` or ``Depends on (merged)`` edge."""
     names = {d.name for d in ids}
-    prereqs: dict[str, list[str]] = {}
-    for d in ids:
-        bp = d / "brief.md"
-        prereqs[d.name] = [cfg.bundle(dep).name for dep in
-                           (brief.depends_on(bp) if bp.exists() else [])
-                           if cfg.bundle(dep).name in names]
+    prereqs = {d.name: _reached(cfg, d, names, through or {}) for d in ids}
     causes: dict[str, str] = {}
     grew = True
     while grew:                     # to a fixed point: a chain of any length, in any order
@@ -1202,8 +1239,11 @@ def _cascade_not_clean(cfg: Config, ids: list[Path],
         for d in ids:
             cause = next((n for n in prereqs[d.name] if n in why), None)
             if cause and d.name not in why:
-                why[d.name] = (f"its `Depends on` names {cause}, whose work its branch "
-                               f"carries", "built_on")
+                via = prereqs[d.name][cause]
+                how = (f"reaches {cause}, whose work its branch carries, through "
+                       f"{', '.join(via)} (finished with no patch)" if via else
+                       f"names {cause}, whose work its branch carries")
+                why[d.name] = (f"its `Depends on` {how}", "built_on")
                 causes[d.name] = cause
                 grew = True
     return causes
@@ -1216,7 +1256,8 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
 
     ``finished`` (:func:`_finished_named`) are ids the run was asked for that an earlier run
     of the batch finished. Nothing happens unless a drive-set bundle's plain ``Depends on``
-    names one the fold can carry (:func:`integrate._fold_candidates`); then every carryable
+    names one the fold can carry (:func:`integrate._fold_candidates`), directly or through
+    finished ids with no patch (#728, below); then every carryable
     finished id of THAT target is judged, in the order asked for. Clean — its PR state
     clean (:func:`_finished_head`), origin's line holding nothing else it cannot account for
     (:func:`integrate.foreign_commit`), merged without error, re-gate not red — it is folded
@@ -1248,15 +1289,25 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
     fresh, as today. A dry-run (stub publisher) asks no host and holds nothing: it prints
     the plan. A prerequisite that is no requested id, such as a split child an earlier run
     adopted, is not carried: :func:`_runnable` holds its plain ``Depends on`` dependents
-    until its PR merges into their base (#647)."""
+    until its PR merges into their base (#647).
+
+    A finished id with no patch (a close / no-fix disposition, #728) is no fold candidate,
+    but it is still a node of the graph, as a bundle built with no patch is for the in-run
+    walk (:func:`_closure_members`, #727): each decision above follows plain ``Depends
+    on`` edges through it (:func:`_reached`) — which finished ids are carried for which
+    drive-set bundles, which are not clean because what they build on is not (the cause
+    is the not-clean id reached, :func:`_cascade_not_clean`), and which bundles wait. One
+    that reaches a held id goes into ``held`` too, so its own plain ``Depends on``
+    dependents wait, but it has no line of its own (it has no PR to judge): the held id's
+    line names, among the bundles it holds, those that reach it through one."""
     cands = {d.name: (d, (repo, base), ref)
              for d, repo, base, _slug, ref in integrate._fold_candidates(finished)}
+    # No fold candidate, still a node (#728): each walk below goes through one of these.
+    bare = {d.name: d for d in finished if not integrate._has_patch(d)}
     dependents: dict[str, list[str]] = {}
     for b in bundles:
-        bp = b / "brief.md"
-        for dep in (brief.depends_on(bp) if bp.exists() else []):
-            if cfg.bundle(dep).name in cands:
-                dependents.setdefault(cfg.bundle(dep).name, []).append(b.name)
+        for name in _reached(cfg, b, cands, bare):
+            dependents.setdefault(name, []).append(b.name)
     for tgt in sorted({cands[name][1] for name in dependents}):
         ids = [d for d, t, _ref in cands.values() if t == tgt]          # in the order asked for
         line = integrate.integration_branch(cfg, tgt[1], batch)
@@ -1283,8 +1334,9 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
                 else:
                     why[d.name] = v
             # One built on a not-clean id carries its work (#652): not clean either, so its
-            # head accounts for nothing on origin's line.
-            causes = _cascade_not_clean(cfg, ids, why)
+            # head accounts for nothing on origin's line. Through finished ids with no patch
+            # too (#728).
+            causes = _cascade_not_clean(cfg, ids, why, bare)
             bad = integrate.foreign_commit(repo, tip, base_ref, [
                 h for n, h in heads.items() if n not in why]) if tip else None
         except integrate.IntegrationError as exc:
@@ -1343,6 +1395,11 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
                       f"{line}: {reason} — holding "
                       f"{', '.join(dependents.get(d.name, [])) or 'no bundle'} this run; "
                       f"{advice}.", file=sys.stderr)
+    # A finished id with no patch that reaches a held one waits with it (#728), so its own
+    # plain `Depends on` dependents wait too (`_runnable`). No line of its own: the held
+    # one's line above names the bundles that reach it through this one.
+    held.update([n for n, d in bare.items()
+                 if any(c in held for c in _reached(cfg, d, cands, bare))])
 
 
 def _audit_wave_overlap(wave: list[Path]) -> None:
