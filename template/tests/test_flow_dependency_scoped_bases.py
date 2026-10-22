@@ -148,6 +148,7 @@ class DependencyScopedBases(unittest.TestCase):
         branch, repo = onto[1] if onto else f"fix/{iid}", self.fx.primary
         sb._git(repo, "fetch", "-q", "origin")
         sb._git(repo, "checkout", "-q", "-B", branch, cut)
+        start = sb._git(repo, "rev-parse", "HEAD").strip()   # publish's `cut_from` (#723)
         for i, files in enumerate(self.commits[iid], 1):
             for name, text in files.items():
                 (repo / name).write_text(text, encoding="utf-8")
@@ -157,7 +158,7 @@ class DependencyScopedBases(unittest.TestCase):
         sb._git(repo, "checkout", "-q", "main")
         record = ({"mode": "stacked", "branch": branch, "base": cut} if onto else
                   {"mode": "new-pr" if cut == "origin/main" else "stacked-pr",
-                   "branch": branch, "base": "main"})
+                   "branch": branch, "base": "main", "cut_from": start})
         (d / "publish.json").write_text(json.dumps(
             {**record, "repo": "org/repo", "pr_url": f"https://example.test/pr/{iid}"}),
             encoding="utf-8")

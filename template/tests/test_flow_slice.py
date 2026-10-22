@@ -1512,6 +1512,7 @@ class StackModeFlow(unittest.TestCase):
         branch = f"fix/{d.name}"
         self._git("fetch", "-q", "origin")
         self._git("checkout", "-q", "-B", branch, base)
+        start = self._git("rev-parse", "HEAD")              # publish's `cut_from` (#723)
         self._git("apply", str(d / "patch.diff"))
         self._git("add", "--all")
         self._git("commit", "-q", "-s", "-m", f"fix {d.name}")
@@ -1519,7 +1520,7 @@ class StackModeFlow(unittest.TestCase):
         self._git("checkout", "-q", "main")
         (d / "publish.json").write_text(json.dumps(
             {"mode": "stacked-pr" if stack else "new-pr", "branch": branch,
-             "base": "main", "repo": self.TARGET[0]}), encoding="utf-8")
+             "base": "main", "repo": self.TARGET[0], "cut_from": start}), encoding="utf-8")
         return 0
 
     def _earlier_attempt(self, iid: str) -> str:
@@ -1529,6 +1530,7 @@ class StackModeFlow(unittest.TestCase):
         "written by this call?" check (#593) never hinges on the clock's resolution."""
         branch = f"fix/issue_{iid}"
         self._git("checkout", "-q", "-B", branch, "main")
+        start = self._git("rev-parse", "HEAD")              # publish's `cut_from` (#723)
         (self.repo / f"{iid.lower()}-old.txt").write_text("rejected\n", encoding="utf-8")
         self._git("add", "--all")
         self._git("commit", "-q", "-s", "-m", f"fix issue_{iid} (earlier run, rejected)")
@@ -1537,7 +1539,7 @@ class StackModeFlow(unittest.TestCase):
         record = self.cfg.bundle(iid) / "publish.json"
         record.write_text(json.dumps(
             {"mode": "new-pr", "branch": branch, "pr_url": "https://example.test/pr/1",
-             "base": "main", "repo": self.TARGET[0]}), encoding="utf-8")
+             "base": "main", "repo": self.TARGET[0], "cut_from": start}), encoding="utf-8")
         then = record.stat().st_mtime_ns - 3600 * 10**9
         os.utime(record, ns=(then, then))
         return self._origin_rev(branch)

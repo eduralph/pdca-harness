@@ -751,14 +751,15 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     tip and the way out — once the run ends, delete the line on origin, then re-run: a
     re-run whose carry finds the line continues it, and holds d again. Any other d — on a
     base of its own (:func:`integrate.build_bundle_base`) or on the real base — is built
-    from the base as fetched after this check, which has the merge judged here: the merge
-    is enough, and the line is not read (#729). A target with no line (or no recorded tip:
-    a dry-run) is judged as before."""
+    from the base as fetched, so the line is not read (#729): the base as this check
+    fetches it, failing closed, must have the merge (:func:`_base_lacks_merge`), since Do
+    and Check refresh it only best-effort. Else d is held, named on ONE stderr line. A
+    target with no line (or no recorded tip: a dry-run) is judged as before."""
     asked = set(requested) if requested is not None else set(batch_names)
     unpushed_set = set(unpushed)
     unbuilt_set = set(unbuilt)
     views: dict[str, Path | str] = {}   # repo → its fetched checkout, or why not (#655)
-    lacks: dict[tuple[str, str, str], tuple[str, bool] | None] = {}  # (prereq, target)
+    lacks: dict[tuple[str, str, str], tuple[str, bool] | None] = {}  # (prereq, repo, ref)
     runnable: list[Path] = []
     for d in wave:
         # A `Conflicts with` partner the fold left out (#629): its work is on no line.
@@ -781,6 +782,7 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
         unmet: list[str] = []
         unmerged: list[str] = []   # COMPLETE, but not merged into d's base: wait (#647)
         off_line: list[tuple[str, str, bool]] = []  # merged, not on d's line (#655)
+        off_base: list[tuple[str, str, bool]] = []  # merged, not on the base as fetched (#729)
         carryable: list[str] = []  # … of those, ones a line of d's target would carry
         for dep in deps:
             p = cfg.find_bundle(dep)
@@ -800,18 +802,25 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                 if merged.merged_into(cfg, dep, repo, base):
                     # … and when d is cut from this run's line, that line must have it too
                     # (#655); a d on a base of its own, or on the real base, is built from
-                    # the base as fetched, which has it (#729). A close/no-fix prereq merged
-                    # nothing.
-                    line = ((lines or {}).get((repo, base))
-                            if targeted and (on_line is None or d.name in on_line) else None)
+                    # the base as fetched, which must have it (#729). A close/no-fix prereq
+                    # merged nothing.
+                    line = (lines or {}).get((repo, base)) if targeted else None
                     if line is None or line[1] is None or not integrate._has_patch(p):
                         continue
-                    key = (p.name, repo, base)
-                    if key not in lacks:
-                        lacks[key] = _line_lacks_merge(cfg, dep, repo, line, views)
-                    lack = lacks[key]
-                    if lack is not None:
-                        off_line.append((p.name, *lack))
+                    if on_line is None or d.name in on_line:
+                        key = (p.name, repo, base)
+                        if key not in lacks:
+                            lacks[key] = _line_lacks_merge(cfg, dep, repo, line, views)
+                        lack = lacks[key]
+                        if lack is not None:
+                            off_line.append((p.name, *lack))
+                    else:
+                        key = (p.name, repo, f"{cfg.base_remote}/{base}")
+                        if key not in lacks:
+                            lacks[key] = _base_lacks_merge(cfg, dep, repo, base, views)
+                        lack = lacks[key]
+                        if lack is not None:
+                            off_base.append((p.name, *lack))
                     continue
                 if not targeted:
                     unmet.append(dep)
@@ -842,6 +851,15 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                   f"a re-run that finds the line on origin may continue it and hold "
                   f"{d.name} again, and one that does not starts from {base}, which has the "
                   f"merge.", file=sys.stderr)
+        if off_base:
+            has = ("does not have" if all(known for _n, _w, known in off_base)
+                   else "is not known to have")
+            print(f"flow: {d.name} held — prerequisite(s) "
+                  f"{', '.join(f'{n} ({why})' for n, why, _k in off_base)}: their PR merged "
+                  f"into {base} ({repo}), but {cfg.base_remote}/{base} as fetched here, which "
+                  f"{d.name} would be built from, {has} that merge; not built on a base "
+                  f"missing them. To build it, make sure {repo}'s checkout can fetch "
+                  f"{cfg.base_remote}, then re-run.", file=sys.stderr)
         if unmet:
             print(f"flow: {d.name} skipped — prerequisite(s) not ready "
                   f"({', '.join(unmet)}); not built on a base missing them.", file=sys.stderr)
@@ -868,10 +886,43 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                   f"no line or base of this run holds that work; not built on a base missing "
                   f"it. To build it, wait until {p} is built, once what its hold line names is "
                   f"fixed, and its PR merges{into}, then re-run.", file=sys.stderr)
-        if (not unmet and not unmerged and not off_line and not partners and not clashed
-                and not unbuilt_partners):
+        if (not unmet and not unmerged and not off_line and not off_base and not partners
+                and not clashed and not unbuilt_partners):
             runnable.append(d)
     return runnable
+
+
+def _base_lacks_merge(cfg: Config, dep: str, repo_spec: str, base: str,
+                      views: dict[str, Path | str]) -> tuple[str, bool] | None:
+    """Why ``<base_remote>/<base>`` on ``repo_spec``, as fetched now, lacks the work of
+    prerequisite ``dep``'s merged PR, or ``None`` when it has it (#729), as
+    :func:`_line_lacks_merge` judges the line, in the same checkout (``views``). For a
+    bundle built from the base as fetched — a base of its own, or the real base — instead
+    of the run's line: Do and Check refresh that base best-effort (``worktree.ensure``), so
+    after a failed fetch they would build on an older base without the merge ``gh``
+    reports. The fetch here fails closed, and once it succeeds the base ref those steps
+    read holds the merge. A base that does not resolve after it is a reason, never "has
+    it"."""
+    ref = f"{cfg.base_remote}/{base}"
+    view = _carry_checkout(cfg, repo_spec, ref, views)
+    if isinstance(view, str):
+        return view, False
+    tip = integrate._rev(view, ref)
+    if tip is None:
+        return f"{ref} does not resolve in its checkout", False
+    return _line_lacks_merge(cfg, dep, repo_spec, (ref, tip), views)
+
+
+def _carry_checkout(cfg: Config, repo_spec: str, branch: str,
+                    views: dict[str, Path | str]) -> Path | str:
+    """``repo_spec``'s checkout as the carry reads it (``integrate.carry_view``: fetched
+    first), or why it could not be fetched, cached per repo in ``views``."""
+    if repo_spec not in views:
+        try:
+            views[repo_spec] = integrate.carry_view(cfg, repo_spec, branch)[0]
+        except integrate.IntegrationError as exc:
+            views[repo_spec] = f"its checkout could not be fetched to check: {exc}"
+    return views[repo_spec]
 
 
 def _line_lacks_merge(cfg: Config, dep: str, repo_spec: str, line: tuple[str, str | None],
@@ -892,12 +943,7 @@ def _line_lacks_merge(cfg: Config, dep: str, repo_spec: str, line: tuple[str, st
     failure is a reason, never "on the line". A commit the clone lacks is not on the line
     (``integrate._carries``)."""
     branch, tip = line
-    if repo_spec not in views:
-        try:
-            views[repo_spec] = integrate.carry_view(cfg, repo_spec, branch)[0]
-        except integrate.IntegrationError as exc:
-            views[repo_spec] = f"its checkout could not be fetched to check: {exc}"
-    view = views[repo_spec]
+    view = _carry_checkout(cfg, repo_spec, branch, views)
     if isinstance(view, str):
         return view, False
     found = merged.merge_and_head(cfg, dep)
@@ -938,7 +984,7 @@ def _point_at_integration(integ: dict[tuple[str, str], str], runnable: list[Path
 
 
 def _closure_members(cfg: Config, d: Path, *, built: Mapping[str, tuple[Path, int]],
-                     on_target: Collection[str], finished: Collection[str],
+                     on_target: Collection[str], finished: Mapping[str, Path],
                      conflicts: Mapping[str, Collection[str]],
                      seams: Collection[str]) -> list[Path] | str:
     """What bundle ``d`` is built on in stack mode (#727): the members of a base of its own
@@ -956,8 +1002,13 @@ def _closure_members(cfg: Config, d: Path, *, built: Mapping[str, tuple[Path, in
     each bundle with an edge to one. The members are those reached whose branch the fold
     carries on ``d``'s target (``on_target``), in ``built``'s order. A seam: a walked bundle
     declaring ``Stacks on`` or ``Onto branch``; an edge to one of ``finished`` (finished
-    named ids: carried, or with no patch — #728); a member pointed at a seam itself
-    (``seams``)."""
+    named ids, name → directory) with a patch, which the carry puts on the line; a
+    prerequisite edge to one with no patch whose own plain ``Depends on`` reaches one with a
+    patch, directly or through more with no patch (#728, :func:`_reached`, as the carry
+    walks it); a member pointed at a seam itself (``seams``). A finished id with no patch
+    that reaches none adds nothing to any line, so an edge to it, or a ``Conflicts with``
+    one, is no seam and adds no member."""
+    bare = {n: p for n, p in finished.items() if not integrate._has_patch(p)}
     found: set[str] = set()
     todo = [d]
     while todo:
@@ -971,6 +1022,16 @@ def _closure_members(cfg: Config, d: Path, *, built: Mapping[str, tuple[Path, in
         edges = [(cfg.bundle(x).name, True)
                  for x in brief.depends_on(bp) + brief.depends_on_merged(bp)]
         for n, prereq in edges + [(n, False) for n in sorted(conflicts.get(m.name, ()))]:
+            if n in bare:
+                reach = _reached(cfg, bare[n], finished.keys() - bare.keys(), bare) \
+                    if prereq else {}
+                if not reach:
+                    continue           # nothing of it, or of what it builds on, is carried
+                first, via = next(iter(reach.items()))
+                return (f"{m.name} depends on {n}, finished in an earlier run with no patch, "
+                        f"whose `Depends on` reaches {first}"
+                        + (f" through {', '.join(via)}" if via else "")
+                        + ", finished in an earlier run")
             if n in finished:
                 how = "depends on" if prereq else "`Conflicts with`"
                 return f"{m.name} {how} {n}, finished in an earlier run"
@@ -1002,7 +1063,7 @@ def _base_plans(cfg: Config, ds: list[Path], *, built: Mapping[str, tuple[Path, 
         target = publish._resolve_target(d)[:2]
         mine = {m.name for m, repo, base, _s, _r in cands if (repo, base) == target}
         plans[d.name] = (mine, _closure_members(
-            cfg, d, built=built, on_target=mine, finished={f.name for f in finished},
+            cfg, d, built=built, on_target=mine, finished={f.name: f for f in finished},
             conflicts=conflicts, seams=set(seams)))
     return plans
 
