@@ -920,7 +920,7 @@ def _point_at_integration(integ: dict[tuple[str, str], str], runnable: list[Path
 
 
 def _closure_members(cfg: Config, d: Path, *, built: Mapping[str, tuple[Path, int]],
-                     on_target: Collection[str], finished: Collection[str],
+                     on_target: Collection[str], finished: Mapping[str, Path],
                      conflicts: Mapping[str, Collection[str]],
                      seams: Collection[str]) -> list[Path] | str:
     """What bundle ``d`` is built on in stack mode (#727): the members of a base of its own
@@ -938,8 +938,13 @@ def _closure_members(cfg: Config, d: Path, *, built: Mapping[str, tuple[Path, in
     each bundle with an edge to one. The members are those reached whose branch the fold
     carries on ``d``'s target (``on_target``), in ``built``'s order. A seam: a walked bundle
     declaring ``Stacks on`` or ``Onto branch``; an edge to one of ``finished`` (finished
-    named ids: carried, or with no patch — #728); a member pointed at a seam itself
-    (``seams``)."""
+    named ids, name → directory) with a patch, which the carry puts on the line; a
+    prerequisite edge to one with no patch whose own plain ``Depends on`` reaches one with a
+    patch, directly or through more with no patch (#728, :func:`_reached`, as the carry
+    walks it); a member pointed at a seam itself (``seams``). A finished id with no patch
+    that reaches none adds nothing to any line, so an edge to it, or a ``Conflicts with``
+    one, is no seam and adds no member."""
+    bare = {n: p for n, p in finished.items() if not integrate._has_patch(p)}
     found: set[str] = set()
     todo = [d]
     while todo:
@@ -953,6 +958,16 @@ def _closure_members(cfg: Config, d: Path, *, built: Mapping[str, tuple[Path, in
         edges = [(cfg.bundle(x).name, True)
                  for x in brief.depends_on(bp) + brief.depends_on_merged(bp)]
         for n, prereq in edges + [(n, False) for n in sorted(conflicts.get(m.name, ()))]:
+            if n in bare:
+                reach = _reached(cfg, bare[n], finished.keys() - bare.keys(), bare) \
+                    if prereq else {}
+                if not reach:
+                    continue           # nothing of it, or of what it builds on, is carried
+                first, via = next(iter(reach.items()))
+                return (f"{m.name} depends on {n}, finished in an earlier run with no patch, "
+                        f"whose `Depends on` reaches {first}"
+                        + (f" through {', '.join(via)}" if via else "")
+                        + ", finished in an earlier run")
             if n in finished:
                 how = "depends on" if prereq else "`Conflicts with`"
                 return f"{m.name} {how} {n}, finished in an earlier run"
@@ -984,7 +999,7 @@ def _base_plans(cfg: Config, ds: list[Path], *, built: Mapping[str, tuple[Path, 
         target = publish._resolve_target(d)[:2]
         mine = {m.name for m, repo, base, _s, _r in cands if (repo, base) == target}
         plans[d.name] = (mine, _closure_members(
-            cfg, d, built=built, on_target=mine, finished={f.name for f in finished},
+            cfg, d, built=built, on_target=mine, finished={f.name: f for f in finished},
             conflicts=conflicts, seams=set(seams)))
     return plans
 
