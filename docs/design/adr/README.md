@@ -34,3 +34,4 @@ PR of each migration step (see [architecture §9](../architecture/09-build-order
 | 0014 | Every phase returns `Ok / Held / FailedInfra`, recorded in `run.json` and the exit code | step 5 | Planned ([#714](https://github.com/eduralph/pdca-harness/issues/714)) |
 | 0015 | Integration modes are strategy objects with stated invariants and property tests | step 6 | Planned ([#715](https://github.com/eduralph/pdca-harness/issues/715)) |
 | [0016](0016-strangler-migration.md) | The migration is a strangler, never a rewrite | 2026-10-15 | Accepted |
+| [0017](0017-issue-priority-and-automated-triage.md) | Issue priority and automated triage: severity × reach set P0–P3 with security and decision-integrity overrides; a GitHub Action applies it to this repository's issues with one Claude API call per issue | — | Proposed |
