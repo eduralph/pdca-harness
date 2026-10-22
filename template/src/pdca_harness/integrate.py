@@ -123,6 +123,16 @@ class _Conflict(IntegrationError):
         self.paths = list(paths)
 
 
+class _Rewritten(IntegrationError):
+    """What :func:`build_bundle_base` refuses a member's rewritten branch with (#727):
+    bundle ``name``'s, every PR holding a head it lost named in the message — so the flow's
+    end-of-run check (#695) does not report that branch again."""
+
+    def __init__(self, message: str, name: str) -> None:
+        super().__init__(message)
+        self.name = name
+
+
 def integration_branch(cfg: Config, base: str, batch: Iterable[str] | None = None) -> str:
     """The run-scoped integration branch for a target ``base`` — deterministic (a resumed run
     rebuilds the same branch) and **injective in the base** (#187): the base is flattened to a
@@ -348,6 +358,7 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
          pr_heads: Mapping[str, str] | None = None,
          holds: dict[str, str] | None = None,
          clashes: dict[str, tuple[str, dict[str, list[str]], list[str]]] | None = None,
+         bases: Bases | None = None, line_prs: LinePrs | None = None,
          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
     """Fold the cumulative accepted bundles' published branches onto a per-target
     integration branch.
@@ -449,6 +460,10 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     ``None`` (the pre-wave carry, a direct caller) checks and records nothing; a dry-run
     does neither.
 
+    ``bases`` / ``line_prs`` (#727, the flow's in-run folds: :data:`Bases`,
+    :data:`LinePrs`): the heads the run's PRs hold. The same check holds each branch to
+    them too, and the error names each PR holding a head the branch lost.
+
     ``held_out`` (#674, the flow's in-run folds) with ``wave``, the names of the bundles of
     the wave just published: a bundle of ``wave`` whose branch conflicts with the line is
     left out — recorded in place as ``held_out[name] = (partners, paths)`` — when at least
@@ -511,7 +526,8 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     # merges or pushes (#633). Each carried branch's tip is read once, here, and that commit
     # is the one merged below — never the branch read again after a later fetch (another
     # target in the same checkout) or a push from that checkout has moved it.
-    checked = _carried_tips(cfg, groups, refs, carried, batch) if carried and not dry_run else {}
+    checked = (_carried_tips(cfg, groups, refs, carried, batch, bases=bases, line_prs=line_prs)
+               if carried and not dry_run else {})
     result: dict[tuple[str, str], tuple[str, Path | None]] = {}
     # Groups are processed in SORTED (repo, base) order (#297 review round 11): with a
     # caller-held ``locks`` stack the per-target locks accumulate, and two concurrent
@@ -715,7 +731,10 @@ def _bundle_name(name: str) -> str:
 
 def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
                       batch: Collection[str] | None, carried: Mapping[str, str],
-                      excluded: Mapping[str, str]) -> tuple[str, str]:
+                      excluded: Mapping[str, str],
+                      merged_heads: dict[str, str] | None = None,
+                      bases: Bases | None = None,
+                      line_prs: LinePrs | None = None) -> tuple[str, str]:
     """Build bundle ``d``'s own base (#723, for #463's dependency-scoped bases): a branch on
     ``origin`` holding exactly ``<base_remote>/<base>`` as just fetched plus the published
     branches of ``members`` (bundle paths, merged in that order). Returns ``(branch, pushed
@@ -736,7 +755,10 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
     * ``carried`` (member name → the head a fold of this run put on its line, #633): a
       member whose branch no longer holds that head was rewritten
       (:func:`_carried_rewrite`). Each member's tip is read once, after the fetch, and that
-      commit is the one checked and merged. Checked before anything is merged.
+      commit is the one checked and merged. Checked before anything is merged. So for a
+      head ``bases`` / ``line_prs`` record (#727, as :func:`fold` takes them): the refusal
+      (a :class:`_Rewritten`) names each PR holding a head the branch lost
+      (:func:`_rewrite_stop`).
     * A member whose cut point cannot be trusted (:func:`_member_cut_point`). Checked before
       anything is merged.
     * A member that does not merge cleanly, naming both sides (:func:`_member_clash`): one
@@ -759,6 +781,10 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
 
     A name in ``carried`` or ``excluded`` is a bundle's with or without its ``issue_``
     prefix (:func:`_bundle_name`); one that is also a member's is a member.
+
+    ``merged_heads`` (#727), when given, gets each member's name with the head this build
+    put on the branch (merged, or found on it) once the push has succeeded: what the run's
+    later checks hold that branch to for ``d``'s PR (:data:`Bases`).
 
     Push: a branch origin does not have is pushed plainly (no force, so an origin with
     ``receive.denyNonFastForwards`` takes it); one it has (``d``'s base built again) is
@@ -809,17 +835,14 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
                 f"directory (permissions?), then re-run")
         wt = _prepare_worktree(repo, base_remote, base, remotes=[r[0] for r in refs.values()])
         heads = {m.name: _rev(wt, refs[m.name][1]) for m in mine}   # each read once (#633)
+        takers = _takers(took_by, bases, line_prs)
         for m in mine:
-            ref, tip, took = refs[m.name][1], heads[m.name], took_by.get(_bundle_name(m.name))
-            facts = _carried_rewrite(wt, m.name, ref, took, tip, line) if tip and took else None
-            if facts is not None:
-                raise IntegrationError(
-                    f"{facts} A bundle's own base takes from a branch this run carried only "
-                    f"commits that extend what the run took (a fast-forward, such as "
-                    f"GitHub's merge-style \"Update branch\"): merging {tip[:12]} would put on "
-                    f"{branch} commits no fold of this run checked, beside the old ones the "
-                    f"run's other branches hold. Nothing was merged or pushed. Restore {ref} "
-                    f"to {took[:12]} or a commit that contains it, then re-run")
+            ref, tip = refs[m.name][1], heads[m.name]
+            gone = (_lost(wt, m.name, ref, tip, line, takers.get(_bundle_name(m.name), []))
+                    if tip else [])
+            if gone:
+                raise _Rewritten(_rewrite_stop(m.name, ref, tip, line, gone, onto=branch),
+                                 m.name)
         cuts: dict[str, str | None] = {}           # member → its recorded cut point
         for m in mine:
             head = heads[m.name]
@@ -857,6 +880,8 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
                    f"pdca-integration/*")
             raise IntegrationError(f"could not push {branch} to origin ({why}) — {d.name} "
                                    f"cannot be built on it")
+        if merged_heads is not None:
+            merged_heads.update(merged_in)   # pushed: the branch now holds these (#727)
     return branch, tip
 
 
@@ -1038,9 +1063,49 @@ def _foreign_refusal(wt: Path, d: Path, branch: str, base_ref: str, foreign: Seq
         f"{fix} on a base without that work (re-publish it), then re-run")
 
 
+#: Who took a head from a branch (#727): ``None``, the run's line; ``(owner, None)``, the PR
+#: of ``owner``, cut from the line then; ``(owner, branch)``, ``owner``'s own base.
+Taker = tuple[str, str | None] | None
+#: Each bundle on a base of its own whose PR the run published → ``(that base's branch,
+#: {member: the head it took})`` (#727).
+Bases = Mapping[str, tuple[str, Mapping[str, str]]]
+#: Each bundle the line took a head from → ``[(owner, head), ...]``, in the order cut: each
+#: PR the run cut from the line while it held ``head`` of that branch (#727). A fold refuses
+#: a rewrite, so a PR cut later holds that head or a newer one.
+LinePrs = Mapping[str, Sequence[tuple[str, str]]]
+
+
+def _takers(carried: Mapping[str, str], bases: Bases | None,
+            line_prs: LinePrs | None) -> dict[str, list[tuple[str, Taker]]]:
+    """Each branch's bundle name → ``(head, who took it)``: the line's head (``carried``),
+    each line-cut PR's (``line_prs``, in the order cut), each own base's (``bases``)."""
+    out: dict[str, list[tuple[str, Taker]]] = {}
+    for name, took in carried.items():
+        out.setdefault(_bundle_name(name), []).append((took, None))
+    for name, prs in (line_prs or {}).items():
+        out.setdefault(_bundle_name(name), []).extend((h, (o, None)) for o, h in prs)
+    for owner, (branch, heads) in sorted((bases or {}).items()):
+        for name, took in heads.items():
+            out.setdefault(_bundle_name(name), []).append((took, (owner, branch)))
+    return out
+
+
+def _lost(repo: Path, name: str, ref: str, tip: str, line: str,
+          takers: Sequence[tuple[str, Taker]]) -> list[tuple[str, Taker, str]]:
+    """``(head, who took it, facts)`` for each of ``takers`` whose head bundle ``name``'s
+    branch ``ref``, now at ``tip``, no longer holds: each head judged once, as the line's
+    is (:func:`_carried_rewrite`, whose words ``facts`` are). A git failure raises."""
+    facts: dict[str, str | None] = {}
+    for took, _by in takers:
+        if took not in facts:
+            facts[took] = _carried_rewrite(repo, name, ref, took, tip, line)
+    return [(took, by, f) for took, by in takers if (f := facts[took]) is not None]
+
+
 def _carried_tips(cfg: Config, groups: Mapping[tuple[str, str], list[Path]],
                   refs: Mapping[str, tuple[str, str, bool]], carried: Mapping[str, str],
-                  batch: Collection[str] | None) -> dict[str, str | None]:
+                  batch: Collection[str] | None, *, bases: Bases | None = None,
+                  line_prs: LinePrs | None = None) -> dict[str, str | None]:
     """The tip of each published branch ``carried`` records a head for (#633), read once
     after fetching its checkout — None for a branch that no longer resolves (gone:
     :func:`_gone_branch` judges it). :func:`fold` checks every target this way before it
@@ -1053,7 +1118,10 @@ def _carried_tips(cfg: Config, groups: Mapping[tuple[str, str], list[Path]],
     of this run put on the line (``carried[name]``), as itself or an ancestor
     (:func:`_carried_rewrite`): the branch was rewritten (re-published, force-pushed,
     updated with a rebase), and merging its tip would put the old and the rewritten commits
-    on the line together. Decided by ancestry, never by message; a git failure raises."""
+    on the line together. Decided by ancestry, never by message; a git failure raises.
+    So for a head ``bases`` / ``line_prs`` record (#727, :func:`fold`'s): the error names
+    each PR holding a head the branch lost (:func:`_rewrite_stop`)."""
+    takers = _takers(carried, bases, line_prs)
     tips: dict[str, str | None] = {}
     for (repo_spec, base), bundles in sorted(groups.items()):
         mine = [d for d in bundles if d.name in carried]
@@ -1063,21 +1131,58 @@ def _carried_tips(cfg: Config, groups: Mapping[tuple[str, str], list[Path]],
         _fetch(repo, cfg.base_remote, [refs[d.name][0] for d in mine], attempts=2)
         line = integration_branch(cfg, base, batch)
         for d in mine:
-            ref, took = refs[d.name][1], carried[d.name]
+            ref = refs[d.name][1]
             tip = tips[d.name] = _rev(repo, ref)
             if tip is None:
                 continue
-            facts = _carried_rewrite(repo, d.name, ref, took, tip, line)
-            if facts is None:
-                continue
-            raise IntegrationError(
-                f"{facts} Only commits that extend "
-                f"a carried branch reach the line (a fast-forward, such as GitHub's "
-                f"merge-style \"Update branch\"): merging {tip[:12]} would put the old and "
-                f"the rewritten commits on {line} together. Nothing was merged or pushed. "
-                f"Restore {ref} to {took[:12]} or a commit that contains it, then re-issue "
-                f"the run; or let this run stop and re-issue it")
+            lost = _lost(repo, d.name, ref, tip, line, takers[d.name])
+            if lost:
+                raise IntegrationError(_rewrite_stop(d.name, ref, tip, line, lost))
     return tips
+
+
+def _rewrite_stop(name: str, ref: str, tip: str, line: str,
+                  lost: Sequence[tuple[str, Taker, str]], *, onto: str | None = None) -> str:
+    """The error a fold — or, given ``onto``, the build of the bundle base ``onto`` — stops
+    with for bundle ``name``'s branch ``ref``, now at ``tip``, which lost each head of
+    ``lost`` (:func:`_lost`): the line's words as before #727, then each PR holding a lost
+    head (#727), each to be rebuilt."""
+    parts: list[str] = []
+    facts = next((f for _h, by, f in lost if by is None), None)
+    if facts is not None:
+        parts.append(f"{facts} " + (
+            f"Only commits that extend a carried branch reach the line (a fast-forward, such "
+            f"as GitHub's merge-style \"Update branch\"): merging {tip[:12]} would put the old "
+            f"and the rewritten commits on {line} together." if onto is None else
+            f"A bundle's own base takes from a branch this run carried only commits that "
+            f"extend what the run took (a fast-forward, such as GitHub's merge-style \"Update "
+            f"branch\"): merging {tip[:12]} would put on {onto} commits no fold of this run "
+            f"checked, beside the old ones the run's other branches hold."))
+    prs = [(by[0], h) for h, by, _f in lost if by is not None and by[1] is None]
+    if prs:
+        parts.append(f"Every PR this run cut from {line} after it took {prs[0][1][:12]} "
+                     f"({', '.join(o for o, _h in prs)}) holds those old commits too.")
+    parts += [_base_rewrite(name, ref, h, tip, by[0], by[1]) for h, by, _f in lost
+              if by is not None and by[1] is not None]
+    rebuild = [by[0] for _h, by, _f in lost if by is not None]
+    heads = list(dict.fromkeys(h[:12] for h, _by, _f in lost))
+    to = (f"to {heads[0]} or a commit that contains it" if len(heads) == 1
+          else f"to a commit that contains {' and '.join(heads)}")
+    if onto is not None:
+        return (f"{' '.join(parts)} Nothing was merged or pushed. Restore {ref} {to}, then "
+                f"re-run" + (f"; or {_rebuild(rebuild)}, then re-run" if rebuild else ""))
+    return (f"{' '.join(parts)} Nothing was merged or pushed. Restore {ref} {to}, then "
+            f"re-issue the run; or let this run stop and re-issue it"
+            + (f", and {_rebuild(rebuild)}" if rebuild else ""))
+
+
+def _rebuild(names: Sequence[str]) -> str:
+    """The step for the PRs of ``names``, which hold a head their branch lost (#727)."""
+    names = list(dict.fromkeys(names))
+    if len(names) == 1:
+        return f"rebuild {names[0]}'s PR on the rewritten branch before it merges"
+    return (f"rebuild the PRs of {', '.join(names)} on the rewritten branch before any of "
+            f"them merges")
 
 
 def _carried_rewrite(repo: Path, name: str, ref: str, took: str, tip: str,
@@ -1096,9 +1201,22 @@ def _carried_rewrite(repo: Path, name: str, ref: str, took: str, tip: str,
             f"\"Update with rebase\" does this.")
 
 
+def _base_rewrite(name: str, ref: str, took: str, tip: str, owner: str, branch: str) -> str:
+    """The facts of bundle ``name``'s branch ``ref``, now at ``tip``, rewritten after
+    ``owner``'s own base ``branch`` took ``took`` from it (#727): ``owner``'s PR, built on
+    that base, holds commits the branch no longer has."""
+    return (f"{name}'s branch {ref} was rewritten after {owner}'s own base {branch} took "
+            f"{took[:12]} from it: it is now at {tip[:12]}, which does not contain "
+            f"{took[:12]}. A re-publish (`pdca publish` force-pushes), a force-push or "
+            f"\"Update with rebase\" does this. {owner} was built on {branch}, so {owner}'s "
+            f"PR holds commits {ref} no longer has.")
+
+
 def rewritten_carried(cfg: Config, bundles: Iterable[Path], carried: Mapping[str, str],
-                      batch: Collection[str] | None = None
-                      ) -> tuple[dict[str, str], dict[str, tuple[str, str]]]:
+                      batch: Collection[str] | None = None, *, bases: Bases | None = None,
+                      line_prs: LinePrs | None = None
+                      ) -> tuple[dict[str, list[str]],
+                                 dict[str, list[tuple[str, str, str, Taker]]]]:
     """The end-of-run half of the #633 check (#695), over each bundle of ``bundles`` whose
     published branch a fold of this run put on its line (``carried``, the record
     :func:`fold` filled). A fold checks the branches it carries only before it merges, and
@@ -1106,49 +1224,85 @@ def rewritten_carried(cfg: Config, bundles: Iterable[Path], carried: Mapping[str
     (after its check read the tip) or after it (while the last wave builds, publishes, or
     Act runs) went unseen.
 
-    Returns ``(rewritten, unchecked)``. ``rewritten`` is ``{name: report}`` for each branch
+    Returns ``(rewritten, unchecked)``. ``rewritten`` is ``{name: reports}`` for each branch
     rewritten since, judged and worded as a fold judges it (:func:`_carried_rewrite`), with
     what to do now that no fold will. A branch that no longer resolves is left alone (in a
     fold, :func:`_gone_branch` judges it; at the end of the run nothing does).
-    ``unchecked`` is ``{name: (ref, why)}`` for each branch that could not be judged: every
+    ``unchecked`` is ``{name: items}`` for each branch that could not be judged: every
     one of a target whose checkout is missing or whose fetch failed twice (:func:`_fetch`),
     or one whose ancestry check failed (:func:`_in_line`). ``why`` is the error's
     ``cause`` — what failed, without the step its message tells a fold to take: re-running
     is no remedy once the run has pushed its line. Each target is fetched and each branch
     judged on its own, so one that cannot be checked never hides a rewrite found on
-    another, nor stops the others being checked. Never raises :class:`IntegrationError`."""
+    another, nor stops the others being checked. Never raises :class:`IntegrationError`.
+
+    ``bases`` / ``line_prs`` (#727, as :func:`fold` takes them): each head is judged once; a
+    lost one gets a report, one not judged an item ``(ref, why, head, who took it)``. The
+    line's report names the PRs cut from it holding a head lost or not judged; a bundle's
+    own base gets one of its own. A line-cut PR has no item: the flow names those."""
+    takers = _takers(carried, bases, line_prs)
     groups: dict[tuple[str, str], list[tuple[str, str, str]]] = {}   # (name, remote, ref)
     for d, repo_spec, base, _slug, published in _fold_candidates(bundles):
         if d.name in carried and published is not None:
             remote, ref, _onto = published
             groups.setdefault((repo_spec, base), []).append((d.name, remote, ref))
-    rewritten: dict[str, str] = {}
-    unchecked: dict[str, tuple[str, str]] = {}
+    rewritten: dict[str, list[str]] = {}
+    unchecked: dict[str, list[tuple[str, str, str, Taker]]] = {}
     for (repo_spec, base), mine in sorted(groups.items()):
         repo = publish._checkout_path(cfg, repo_spec)
         try:
             _fetch(repo, cfg.base_remote, [remote for _name, remote, _ref in mine], attempts=2)
         except IntegrationError as exc:
-            unchecked.update({name: (ref, exc.cause) for name, _remote, ref in mine})
+            for name, _remote, ref in mine:
+                unchecked[name] = [(ref, exc.cause, h, by) for h, by in takers[name]
+                                   if by is None or by[1] is not None]
             continue
         line = integration_branch(cfg, base, batch)
         for name, _remote, ref in mine:
-            took, tip = carried[name], _rev(repo, ref)
+            tip = _rev(repo, ref)
             if tip is None:
                 continue
-            try:
-                facts = _carried_rewrite(repo, name, ref, took, tip, line)
-            except IntegrationError as exc:
-                unchecked[name] = (ref, exc.cause)
-                continue
-            if facts is not None:
-                rewritten[name] = (
-                    f"{facts} No fold of this run ran after the rewrite, so {line} still "
-                    f"carries the old commits, and so does every PR this run cut from {line} "
-                    f"after it took {took[:12]}: they hold commits {ref} no longer has. "
-                    f"Restore {ref} to {took[:12]} or a commit that contains it; or rebuild "
-                    f"those PRs on the rewritten branch before any of them merges")
+            judged: dict[str, str | IntegrationError | None] = {}   # head → its facts
+            for h, _by in takers[name]:
+                if h not in judged:
+                    try:
+                        judged[h] = _carried_rewrite(repo, name, ref, h, tip, line)
+                    except IntegrationError as exc:
+                        judged[h] = exc
+            reports: list[str] = []
+            for h, by in takers[name]:
+                facts = judged[h]
+                if facts is None or (by is not None and by[1] is None):
+                    continue                    # held; or a line-cut PR, named with the line
+                if isinstance(facts, IntegrationError):
+                    unchecked.setdefault(name, []).append((ref, facts.cause, h, by))
+                elif by is None:
+                    reports.append(_late_line_rewrite(facts, ref, h, line, [
+                        (b[0], h2) for h2, b in takers[name]
+                        if b is not None and b[1] is None and judged[h2] is not None]))
+                else:
+                    reports.append(f"{_base_rewrite(name, ref, h, tip, *by)} No fold of this "
+                                   f"run ran after the rewrite. Restore {ref} to {h[:12]} or a "
+                                   f"commit that contains it; or {_rebuild([by[0]])}")
+            if reports:
+                rewritten[name] = reports
     return rewritten, unchecked
+
+
+def _late_line_rewrite(facts: str, ref: str, took: str, line: str,
+                       prs: Sequence[tuple[str, str]]) -> str:
+    """The end-of-run report (#695) of a branch rewritten after the line took ``took`` from
+    it (``facts``): the line still carries the old commits, and so does each PR of ``prs``
+    (``(owner, head)``, in the order cut, #727), cut after it took the first one's head."""
+    if not prs:
+        return (f"{facts} No fold of this run ran after the rewrite, so {line} still carries "
+                f"the old commits, which {ref} no longer has; no PR this run cut from {line} "
+                f"holds them. Restore {ref} to {took[:12]} or a commit that contains it")
+    return (f"{facts} No fold of this run ran after the rewrite, so {line} still carries the "
+            f"old commits, and so does every PR this run cut from {line} after it took "
+            f"{prs[0][1][:12]} ({', '.join(o for o, _h in prs)}): they hold commits {ref} no "
+            f"longer has. Restore {ref} to {took[:12]} or a commit that contains it; or "
+            f"rebuild those PRs on the rewritten branch before any of them merges")
 
 
 def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, bool],
