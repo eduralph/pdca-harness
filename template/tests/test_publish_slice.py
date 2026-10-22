@@ -379,6 +379,33 @@ class PublishSlice(unittest.TestCase):
         self.assertEqual(pj["pr_url"], "")                       # recorded, but empty
         self.assertEqual(pj["branch"], "fix/PUBFAIL-my-fix")     # branch was pushed
 
+    def test_the_commit_the_branch_was_cut_from_is_recorded(self) -> None:
+        """#723: publish.json records ``cut_from``, the parent of the one commit publish
+        made, so a bundle's own base can tell the bundle's work from base commits a later
+        rewind dropped. Nothing is recorded when git cannot name it."""
+        cases = (("PUBCUT", SimpleNamespace(returncode=0, stdout="c0ffee\n", stderr=""), "c0ffee"),
+                 ("PUBNOCUT", SimpleNamespace(returncode=1, stdout="", stderr=""), None))
+        for iid, answer, want in cases:
+            d = _bundle(self.cfg, iid, brief_body=_FIX_BRIEF, accepted=True)
+            ran: list[list[str]] = []
+
+            def fake_run(cmd, *a, answer=answer, iid=iid, **k):
+                ran.append(cmd)
+                if "rev-parse" in cmd and f"fix/{iid}-my-fix^" in cmd:
+                    return answer
+                if cmd[:3] == ["gh", "pr", "create"]:
+                    return SimpleNamespace(returncode=0, stdout="https://x/pr/1\n", stderr="")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(publish, "_check_repo", return_value=0), \
+                 mock.patch.object(publish.subprocess, "run", side_effect=fake_run), \
+                 redirect_stdout(io.StringIO()):
+                rc = publish.publish(self.cfg, iid, by="Tester", today="2026-06-05")
+            self.assertEqual(rc, 0)
+            self.assertTrue(any("rev-parse" in c for c in ran), ran)
+            pj = json.loads((d / "publish.json").read_text(encoding="utf-8"))
+            self.assertEqual(pj.get("cut_from"), want)
+
     def _publish(self, iid: str, **kw) -> tuple[int, str]:
         """Dry-run publish; return (rc, stderr text)."""
         err = io.StringIO()

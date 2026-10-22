@@ -164,11 +164,12 @@ class StackFoldGit(unittest.TestCase):
         (d / "patch.diff").write_text(_git(self.primary, "diff", "HEAD~1", "HEAD"),
                                       encoding="utf-8")
         _git(self.primary, "push", "-q", "origin", branch)
+        cut = _git(self.primary, "rev-parse", "HEAD~1").strip()
         _git(self.primary, "checkout", "-q", "main")
         mode = "new-pr" if cut_from == "origin/main" else "stacked-pr"
         (d / "publish.json").write_text(json.dumps(
             {"mode": mode, "branch": branch, "base": "main", "repo": "org/repo",
-             "pr_url": f"https://example.test/pr/{iid}"}), encoding="utf-8")
+             "pr_url": f"https://example.test/pr/{iid}", "cut_from": cut}), encoding="utf-8")
         return d
 
     def _push_from_human(self, files: dict[str, str], *, to: str, url: str = "",
