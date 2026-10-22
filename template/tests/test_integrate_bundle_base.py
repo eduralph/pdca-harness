@@ -491,6 +491,32 @@ class BundleBase(unittest.TestCase):
             self.assertIn(part, msg)
         self.assertNotIn("stacked-pr", msg)
 
+    def test_6e_v_base_work_a_rewind_dropped_is_not_a_never_stacked_members_own(
+            self) -> None:
+        # A is cut from main holding m; main is then rewound past m. Before: an unstacked
+        # member's work was all its head reaches above the base as fetched, so m (no
+        # bundle's) was counted A's and pushed on D's base.
+        old = self.fx._tip("main")
+        moved = self.fx._push_from_human({"m.txt": "m\n"}, to="main")
+        a = self.fx._publish("A", {"a.txt": "a\n"})
+        self.fx._push_from_human({"r.txt": "r\n"}, to="main", off=old, force=True)
+        self.assertFalse(self.fx._ancestor(moved, self.fx._tip("main")))
+        msg, _steps = self._refused(self._dest("D"), [a])
+        for part in (f"would hold {moved[:12]}", "issue_A's branch origin/fix/A brings it in "
+                     "from below", "No bundle of the run owns it"):
+            self.assertIn(part, msg)
+
+    def test_6e_vi_a_never_stacked_member_with_no_recorded_cut_point_is_refused(
+            self) -> None:
+        a = self.fx._publish("A", {"a.txt": "a\n"})
+        rec = json.loads((a / "publish.json").read_text(encoding="utf-8"))
+        del rec["cut_from"]                          # published before it was recorded
+        (a / "publish.json").write_text(json.dumps(rec), encoding="utf-8")
+        msg, _steps = self._refused(self._dest("D"), [a])
+        for part in ("issue_A's publish.json records no commit its branch origin/fix/A was "
+                     "cut from", "Nothing was merged or pushed", "Re-publish issue_A"):
+            self.assertIn(part, msg)
+
     def test_6f_an_excluded_bundle_cut_from_the_line_never_claims_a_members_work(
             self) -> None:
         a, _z, line_tip = self._wave0()
