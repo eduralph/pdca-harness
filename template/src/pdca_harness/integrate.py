@@ -78,7 +78,7 @@ import time
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
 
-from . import merged, publish
+from . import brief, merged, publish
 from .config import Config
 
 
@@ -140,6 +140,19 @@ def integration_branch(cfg: Config, base: str, batch: Iterable[str] | None = Non
     no batch) keeps the unscoped ``pdca-integration/<flattened base>``."""
     name = "pdca-integration/" + _flatten_base(base)
     return name if batch is None else f"{name}-r{batch_key(batch)}"
+
+
+def bundle_base_branch(cfg: Config, base: str, batch: Iterable[str] | None, name: str) -> str:
+    """The branch :func:`build_bundle_base` builds for bundle ``name`` (#723): the run's
+    line for ``base`` (:func:`integration_branch`, scoped to ``batch``), then ``-b`` and the
+    bundle's id (``issue_`` dropped, so ``12`` and ``issue_12`` are one bundle), escaped as a
+    base is (:func:`_flatten_base`). A flattened base or id never holds ``-b`` (each ``-``
+    there is ``-h`` or ``-s``), nor does a batch key (hex), so the first ``-b`` ends the
+    line's part and the name decodes to one (base, batch, bundle). It has no ``/`` after
+    ``pdca-integration/``, so it is never a ref-path prefix of the line or of another
+    bundle's base, nor under one (git refuses a branch ``x`` beside ``x/y``)."""
+    iid = str(name).removeprefix("issue_")
+    return f"{integration_branch(cfg, base, batch)}-b{_flatten_base(iid)}"
 
 
 def batch_key(names: Iterable[str]) -> str:
@@ -692,6 +705,337 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                 carried.update(took)   # pushed: the line now holds these heads (#633)
         result[(repo_spec, base)] = (branch, wt)
     return result
+
+
+def _bundle_name(name: str) -> str:
+    """``name`` as a bundle's name, given as one or as its id: ``500`` and ``issue_500`` are
+    one bundle, as :func:`batch_key` counts them."""
+    return "issue_" + str(name).removeprefix("issue_")
+
+
+def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
+                      batch: Collection[str] | None, carried: Mapping[str, str],
+                      excluded: Mapping[str, str]) -> tuple[str, str]:
+    """Build bundle ``d``'s own base (#723, for #463's dependency-scoped bases): a branch on
+    ``origin`` holding exactly ``<base_remote>/<base>`` as just fetched plus the published
+    branches of ``members`` (bundle paths, merged in that order). Returns ``(branch, pushed
+    tip)``; the branch is :func:`bundle_base_branch` for ``d``'s target. The run's line, and
+    what the caller recorded for it (``carried`` included), are never written.
+
+    A sibling of :func:`fold` on the same path: the target's lock (:func:`integ_lock`) and
+    worktree (:func:`_prepare_worktree`, which fetches), the tree reset
+    (:func:`_reset_tree`), and the merge of each published branch (:func:`_merge_published`:
+    a gone branch is judged by :func:`_gone_branch`, and a merge that would remove a
+    member's work is refused, #623/#673). It always starts fresh from the base as fetched.
+    A member with no patch adds nothing, as in a fold; one with a patch but no usable
+    target, one on another target than ``d``, or one with no published branch raises before
+    any git step.
+
+    Refused with :class:`IntegrationError`, before anything is pushed:
+
+    * ``carried`` (member name → the head a fold of this run put on its line, #633): a
+      member whose branch no longer holds that head was rewritten
+      (:func:`_carried_rewrite`). Each member's tip is read once, after the fetch, and that
+      commit is the one checked and merged. Checked before anything is merged.
+    * A member whose cut point cannot be trusted (:func:`_member_cut_point`). Checked before
+      anything is merged.
+    * A member that does not merge cleanly, naming both sides (:func:`_member_clash`): one
+      that clashes with the fetched base itself names ``<base_remote>/<base>`` and is to be
+      rebuilt on it.
+    * A result holding work that is neither the base's nor a member's own
+      (:func:`_unowned_work`). A member's own work is each non-merge commit its head (the one
+      merged, or found on the branch already) reaches that neither the fetched base nor its
+      cut point does: the commit its branch was cut from, as recorded when it was published
+      (its stack-base tip, or for a member never stacked its ``cut_from``). So work merged
+      by hand into a member's branch
+      above its cut point is its own, and ownership comes only from what was recorded for
+      each member, never from which integration refs exist on origin: rebuilding or moving a
+      ref cannot change who owns a member's unchanged history. The message names the first
+      such commit, the first member whose head reaches it, and each bundle of ``excluded``
+      (name → the published head of a bundle of the run that is not a member) whose head
+      reaches it, or says no bundle of the run owns it (:func:`_foreign_refusal`).
+      ``excluded`` only names: it never decides a refusal, so a head this clone does not
+      have is no error.
+
+    A name in ``carried`` or ``excluded`` is a bundle's with or without its ``issue_``
+    prefix (:func:`_bundle_name`); one that is also a member's is a member.
+
+    Push: a branch origin does not have is pushed plainly (no force, so an origin with
+    ``receive.denyNonFastForwards`` takes it); one it has (``d``'s base built again) is
+    force-pushed, leased on the tip just fetched. A refused push raises, naming the branch
+    and the remedy."""
+    repo_spec, base, _slug = publish._resolve_target(d)
+    if not (repo_spec and base):
+        raise IntegrationError(f"{d.name} has no usable target (Repo + branch target), so "
+                               f"there is no base to build its own base on")
+    branch = bundle_base_branch(cfg, base, batch, d.name)
+    found = _fold_candidates(members)
+    targeted = {c[0] for c in found}
+    lost = [m.name for m in members if _has_patch(m) and m not in targeted]
+    if lost:
+        raise IntegrationError(
+            f"{', '.join(lost)} has a patch but no usable target (Repo + branch target), so "
+            f"none of its work can be part of {branch}: fix its brief, or leave it out of "
+            f"{d.name}'s members, then re-run")
+    mine: list[Path] = []                          # the members with work, in member order
+    refs: dict[str, tuple[str, str, bool]] = {}    # member name → (remote, ref, onto)
+    for m, m_repo, m_base, _s, ref in found:
+        if (m_repo, m_base) != (repo_spec, base):
+            raise IntegrationError(
+                f"{m.name} targets {m_repo} @ {m_base}, but {d.name} targets {repo_spec} @ "
+                f"{base}: one branch holds one target's work, so {m.name} cannot be part of "
+                f"{branch}")
+        if ref is None:
+            raise IntegrationError(
+                f"{m.name} accepted but not published (no publish.json branch) — there is "
+                f"nothing of it to put on {branch}; publish it, then re-run")
+        mine.append(m)
+        refs[m.name] = ref
+    names = {_bundle_name(m.name) for m in members}
+    took_by = {_bundle_name(n): h for n, h in carried.items()}
+    others: dict[str, str] = {}                    # the excluded bundles, by bundle name
+    for n, h in excluded.items():
+        if _bundle_name(n) not in names:
+            others[_bundle_name(n)] = h
+    base_remote = cfg.base_remote
+    base_ref = f"{base_remote}/{base}"
+    line = integration_branch(cfg, base, batch)   # where the run's folds recorded ``carried``
+    repo = publish._checkout_path(cfg, repo_spec)
+    with integ_lock(_integ_worktree(repo, base)) as held:
+        if not held:
+            raise IntegrationError(
+                f"could not take the integration lock next to "
+                f"{_integ_worktree(repo, base).name} — fix the checkout's parent "
+                f"directory (permissions?), then re-run")
+        wt = _prepare_worktree(repo, base_remote, base, remotes=[r[0] for r in refs.values()])
+        heads = {m.name: _rev(wt, refs[m.name][1]) for m in mine}   # each read once (#633)
+        for m in mine:
+            ref, tip, took = refs[m.name][1], heads[m.name], took_by.get(_bundle_name(m.name))
+            facts = _carried_rewrite(wt, m.name, ref, took, tip, line) if tip and took else None
+            if facts is not None:
+                raise IntegrationError(
+                    f"{facts} A bundle's own base takes from a branch this run carried only "
+                    f"commits that extend what the run took (a fast-forward, such as "
+                    f"GitHub's merge-style \"Update branch\"): merging {tip[:12]} would put on "
+                    f"{branch} commits no fold of this run checked, beside the old ones the "
+                    f"run's other branches hold. Nothing was merged or pushed. Restore {ref} "
+                    f"to {took[:12]} or a commit that contains it, then re-run")
+        cuts: dict[str, str | None] = {}           # member → its recorded cut point
+        for m in mine:
+            head = heads[m.name]
+            if head is not None:                   # a gone branch is judged by _gone_branch
+                cuts[m.name] = _member_cut_point(wt, d, m, refs[m.name], head)
+        existing = _rev(wt, f"origin/{branch}")    # origin's copy, as just fetched
+        _reset_tree(wt, "HEAD")
+        if _git(wt, "checkout", "-B", branch, base_ref) != 0:
+            raise IntegrationError(f"could not start {branch} off {base_ref}")
+        merged_in: list[tuple[str, str]] = []      # (member, head on the branch), in order
+        for m in mine:
+            head = heads[m.name]
+            try:
+                _merge_published(cfg, wt, m, refs[m.name], head, branch=branch, base=base,
+                                 owners=tuple(mine))
+            except _Conflict as exc:
+                raise _member_clash(wt, d, branch, base_ref, m.name, refs[m.name][1], head,
+                                    merged_in, exc) from exc
+            if head is not None:                   # merged, or on the branch already
+                merged_in.append((m.name, head))
+        tip = pushed_tip(wt)
+        own = [(n, refs[n][1], h, cuts[n]) for n, h in merged_in]
+        foreign = _unowned_work(wt, tip, base_ref, own)
+        if foreign:
+            raise _foreign_refusal(wt, d, branch, base_ref, foreign, own, others)
+        push = (("push", "origin", branch) if existing is None else
+                ("push", f"--force-with-lease={branch}:{existing}", "origin", branch))
+        if _git(wt, *push) != 0:
+            why = (f"origin already has {branch} at {existing[:12]}, and a build always starts "
+                   f"fresh from {base_ref}, so building {d.name}'s base again force-pushes "
+                   f"over it: if origin refuses force-pushes, delete {branch} there or allow "
+                   f"force-pushes on pdca-integration/*; or another run moved it since this "
+                   f"build fetched it" if existing is not None else
+                   f"a plain push creating it was refused: check origin's rules for "
+                   f"pdca-integration/*")
+            raise IntegrationError(f"could not push {branch} to origin ({why}) — {d.name} "
+                                   f"cannot be built on it")
+    return branch, tip
+
+
+def _member_cut_point(wt: Path, d: Path, m: Path, published: tuple[str, str, bool],
+                      head: str) -> str | None:
+    """Where member ``m``'s published branch (``published``, its tip ``head``) was cut from,
+    as recorded when it was published (#723): the commit its own work on ``d``'s base is
+    counted above (:func:`build_bundle_base`). Its ``stack-base-tip``
+    (``publish.read_stack_base_tip``) when it has a ``stack-base`` record
+    (``publish.read_stack_base``); for a member never stacked, the base commit its branch
+    was cut from (``publish.json``'s ``cut_from``, or its ``host_ci_base``, the same commit),
+    so base commits a later rewind or force-push of the base dropped are never its own.
+    Read from the bundle's own files only, never from which integration refs exist on
+    origin.
+
+    Raises :class:`IntegrationError`, naming ``m`` and the fix (re-publish it), when the cut
+    point cannot be trusted:
+
+    1. a ``stack-base`` record with no tip (a dry-run fold records none, and so did a marker
+       older than #593). ``read_stack_base_tip`` gives "" both for that and for no record,
+       so the record itself is read;
+    2. a tip that is not an ancestor of ``head``, or that this clone does not have: the
+       branch was cut, or cut again, from somewhere else since it was recorded;
+    3. an ``Onto branch`` member (``published``'s ``onto``): a commit on another PR's
+       branch, for which no cut point is recorded;
+    4. no ``stack-base`` record, but published stacked: its ``publish.json`` ``mode`` is
+       ``"stacked-pr"`` (publish cut it from a stack branch: a wave's line, whose record a
+       later run cleared, or a legacy ``Stacks on:`` parent's PR branch), or its brief
+       declares ``Stacks on:``;
+    5. never stacked, but with no recorded cut point (a ``publish.json`` older than
+       ``cut_from``), or one that is not an ancestor of ``head``, as in 2.
+
+    A git failure raises."""
+    _remote, ref, onto = published
+
+    def refuse(why: str, how: str) -> IntegrationError:
+        return IntegrationError(
+            f"{why}, so which commits on {ref} are {m.name}'s own cannot be told, nor whether "
+            f"{d.name}'s base would hold work of a bundle it does not build on. Nothing was "
+            f"merged or pushed. Re-publish {m.name} {how}, then re-run")
+
+    if onto:
+        raise refuse(f"{m.name} was published as an `Onto branch` commit on another PR's "
+                     f"branch {ref}, and no cut point is recorded for one",
+                     "as a PR of its own (no `Onto branch` in its brief)")
+    stack = publish.read_stack_base(m)
+    if stack:
+        tip = publish.read_stack_base_tip(m)
+        if not tip:
+            raise refuse(f"{m.name} has a recorded stack base ({stack}) but no recorded tip, "
+                         f"the commit its branch was cut from",
+                         "from a run that records that tip (not a dry-run)")
+        if not _carries(wt, tip, f"{m.name}'s recorded tip {tip[:12]}", ref, of=head):
+            raise refuse(f"{m.name}'s recorded cut point {tip[:12]} (its stack-base tip, on "
+                         f"{stack}) is not in its branch {ref} at {head[:12]}: the branch was "
+                         f"cut, or cut again, from somewhere else since that was recorded",
+                         "(publish cuts its branch from its recorded tip)")
+        return tip
+    why: list[str] = []
+    record = publish._publish_record(m) or {}
+    if record.get("mode") == "stacked-pr":
+        why.append('its publish.json records "mode": "stacked-pr"')
+    parents = brief.stacks_on(m / "brief.md")
+    if parents:
+        why.append(f"its brief declares `Stacks on: {', '.join(parents)}`")
+    if why:
+        raise refuse(f"{m.name} was published stacked ({'; '.join(why)}) but has no "
+                     f"stack-base record: the commit its branch {ref} was cut from is "
+                     f"unknown",
+                     "from a run that records where its branch is cut from"
+                     + (" (plan its parent as a `Depends on`, not `Stacks on:`)"
+                        if parents else ""))
+    cut = str(record.get("cut_from") or record.get("host_ci_base") or "")
+    if not cut:
+        raise refuse(f"{m.name}'s publish.json records no commit its branch {ref} was cut "
+                     f"from (no `cut_from`: published before that was recorded)",
+                     "from a run that records where its branch is cut from")
+    if not _carries(wt, cut, f"{m.name}'s recorded cut point {cut[:12]}", ref, of=head):
+        raise refuse(f"{m.name}'s recorded cut point {cut[:12]} (its publish.json "
+                     f"`cut_from`) is not in its branch {ref} at {head[:12]}: the branch was "
+                     f"cut again from somewhere else since it was published",
+                     "(publish records where it cuts its branch from)")
+    return cut
+
+
+def _member_clash(wt: Path, d: Path, branch: str, base_ref: str, name: str, ref: str,
+                  head: str | None, merged_in: Sequence[tuple[str, str]],
+                  exc: _Conflict) -> IntegrationError:
+    """The refusal for member ``name`` (branch ``ref`` at ``head``) not merging cleanly onto
+    ``d``'s base ``branch`` (#723), naming both sides. A head that does not merge cleanly
+    onto ``base_ref`` alone clashes with the base itself (always so when no member was
+    merged before it): no bundle is to blame, and the member's branch is to be rebuilt on
+    the new base. Otherwise the members of ``merged_in`` (merged before it, ``(name, head)``
+    in order) it clashes with, each tried on its own after the base, as a fold finds a
+    same-wave clash (:func:`_held_by`), or all of them when only their combination clashes.
+    The trials run on a detached HEAD under the caller's lock and leave ``branch`` where it
+    was (:func:`_trial`)."""
+    if head is None or not merged_in:
+        on_base, files = True, list(exc.paths)
+    else:
+        at, files = _trial(wt, branch, base_ref, [head])
+        on_base = at is not None
+    if on_base or head is None:
+        return IntegrationError(
+            f"{name}'s branch {ref} does not merge cleanly onto {base_ref} itself (conflicts "
+            f"in {', '.join(files)}): {base_ref} changed those files since {name}'s branch "
+            f"was cut, so no base built from {base_ref} can hold {name} as it is. Rebuild "
+            f"{name}'s branch on the new {base_ref} (update it from {base_ref} and resolve "
+            f"the conflicts there), then re-run")
+    clash = _held_by(wt, branch, head, base_ref, merged_in)
+    partners, paths = clash if clash else ([n for n, _h in merged_in], list(exc.paths))
+    return IntegrationError(
+        f"{name}'s branch {ref} does not merge cleanly onto {branch} after "
+        f"{', '.join(partners)} (conflicts in {', '.join(paths)}): {name} and "
+        f"{', '.join(partners)} change the same lines and neither is built on the other, so "
+        f"{d.name}'s base cannot hold both. Plan one of them to build on the other and "
+        f"re-drive it, then re-run")
+
+
+def _unowned_work(wt: Path, tip: str, base_ref: str,
+                  own: Sequence[tuple[str, str, str, str | None]]) -> list[str]:
+    """The non-merge commits on a bundle base at ``tip`` that are neither ``base_ref``'s nor
+    any member's own work (#723), newest first in topological order. ``own``: for each
+    member with a head, ``(name, ref, the head merged, its cut point or None)``
+    (:func:`_member_cut_point`). A member's own work is each non-merge commit its head
+    reaches that neither ``base_ref`` nor its cut point does: :func:`foreign_commit`'s
+    ``rev-list --no-merges`` shape, with the cut point beside the base. A merge commit (the
+    build's own, or a branch's update or topic merge) never counts. A git failure raises."""
+    built = _out(wt, "rev-list", "--no-merges", "--topo-order", tip, "--not", base_ref,
+                 what=f"the commits on {tip[:12]}").split()
+    if not built:
+        return []
+    theirs: set[str] = set()
+    for name, _ref, head, cut in own:
+        theirs.update(_out(wt, "rev-list", "--no-merges", head, "--not", base_ref,
+                           *((cut,) if cut else ()), what=f"{name}'s own work").split())
+    return [c for c in built if c not in theirs]
+
+
+def _foreign_refusal(wt: Path, d: Path, branch: str, base_ref: str, foreign: Sequence[str],
+                     own: Sequence[tuple[str, str, str, str | None]],
+                     others: Mapping[str, str]) -> IntegrationError:
+    """The refusal of ``d``'s base ``branch`` for holding ``foreign``, work that is no
+    member's own (#723, :func:`_unowned_work`; ``own`` as there). It names the first such
+    commit, the first member (in member order) whose head reaches it, and each bundle of
+    ``others`` (name → published head) whose head reaches it, or says no bundle of the run
+    owns it. ``others`` only names: a head this clone does not have is left unjudged, and
+    said so. A git failure raises."""
+    commit = foreign[0]
+    more = (f" (and {len(foreign) - 1} more commit{'s' if len(foreign) > 2 else ''} like it)"
+            if len(foreign) > 1 else "")
+    by = next(((n, ref, cut) for n, ref, head, cut in own
+               if _in_line(wt, commit, commit[:12], f"{n}'s branch", of=head)), None)
+    seen = {n: h for n, h in others.items()
+            if h and _git(wt, "cat-file", "-e", f"{h}^{{commit}}") == 0}
+    theirs = [n for n, h in seen.items()
+              if _in_line(wt, commit, commit[:12], f"{n}'s published head", of=h)]
+    unseen = [n for n in others if n not in seen]
+    if by is None:
+        how, member = "a member's branch brings it in", "that member"
+    else:
+        n, ref, cut = by
+        how = f"{n}'s branch {ref} brings it in" + (
+            f" from below {cut[:12]}, the cut point recorded when {n} was published"
+            if cut else "")
+        member = n
+    if theirs:
+        whose = (f"It is in the published head of {', '.join(theirs)}, which {d.name} does "
+                 f"not build on")
+        fix = f"add {', '.join(theirs)} to {d.name}'s members, or rebuild {member}'s branch"
+    else:
+        whose = "No bundle of the run owns it" + (
+            f" (this clone does not have the published head of {', '.join(unseen)}, so "
+            f"that was not checked)" if unseen else "")
+        fix = f"rebuild {member}'s branch"
+    return IntegrationError(
+        f"{branch} would hold {commit[:12]}{more}, which is not {base_ref}'s and not any "
+        f"member's own work: {how}. {whose}. Nothing was pushed. To build {d.name}'s base, "
+        f"{fix} on a base without that work (re-publish it), then re-run")
 
 
 def _carried_tips(cfg: Config, groups: Mapping[tuple[str, str], list[Path]],
