@@ -686,7 +686,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
               conflicts: Mapping[str, Collection[str]] | None = None,
               conflict_held: Mapping[str, Collection[str]] | None = None,
               lines: Mapping[tuple[str, str], tuple[str, str | None]] | None = None,
-              on_line: Collection[str] | None = None
+              on_line: Collection[str] | None = None,
+              unbuilt: Collection[str] = frozenset()
               ) -> list[Path]:
     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
 
@@ -729,9 +730,14 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     out of the line, for a conflict with bundles of its own wave, to those bundles. A bundle
     tied by a ``Conflicts with`` edge to one of them is held the same way, for the same
     reason — one stderr line per such bundle, naming the conflict — and waits until that
-    bundle, rebuilt on a base holding them, has its PR merged. A skipped bundle never
-    completes, so its own dependents fall out of later waves the same way (the skip
-    cascades).
+    bundle, rebuilt on a base holding them, has its PR merged. ``unbuilt`` (#738) names each
+    bundle this run held before building it, because its own base could not be built
+    (:func:`_bundle_bases`): it never completes, so a prerequisite edge to it is not ready
+    as above, and a bundle tied to it by a ``Conflicts with`` edge is held the same way as
+    a partner of ``unpushed``, for the same reason — one stderr line per such partner,
+    naming it — and waits until that bundle is built (once what its own hold line names is
+    fixed) and its PR merges into its own base. A skipped bundle never completes, so its
+    own dependents fall out of later waves the same way (the skip cascades).
 
     ``lines`` maps a target ``(repo, base)`` to the run's line for it — ``(branch, the tip
     the run recorded)`` — once the run has folded (or carried) that target. ``on_line``
@@ -751,6 +757,7 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     target with no line (or no recorded tip: a dry-run) is judged as before."""
     asked = set(requested) if requested is not None else set(batch_names)
     unpushed_set = set(unpushed)
+    unbuilt_set = set(unbuilt)
     views: dict[str, Path | str] = {}   # repo → its fetched checkout, or why not (#655)
     lacks: dict[tuple[str, str, str], tuple[str, bool] | None] = {}  # (prereq, repo, ref)
     runnable: list[Path] = []
@@ -761,13 +768,16 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
         # … or held out for a conflict with a bundle of its own wave (#674): on no line either.
         clashed = (sorted(set(conflicts.get(d.name, ())) & set(conflict_held))
                    if conflicts and conflict_held else [])
+        # … or held before it was built, its own base not buildable (#738): never built.
+        unbuilt_partners = (sorted(set(conflicts.get(d.name, ())) & unbuilt_set)
+                            if conflicts and unbuilt_set else [])
         bp = d / "brief.md"
         deps = waves.declared_deps(bp) if bp.exists() else []
         merged_deps = set(brief.depends_on_merged(bp)) if deps else set()
         plain_deps = set(brief.depends_on(bp)) if deps else set()
         # "Merged" means merged into d's OWN target (#647) — none usable: ("", "").
-        repo, base = (publish._resolve_target(d)[:2] if deps or partners or clashed
-                      else ("", ""))
+        repo, base = (publish._resolve_target(d)[:2]
+                      if deps or partners or clashed or unbuilt_partners else ("", ""))
         targeted = bool(repo and base)
         unmet: list[str] = []
         unmerged: list[str] = []   # COMPLETE, but not merged into d's base: wait (#647)
@@ -869,8 +879,15 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                   f"work; not built on a base missing it. To build it, wait until {p} is "
                   f"rebuilt on a base that holds {', '.join(conflict_held[p])} and its PR "
                   f"merges{into}, then re-run.", file=sys.stderr)
+        for p in unbuilt_partners:
+            into = f" into {base} ({repo})" if repo and base else ""
+            print(f"flow: {d.name} held — it `Conflicts with` {p}, which this run held before "
+                  f"building it (its own base could not be built: see its hold line above), so "
+                  f"no line or base of this run holds that work; not built on a base missing "
+                  f"it. To build it, wait until {p} is built, once what its hold line names is "
+                  f"fixed, and its PR merges{into}, then re-run.", file=sys.stderr)
         if (not unmet and not unmerged and not off_line and not off_base and not partners
-                and not clashed):
+                and not clashed and not unbuilt_partners):
             runnable.append(d)
     return runnable
 
@@ -1058,16 +1075,26 @@ def _bundle_bases(cfg: Config, runnable: list[Path], *,
                   carried_heads: Mapping[str, str], batch: list[str],
                   bases: dict[str, tuple[str, dict[str, str]]],
                   line_cut: dict[str, dict[str, str]],
-                  taken: tuple[integrate.Bases, integrate.LinePrs]) -> None:
+                  taken: tuple[integrate.Bases, integrate.LinePrs],
+                  held: dict[str, tuple[str, integrate.IntegrationError]]) -> None:
     """Point each bundle of ``runnable`` at what its plan says it is built on (#727,
     ``plans``: :func:`_base_plans`): a base of its own, the real base, or — a seam — the
     run's line, as before (:func:`_point_at_integration`). A base of its own is
     :func:`integrate.build_bundle_base` of the members, held to the heads the line took
     (``carried_heads``) and the run's PRs hold (``taken``, :func:`_heads_taken`). Every base
-    of the wave is built before any bundle is pointed; an :class:`integrate.IntegrationError`
-    names the bundle and its members and propagates (the caller stops the run). Then
-    ``bases`` gets ``(branch, {member: head})`` per base, and ``line_cut`` the heads of its
-    target's branches the line held (none: no line yet) per bundle pointed at a seam."""
+    of the wave is built before any bundle is pointed. A base that cannot be built is that
+    bundle's failure alone (#738): ``held`` gets, under the bundle's name, the words saying
+    whose base it is (the bundle and its members) and the
+    :class:`integrate.IntegrationError` the build raised, and that bundle is not pointed —
+    the caller holds it — while every other bundle is. A broken shared integration worktree
+    is not one bundle's: an :class:`integrate.IntegrationTreeError` (the tree could not be
+    put back to a known commit, #631) or an :class:`integrate._LineBroken` (the branch
+    checked out in it could not be put back, #623), and every later build and fold would
+    run in it. So, as in the carry (:func:`integrate.fold`'s ``skipped``), it propagates,
+    its message naming the bundle and its members (the caller stops the run), and ``held``
+    keeps each bundle held before it. Then ``bases`` gets ``(branch, {member: head})`` per
+    base, and ``line_cut`` the heads of its target's branches the line held (none: no line
+    yet) per bundle pointed at a seam."""
     made: dict[str, tuple[str, str, dict[str, str]]] = {}
     for d in runnable:
         members = plans[d.name][1]
@@ -1078,12 +1105,18 @@ def _bundle_bases(cfg: Config, runnable: list[Path], *,
             branch, tip = integrate.build_bundle_base(
                 cfg, d, members, batch=batch, carried=carried_heads, excluded=carried_heads,
                 merged_heads=took, bases=taken[0], line_prs=taken[1])
-        except integrate.IntegrationError as exc:   # the same error, saying whose base it is
-            exc.args = (f"could not build {d.name}'s own base from "
-                        f"{', '.join(m.name for m in members)}: {exc}",)
-            raise
+        except integrate.IntegrationError as exc:
+            whose = (f"could not build {d.name}'s own base from "
+                     f"{', '.join(m.name for m in members)}")
+            if isinstance(exc, (integrate.IntegrationTreeError, integrate._LineBroken)):
+                exc.args = (f"{whose}: {exc}",)   # the same error, saying whose base it is
+                raise
+            held[d.name] = (whose, exc)
+            continue
         made[d.name] = (branch, tip, took)
     for d in runnable:
+        if d.name in held:
+            continue
         mine, plan = plans[d.name]
         if isinstance(plan, str):      # a seam: the run's line, as before #727
             _point_at_integration(integ, [d], folded_tips)
@@ -1094,6 +1127,69 @@ def _bundle_bases(cfg: Config, runnable: list[Path], *,
             bases[d.name] = (branch, took)
         else:
             publish.clear_stack_base(d)
+
+
+#: The step a base hold's line names (#738) for a failure of :func:`integrate.build_bundle_base`
+#: whose message gives none, or gives a fold's, keyed on the start of the error's ``cause``:
+#: a fetch that failed (the ``cause`` :func:`integrate._fetch` gives it, #695, without the
+#: words it says to a fold); then three whose ``cause`` is their whole message — no checkout
+#: where the target maps it (``_fetch`` too), an integration worktree
+#: :func:`integrate._prepare_worktree` could not make, and a git step that failed in that
+#: worktree (the base's branch not started off the base, its tip not read). Every other
+#: refusal names its own step, and the line keeps it.
+_BASE_HOLD_STEPS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("could not fetch ",), "check the remote (its URL, the network, credentials), then re-run"),
+    (("checkout not found at ",),
+     "clone the target's checkout there, or map the target to where it is in "
+     "[publisher.checkouts] in pdca.toml, then re-run"),
+    (("could not create the integration worktree at ",),
+     "check that path (a directory left there that is not a git worktree blocks it), then "
+     "re-run"),
+    (("could not start ", "could not read the folded tip in "),
+     "a git step failed: check that checkout, then re-run"),
+)
+
+
+def _base_hold_why(exc: integrate.IntegrationError) -> str:
+    """What a base hold's line says failed and the step that fixes it (#738), from the error
+    :func:`integrate.build_bundle_base` raised: its ``cause`` and the step
+    :data:`_BASE_HOLD_STEPS` gives for that cause, or else its message, which names its own
+    step — the remedy a rewrite's refusal gives (:class:`integrate._Rewritten`) included."""
+    step = next((s for starts, s in _BASE_HOLD_STEPS if exc.cause.startswith(starts)), None)
+    return str(exc) if step is None else f"{exc.cause} — {step}"
+
+
+def _announce_base_holds(cfg: Config,
+                         held: Mapping[str, tuple[str, integrate.IntegrationError]], *,
+                         fold_next: bool, stopping: bool = False) -> None:
+    """One stderr line per bundle held because its own base could not be built (#738),
+    ``held`` as :func:`_bundle_bases` fills it: whose base it is, what failed and the step
+    that fixes it (:func:`_base_hold_why`), then what the hold does — a bundle that depends
+    on it is skipped and one tied to it by ``Conflicts with`` is held (:func:`_runnable`
+    names each), and the rest of the wave goes on. Printed before the rest of the wave
+    builds. With ``stopping`` a broken shared worktree stops the run at this wave instead
+    (:func:`_bundle_bases`): the line says only that the bundle is not built this run, and
+    comes before the line that stops the run, so that stop never hides a hold's cause.
+
+    A member's branch rewritten after the line took it (:class:`integrate._Rewritten`) is
+    still on the line, and a fold refuses such a branch (#633). So with ``fold_next`` — the
+    fold after this wave runs: something of the wave is left to build, and a later wave
+    remains — the line says the next fold stops the run unless that branch is restored
+    first. Without it no fold follows this wave, and the line warns of none."""
+    for name, (whose, exc) in held.items():
+        if stopping:
+            print(f"flow: {name} held — {whose}: {_base_hold_why(exc)}. {name} is not built "
+                  f"this run.", file=sys.stderr)
+            continue
+        then = ""
+        if fold_next and isinstance(exc, integrate._Rewritten):
+            ref = integrate._published_ref(cfg.find_bundle(exc.name.removeprefix("issue_")))
+            branch = ref[1] if ref else f"{exc.name}'s branch"
+            then = (f" But the next fold stops the run unless {branch} is restored first: a "
+                    f"fold refuses a branch rewritten after the line took it (#633).")
+        print(f"flow: {name} held — {whose}: {_base_hold_why(exc)}. {name} is not built this "
+              f"run: a bundle that depends on it is skipped, one tied to it by `Conflicts "
+              f"with` is held, and the rest of this wave goes on.{then}", file=sys.stderr)
 
 
 def _heads_taken(bases: Mapping[str, tuple[str, Mapping[str, str]]],
@@ -2614,16 +2710,20 @@ def _drive_and_act(
     bundle, loudly (:func:`_carry_finished`, #646). ``None`` — a library call — scopes by
     the drive set as passed.
 
-    ``holds`` (#693) is the caller's collector for the accepted bundles a fold of this run
-    held out of the integration line: filled at the end of the run with ``{id: reason}``,
-    ``"unpushed"`` for one that pushed no branch (#593) and ``"conflict"`` for one whose
-    branch conflicts with a same-wave bundle merged before it (#674). Such a bundle is
-    COMPLETE in the returned map, which therefore cannot say it was held; ``cli._flow``
-    reads this to exit 3 instead of 0 (``cli._results_rc``). It also names each bundle whose
-    carried branch was rewritten after the run's last fold read it (#695,
-    :func:`_report_late_rewrites`): ``"rewritten"``, or ``"unchecked"`` for each carried
-    branch that end-of-run check could not judge — either one makes ``cli._flow`` exit 1,
-    ahead of any hold. ``None`` — nobody listens.
+    ``holds`` (#693) is the caller's collector for the bundles this run held: filled at the
+    end of the run with ``{id: reason}``. A fold held an accepted bundle out of the
+    integration line: ``"unpushed"`` for one that pushed no branch (#593) and ``"conflict"``
+    for one whose branch conflicts with a same-wave bundle merged before it (#674). Such a
+    bundle is COMPLETE in the returned map, which therefore cannot say it was held.
+    ``"base"`` (#738) for one held before it was built, because its own base could not be
+    built (:func:`_bundle_bases`): not driven this run — PLANNED in the map, for one not
+    built yet — and named on stderr with the cause and the fix. ``cli._flow`` reads this to
+    exit 3 instead of 0 (``cli._results_rc``). It also names each bundle whose carried
+    branch was rewritten after the run's last fold read it (#695,
+    :func:`_report_late_rewrites`), a branch a base's refusal named included:
+    ``"rewritten"``, or ``"unchecked"`` for each carried branch that end-of-run check could
+    not judge — either one makes ``cli._flow`` exit 1, ahead of any hold. ``None`` — nobody
+    listens.
     """
     bundles = list(bundles)          # the drive set — split adoption extends it (#469)
     allowance = cfg.max_passes if max_passes is None else max_passes
@@ -2745,9 +2845,13 @@ def _drive_and_act(
     # The loop stopped on a fold error or a red re-gate: that run already ends non-zero, and
     # a rewrite the fold refused is reported there — so no end-of-run check (#695).
     line_stopped = False
-    # A bundle's own base stopped the loop (#727): it checks only its members' branches, so
-    # the end-of-run check still runs, without the branch whose rewrite that stop named.
-    stop_named: set[str] = set()
+    # Bundles held before they were built because their own base could not be built (#738),
+    # each named on stderr with the cause and the fix: never COMPLETE, so their dependents
+    # are not ready, and their `Conflicts with` partners are held by `_runnable` too. Such a
+    # hold leaves the end-of-run check (#695) every carried branch, so a member's branch a
+    # base refused as rewritten is judged there too (#695 wins: still carried at the end of
+    # the run, it fails the run). Only a broken shared worktree stops the loop at a base.
+    held_base: set[str] = set()
     for k, wave in enumerate(wave_list):
         # What each bundle of the wave is built on (#727), asked once: `_bundle_bases` points
         # it there below, and `_runnable` judges a merged prerequisite on the run's line for
@@ -2759,20 +2863,22 @@ def _drive_and_act(
         on_line = ({n for n, (_mine, plan) in plans.items() if isinstance(plan, str)}
                    if own_bases else None)
         # `Conflicts with` partners of `held_unpushed` are held too (#629), and so are those
-        # of `held_conflict` (#674). The relation is read off the LIVE `bundles` each wave:
-        # an adopted split child adds its edges.
+        # of `held_conflict` (#674) and of `held_base` (#738). The relation is read off the
+        # LIVE `bundles` each wave: an adopted split child adds its edges.
         runnable = _runnable(cfg, wave, batch_names,
-                             held=held_unpushed | held_finished | set(held_conflict),
+                             held=held_unpushed | held_finished | set(held_conflict)
+                             | held_base,
                              requested=requested, hold_unmerged=hold_unmerged,
                              unpushed=held_unpushed,
                              conflicts=(waves.conflict_map(cfg, bundles)
-                                        if held_unpushed or held_conflict else None),
+                                        if held_unpushed or held_conflict or held_base
+                                        else None),
                              conflict_held={n: ps for n, (ps, _paths) in held_conflict.items()},
                              # The line each target's bundles are cut from, if any (#655),
                              # and the bundles cut from it (#729).
                              lines={tgt: (branch, folded_tips.get(tgt))
                                     for tgt, branch in integ.items()},
-                             on_line=on_line)
+                             on_line=on_line, unbuilt=held_base)
         if not runnable:
             continue
         # The pool, read off the schedule as it stands NOW — so a splice below has already
@@ -2817,19 +2923,32 @@ def _drive_and_act(
         # base (#187). Unconditional — the stale-clear must run even before any wave has
         # folded (integ still empty). Where the line folds for real, a bundle gets the line
         # only at a seam (#727): else a base of its own holding exactly what it declares, or
-        # the real base. A base that cannot be built stops the run, as a failed fold does.
+        # the real base. A base that cannot be built holds that bundle, named on one line
+        # with the cause and the fix, and the rest of the wave goes on (#738), as an
+        # unpushed bundle is held (#593). A broken shared worktree — the tree, or the branch
+        # checked out in it, not put back — is no one bundle's: it stops the run, as a failed
+        # fold does (#631, #623), after naming each bundle held before it.
         if own_bases:
+            failed: dict[str, tuple[str, integrate.IntegrationError]] = {}
             try:
                 _bundle_bases(cfg, runnable, plans=plans, integ=integ,
                               folded_tips=folded_tips, carried_heads=carried_heads,
                               batch=run_batch, bases=bases_took, line_cut=line_cut,
-                              taken=_heads_taken(bases_took, line_cut, pushed))
-            except integrate.IntegrationError as exc:
+                              taken=_heads_taken(bases_took, line_cut, pushed), held=failed)
+            except (integrate.IntegrationTreeError, integrate._LineBroken) as exc:
+                _announce_base_holds(cfg, failed, fold_next=False, stopping=True)
+                held_base.update(failed)
                 print(f"flow: wave {k} — {exc}; STOPPING — wave {k} and later waves not run.",
                       file=sys.stderr)
-                if isinstance(exc, integrate._Rewritten):
-                    stop_named.add(exc.name)
                 break
+            held_base.update(failed)
+            runnable = [d for d in runnable if d.name not in failed]
+            # The fold after this wave runs only if something of it is left to build and a
+            # later wave remains (the fold below reads `k < len(wave_list) - 1` the same way).
+            _announce_base_holds(cfg, failed,
+                                 fold_next=bool(runnable) and k < len(wave_list) - 1)
+            if not runnable:   # nothing of this wave left to build, publish or fold
+                continue
         else:
             _point_at_integration(integ, runnable, folded_tips)
         # This wave's allowance is its own cap AND what is left of the run's pool, whichever
@@ -2971,18 +3090,22 @@ def _drive_and_act(
     # Only where a fold ran: `carried_heads` is filled by a stack-mode fold that pushed, so
     # it is empty with publishing off, in merge mode and in a dry-run. Not after the loop
     # stopped on the line: that run already ends non-zero, and reported the rewrite a fold
-    # refused. What the run's PRs hold is checked too (#727).
+    # refused. What the run's PRs hold is checked too (#727). Every branch the line carries
+    # is judged, one a base's refusal named on a hold line too (#738): that line said why a
+    # bundle was not built, this one says what the line and the run's PRs still hold.
     taken = _heads_taken(bases_took, line_cut, pushed)
-    late = (_report_late_rewrites(cfg, [d for d in accepted if d.name not in stop_named],
-                                  carried_heads, run_batch, bases=taken[0], line_prs=taken[1])
+    late = (_report_late_rewrites(cfg, accepted, carried_heads, run_batch, bases=taken[0],
+                                  line_prs=taken[1])
             if carried_heads and not line_stopped else {})
-    # The run's holds, for the caller's exit code (#693): a held bundle reads COMPLETE above.
-    # Keyed exactly as `results` is, so each held id is a key of the map returned beside it.
+    # The run's holds, for the caller's exit code (#693): a bundle a fold held reads COMPLETE
+    # above, and one held before it was built (#738) reads as it was left (PLANNED). Keyed
+    # exactly as `results` is, so each held id is a key of the map returned beside it.
     # A late rewrite ("rewritten", or "unchecked" for a branch the check could not judge)
     # fails the run (exit 1, `cli._results_rc`), so it is written last: it outranks a hold.
     if holds is not None:
         holds.update({n.replace("issue_", ""): "unpushed" for n in sorted(held_unpushed)})
         holds.update({n.replace("issue_", ""): "conflict" for n in held_conflict})
+        holds.update({n.replace("issue_", ""): "base" for n in sorted(held_base)})
         holds.update({n.replace("issue_", ""): why for n, why in late.items()})
     return results
 
