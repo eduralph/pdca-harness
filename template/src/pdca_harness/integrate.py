@@ -482,10 +482,12 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     merges cleanly onto ``<base_remote>/<base>`` alone, :func:`_clash` names the bundles on
     the line whose own change it conflicts with — of an earlier wave or of this one, or
     finished ids the carry put there (``finished_heads``) — and the line without them
-    merges it cleanly (rebuilt on those of them it says it builds on, which stay). Any
-    other conflict — with the base, with work on the line no bundle's own change accounts
-    for, or one the named bundles do not explain alone — raises, as before. Nothing is
-    pushed for a held bundle, and the caller leaves it out of its later folds.
+    merges it cleanly (rebuilt on those of them it says it builds on, which stay). When no
+    bundle on the line explains it alone, the bundles it conflicts with in a pair are named
+    too (#748, :func:`_together`), held to the same check. Any other conflict — with the
+    base, with work on the line no bundle's own change accounts for, one only three or more
+    of them make together, or one the named bundles do not explain — raises, as before.
+    Nothing is pushed for a held bundle, and the caller leaves it out of its later folds.
     The trial merges run in the integration worktree under the fold's lock and leave it
     clean on the line. ``None`` (the carry, a direct caller): every conflict raises (or,
     under ``skipped``, is skipped) as before; a dry-run merges nothing, so holds nothing.
@@ -1839,6 +1841,11 @@ def _held_by_line(cfg: Config, wt: Path, branch: str, d: Path, head: str, base_r
       :func:`_built_on` says it was built on holds that partner's head) would bring that
       partner back, so the clash is not explained: the fold stops.
 
+    When the second fails, or :func:`_clash` says ``"line"`` (no bundle on the line clashes
+    with ``head`` alone), the clash may be one several of them make only together (#748):
+    :func:`_together` names those, and they are held to the same second rule. Its names
+    replace the partners :func:`_clash` gave.
+
     A git step that fails in a trial gives None; a tree that will not go back raises. The
     trials never move the line (:func:`_trial`)."""
     try:
@@ -1848,29 +1855,121 @@ def _held_by_line(cfg: Config, wt: Path, branch: str, d: Path, head: str, base_r
         under = _built_on(wt, base_ref, {**dict(on), **tips, d.name: head},
                           [n for n, _h in on])
         kind, partners, _files = _clash(wt, branch, head, base_ref, paths, on, (), under)
-        if kind != "batch":
+        if kind == "batch" and _explains(cfg, wt, branch, d, head, base_ref, on, under,
+                                         partners):
+            return list(partners), list(paths)
+        if kind not in ("batch", "line"):
             return None
-        own = _prerequisites(cfg, d)
-        off = [(n, h) for n, h in on if n in partners and n not in own]   # taken off the line
-        left = [(n, h) for n, h in on if n not in partners or n in own]
-        if any(_in_line(wt, ph, f"{p}'s head", f"what {n} was built on", of=u)
-               for n, _h in left for u in under.get(n, ()) for p, ph in off):
-            return None     # a bundle left on the line brings a partner back
-        last = head
-        pre = [h for n, h in left if n in partners]     # its prerequisites: rebuilt on them
-        if pre:
-            made: list[str] = []
-            if _trial(wt, branch, base_ref, [*pre, head], wins=len(pre),
-                      made=made)[0] is not None:
-                return None
-            last = made[0]
-        if _trial(wt, branch, base_ref, [*(h for _n, h in left), last])[0] is not None:
-            return None     # the partners alone do not explain the clash
+        # Not one bundle's alone (#748): those the clash needs together, never one it does not.
+        joint = _together(wt, branch, head, base_ref, on, under, partners)
+        if (not joint or set(joint) == set(partners)
+                or not _explains(cfg, wt, branch, d, head, base_ref, on, under, joint)):
+            return None
     except (IntegrationTreeError, _LineBroken):
         raise
     except IntegrationError:
         return None
-    return list(partners), list(paths)
+    return joint, list(paths)
+
+
+def _explains(cfg: Config, wt: Path, branch: str, d: Path, head: str, base_ref: str,
+              on: Sequence[tuple[str, str]], under: Mapping[str, Sequence[str]],
+              partners: Collection[str]) -> bool:
+    """Whether ``partners``, bundles of ``on`` (the bundles on the line, ``(name, head)`` in
+    merge order), explain the whole clash bundle ``d``'s branch tip ``head`` has with the
+    line (#747, the second rule of :func:`_held_by_line`, which says how): ``head``, merged
+    last, merges cleanly onto ``base_ref`` plus the line without them. A partner ``d``'s
+    brief says it builds on stays on the line, and ``head`` is tried rebuilt on it; a bundle
+    left on the line built on a partner taken off (``under``, :func:`_built_on`) makes it
+    False. Raises as :func:`_trial` does."""
+    own = _prerequisites(cfg, d)
+    off = [(n, h) for n, h in on if n in partners and n not in own]   # taken off the line
+    left = [(n, h) for n, h in on if n not in partners or n in own]
+    if any(_in_line(wt, ph, f"{p}'s head", f"what {n} was built on", of=u)
+           for n, _h in left for u in under.get(n, ()) for p, ph in off):
+        return False    # a bundle left on the line brings a partner back
+    last = head
+    pre = [h for n, h in left if n in partners]     # its prerequisites: rebuilt on them
+    if pre:
+        made: list[str] = []
+        if _trial(wt, branch, base_ref, [*pre, head], wins=len(pre),
+                  made=made)[0] is not None:
+            return False
+        last = made[0]
+    # The partners alone do not explain the clash when this does not merge.
+    return _trial(wt, branch, base_ref, [*(h for _n, h in left), last])[0] is None
+
+
+def _own_change(wt: Path, head: str, base_ref: str,
+                bundles: Sequence[tuple[str, str]]) -> list[str]:
+    """The revs a trial merges onto ``base_ref`` before anything else so that what it then
+    merges of branch tip ``head`` is ``head``'s own change only (#748): for each bundle of
+    ``bundles`` (``(name, head)``) whose head shares commits with ``head`` beyond
+    ``base_ref``, ``git merge-base`` of the two. What ``head`` already holds of that bundle
+    is then on both sides of the trial, so it never counts as ``head``'s clash with the
+    other revs tried. Never a squash of ``head`` onto where it started: that loses which
+    tip of a bundle it holds, and a bundle whose branch moved on since would be named for
+    the move. Each rev once, in ``bundles``' order; none for a ``head`` cut from the base.
+    A git failure raises."""
+    lead: list[str] = []
+    for name, its in bundles:
+        r = subprocess.run(["git", "-C", str(wt), "merge-base", head, its],
+                           capture_output=True, text=True)
+        if r.returncode == 1 and not r.stdout.strip():
+            continue        # no common ancestor
+        if r.returncode != 0:
+            raise IntegrationError(
+                f"could not find what {head[:12]} holds of {name}'s head {its[:12]} — `git "
+                f"merge-base` exited {r.returncode} in {wt}; a git step failed (not an "
+                f"overlap): check that checkout, then re-run")
+        mb = r.stdout.strip()
+        if not _in_line(wt, mb, f"{name}'s merge-base with {head[:12]}", base_ref,
+                        of=base_ref):
+            lead.append(mb)
+    return list(dict.fromkeys(lead))
+
+
+def _together(wt: Path, branch: str, head: str, base_ref: str,
+              on: Sequence[tuple[str, str]], under: Mapping[str, Sequence[str]],
+              partners: Collection[str]) -> list[str]:
+    """The bundles of ``on`` (on the line, ``(name, head)`` in merge order) that branch tip
+    ``head`` conflicts with alone or in a pair (#748), by name in ``on``'s order: each one
+    in a minimal set of them that ``head``'s own change does not merge onto, of size one or
+    two. Decided by trial merges onto ``base_ref`` only, clean or not, never by which files
+    or hunks clash. Each trial merges :func:`_own_change` first, then the set, then
+    ``head``; a set counts only when ``head`` is the merge that fails.
+
+    * Size one: a bundle ``head`` conflicts with alone. One built on more than the base
+      (``under``, :func:`_built_on`) is judged as :func:`_partners` judges it: it is named
+      when it is in ``partners``, what :func:`_partners` found.
+    * Size two: two bundles cut from the base, ``head`` merging cleanly after each alone,
+      but not after both. One built on another bundle, or on the line, is never in a pair:
+      a clash that needs it is not named here, and the fold stops on it, as on a clash only
+      three or more of them make together.
+
+    Cost: up to n trials of one bundle and n(n-1)/2 of two, n the bundles cut from the
+    base, plus one of :func:`_own_change` alone when there is any, then one acceptance
+    trial in :func:`_held_by_line` (:func:`_explains`); each merges a handful of revs onto
+    ``base_ref``, and all run only after a fold merge has already conflicted. The trials
+    never move the line (:func:`_trial`); raises as it does."""
+    lead = _own_change(wt, head, base_ref, on)
+    if lead and _trial(wt, branch, base_ref, [*lead, head])[0] is not None:
+        return []           # its own change does not merge even onto what it holds
+    alone: list[tuple[str, str]] = []     # cut from the base, ``head`` merges after it alone
+    named = {n for n, _h in on if under.get(n) and n in partners}
+    for name, its in on:
+        if under.get(name):
+            continue
+        at, _paths = _trial(wt, branch, base_ref, [*lead, its, head])
+        if at is None:
+            alone.append((name, its))
+        elif at == len(lead) + 1:
+            named.add(name)
+    for i, (x, xh) in enumerate(alone):
+        for y, yh in alone[i + 1:]:
+            if _trial(wt, branch, base_ref, [*lead, xh, yh, head])[0] == len(lead) + 2:
+                named.update((x, y))
+    return [n for n, _h in on if n in named]
 
 
 def _prerequisites(cfg: Config, d: Path) -> set[str]:

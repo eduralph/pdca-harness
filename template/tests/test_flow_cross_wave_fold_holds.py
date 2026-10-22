@@ -361,14 +361,16 @@ class CrossWaveFoldHolds(unittest.TestCase):
 
     # -- (3) clashes the rule cannot pin on the named partners alone still stop ---------------
 
-    def test_a_clash_two_line_bundles_cause_only_together_still_stops(self):
-        """Fails rule (e): the partner named alone (A) does not explain the whole clash.
-        child-2 (#748, joint attribution) flips this to a hold naming A, P and R.
+    def test_a_clash_two_line_bundles_cause_only_together_holds_naming_them(self):
+        """Fails rule (e) — the partner named alone (A) does not explain the whole clash —
+        so it stopped the run under #747. #748 (joint attribution) holds it, naming A and
+        the pair P and R that make the rest of the clash together
+        (tests/test_flow_cross_wave_joint_holds.py has the cases).
 
         P renames shared.txt to moved.txt; R rewrites most of shared.txt; H changes its last
         line, which merges onto main plus either of them alone, but not after both. H also
-        adds other.txt, as A does: a clash with A alone. So A is named, but the line
-        without A still does not merge H — what is left is P and R's together."""
+        adds other.txt, as A does: a clash with A alone. The line without A, P and R merges
+        H."""
         self._on_base({"shared.txt": TEN})
         self._plan("A", {"other.txt": "a\n"})
         self._plan("P", {"shared.txt": None, "moved.txt": TEN})
@@ -385,10 +387,18 @@ class CrossWaveFoldHolds(unittest.TestCase):
         self.assertIsNone(self._merges("origin/main", "P", "H"))
         self.assertIsNone(self._merges("origin/main", "R", "H"))
         self.assertEqual(self._merges("origin/main", "K", "P", "R", "W", "H"), 4)
-        self._stopped(1, "H")
-        self.assertEqual(self.results["U"], state.PLANNED, self.err)
-        self.assertEqual(self.holds, {})
-        self.assertEqual(self.rc, 1, self.err)
+        self.assertIsNone(self._merges("origin/main", "K", "W", "H"))
+        self._not_stopped()
+        line = self._held("H", "its change conflicts with issue_A's, issue_P's, issue_R's, "
+                               "already on the line from an earlier wave (conflicts in "
+                               "other.txt, shared.txt)")
+        self._report("H", "Proposed, for you to confirm: declare `Conflicts with: A, P, R` "
+                          "in issue_H's brief")
+        for other in ("issue_K", "issue_W", "issue_V"):
+            self.assertNotIn(other, line)
+        self._complete("A", "P", "R", "K", "W", "H", "V", "U")
+        self.assertEqual(self.holds, {"H": "conflict"})
+        self.assertEqual(self.rc, 3, self.err)
 
     def test_a_clash_with_a_partner_whose_head_no_longer_fits_the_base_still_stops(self):
         """Fails rule (d): A's branch, on the line, no longer merges onto the base alone, so
