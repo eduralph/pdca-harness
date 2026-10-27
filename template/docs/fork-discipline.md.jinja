@@ -56,21 +56,24 @@ it there, not by editing this file (so `copier update` keeps the rules current).
   sign-off** that made the bundle `COMPLETE` before it was published at all, and the
   driver refuses to merge unless the PR's **full check rollup is green** on a head that
   contains the base it merges into (`[driver].merge_requires = "all"`, the default). The
-  sequence for each PR: ready-mark → read whether its head is **behind** its base (an
+  sequence for each PR: retarget it to its bundle's own **target base** if it is on another
+  (`gh pr edit --base`) → ready-mark → read whether its head is **behind** its base (an
   earlier PR of the same wave just merged, or the base moved; decided in git, `git
   merge-base --is-ancestor` after a fetch) → if behind, update the PR's own branch with a
   merge commit of the base (`gh pr update-branch`, never a rebase) and wait for the update
   to land → bounded wait for the rollup of that head (`[driver].merge_wait_secs`, one
-  budget for both waits) → read the head and base again (unchanged, not behind) → merge
-  **pinned to that head** (`--match-head-commit`). A failed update, a red updated head, a
+  budget for both waits) → read the head and base again (unchanged, not behind, still the
+  target base) → merge **pinned to that head** (`--match-head-commit`). A target base
+  another bundle of the batch produced, or a retarget that fails or does not take, stops the
+  run before the ready-mark, the PR left as it was. A failed update, a red updated head, a
   head that changed or a base that moved stops the run with the PR back in draft; an
   update commit already pushed stays on the PR branch. **What sign-off covered changes
   after an update:** the head that merges is then a merge commit of the reviewed PR branch
   with the newer base. Check reviewed `patch.diff`, not that combination; the combination
   is verified by the PR's own CI (the green rollup the driver reads), not by a reviewer.
-  `merge_requires = "required"` skips all of this and trusts the host's branch
-  protection, stale base included. A fork keeps the default `wave_mode = "stack"`, where
-  nothing is ever readied or merged for you.
+  `merge_requires = "required"` skips all of this but the target-base check, and trusts
+  the host's branch protection, stale base included. A fork keeps the default
+  `wave_mode = "stack"`, where nothing is ever readied or merged for you.
 - No push / PR-open / ready-mark happens without explicit instruction. This is
   **mechanically enforced** by the builder/publisher PreToolUse hook (`builder_guard.py`),
   not left to prompt discipline.

@@ -71,6 +71,8 @@ class OntoBranchRecordInMergeMode(unittest.TestCase):
     def _bundle(self, iid: str, record: dict) -> Path:
         d = self.cfg.bundle(iid)
         d.mkdir(parents=True)
+        (d / "brief.md").write_text(  # issue #500: the target base merge mode holds PRs to
+            "- **Repo + branch target:** org/repo @ main\n", encoding="utf-8")
         (d / "patch.diff").write_text("diff\n", encoding="utf-8")
         (d / "publish.json").write_text(json.dumps(record), encoding="utf-8")
         return d
@@ -165,7 +167,8 @@ class OntoBranchRecordInMergeMode(unittest.TestCase):
                 rc, calls, out, err = self._wave(self._bundle(iid, record))
                 self.assertEqual(rc, 0, err)
                 gh = [c for c in calls if c[:2] == ["gh", "pr"]]
-                self.assertEqual(gh[0], ["gh", "pr", "ready", PR])
+                self.assertEqual(gh[0][:3], ["gh", "pr", "view"])   # issue #500: its base
+                self.assertEqual(gh[1], ["gh", "pr", "ready", PR])
                 self.assertEqual(gh[-1], ["gh", "pr", "merge", PR, "--merge",
                                           "--match-head-commit", HEAD])
 

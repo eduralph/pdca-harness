@@ -285,11 +285,13 @@ def publish(
     # base" (merge.py:32-33), unattended, mid-flow — whatever base that PR happens to carry.
     # So a PR opened against a branch THIS run produced silently lands the fix in another
     # bundle's branch instead of the shared target, and the wave still reports success.
-    # Refuse here rather than at merge time: the publisher is an interactive step with a
-    # human present, and a PR never opened against a run-produced branch leaves the merge
-    # nothing wrong to merge. Same shape as the `Stacks on` refusal above (stderr, return 1,
-    # nothing pushed). Stack mode — the default — is untouched: chaining onto a predecessor
-    # is correct there, because nothing is ever merged for you.
+    # Refuse here first: the publisher is an interactive step with a human present, and a
+    # PR never opened against a run-produced branch leaves the merge nothing wrong to
+    # merge. Merge time checks again (`merge._target_base`, issue #500) for a PR this guard
+    # never saw — one an earlier run opened, or one whose base was edited on the host since
+    # — and retargets it to `base`, or refuses. Same shape as the `Stacks on` refusal above
+    # (stderr, return 1, nothing pushed). Stack mode — the default — is untouched: chaining
+    # onto a predecessor is correct there, because nothing is ever merged for you.
     if cfg.wave_mode == "merge":
         refusal = _merge_base_refusal(cfg, d, repo_spec, pr_base, base)
         if refusal:
@@ -766,6 +768,17 @@ def _stacks_on_branch(cfg: Config, d: Path) -> str | None:
     return rec.get("branch") if rec else None
 
 
+# The way out of a merge-mode refusal of a base this run produced (#411), worded once for
+# both places that refuse one: publish (`_merge_base_refusal`) and merge time
+# (`merge._target_base`, issue #500). No closing period, so each caller ends the sentence
+# its own message needs.
+MERGE_BASE_FIX = ('`[driver].wave_mode = "merge"` merges this PR into whatever it targets, '
+                  "unattended — so it may only target a base that exists independently of "
+                  "this run. Point the brief's `Repo + branch target` at the shared base, or "
+                  'use the default wave_mode = "stack", where chaining onto a predecessor is '
+                  "correct")
+
+
 def _merge_base_refusal(cfg: Config, d: Path, repo_spec: str, pr_base: str, base: str) -> str:
     """Why ``pr_base`` is not a base that exists independently of this run — or "" if it is.
 
@@ -787,10 +800,7 @@ def _merge_base_refusal(cfg: Config, d: Path, repo_spec: str, pr_base: str, base
     The bundle's own base is never re-parsed here — it is passed in from
     :func:`_resolve_target`, the one parse (#235/#262/#387).
     """
-    fix = ('`[driver].wave_mode = "merge"` merges this PR into whatever it targets, '
-           "unattended — so it may only target a base that exists independently of this "
-           "run. Point the brief's `Repo + branch target` at the shared base, or use the "
-           'default wave_mode = "stack", where chaining onto a predecessor is correct.')
+    fix = MERGE_BASE_FIX + "."
     if pr_base != base:
         return (f"publish: {d.name} would open its PR against `{pr_base}`, not its target "
                 f"base `{base}` — that branch is one this run produced (a `Stacks on:` "

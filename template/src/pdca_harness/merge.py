@@ -70,8 +70,8 @@ green was that head's) and must not be behind, and ``gh pr merge`` is pinned to 
 host instead of merged. Every refusal on that path undoes the ready-mark. The base moving
 between the last read and the host executing the merge is a gap no client can close: a
 ``strict`` host refuses that merge, a non-strict one would merge it.
-``merge_requires = "required"`` (trust the host's protection) is unchanged: no base read,
-no update, no pin.
+``merge_requires = "required"`` (trust the host's protection) is unchanged: no behind
+check, no update, no pin. Only the target-base check below (issue #500) runs under it too.
 
 The head ``_base_read`` asks about lives where publish pushed the PR's branch, read from
 the publish record as the fold reads it (``integrate._published_ref``, issue #650), and a
@@ -89,6 +89,19 @@ possibly someone else's, with other work on it and any base — so ``_merge_one`
 (issue #658) before any ``gh`` call for that PR, in a dry run too, and whether or not the
 PR already reads merged, as ``merged.merged_into`` and the fold (``integrate._gone_branch``)
 never trust such a record either.
+
+A PR merges only into its bundle's own target base (issue #500), the ``Repo + branch
+target`` publish resolves (``publish._resolve_target``), and only when that base exists
+independently of the run. Publish enforces that rule when it opens the PR (#411,
+``publish._merge_base_refusal``); ``_target_base`` holds it again before the ready-mark,
+under either ``merge_requires`` value, for a PR that check never saw: one an earlier run
+opened, or one whose base was edited on the host since. A target another bundle of the
+batch published is refused. A PR on another base is retargeted (``gh pr edit --base``) and
+its base read again, and it goes on only if the host now reports the target. Those
+refusals leave the PR draft or ready, as they found it. The base can be edited again while
+the checks are read, so under ``"all"`` every later read of it (``_base_read``) is held to
+the target as well and refuses, ready-mark undone, rather than merge into another branch.
+A base edited after the last read is the same gap as a base tip that moves after it.
 """
 
 from __future__ import annotations
@@ -364,20 +377,29 @@ def _contains(repo: Path, tip: str, head: str) -> tuple[bool | None, str]:
 
 
 def _base_read(cfg: Config, repo: Path, pub: tuple[str, str, bool] | None,
-               pr_url: str) -> tuple[str, str, bool | None, str]:
+               pr_url: str, *, target: str) -> tuple[str, str, bool | None, str]:
     """Whether PR ``pr_url``'s head lacks its base branch's current tip (issue #531), in
     plain git as ``publish._line_tip_refusal`` decides its question (#593), not by a
     host-side comparison: the head and base branch from the host (``_pr_head``), a fetch
     into the checkout ``repo`` (``_fetch``, which reads where the branch is from the publish
     record ``pub``, #650), the base tip recorded from ``<base_remote>/<base>``, a check
     that the head is in the checkout (``_have``), then ``_contains``. Returns ``(head, tip,
-    behind, "")``. On any failure — ``gh`` unreadable, a failed fetch, a base that does not
-    resolve, a head the fetches did not bring in, ``git merge-base`` exiting other than 0/1
-    — ``behind`` is None and the last item says why: the caller refuses, fail-closed, and
-    never guesses "up to date"."""
+    behind, "")``. On any failure — ``gh`` unreadable, a base other than ``target``, a
+    failed fetch, a base that does not resolve, a head the fetches did not bring in, ``git
+    merge-base`` exiting other than 0/1 — ``behind`` is None and the last item says why:
+    the caller refuses, fail-closed, and never guesses "up to date".
+
+    ``target`` (issue #500) is the bundle's own target base, which ``_target_base`` put the
+    PR on before the ready-mark. The base can be edited on the host after that, so a read
+    that finds the PR on any other base refuses, before anything is fetched or brought up
+    to date against it."""
     head, base, why = _pr_head(pr_url)
     if not head:
         return "", "", None, why
+    if base != target:
+        return head, "", None, (f"its base on the host is now `{base}`, though it was its "
+                                f"target base `{target}` when the driver checked it; merging "
+                                "now would land it on the wrong branch")
     why = _fetch(cfg, repo, pub)
     if why:
         return head, "", None, why
@@ -460,6 +482,56 @@ def _refuse(d: Path, pr_url: str, why: str) -> int:
     return 1
 
 
+def _target_base(cfg: Config, d: Path, pr_url: str) -> tuple[str, str]:
+    """Put ``d``'s PR on its bundle's own target base before it is readied (issue #500):
+    ``(target, "")`` once the host reports the PR on ``target``, or ``("", why)`` to refuse.
+    The merge-time half of the #411 rule (``publish._merge_base_refusal``), for a PR that
+    rule never saw: one an earlier run opened, or one whose base was edited on the host since.
+
+    ``target`` is ``publish._resolve_target``'s, the one parse publish uses; with no brief,
+    or no usable ``Repo + branch target`` in it, there is no target and the PR is refused. A
+    target that is a branch another bundle of this batch published (#411 route 2,
+    ``publish._batch_branch_producer``) is refused before the host is asked anything,
+    whatever base the PR is on. Otherwise the PR's base is read (``_pr_head``); a PR on
+    another base is retargeted (``gh pr edit --base``) and its base read again, and only a
+    read that reports ``target`` lets the merge go on. ``_merge_one`` calls this before the
+    ready-mark, so a refusal leaves the PR draft or ready, as it found it: nothing to undo."""
+    if not (d / "brief.md").is_file():
+        return "", ("it has no brief.md, so there is no target base to check its PR's base "
+                    "against")
+    repo_spec, target = publish._resolve_target(d)[:2]
+    if not repo_spec or not target:
+        return "", (f"its brief has no usable `Repo + branch target` (repo {repo_spec!r}, base "
+                    f"{target!r}), so there is no target base to check its PR's base against")
+    producer = publish._batch_branch_producer(cfg, d, repo_spec, target)
+    if producer:
+        return "", (f"its target base `{target}` is the branch {producer} produced in this "
+                    f"batch, not a shared base. {publish.MERGE_BASE_FIX}")
+    _, base, why = _pr_head(pr_url)
+    if not base:
+        return "", f"its base could not be checked against its target base `{target}`: {why}"
+    if base == target:
+        return target, ""
+    # From here the brief is right and the PR is not, so the way out is on the host.
+    fix = (f"Retarget the PR to `{target}` on the host, or check that this `gh` login may "
+           "edit it")
+    print(f"   PR base `{base}` is not its target base `{target}` — retargeting it")
+    print(f"→ gh pr edit {pr_url} --base {target}")
+    edit = subprocess.run(["gh", "pr", "edit", pr_url, "--base", target],
+                          capture_output=True, text=True)
+    if edit.returncode != 0:
+        print((edit.stderr or edit.stdout).strip(), file=sys.stderr)
+        return "", (f"its PR targets `{base}`, not its target base `{target}`, and `gh pr edit "
+                    f"--base {target}` failed. {fix}")
+    _, now, why = _pr_head(pr_url)
+    if now != target:
+        seen = f"the host reports its base as `{now}`" if now else why
+        return "", (f"its PR targeted `{base}`, not its target base `{target}`, and after "
+                    f"`gh pr edit --base {target}` {seen}. {fix}")
+    print(f"   retargeted {pr_url} from `{base}` to `{target}`")
+    return target, ""
+
+
 def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
                fetched: set[str]) -> int:
     """Merge one bundle's recorded PR (idempotent, fail-closed). ``fetched`` dedupes the
@@ -509,6 +581,17 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
               f"{cfg.expected_checks_error}. STOP: later waves are NOT run; fix the setting "
               "in pdca.toml, then re-run (the run resumes idempotently).\n", file=sys.stderr)
         return 1
+    # Issue #500: merge only into the bundle's own target base, and only when that base
+    # exists independently of this run (#411) — never into whatever base the PR carries.
+    # Under either merge_requires value, after the refusals above (a malformed setting stops
+    # the run before any `gh pr edit`) and before the ready-mark, so a refusal here has no
+    # ready-mark to undo: not `_refuse`, which always undoes one.
+    target, why = _target_base(cfg, d, str(pr_url))
+    if why:
+        print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. STOP: later waves "
+              "are NOT run, and the PR is left draft or ready, as it was. Re-run once that "
+              "is resolved (the run resumes idempotently).\n", file=sys.stderr)
+        return 1
 
     # The publisher opens every PR as a draft (STOP discipline), but `gh pr merge` refuses a
     # draft — so in merge mode a non-final wave's PRs must be readied before they can advance
@@ -549,7 +632,9 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
         # nor `origin`) never gets here: it was refused above before the head was read
         # (issue #658); `_remotes` keeps its remote for a caller passing such a `pub`.
         pub = integrate._published_ref(d)
-        head, tip, behind, why = _base_read(cfg, repo, pub, str(pr_url))
+        # Issue #500: every read is held to the target base `_target_base` put the PR on, so
+        # a base edited on the host since is refused before anything is updated against it.
+        head, tip, behind, why = _base_read(cfg, repo, pub, str(pr_url), target=target)
         if behind is None:
             return _refuse(d, pr_url, why)
         waited = 0
@@ -604,7 +689,9 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
         # base again: the head must be the one read before the wait (the green rollup is
         # then that head's) and must still contain its base's tip. The merge is pinned to
         # it, so a head that changes after this read is refused by the host, not merged.
-        after, _, behind, why = _base_read(cfg, repo, pub, str(pr_url))
+        # Issue #500: and the base must still be the target, or the merge would land on
+        # whatever branch the PR was moved to during the wait.
+        after, _, behind, why = _base_read(cfg, repo, pub, str(pr_url), target=target)
         if behind is None:
             return _refuse(d, pr_url, why)
         if after != head:
