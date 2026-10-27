@@ -11,6 +11,11 @@ instance; this one governs work on the template itself.)
 - **Never merge a pull request.** Not `gh pr merge`, not the web UI, not
   auto-merge — no path, regardless of green checks or how trivial the change is.
 - **Never mark a draft pull request ready** (`gh pr ready`).
+- These rules cover this project's own pull requests. The one exception is the ready-marks
+  and merges that `tools/live/stack_mode_live.py` makes itself, started by a human, on a
+  repository that passes the tool's repo guard (the private sandbox; see
+  [CONTRIBUTING.md](CONTRIBUTING.md#checking-stack-mode-on-real-github)). It covers no other
+  merge on the sandbox repository, by hand or by an agent.
 - Your work on a change **ends at the open PR with green checks**. Report the PR
   URL and stop. The ready-mark and the merge are the maintainer's sign-off
   touchpoints — the human decision this project's quality cycle exists to
