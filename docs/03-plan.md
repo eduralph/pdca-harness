@@ -94,6 +94,16 @@ shape and the driver schedules it. Optional brief fields, set at Plan:
   *why* the scheduling is set as it is (e.g. "depends-on 12 because both edit cache.py").
   Not machine-parsed; it just keeps the human's reasoning next to the bare-id fields for
   the next person (including future-you) reading the brief.
+- **`Merges with:`** — an *atomic merge group*: bundles that must not land on the base
+  separately (a caller-first pair, or issues planned to merge as one unit). Ids only, like
+  `Conflicts with`. Declare it on **every** member: the driver only reads the briefs in
+  the run, so a group named only by a bundle outside the run is not seen. It changes no
+  wave. Under the default `wave_mode = "stack"` you merge the PRs yourself and can take a
+  group together, so nothing more happens. Under `wave_mode = "merge"` the driver merges
+  each PR on its own, so for now it builds no member it can see: `pdca flow <ids>` refuses
+  the run, and the `--from-csv` sweep holds the group and its dependents
+  ([07 · Waves in execution](07-crosscutting.md#waves-in-execution); real merge-mode
+  support is issue #778).
 - **`Difficulty:` / `Do model:`** — route this bundle's Do to the right backend
   ([step 04](04-do.md)): `Difficulty` feeds the `when` routing (and the iterate escalation
   ladder); `Do model` pins a backend by name. So different bundles in one wave can build
