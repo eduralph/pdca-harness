@@ -56,6 +56,13 @@ def _cfg(root: Path, **overrides: object) -> Config:
         **overrides)
 
 
+def _brief(d: Path, repo: str = "org/repo") -> None:
+    """The brief merge mode reads bundle ``d``'s target base from (issue #500): `main`,
+    the base every stub here reports the PR on, so no test here retargets anything."""
+    (d / "brief.md").write_text(f"- **Repo + branch target:** {repo} @ main\n",
+                                encoding="utf-8")
+
+
 def _rollup(*checks: tuple[str, str], code: int = 0) -> SimpleNamespace:
     """A `gh pr checks --json name,bucket` result: `(name, bucket)` pairs plus the exit
     code gh would pair with them (0 all passed, 1 something failed, 8 something pending —
@@ -118,6 +125,7 @@ class MergeWave(unittest.TestCase):
                 patch: str | None = "diff\n", repo: str = "org/repo") -> Path:
         d = self.cfg.bundle(iid)
         d.mkdir(parents=True)
+        _brief(d, repo)
         if patch is not None:
             (d / "patch.diff").write_text(patch, encoding="utf-8")
         if pr_url is not None:
@@ -212,7 +220,9 @@ class MergeWave(unittest.TestCase):
             rc = merge.merge_wave(self.cfg, [b], method="merge")
         self.assertEqual(rc, 0)
         gh = [c for c in runs if c[:2] == ["gh", "pr"]]
-        self.assertEqual(gh[0], ["gh", "pr", "ready", "https://gh/pr/1"])
+        # Issue #500: the PR's base is read against its target base before the ready-mark.
+        self.assertEqual(gh[0][:3], ["gh", "pr", "view"])
+        self.assertEqual(gh[1], ["gh", "pr", "ready", "https://gh/pr/1"])
         self.assertEqual(gh[-1], ["gh", "pr", "merge", "https://gh/pr/1", "--merge",
                                   "--match-head-commit", HEAD])
 
@@ -224,7 +234,8 @@ class MergeWave(unittest.TestCase):
         def fail_ready(cmd, **kw):
             runs.append(cmd)
             rc = 1 if cmd[:3] == ["gh", "pr", "ready"] else 0
-            return SimpleNamespace(returncode=rc, stdout="", stderr="cannot ready")
+            return (_up_to_date(cmd)        # issue #500: the base read before the ready-mark
+                    or SimpleNamespace(returncode=rc, stdout="", stderr="cannot ready"))
 
         with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fail_ready), \
                 mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
@@ -372,8 +383,10 @@ class MergeWave(unittest.TestCase):
         gh = [c[:3] for c in calls if c[:2] == ["gh", "pr"]]
         # Rollup read AFTER ready; issue #582: read twice — the green is confirmed once.
         # Issue #531: the head is read before and after the rollup wait; no update for a
-        # PR that is not behind its base.
-        self.assertEqual(gh, [["gh", "pr", "ready"], ["gh", "pr", "view"],
+        # PR that is not behind its base. Issue #500: before all that, its base is read
+        # against its target base (the same base here, so no edit).
+        self.assertEqual(gh, [["gh", "pr", "view"], ["gh", "pr", "ready"],
+                              ["gh", "pr", "view"],
                               ["gh", "pr", "checks"], ["gh", "pr", "checks"],
                               ["gh", "pr", "view"], ["gh", "pr", "merge"]])
 
@@ -535,7 +548,8 @@ class MergeWave(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(self._merged(calls))
         gh = [c[:3] for c in calls if c[:2] == ["gh", "pr"]]
-        self.assertEqual(gh, [["gh", "pr", "ready"], ["gh", "pr", "view"]]
+        self.assertEqual(gh, [["gh", "pr", "view"], ["gh", "pr", "ready"],   # #500: base
+                              ["gh", "pr", "view"]]
                          + [["gh", "pr", "checks"]] * 4
                          + [["gh", "pr", "view"], ["gh", "pr", "merge"]])  # after read 4
         self.assertNotIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
@@ -905,6 +919,7 @@ class MergeAgainstCurrentBase(unittest.TestCase):
             self._n += 1
             d = cfg.bundle(f"S{self._n}")
             d.mkdir(parents=True)
+            _brief(d)
             (d / "patch.diff").write_text("diff\n", encoding="utf-8")
             (d / "publish.json").write_text(
                 json.dumps({"pr_url": url, "repo": "org/repo"}), encoding="utf-8")
@@ -989,17 +1004,20 @@ class MergeAgainstCurrentBase(unittest.TestCase):
         self.assertIn(["gh", "pr", "ready", PR_A, "--undo"], host.calls)
 
     def test_merge_requires_required_call_log_is_unchanged(self) -> None:
-        # (c): "trust the host's protection" — no base read, no update, no rollup read, no
-        # pin: exactly the call log this setting produced before #531, stale merge included.
+        # (c): "trust the host's protection" — no behind read, no update, no rollup read, no
+        # pin: exactly the call log this setting produced before #531, stale merge included,
+        # but for one read of each PR's base against its target base (issue #500).
         host = _Host(PR_A, PR_B)
         cfg = _cfg(self.tmp, merge_requires="required")
         rc, err = self._run(host, [PR_A, PR_B], cfg)
         self.assertEqual(rc, 0, err)
         repo = str(merge.publish._checkout_path(cfg, "org/repo"))
         self.assertEqual(host.calls, [
+            ["gh", "pr", "view", PR_A, "--json", "headRefOid,baseRefName"],
             ["gh", "pr", "ready", PR_A],
             ["gh", "pr", "merge", PR_A, "--merge"],
             ["git", "-C", repo, "fetch", "origin"],
+            ["gh", "pr", "view", PR_B, "--json", "headRefOid,baseRefName"],
             ["gh", "pr", "ready", PR_B],
             ["gh", "pr", "merge", PR_B, "--merge"],
         ])
@@ -1015,10 +1033,11 @@ class MergeAgainstCurrentBase(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertIn(PR_B, host.updated)
         b_updated = host.updated[PR_B]
-        # Read before the update, twice while it had not landed, once when it had, and
-        # once more after the rollup wait.
+        # Read against its target base before the ready-mark (issue #500), then before the
+        # update, twice while it had not landed, once when it had, and once more after the
+        # rollup wait.
         self.assertEqual([h for u, h in host.views if u == PR_B],
-                         [b_reviewed, b_reviewed, b_reviewed, b_updated, b_updated])
+                         [b_reviewed] * 4 + [b_updated, b_updated])
         update = self._at(host, ["gh", "pr", "update-branch", PR_B])
         first_read = self._at(host, ["gh", "pr", "checks", PR_B])
         self.assertTrue(any(c[0] == "sleep" for c in host.calls[update:first_read]))
@@ -1197,6 +1216,7 @@ class MergeConfirmRequiresCompleteRollup(unittest.TestCase):
         Returns the exit code, every command shelled, and stderr."""
         d = cfg.bundle("621")
         d.mkdir(parents=True)
+        _brief(d)
         (d / "patch.diff").write_text("diff\n", encoding="utf-8")
         (d / "publish.json").write_text(json.dumps({"pr_url": self.URL, "repo": "org/repo"}),
                                         encoding="utf-8")

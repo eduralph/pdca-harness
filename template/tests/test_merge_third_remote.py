@@ -112,6 +112,8 @@ class ThirdRemoteHead(unittest.TestCase):
     def _bundle(self, record: dict) -> Path:
         d = self.cfg.bundle("650")
         d.mkdir(parents=True, exist_ok=True)
+        (d / "brief.md").write_text(  # issue #500: the target base merge mode holds PRs to
+            "- **Repo + branch target:** org/repo @ main\n", encoding="utf-8")
         (d / "patch.diff").write_text("diff\n", encoding="utf-8")
         (d / "publish.json").write_text(
             json.dumps({"pr_url": PR, "repo": "org/repo", **record}), encoding="utf-8")
@@ -161,7 +163,8 @@ class ThirdRemoteHead(unittest.TestCase):
         its publish record (``integrate._published_ref``) — the path a ``"stacked"`` record
         no longer reaches through ``_merge_one`` (issue #658)."""
         with mock.patch("pdca_harness.merge.subprocess.run", side_effect=self._run):
-            return merge._base_read(self.cfg, self.repo, integrate._published_ref(d), PR)
+            return merge._base_read(self.cfg, self.repo, integrate._published_ref(d), PR,
+                                    target="main")   # the base `gh pr view` reports
 
     def _assert_refused_up_front(self, rc: int, err: str) -> None:
         """Issue #658: a ``"stacked"`` record is refused before any ``gh`` or ``git`` call."""

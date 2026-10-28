@@ -884,6 +884,16 @@ wave builds on, via `[driver].wave_mode`:
   refuses a merge if the base moves after the driver's last read.
   `[driver].merge_requires = "required"` opts back into host-config-only
   semantics, and skips the behind check and the update too.
+  Under either setting, before it readies a PR the driver reads the PR's base on
+  the host and compares it with the bundle's own target base (the `Repo + branch
+  target` publish used). If they differ, the driver retargets the PR
+  (`gh pr edit --base <target>`) and reads the base again. It goes on only if the
+  host now reports the target base; otherwise the run stops, naming both
+  branches, and the PR is left draft or ready, as it was. Under `"all"` every
+  later read of the base must still find the target base, so a base edited on
+  the host while the checks are read stops the run too, with the ready-mark
+  undone. A target base that another bundle of the batch produced stops the run
+  before any retarget (see below).
   Merge mode does not support a `Merges with` group yet (an atomic merge group,
   [step 03](03-plan.md#ordering-and-routing-the-batch); issue #778): it merges
   each PR on its own, so one member could land on the base without the rest. So
@@ -909,7 +919,13 @@ fix branch or a recorded integration branch), and a brief whose `Repo + branch
 target` itself names a branch another bundle in the batch produced — the
 chained-brief practice that is right under `"stack"` and wrong here, where wave
 order already carries the dependency. Fix the brief's target (or go back to
-`"stack"`) and re-publish; the harness never retargets a PR for you.
+`"stack"`) and re-publish. The same rule is checked again at merge time, for a
+PR that never went through this publish check (one an earlier run opened, or one
+whose base was edited on the host since): a target base another bundle of the
+batch produced stops the run, and a PR on any other base is retargeted to its
+bundle's target base before it is readied and merged. That is the one retarget
+the harness makes: of a PR it is about to merge in merge mode, to the target its
+brief names. It never changes a brief's target.
 
 `[driver].regate_between_waves` (default `false`) optionally re-runs your
 repo-scoped gates over each folded integration tip before the next wave builds
