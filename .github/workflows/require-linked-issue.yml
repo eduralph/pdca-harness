@@ -4,9 +4,16 @@ name: PR hygiene
 # check on `main` (no CI/test gates) — it pairs with branch protection's
 # `enforce_admins` so the PR+issue process binds everyone, admins included.
 #
-# A PR satisfies the check when it has a linked/closing issue: a closing keyword
-# in the description ("Closes #123", "Fixes #123", "Resolves #123") or an issue
-# linked via the PR's Development sidebar. Editing the PR body re-runs the check.
+# A PR satisfies the check when it is tied to an issue in either of two ways:
+#   1. a linked/closing issue: a closing keyword in the description ("Closes #123",
+#      "Fixes #123", "Resolves #123") or an issue linked via the PR's Development
+#      sidebar;
+#   2. a non-closing reference in the description ("Refs #123", "Ref: #123",
+#      "Refs #123, #124", "Refs owner/repo#123"), for a PR that delivers part of an
+#      issue and must not close it. Each referenced number is looked up and counts
+#      only if it is an issue (not a PR) the workflow token can read. References
+#      inside fenced code blocks or HTML comments are ignored.
+# Editing the PR body re-runs the check.
 
 on:
   pull_request:
@@ -15,6 +22,7 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  issues: read
 
 jobs:
   require-linked-issue:
@@ -31,18 +39,62 @@ jobs:
               query($owner: String!, $repo: String!, $number: Int!) {
                 repository(owner: $owner, name: $repo) {
                   pullRequest(number: $number) {
+                    body
                     closingIssuesReferences(first: 1) { totalCount }
                   }
                 }
               }`;
             const res = await github.graphql(query, { owner, repo, number });
-            const linked = res.repository.pullRequest.closingIssuesReferences.totalCount;
-            if (linked === 0) {
-              core.setFailed(
-                'This PR is not linked to an issue. Add a closing reference to the ' +
-                'PR description (e.g. "Closes #123") or link an issue via the ' +
-                'Development sidebar, then the check re-runs automatically.'
-              );
-            } else {
+            const pr = res.repository.pullRequest;
+            const linked = pr.closingIssuesReferences.totalCount;
+            if (linked > 0) {
               core.info(`PR is linked to ${linked} issue(s) — OK.`);
+              return;
             }
+
+            // No closing link: look for `Refs #N` references in the body.
+            const text = (pr.body || '')
+              .replace(/<!--[\s\S]*?-->/g, '')
+              .replace(/^\s*(```|~~~)[\s\S]*?^\s*\1/gm, '');
+            const REF = '(?:([\\w.-]+)\\/([\\w.-]+))?#(\\d+)';
+            const keyword = new RegExp(
+              `\\brefs?\\b:?\\s*(${REF}(?:\\s*(?:,|and)\\s*${REF})*)`, 'gi');
+            const refs = [];
+            for (const m of text.matchAll(keyword)) {
+              for (const r of m[1].matchAll(new RegExp(REF, 'g'))) {
+                refs.push({ owner: r[1] || owner, repo: r[2] || repo, number: Number(r[3]) });
+              }
+            }
+
+            const kind = `
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  issueOrPullRequest(number: $number) { __typename }
+                }
+              }`;
+            const issues = [];
+            for (const r of refs) {
+              const name = `${r.owner}/${r.repo}#${r.number}`;
+              try {
+                const k = await github.graphql(kind, r);
+                const t = k.repository && k.repository.issueOrPullRequest &&
+                          k.repository.issueOrPullRequest.__typename;
+                if (t === 'Issue') {
+                  issues.push(name);
+                } else {
+                  core.info(`${name} is ${t ? 'a pull request' : 'not found'} — not counted.`);
+                }
+              } catch (e) {
+                core.info(`${name} could not be read (${e.message}) — not counted.`);
+              }
+            }
+            if (issues.length > 0) {
+              core.info(`PR references ${issues.join(', ')} (non-closing) — OK.`);
+              return;
+            }
+            core.setFailed(
+              'This PR is not linked to an issue. Add a closing reference to the ' +
+              'PR description (e.g. "Closes #123"), a non-closing one for partial ' +
+              'work (e.g. "Refs #123"), or link an issue via the Development ' +
+              'sidebar, then the check re-runs automatically.'
+            );
