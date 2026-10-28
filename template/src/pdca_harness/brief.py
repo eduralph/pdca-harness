@@ -224,6 +224,17 @@ def conflicts_with(brief_path: Path) -> list[str]:
     return _id_list(field(brief_path, "conflicts with", "conflicts_with"))
 
 
+def merges_with(brief_path: Path) -> list[str]:
+    """Issue ids that must land on the base together with this bundle, never alone (#412).
+
+    The optional ``- **Merges with:** <id>[, <id>…]`` field: an atomic merge group — a
+    caller-first pair, or issues planned to merge as one unit. Parsed like
+    :func:`conflicts_with` (ids only on the value line, a trailing note ignored). Either
+    side's declaration binds both (``waves.merge_groups``). Absent ⇒ ``[]``.
+    """
+    return _id_list(field(brief_path, "merges with", "merges_with"))
+
+
 def stacks_on(brief_path: Path) -> list[str]:
     """Issue ids whose just-produced branch this bundle stacks on (issue #123).
 

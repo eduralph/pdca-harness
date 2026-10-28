@@ -20,6 +20,11 @@ Two declared fields shape the partition (docs 09):
   patch conflicts at fold). So each conflict pair is **oriented** into a dependency
   edge — by a deterministic id order — unless a dependency path already separates them.
 
+A third, ``Merges with:`` (#412), names an atomic merge group: bundles that must not land
+on the base separately. It adds no edge. Under ``wave_mode = "merge"`` the driver merges
+each PR on its own, so a group this run can see (:func:`merge_groups`) is refused by the
+strict check and held by the tolerant one; any other mode ignores it.
+
 The result is a list of waves; within each there is provably no dependency and no
 conflict edge, so the wave is safe to build in parallel and fold in one step. With no
 fields declared the whole batch is a single wave, sorted by name — byte-for-byte the
@@ -78,6 +83,10 @@ def check_dep_graph(cfg: Config, bundles: list[Path], *,
     schedule only at the seed splice, which re-levels with it in place, so that is where
     the edge orders anything. A ``Stacks on`` edge to one stays refused (a stack parent must
     be an active COMPLETE bundle). Empty ⇒ exactly the check as it always was.
+
+    Under ``wave_mode = "merge"`` a run with any ``Merges with`` group member
+    (:func:`merge_groups`) is refused the same way (#412): the driver merges each PR on its
+    own, so a member could land on the base without the rest. Any other mode: no check.
     """
     names = {b.name for b in bundles}
     graph: dict[str, list[str]] = {}
@@ -132,6 +141,60 @@ def check_dep_graph(cfg: Config, bundles: list[Path], *,
         if color[n] == WHITE:
             visit(n)
 
+    # Merge mode `gh pr merge`s each non-final wave's PRs one at a time, so a group member
+    # could land on the base alone (#412). Every group this run can see is refused, a
+    # single-wave one too: a later merge-mode run (a resume, or a batch where another bundle
+    # depends on one member) can pick its open PRs up and merge them one by one. Holding a
+    # member and merging the group together is #778.
+    if cfg.wave_mode == "merge":
+        groups = merge_groups(cfg, bundles)
+        if groups:
+            raise DependencyGraphError(
+                "; ".join(f"`Merges with` group {_group_text(g, names)}" for g in groups)
+                + ': wave_mode = "merge" merges each PR on its own, so a member could land '
+                  "on the base without the rest",
+                remedy=_GROUP_WAYS_OUT)
+
+
+#: The two ways out of a ``Merges with`` group under ``wave_mode = "merge"`` (#412), shared
+#: by the strict refusal and the tolerant hold so they say the same thing.
+_GROUP_WAYS_OUT = ('set [driver] wave_mode = "stack" and merge the group\'s PRs together '
+                   "yourself; or fold the group into one bundle")
+
+
+def _group_text(group: list[str], names: set[str]) -> str:
+    """``issue_A + issue_B``: a group's members, each one outside the run marked so."""
+    return " + ".join(n if n in names else f"{n} (not in this run)" for n in group)
+
+
+def merge_groups(cfg: Config, bundles: list[Path]) -> list[list[str]]:
+    """The atomic merge groups this run can see (#412), each a sorted list of bundle names.
+
+    Read from the ``Merges with`` fields of the briefs IN the run, symmetrically (the way
+    :func:`conflict_map` reads ``Conflicts with``): a bundle is a group member when its own
+    brief declares a non-empty ``Merges with``, or when another in-run brief names it there.
+    Unlike a conflict, a partner outside the run is kept, not dropped: a member merged by
+    this run would still land on the base without it. Only in-run briefs are read, so a
+    group declared only by a bundle outside the run is not seen. None declared ⇒ ``[]``.
+    """
+    parent: dict[str, str] = {}
+
+    def root(n: str) -> str:
+        while parent.setdefault(n, n) != n:
+            n = parent[n]
+        return n
+
+    for b in bundles:
+        bp = b / "brief.md"
+        if not bp.exists():
+            continue
+        for mid in brief.merges_with(bp):
+            parent[root(cfg.bundle(mid).name)] = root(b.name)
+    groups: dict[str, list[str]] = {}
+    for n in sorted(parent):
+        groups.setdefault(root(n), []).append(n)
+    return sorted(groups.values())
+
 
 def conflict_map(cfg: Config, bundles: list[Path]) -> dict[str, set[str]]:
     """Symmetric bundle-name → conflicting-bundle-names map, restricted to this batch.
@@ -178,7 +241,8 @@ def compute_waves(cfg: Config, bundles: list[Path], *,
     folds onto the integration branch in one step. Raises :class:`DependencyGraphError`
     (a ``ValueError``, via :func:`check_dep_graph`) on an unschedulable graph — a cycle,
     or a dependency neither in this batch nor already COMPLETE (nor ``offered``, passed
-    straight to :func:`check_dep_graph`). No fields declared ⇒ one wave, sort-by-name.
+    straight to :func:`check_dep_graph`) — and, in merge mode, on a ``Merges with`` group
+    (#412). No fields declared ⇒ one wave, sort-by-name.
     """
     # cycle / unresolved dep → ValueError, before any work
     check_dep_graph(cfg, bundles, offered=offered)
@@ -283,10 +347,12 @@ def partition_schedulable(cfg: Config, bundles: list[Path]
     A bundle is **held** (skipped this run, left in-flight for a later one) when a declared
     dependency is *unresolvable* — neither in the surviving batch nor an existing COMPLETE
     bundle on disk (archived ``completed/`` too, #171; ``Stacks on`` against the active bundle)
-    — or when it sits in a dependency cycle. Held-ness propagates to in-batch dependents (a
-    fixpoint: a bundle whose prerequisite is held can't build either). The schedulable
-    remainder is a valid DAG that :func:`compute_waves` levels without raising. ``held`` maps
-    each held bundle name to a one-line reason for the caller to report."""
+    — or when it sits in a dependency cycle, or, under ``wave_mode = "merge"``, when it is a
+    ``Merges with`` group member (:func:`merge_groups`, #412). Held-ness propagates to
+    in-batch dependents (a fixpoint: a bundle whose prerequisite is held can't build either).
+    The schedulable remainder is a valid DAG that :func:`compute_waves` levels without
+    raising. ``held`` maps each held bundle name to a one-line reason for the caller to
+    report."""
     names = {b.name for b in bundles}
     by_name = {b.name: b for b in bundles}
     edges: dict[str, list[str]] = {}
@@ -307,6 +373,16 @@ def partition_schedulable(cfg: Config, bundles: list[Path]
         edges[b.name] = in_batch
         if unresolved:
             held[b.name] = f"unresolved dependency ({', '.join(unresolved)})"
+
+    # What check_dep_graph refuses in merge mode, held here instead, with the same ways out
+    # (#412). Before the propagation below, so a member's dependents are held as well.
+    if cfg.wave_mode == "merge":
+        for group in merge_groups(cfg, bundles):
+            why = (f"`Merges with` group {_group_text(group, names)}, which wave_mode = "
+                   f"\"merge\" would merge one PR at a time — {_GROUP_WAYS_OUT}")
+            for name in group:
+                if name in names:
+                    held[name] = f"{held[name]}; {why}" if name in held else why
 
     # A bundle whose in-batch prerequisite is held can't build on a base missing that
     # prerequisite's change either — propagate to a fixpoint.
