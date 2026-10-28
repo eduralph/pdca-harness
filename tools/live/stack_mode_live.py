@@ -27,10 +27,11 @@ tool or the driver starts gets ``GH_TOKEN`` set to the token file's token; an am
 ``GH_TOKEN`` / ``GITHUB_TOKEN`` or a stored ``gh`` login is never used, and ``git`` pushes
 through ``gh auth git-credential``, set as the credential helper of the tool's own clone only.
 
-``setup`` creates the run base ``live-<UTC stamp>`` from the sandbox's ``main`` and records it
-in ``state.json`` (written before the branch is created, so ``teardown`` always finds it), then
-clones the sandbox and writes the scenario's bundles. ``main``, the repository and its settings
-are never changed.
+``setup`` creates the run base ``live-<UTC stamp>-<6 hex>`` from the sandbox's ``main`` and
+records it in ``state.json`` (written before the branch is created, so ``teardown`` always finds
+it; a name GitHub reports as already taken is marked as another run's, which ``teardown`` then
+leaves alone), then clones the sandbox and writes the scenario's bundles. ``main``, the
+repository and its settings are never changed.
 
 ``run`` drives the scenario through the real driver code: each run is ``flow.flow_ids``, the
 call ``pdca flow <ids>`` makes, with only the model leaves replaced (``flow._drive_wave`` writes
@@ -68,6 +69,7 @@ import json
 import os
 import re
 import shlex
+import secrets
 import shutil
 import subprocess
 import sys
@@ -351,7 +353,8 @@ def cmd_setup(a: argparse.Namespace) -> int:
         return RC_REFUSED
     repo = str(info["full_name"])
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
-    base = f"live-{stamp}"
+    # The random part keeps two setups started in the same second from picking one name.
+    base = f"live-{stamp}-{secrets.token_hex(3)}"
     workdir.mkdir(parents=True, exist_ok=True)
     state = {"tool": TOOL, "repo": repo, "run_base": base, "stamp": stamp,
              "default_branch": info.get("default_branch"), "base_created": False,
@@ -363,6 +366,14 @@ def cmd_setup(a: argparse.Namespace) -> int:
         state["base_from"] = _main_sha(repo)
         r = gh("api", "-X", "POST", f"repos/{repo}/git/refs",
                "-f", f"ref=refs/heads/{base}", "-f", f"sha={state['base_from']}")
+        if r.returncode != 0 and "Reference already exists" in _said(r):
+            # Another run's branch: this setup made nothing on GitHub, and `teardown` must not
+            # treat that run's base, or the branches under its prefix, as this run's.
+            state["base_collision"] = True
+            write_json(workdir / "state.json", state)
+            print(f"setup: {base} already exists on {repo} — another run's; nothing was made "
+                  f"on GitHub. Re-run setup with a fresh --workdir.", file=sys.stderr)
+            return RC_FAIL
         if r.returncode != 0:
             raise RuntimeError(f"could not create {base} on {repo}: {_said(r)}")
         state["base_created"] = True
@@ -1452,9 +1463,10 @@ def cmd_teardown(a: argparse.Namespace) -> int:
     branch ``state.json`` records and every remote branch under the run's integration prefix
     (``integrate.integration_branch(cfg, base)``, integrate.py:140-157: the lines and the
     per-bundle bases, :160, all start with it). Never ``main`` or the default branch, never
-    the repository or its settings. Then remove what ``setup`` made locally (the clone, its
-    integration worktrees, the bundle root); ``state.json``, the observations and the report
-    stay. ``--keep`` changes nothing."""
+    the repository or its settings, and nothing on GitHub at all when ``setup`` found the run
+    base already taken (``base_collision``: that base and its prefix are another run's). Then
+    remove what ``setup`` made locally (the clone, its integration worktrees, the bundle
+    root); ``state.json``, the observations and the report stay. ``--keep`` changes nothing."""
     token, why = guard(a.repo, a.token_file)
     if why:
         return _refuse("teardown", why)
@@ -1468,6 +1480,7 @@ def cmd_teardown(a: argparse.Namespace) -> int:
     if not base.startswith("live-") or base == MAIN:
         return _refuse("teardown", f"state.json names {base!r} as the run base, not a "
                                    f"live-<stamp> branch")
+    owns_base = not state.get("base_collision")
     recorded = [b for b in state.get("branches") or [] if isinstance(b, str) and b]
     prs = [p for p in (state.get("prs") or {}).values() if isinstance(p, dict)]
     if a.keep:
@@ -1486,14 +1499,14 @@ def cmd_teardown(a: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001 — the recorded branches still go
         failed.append(f"could not work out the integration prefix: {exc}")
     listed: list[str] = []
-    if prefix:
+    if prefix and owns_base:
         r = gh("api", "--paginate", f"repos/{repo}/git/matching-refs/heads/{prefix}",
                "--jq", ".[].ref")
         if r.returncode != 0:
             failed.append(f"could not list the branches under {prefix}: {_said(r)}")
         listed = [x.strip().removeprefix("refs/heads/") for x in r.stdout.splitlines()
                   if x.strip().startswith(f"refs/heads/{prefix}")]
-    branches = list(dict.fromkeys([base, *recorded, *listed]))
+    branches = list(dict.fromkeys(([base] if owns_base else []) + [*recorded, *listed]))
     branches = [b for b in branches if b not in protected]
     numbers = {p.get("number") for p in prs if isinstance(p.get("number"), int)}
     r = gh("pr", "list", "--repo", repo, "--state", "open", "--limit", "1000",

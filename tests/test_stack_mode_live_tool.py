@@ -542,6 +542,14 @@ elif args[:3] == ["api", "-X", "DELETE"] and "/git/refs/heads/" in args[3]:
     (home / "world.json").write_text(json.dumps(world), encoding="utf-8")
 elif args[:2] == ["pr", "close"]:
     pass
+elif args[:1] == ["api"] and args[1] == f"repos/{repo}/git/ref/heads/main":
+    print("a" * 40)
+elif args[:3] == ["api", "-X", "POST"] and args[3] == f"repos/{repo}/git/refs":
+    branch = args[args.index("-f") + 1].split("refs/heads/", 1)[1]
+    if world.get("ref_taken") or branch in world["branches"]:
+        sys.exit("gh: Reference already exists (HTTP 422)")
+    world["branches"].append(branch)
+    (home / "world.json").write_text(json.dumps(world), encoding="utf-8")
 else:
     sys.exit(f"fake gh: unexpected call {args}")
 """
@@ -743,6 +751,51 @@ class GuardPreflightTeardown(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         deleted, _closed = self._deleted_and_closed()
         self.assertEqual(deleted, {BASE, _branch("A"), LINE, f"{LINE}-bD"}, r.stdout)
+
+    # Two setups that pick the same run base: the second finds it taken, makes nothing on
+    # GitHub, and its teardown leaves the first run's base, branches and PRs alone.
+    def test_a_taken_run_base_is_never_torn_down_as_this_runs(self):
+        self._teardown_world()
+        world = json.loads((self.gh_home / "world.json").read_text(encoding="utf-8"))
+        world["ref_taken"] = True
+        (self.gh_home / "world.json").write_text(json.dumps(world), encoding="utf-8")
+        second = self.root / "second"
+        r = self.tool("setup", "--workdir", str(second), "--repo", REPO,
+                      "--token-file", str(self.token))
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0, out)
+        self.assertIn("already exists", r.stderr)
+        self.assertNotIn("teardown", r.stderr)
+        state = json.loads((second / "state.json").read_text(encoding="utf-8"))
+        self.assertTrue(state["base_collision"], state)
+        self.assertFalse(state["base_created"], state)
+        # As if both setups had picked the first run's base.
+        state["run_base"] = BASE
+        (second / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        (self.gh_home / "calls.jsonl").unlink()     # judge teardown's calls only
+        r = self.tool("teardown", "--workdir", str(second), "--repo", REPO,
+                      "--token-file", str(self.token))
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        deleted, closed = self._deleted_and_closed()
+        self.assertEqual((deleted, closed), (set(), []), out)
+        world = json.loads((self.gh_home / "world.json").read_text(encoding="utf-8"))
+        self.assertTrue({BASE, _branch("A"), LINE} <= set(world["branches"]), world)
+
+    # The name is in state.json before the branch is created; `ref_taken` stops each setup
+    # there, so the test never reaches the clone (a real `git fetch` from github.com).
+    def test_setup_names_each_run_base_apart(self):
+        self.world({}, ref_taken=True)
+        names = set()
+        for n in range(2):
+            work = self.root / f"w{n}"
+            r = self.tool("setup", "--workdir", str(work), "--repo", REPO,
+                          "--token-file", str(self.token))
+            state = json.loads((work / "state.json").read_text(encoding="utf-8"))
+            self.assertRegex(state["run_base"], r"^live-\d{8}-\d{6}-[0-9a-f]{6}$",
+                             r.stdout + r.stderr)
+            names.add(state["run_base"])
+        self.assertEqual(len(names), 2, names)
 
     def test_teardown_keep_changes_nothing(self):
         self._teardown_world()
