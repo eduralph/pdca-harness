@@ -193,6 +193,29 @@ class MergeHoldsThePrToItsTargetBase(unittest.TestCase):
                     self.assertIn("may edit it", err)
                     self.assertNotIn("Repo + branch target", err)
 
+    # A record that names the base the PR was published against (an integration line) is
+    # rewritten to the target once the host reports the PR there, so a dependent asking
+    # `merged.merged_into` about the merged PR counts it merged into the target, not held.
+    def test_retarget_records_the_target_so_dependents_count_the_merge(self) -> None:
+        line = "pdca-integration/main"
+        for requires in REQUIRES:
+            with self.subTest(merge_requires=requires):
+                cfg = _cfg(self.tmp / requires, merge_requires=requires)
+                host = _Host(line)
+                d = self._bundle(cfg, "500", record={
+                    "mode": "stacked-pr", "branch": "fix/500-x", "pr_url": PR,
+                    "repo": "org/repo", "base": line})
+                rc, err = self._run(cfg, host, d)
+                self.assertEqual(rc, 0, err)
+                self.assertEqual(host.merged_into, ["main"])
+                rec = json.loads((d / "publish.json").read_text(encoding="utf-8"))
+                self.assertEqual(rec["base"], "main")
+                self.assertEqual(rec["mode"], "stacked-pr")          # the rest is kept
+                with mock.patch.object(state, "state", return_value=state.COMPLETE), \
+                        mock.patch.object(merged, "pr_state", return_value=("MERGED", HEAD)), \
+                        redirect_stderr(io.StringIO()):
+                    self.assertTrue(merged.merged_into(cfg, "500", "org/repo", "main"))
+
     # (d) + (c): a PR already on its target base makes no edit.
     def test_pr_on_its_target_base_makes_no_edit(self) -> None:
         for requires in REQUIRES:

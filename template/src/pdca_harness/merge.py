@@ -592,6 +592,13 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
               "are NOT run, and the PR is left draft or ready, as it was. Re-run once that "
               "is resolved (the run resumes idempotently).\n", file=sys.stderr)
         return 1
+    # The host now reports the PR on `target`, so the record must too: `merged.merged_into`
+    # compares the record's `base` with a dependent's target, and a record still naming the
+    # base the PR was published against (an integration line, say) would hold every
+    # dependent of this PR once it merges, in this run and later ones.
+    if rec.get("base") != target:
+        rec["base"] = target
+        (d / "publish.json").write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
 
     # The publisher opens every PR as a draft (STOP discipline), but `gh pr merge` refuses a
     # draft — so in merge mode a non-final wave's PRs must be readied before they can advance
