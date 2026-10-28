@@ -20,7 +20,10 @@ instance; this one governs work on the template itself.)
 
 - Every change starts from an issue on the open milestone, and the PR body
   carries a closing reference (`Closes #NNN`) — the `require-linked-issue` check
-  enforces it.
+  enforces it. A PR that delivers only part of an issue uses a non-closing
+  `Refs #NNN` instead, so the issue stays open for the rest; the check accepts
+  that too, but only for a number that is an existing issue. Say in the PR body
+  what is left and where it is tracked.
 - One logical change per issue / branch / PR; split unrelated changes.
 - Commits are signed off (`git commit -s`, [DCO](DCO)) with a
   conventional-prefix subject (`fix:`, `feat:`, `docs:`, `ci:`, `chore:`) and a

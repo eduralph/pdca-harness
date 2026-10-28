@@ -894,6 +894,21 @@ wave builds on, via `[driver].wave_mode`:
   the host while the checks are read stops the run too, with the ready-mark
   undone. A target base that another bundle of the batch produced stops the run
   before any retarget (see below).
+  Merge mode does not support a `Merges with` group yet (an atomic merge group,
+  [step 03](03-plan.md#ordering-and-routing-the-batch); issue #778): it merges
+  each PR on its own, so one member could land on the base without the rest. So
+  it builds no group member the run can see, meaning a bundle in the run whose
+  brief declares `Merges with`, or that another brief in the run names there.
+  That holds even when the whole group would sit in the final wave, which the
+  driver does not merge: a later merge-mode run can still pick up its open PRs
+  one at a time. `pdca flow <ids>` exits 2 before building anything, naming the
+  group and the two ways out: set `wave_mode = "stack"`, or fold the group into
+  one bundle. The `--from-csv` sweep holds the group and its dependents and
+  drives the rest. Bare `pdca waves` refuses (`unschedulable:`, exit 1) where
+  the sweep holds, as it already does for an unresolved `Depends on`. Two gaps
+  remain, both in issue #778: a group declared only in the brief of a bundle
+  outside the run is not seen, and a split does not carry `Merges with` to its
+  children. Declare it on every member.
 
 In merge mode the merge is unattended, so **publish refuses to open a PR against
 any branch this run produced** — the work must land on a base that exists
