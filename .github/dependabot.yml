@@ -1,0 +1,13 @@
+# Weekly version updates for the actions the workflows pin to commit hashes. Dependabot
+# reads only .github/workflows/*.yml, not the workflow the template renders into every
+# instance (template/.github/workflows/*.jinja); tests/test_workflows.py fails until that
+# one uses the same pins, so a Dependabot PR shows what else to update.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
