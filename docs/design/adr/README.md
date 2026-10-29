@@ -14,6 +14,38 @@ ADRs 0001–0008 were backfilled on 2026-10-15: they record decisions the harnes
 made, each dated to the commit or issue that made it. ADRs 0009–0015 are written as the first
 PR of each migration step (see [architecture §9](../architecture/09-build-order-and-roadmap.md)).
 
+## How an ADR is made
+
+The rules are in ADR-0001 (lifecycle), ADR-0019 (supersession) and
+[GOVERNANCE.md](../../governance/GOVERNANCE.md) (who accepts). In order:
+
+1. **Open an issue** that states the question. Every pull request needs one, and the
+   discussion before there is a draft belongs there.
+2. **Take the next number.** One more than the highest number in the index and in any open
+   pull request that adds an ADR. Numbers are never reused, not even for an ADR that was
+   dropped.
+3. **Write it from the template.** Copy [`../templates/adr.md`](../templates/adr.md) to
+   `NNNN-short-title.md`, keep `status: Proposed` with nothing after it on that line, and
+   write Context, Decision and Consequences. Mark anything still undecided **[OPEN]**.
+4. **Add it to the index** below, with status `Proposed`, in the same pull request.
+5. **Open the pull request** with `Refs #N` for the issue. Discussion happens there; a
+   Proposed ADR may be edited freely, before and after it merges.
+6. **Accept it.** When the architecture board (GOVERNANCE.md) agrees and no **[OPEN]**
+   items are left, change `status:` to `Accepted` and the index row to match, then merge.
+   This edit is the act of acceptance; only a maintainer makes it, never an agent. From
+   here the file is frozen (`docs-immutability`).
+7. **Change it later only by superseding it** (ADR-0019): a new ADR with
+   `supersedes: NNNN`, the old file's `status:` changed to `Superseded` (optionally with
+   `superseded-by:`) and nothing else, and the old index row changed to
+   `Superseded by NNNN`, all in one pull request.
+
+ADR-0001 has no Rejected status: if the board does not agree, close the pull request
+without merging it.
+
+`docs-check` keeps this index honest: every ADR is listed once, its status here matches its
+frontmatter, and both sides of every supersession agree. Run
+`python3 -I .github/docs-check/adr_index.py` before pushing.
+
 ## Index
 
 | # | Title | Decided | Status |
@@ -35,3 +67,5 @@ PR of each migration step (see [architecture §9](../architecture/09-build-order
 | 0015 | Integration modes are strategy objects with stated invariants and property tests | step 6 | Planned ([#715](https://github.com/eduralph/pdca-harness/issues/715)) |
 | [0016](0016-strangler-migration.md) | The migration is a strangler, never a rewrite | 2026-10-15 | Accepted |
 | [0017](0017-issue-priority-and-automated-triage.md) | Issue priority and automated triage: severity × reach set P0–P3 with security and decision-integrity overrides; a GitHub Action applies it to this repository's issues with one Claude API call per issue | — | Proposed |
+| [0018](0018-proposal-and-spec-process.md) | Proposal and specification process, lifecycle, and immutability | — | Proposed |
+| [0019](0019-supersession.md) | How a frozen document is superseded | — | Proposed |
