@@ -52,6 +52,10 @@ Set each flag to true only when the issue text supports it:
 - `security`: the issue is about an attack on the harness or the projects it runs on: a leaf escaping its sandbox or tools, a credential exposed, hostile tracker text steering a leaf.
 - `decision_integrity`: the issue is about a change being signed off or published without the human decision or the red-green evidence: a model writing the decision, the accept guard bypassed, a gate reporting a pass it did not earn, a leaf merging or marking a pull request ready.
 
+## Deferred review findings
+
+Some issues record a code review finding that was deferred out of a pull request. The body then names the review's priority, for example "Codex review of the pull request (P2, deferred on purpose there)" or a P1 or P2 badge. A deferred review finding keeps the review's priority, unless the issue shows that the pull request changed the impact. Set `review_priority` to that priority (`P0` to `P3`). Set it to `none` when the issue states no review priority, or when it shows that the pull request changed the impact.
+
 ## When you cannot tell
 
 If the text does not let you place severity or reach, set `unsure` to true and say in `missing` what information would settle it. Never pick a lower severity or reach to be safe; leaving it open is the safe choice.
