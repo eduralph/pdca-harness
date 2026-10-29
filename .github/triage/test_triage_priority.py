@@ -24,7 +24,7 @@ NO_FLAGS = {f: False for f in tp.FLAGS}
 def verdict(**over) -> dict:
     v = {
         "type": "bug", "severity": "major", "reach": "common", "areas": ["records"],
-        "flags": dict(NO_FLAGS), "unsure": False, "missing": "",
+        "flags": dict(NO_FLAGS), "review_priority": "none", "unsure": False, "missing": "",
         "secret_in_issue": False, "vulnerability_report": False,
         "reasons": {"type": "The driver reads a finished bundle's state wrongly.",
                     "severity": "A bundle is misread as unplanned and its cycle cannot advance.",
@@ -49,8 +49,8 @@ def plan(i: tp.Issue | None = None, **v) -> tp.Plan:
                          model=tp.MODEL, usage="1 in, 1 out", truncated=False)
 
 
-def prio(severity, reach, flags=None, labels=()):
-    return tp.compute_priority(severity, reach, flags or NO_FLAGS, set(labels))
+def prio(severity, reach, flags=None, review="none", labels=()):
+    return tp.compute_priority(severity, reach, flags or NO_FLAGS, review, set(labels))
 
 
 class Table(unittest.TestCase):
@@ -63,17 +63,17 @@ class Table(unittest.TestCase):
         }
         for (sev, reach), p in expected.items():
             with self.subTest(sev=sev, reach=reach):
-                self.assertEqual(tp.compute_priority(sev, reach, NO_FLAGS, set())[0], p)
+                self.assertEqual(prio(sev, reach)[0], p)
 
     def test_security_lifts_adversarial_major_to_p1(self) -> None:
-        prio, base, applied = tp.compute_priority(
-            "major", "adversarial", dict(NO_FLAGS, security=True), set())
-        self.assertEqual((prio, base), (1, 2))
+        p, base, applied = prio(
+            "major", "adversarial", dict(NO_FLAGS, security=True))
+        self.assertEqual((p, base), (1, 2))
         self.assertIn("security", applied[0])
 
     def test_decision_integrity_lifts_edge_minor_to_p1(self) -> None:
         flags = dict(NO_FLAGS, decision_integrity=True)
-        self.assertEqual(tp.compute_priority("minor", "edge", flags, set())[0], 1)
+        self.assertEqual(prio("minor", "edge", flags)[0], 1)
 
     def test_decision_integrity_lifts_edge_major_to_p1(self) -> None:
         # ADR-0017 section 6: the reviewer's vendor is not checked (major / edge) is P1.
@@ -86,12 +86,32 @@ class Table(unittest.TestCase):
 
     def test_no_release_gating_floor(self) -> None:
         # The repository has no release-gating label, so the label is not a floor here.
-        self.assertEqual(tp.compute_priority("trivial", "common", NO_FLAGS, {"release-gating"})[0], 3)
+        self.assertEqual(prio("trivial", "common", labels={"release-gating"})[0], 3)
 
     def test_no_label_is_a_floor(self) -> None:
         # ADR-0017 section 3 lists no label override.
         self.assertEqual(tp.LABEL_FLOORS, {})
         self.assertEqual(prio("trivial", "edge", labels={"accessibility", "security"})[0], 3)
+
+    def test_review_priority_is_kept(self) -> None:
+        # ADR-0017 section 3: a minor/edge deferred finding is P3 by the table, P2 from review.
+        p, base, notes = prio("minor", "edge", review="P2")
+        self.assertEqual((p, base), (2, 3))
+        self.assertIn("deferred review", notes[0])
+
+    def test_review_priority_can_lower_the_table(self) -> None:
+        self.assertEqual(prio("major", "common", review="P2")[0], 2)
+
+    def test_review_priority_that_agrees_adds_no_note(self) -> None:
+        self.assertEqual(prio("major", "common", review="P1"), (1, 1, []))
+
+    def test_floors_apply_after_the_review_priority(self) -> None:
+        p, _, notes = prio("major", "adversarial", dict(NO_FLAGS, decision_integrity=True), review="P2")
+        self.assertEqual(p, 1)
+        self.assertEqual(len(notes), 1)  # the review agrees with the table; only the floor
+        p, _, notes = prio("minor", "common", dict(NO_FLAGS, security=True), review="P3")
+        self.assertEqual(p, 1)
+        self.assertEqual(len(notes), 2)  # the review lowers it to P3, the floor lifts it to P1
 
     def test_adr_0017_section_6_examples(self) -> None:
         di, sec = dict(NO_FLAGS, decision_integrity=True), dict(NO_FLAGS, security=True)
@@ -114,8 +134,8 @@ class Table(unittest.TestCase):
         self.assertEqual(tp.FLOORS["decision_integrity"][0], 1)
 
     def test_floor_never_lowers(self) -> None:
-        prio, _, applied = tp.compute_priority("critical", "common", dict(NO_FLAGS, security=True), set())
-        self.assertEqual((prio, applied), (0, []))
+        p, _, applied = prio("critical", "common", dict(NO_FLAGS, security=True))
+        self.assertEqual((p, applied), (0, []))
 
     def test_every_flag_has_a_floor(self) -> None:
         self.assertLessEqual(set(tp.FLAGS), set(tp.FLOORS))
@@ -124,12 +144,12 @@ class Table(unittest.TestCase):
 class Validate(unittest.TestCase):
     def test_rejects_unknown_values(self) -> None:
         for bad in ({"severity": "blocker"}, {"reach": "rare"}, {"type": "chore"},
-                    {"areas": ["kernel"]}):
+                    {"areas": ["kernel"]}, {"review_priority": "P4"}):
             with self.subTest(bad=bad), self.assertRaises(tp.InvalidVerdict):
                 tp.validate(verdict(**bad), AREAS)
 
     def test_rejects_missing_fields(self) -> None:
-        for field in ("flags", "secret_in_issue", "vulnerability_report"):
+        for field in ("flags", "review_priority", "secret_in_issue", "vulnerability_report"):
             v = verdict()
             del v[field]
             with self.subTest(field=field), self.assertRaises(tp.InvalidVerdict):
@@ -212,7 +232,8 @@ class SecurityNotes(unittest.TestCase):
         p = plan(severity="critical", reach="adversarial", vulnerability_report=True,
                  flags=dict(NO_FLAGS, security=True))
         self.assertIn("priority:P1", p.add_labels)
-        self.assertIn("follow up with you privately", p.comment)
+        self.assertIn("report it privately as SECURITY.md describes", p.comment)
+        self.assertIn("private advisory", p.comment)
         for reason in verdict()["reasons"].values():
             self.assertNotIn(reason, p.comment)
 
@@ -226,6 +247,7 @@ class SecurityNotes(unittest.TestCase):
     def test_no_notes_on_an_ordinary_issue(self) -> None:
         c = plan().comment
         self.assertNotIn("privately", c)
+        self.assertNotIn("SECURITY.md", c)
         self.assertNotIn("rotate", c)
 
 
@@ -357,7 +379,12 @@ class BuildPlan(unittest.TestCase):
         self.assertIn("priority:P1", p.add_labels)
         p = plan(severity="major", reach="adversarial", flags=dict(NO_FLAGS, security=True))
         self.assertIn("priority:P1", p.add_labels)
-        self.assertIn("Raised by: security bug", p.comment)
+        self.assertIn("Then: security bug (at least P1)", p.comment)
+
+    def test_review_priority_is_explained(self) -> None:
+        p = plan(severity="minor", reach="edge", review_priority="P2")
+        self.assertIn("priority:P2", p.add_labels)
+        self.assertIn("kept the deferred review's P2", p.comment)
 
     def test_never_touches_the_milestone(self) -> None:
         self.assertFalse(hasattr(plan(), "milestone"))
@@ -389,7 +416,7 @@ class ApplyCheck(unittest.TestCase):
         return e
 
     def test_a_built_plan_passes(self) -> None:
-        p = plan(severity="minor", reach="edge", flags=dict(NO_FLAGS, decision_integrity=True))
+        p = plan(severity="minor", reach="edge", review_priority="P2")
         self.assertEqual(tp.check_plan(asdict(p), CONFIG), p)
 
     def test_an_entry_passes(self) -> None:
@@ -492,6 +519,14 @@ class LoadPrompt(unittest.TestCase):
         # pdca-harness's prompt.md has no template text and no maintainer notes.
         real = tp.HERE / "prompt.md"
         self.assertEqual(tp.load_prompt(real), real.read_text(encoding="utf-8"))
+
+    def test_the_real_prompt_names_every_verdict_field(self) -> None:
+        text = (tp.HERE / "prompt.md").read_text(encoding="utf-8")
+        for name in (*tp.FLAGS, "review_priority", "unsure", "missing", "secret_in_issue",
+                     "vulnerability_report"):
+            with self.subTest(field=name):
+                self.assertIn(f"`{name}`", text)
+        self.assertIn("changed the impact", text)
 
     def test_the_real_labels_have_no_template_area(self) -> None:
         self.assertFalse(any("EXAMPLE" in spec["description"] for spec in CONFIG["area"].values()))

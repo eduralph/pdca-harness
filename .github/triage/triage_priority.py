@@ -16,11 +16,12 @@ scopes the token's permissions per job (ADR-0017 sections 4 and 5):
                issues: write and never imports the Anthropic SDK or calls a model.
 
 For each issue that has no `priority:*` label, the model returns a JSON verdict (type,
-severity, reach, area, override flags). The priority is computed HERE from ADR-0017's
-table and overrides, never by the model. The model has no tools. The script never sets a
-milestone, and withholds any reason that repeats the issue's own text, so a log line,
-hostname or key pasted into a report is not copied into the comment. A report that looks
-like an undisclosed vulnerability is labelled but not restated (ADR-0017 section 4).
+severity, reach, area, flags, the review priority of a deferred finding). The priority
+is computed HERE from ADR-0017's table and overrides, never by the model. The model has
+no tools. The script never sets a milestone, and withholds any reason that repeats the
+issue's own text, so a log line, hostname or key pasted into a report is not copied into
+the comment. A report that looks like an undisclosed vulnerability is labelled but not
+restated (ADR-0017 section 4).
 
     triage_priority.py classify --issue 42 --out plan.json
     triage_priority.py classify --all --limit 20 --dry-run
@@ -63,6 +64,7 @@ TYPES = ("bug", "enhancement", "documentation")
 SEVERITIES = ("critical", "major", "minor", "trivial")
 REACHES = ("common", "edge", "adversarial")
 FLAGS = ("security", "decision_integrity")
+REVIEW_PRIORITIES = ("none", "P0", "P1", "P2", "P3")
 # ADR-0017 sets severity, reach and priority for every type (section 4, step 1); for an
 # enhancement or documentation issue, severity is how much it matters if it is not done.
 PRIORITISED_TYPES = TYPES
@@ -127,6 +129,7 @@ def verdict_schema(areas: list[str]) -> dict:
                 "required": list(FLAGS),
                 "additionalProperties": False,
             },
+            "review_priority": {"type": "string", "enum": list(REVIEW_PRIORITIES)},
             "unsure": {"type": "boolean"},
             "missing": {"type": "string"},
             "secret_in_issue": {"type": "boolean"},
@@ -138,8 +141,8 @@ def verdict_schema(areas: list[str]) -> dict:
                 "additionalProperties": False,
             },
         },
-        "required": ["type", "severity", "reach", "areas", "flags", "unsure", "missing",
-                     "secret_in_issue", "vulnerability_report", "reasons"],
+        "required": ["type", "severity", "reach", "areas", "flags", "review_priority", "unsure",
+                     "missing", "secret_in_issue", "vulnerability_report", "reasons"],
         "additionalProperties": False,
     }
 
@@ -158,6 +161,8 @@ def validate(verdict: dict, areas: list[str]) -> dict:
             raise InvalidVerdict(f"severity {verdict['severity']!r}")
         if verdict["reach"] not in REACHES:
             raise InvalidVerdict(f"reach {verdict['reach']!r}")
+        if verdict["review_priority"] not in REVIEW_PRIORITIES:
+            raise InvalidVerdict(f"review_priority {verdict['review_priority']!r}")
         chosen = [a for a in verdict["areas"] if a in areas]
         if len(chosen) != len(verdict["areas"]):
             raise InvalidVerdict(f"areas {verdict['areas']!r}")
@@ -169,6 +174,7 @@ def validate(verdict: dict, areas: list[str]) -> dict:
             "reach": verdict["reach"],
             "areas": list(dict.fromkeys(chosen))[:2],
             "flags": flags,
+            "review_priority": verdict["review_priority"],
             "unsure": verdict["unsure"] is True,
             "missing": str(verdict["missing"]),
             "secret_in_issue": verdict["secret_in_issue"] is True,
@@ -179,11 +185,19 @@ def validate(verdict: dict, areas: list[str]) -> dict:
         raise InvalidVerdict(f"missing or malformed field: {e}") from e
 
 
-def compute_priority(severity: str, reach: str, flags: dict[str, bool],
+def compute_priority(severity: str, reach: str, flags: dict[str, bool], review_priority: str,
                      existing_labels: set[str]) -> tuple[int, int, list[str]]:
-    """ADR-0017 sections 2 and 3. Returns (priority, table_priority, floors applied)."""
+    """ADR-0017 sections 2 and 3. Returns (priority, table_priority, notes).
+
+    Order where the rules disagree (ADR-0017 does not say): the table, then a deferred
+    review finding keeps the review's priority, then the floors."""
     base = TABLE[severity][reach]
     prio, notes = base, []
+    if review_priority != "none":
+        kept = int(review_priority[1])
+        if kept != prio:
+            notes.append(f"kept the deferred review's P{kept}")
+        prio = kept
     floors = [FLOORS[k] for k, on in flags.items() if on and k in FLOORS]
     floors += [LABEL_FLOORS[name] for name in sorted(existing_labels) if name in LABEL_FLOORS]
     for floor, label in sorted(set(floors)):
@@ -345,7 +359,8 @@ def build_plan(issue: Issue, verdict: dict, config: dict, *, model: str, usage: 
         rows.append(_row("needs-triage", f"Severity or reach could not be placed. Missing: {missing}"))
     else:
         prio, base, notes = compute_priority(verdict["severity"], verdict["reach"],
-                                             verdict["flags"], issue.labels)
+                                             verdict["flags"], verdict["review_priority"],
+                                             issue.labels)
         if "needs-triage" in issue.labels:
             plan.remove_labels.append("needs-triage")
         plan.add_labels += [f"sev:{verdict['severity']}", f"reach:{verdict['reach']}",
@@ -354,7 +369,7 @@ def build_plan(issue: Issue, verdict: dict, config: dict, *, model: str, usage: 
         rows.append(_row(f"reach:{verdict['reach']}", reasons["reach"]))
         why = f"{verdict['severity']} × {verdict['reach']} is P{base} in the ADR-0017 table."
         if notes:
-            why += " Raised by: " + "; ".join(notes) + f". {reasons['overrides']}"
+            why += " Then: " + "; ".join(notes) + f". {reasons['overrides']}"
         rows.append(_row(f"priority:P{prio}", why))
 
     if not issue.assignees:
@@ -372,10 +387,10 @@ def build_plan(issue: Issue, verdict: dict, config: dict, *, model: str, usage: 
         *rows,
     ]
     if verdict["vulnerability_report"]:
-        # No private reporting channel exists yet (ADR-0017, [OPEN]); a maintainer follows up.
+        # The private channel is GitHub's private vulnerability reporting (SECURITY.md).
         lines += ["", "This issue may describe a security vulnerability. Please do not add "
-                      "further detail here; a maintainer will hide this report if needed and "
-                      "follow up with you privately."]
+                      "further detail here; report it privately as SECURITY.md describes. A "
+                      "maintainer may move this report to a private advisory."]
     if verdict["secret_in_issue"]:
         lines += ["", "This issue seems to contain a credential or other secret. Please rotate "
                       "it and edit it out of the issue; editing alone does not remove it from "
