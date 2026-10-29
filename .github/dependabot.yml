@@ -2,12 +2,16 @@
 # reads only .github/workflows/*.yml, not the workflow the template renders into every
 # instance (template/.github/workflows/*.jinja); tests/test_workflows.py fails until that
 # one uses the same pins, so a Dependabot PR shows what else to update.
+# Each entry waits 7 days after a release before proposing it (cooldown), so brand-new
+# releases get a week to show problems. Security updates ignore the cooldown.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     commit-message:
       prefix: "ci"
