@@ -14,6 +14,10 @@ name: PR hygiene
 #      only if it is an issue (not a PR) the workflow token can read. References
 #      inside fenced code blocks or HTML comments are ignored.
 # Editing the PR body re-runs the check.
+#
+# Dependabot's dependency-bump PRs pass without an issue: they are traceable through the
+# changelog and the dependency audit. They pass rather than skip, because a skipped
+# required check stays pending and would block the merge.
 
 on:
   pull_request:
@@ -35,6 +39,10 @@ jobs:
           script: |
             const { owner, repo } = context.repo;
             const number = context.payload.pull_request.number;
+            if (context.payload.pull_request.user.login === 'dependabot[bot]') {
+              core.info('Dependency PR by dependabot — exempt.');
+              return;
+            }
             const query = `
               query($owner: String!, $repo: String!, $number: Int!) {
                 repository(owner: $owner, name: $repo) {
