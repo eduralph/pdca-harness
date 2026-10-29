@@ -1,0 +1,266 @@
+name: docs-immutability
+
+# Ratified design documents are append-only:
+#   - ADRs: Proposed -> Accepted -> Superseded.
+#   - Proposals: draft -> accepted -> implemented/superseded/withdrawn.
+#   - Specs: draft -> stable -> superseded/withdrawn.
+#
+# The `status:` field in YAML frontmatter is the source of truth. This check
+# fails a pull request only when it modifies, deletes, or renames a document
+# that is *already* immutable in the PR's base — i.e. the version before the
+# change. Reading status from the base is what makes Proposed/draft -> Accepted
+# and draft -> stable transitions legal while freezing the record from that
+# point on. Adding new documents and editing indexes/READMEs stays allowed.
+#
+# Supersession carve-out: a frozen document (Accepted ADR/proposal, stable spec)
+# MAY be edited in exactly one narrow way — a *supersession stamp* that flips its
+# `status:` to `Superseded` and, optionally, adds a `superseded-by:` frontmatter
+# field. Everything else in the file (the whole body, all other frontmatter) must
+# be byte-for-byte unchanged, and the stamp is one-way (a Superseded base is
+# frozen again). This lets the final "-> Superseded" transition in each lifecycle
+# above be recorded on the document itself; every other edit to a frozen document
+# still fails.
+#
+# Migration note: legacy records with no YAML frontmatter are outside this
+# regime until converted. Once converted, a non-editable base status freezes the
+# document.
+
+# Runs on every pull request (no path filter) so the check always reports a
+# status — required for it to be usable as a required status check. When a PR
+# touches no immutable design document, the job passes cheaply.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  docs-immutability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Reject changes to immutable design documents
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # Read the `status:` frontmatter value of a path at a given git ref.
+          # Fails (non-zero) if the path is absent there or has no frontmatter.
+          status_at_ref() {
+            local ref="$1"
+            local path="$2"
+            local content status
+
+            content=$(git show "$ref:$path" 2>/dev/null) || return 1
+
+            # Legacy records with no YAML frontmatter are not yet under the
+            # immutability regime.
+            [ "$(printf '%s\n' "$content" | head -n1)" = "---" ] || return 1
+
+            status=$(printf '%s\n' "$content" | awk '
+              NR==1 && $0=="---" { infm=1; next }
+              infm && /^---[[:space:]]*$/ { exit }
+              infm && tolower($0) ~ /^status:/ {
+                sub(/^[^:]*:[[:space:]]*/, ""); print; exit
+              }')
+            [ -n "$status" ] || status="unknown"
+            printf '%s' "$status"
+          }
+
+          status_from_base() {
+            status_at_ref "$BASE_SHA" "$1"
+          }
+
+          normalized_status() {
+            printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]'
+          }
+
+          governing_spec_for() {
+            local path="$1"
+            local rel
+            rel="${path#docs/design/specs/}"
+
+            # Markdown spec files govern themselves.
+            if [[ "$path" == *.md ]]; then
+              printf '%s' "$path"
+              return 0
+            fi
+
+            # Non-Markdown conformance assets live below a version directory
+            # (for example conformance/vectors/v1/foo.fragment) and are
+            # governed by the matching spec (conformance/v1.md). Try the most
+            # specific prefix first, then walk back toward the spec domain.
+            IFS='/' read -r -a parts <<< "$rel"
+            for i in "${!parts[@]}"; do
+              if [[ "${parts[$i]}" =~ ^v[0-9]+$ ]]; then
+                local prefix_len prefix version spec_path
+                version="${parts[$i]}"
+                for ((prefix_len = i; prefix_len >= 1; prefix_len--)); do
+                  prefix=$(IFS='/'; printf '%s' "${parts[*]:0:prefix_len}")
+                  spec_path="docs/design/specs/${prefix}/${version}.md"
+                  if git cat-file -e "$BASE_SHA:$spec_path" 2>/dev/null; then
+                    printf '%s' "$spec_path"
+                    return 0
+                  fi
+                done
+              fi
+            done
+
+            return 1
+          }
+
+          document_status() {
+            local path="$1"
+            local governing_spec
+
+            case "$path" in
+              docs/design/adr/[0-9]*.md|docs/design/proposals/draft/[0-9]*.md|docs/design/proposals/accepted/[0-9]*.md)
+                status_from_base "$path"
+                ;;
+              docs/design/specs/*)
+                governing_spec=$(governing_spec_for "$path") || return 1
+                status_from_base "$governing_spec"
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
+          is_editable_status() {
+            local path="$1"
+            local status_lc="$2"
+
+            case "$path" in
+              docs/design/adr/[0-9]*.md)
+                [ "$status_lc" = "proposed" ]
+                ;;
+              docs/design/proposals/draft/[0-9]*.md|docs/design/proposals/accepted/[0-9]*.md|docs/design/specs/*)
+                [ "$status_lc" = "draft" ]
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
+          # The frozen status that a class transitions *out of* into Superseded:
+          # ADRs and proposals from `accepted`, specs from `stable`. Only the
+          # document file itself (a numbered *.md, or a spec *.md) can be stamped
+          # — never a spec conformance asset, whose supersession is expressed by
+          # superseding its governing spec.
+          frozen_source_status() {
+            case "$1" in
+              docs/design/adr/[0-9]*.md) printf 'accepted' ;;
+              docs/design/proposals/draft/[0-9]*.md|docs/design/proposals/accepted/[0-9]*.md) printf 'accepted' ;;
+              docs/design/specs/*.md) printf 'stable' ;;
+              *) return 1 ;;
+            esac
+          }
+
+          # 1-based line number of the frontmatter's closing `---` on stdin, or
+          # empty if there is no closing delimiter. The body is everything after.
+          frontmatter_close_line() {
+            awk '
+              NR == 1 && $0 == "---" { fm = 1; next }
+              fm == 1 && /^---[[:space:]]*$/ { print NR; exit }
+            '
+          }
+
+          # The frontmatter (lines 1..close) with the `status:` and any
+          # `superseded-by:`/`superseded_by:` lines removed — the only fields a
+          # stamp may touch.
+          frontmatter_canon() {
+            local ref="$1" path="$2" close="$3"
+            git show "$ref:$path" | sed -n "1,${close}p" \
+              | grep -viE '^(status:|superseded[-_]by:)' || true
+          }
+
+          # True iff the change to `path` is a pure supersession stamp: base is the
+          # class's frozen source status, head is `superseded`, and the two files
+          # are byte-for-byte identical once the status / superseded-by fields are
+          # removed. Deletions and renames (head absent) never qualify.
+          is_supersession_stamp() {
+            local path="$1"
+            local want_base base_status head_status base_close head_close
+
+            want_base=$(frozen_source_status "$path") || return 1
+
+            base_status=$(status_at_ref "$BASE_SHA" "$path") || return 1
+            head_status=$(status_at_ref "$HEAD_SHA" "$path") || return 1
+            [ "$(normalized_status "$base_status")" = "$want_base" ] || return 1
+            [ "$(normalized_status "$head_status")" = "superseded" ] || return 1
+
+            base_close=$(git show "$BASE_SHA:$path" | frontmatter_close_line)
+            head_close=$(git show "$HEAD_SHA:$path" | frontmatter_close_line)
+            [ -n "$base_close" ] && [ -n "$head_close" ] || return 1
+
+            # Frontmatter (minus the status / superseded-by fields a stamp may
+            # touch) must match, and the body after the frontmatter must be
+            # byte-for-byte identical. cmp on the raw body stream — not a "$(...)"
+            # capture, which strips trailing newlines — so an added/removed blank
+            # line or terminal newline at EOF cannot slip a body change through.
+            cmp -s \
+              <(frontmatter_canon "$BASE_SHA" "$path" "$base_close") \
+              <(frontmatter_canon "$HEAD_SHA" "$path" "$head_close") || return 1
+            cmp -s \
+              <(git show "$BASE_SHA:$path" | tail -n +"$((base_close + 1))") \
+              <(git show "$HEAD_SHA:$path" | tail -n +"$((head_close + 1))")
+          }
+
+          check_path() {
+            local change="$1"
+            local path="$2"
+            local status status_lc
+
+            [ -n "$path" ] || return 0
+            status=$(document_status "$path") || return 0
+            status_lc=$(normalized_status "$status")
+
+            if ! is_editable_status "$path" "$status_lc"; then
+              # A frozen document may still receive a one-way supersession stamp.
+              if is_supersession_stamp "$path"; then
+                return 0
+              fi
+              violations="${violations}  ${change}\t${path} (status: ${status:-unknown})"$'\n'
+            fi
+          }
+
+          # Added/Modified/Deleted/Renamed design records and spec-governed
+          # assets. Additions are included so a stable spec's conformance
+          # surface cannot grow by adding a new vector without superseding or
+          # versioning the governing spec.
+          # The numbered globs exclude README/index pages by design.
+          # --name-status lines are tab-separated: "A\tpath", "M\tpath",
+          # "D\tpath", "R<score>\told\tnew". Rename records are checked as
+          # both a delete at the old path and an add at the new path, because a
+          # move from a draft-governed tree into a stable-governed tree grows
+          # the stable spec's conformance surface.
+          # Three dots: diff against the merge base, so a document added to the base branch
+          # after the PR branch was cut is not read as deleted by the PR.
+          violations=""
+          while IFS=$'\t' read -r change base_path target_path; do
+            check_path "$change" "$base_path"
+            if [[ "$change" == R* ]]; then
+              check_path "$change" "$target_path"
+            fi
+          done < <(git diff -M --name-status --diff-filter=AMDR "$BASE_SHA...$HEAD_SHA" -- \
+            'docs/design/adr/[0-9]*.md' \
+            'docs/design/proposals/draft/[0-9]*.md' \
+            'docs/design/proposals/accepted/[0-9]*.md' \
+            'docs/design/specs/**')
+
+          if [ -n "$violations" ]; then
+            echo "Immutable design documents were changed:"
+            printf '%b' "$violations"
+            echo
+            echo "Accepted ADRs/proposals and stable specs are append-only — supersede or version instead of editing."
+            exit 1
+          fi
+          echo "No immutable design documents were modified."

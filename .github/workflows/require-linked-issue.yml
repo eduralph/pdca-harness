@@ -1,8 +1,8 @@
 name: PR hygiene
 
-# Enforce that every PR is tied to an issue. This is the ONLY required status
-# check on `main` (no CI/test gates) — it pairs with branch protection's
-# `enforce_admins` so the PR+issue process binds everyone, admins included.
+# Enforce that every PR is tied to an issue. A required status check on `main`; with
+# branch protection's `enforce_admins` the PR+issue process binds everyone, admins
+# included.
 #
 # A PR satisfies the check when it is tied to an issue in either of two ways:
 #   1. a linked/closing issue: a closing keyword in the description ("Closes #123",
