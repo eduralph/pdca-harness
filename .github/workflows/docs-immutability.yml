@@ -123,6 +123,10 @@ jobs:
               docs/design/adr/[0-9]*.md|docs/design/proposals/draft/[0-9]*.md|docs/design/proposals/accepted/[0-9]*.md)
                 status_from_base "$path"
                 ;;
+              # Spec indexes are not specs: they have no `status:` and stay editable.
+              docs/design/specs/README.md|docs/design/specs/*/README.md)
+                return 1
+                ;;
               docs/design/specs/*)
                 governing_spec=$(governing_spec_for "$path") || return 1
                 status_from_base "$governing_spec"
