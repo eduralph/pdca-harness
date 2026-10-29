@@ -40,7 +40,7 @@ instance; this one governs work on the template itself.)
 
 - Pin every action to a full commit hash with its release as a comment
   (`uses: actions/checkout@<40-char sha> # v7.0.1`), never to a tag or branch. Pick a
-  release at least two weeks old; Dependabot keeps the pins in `.github/workflows/` current.
+  release at least 7 days old, the same wait as the Dependabot cooldown; Dependabot keeps the pins in `.github/workflows/` current.
 - The workflow the template renders into every instance
   (`template/.github/workflows/*.jinja`) uses the same pins: Dependabot doesn't read it, so
   update it in the same PR.
