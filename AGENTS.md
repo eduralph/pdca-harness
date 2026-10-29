@@ -35,3 +35,18 @@ instance; this one governs work on the template itself.)
   body that explains the why.
 - Keep the offline suite green:
   `cd template && PYTHONPATH=src python3 -m unittest discover -s tests`.
+
+## Workflows
+
+- Pin every action to a full commit hash with its release as a comment
+  (`uses: actions/checkout@<40-char sha> # v7.0.1`), never to a tag or branch. Pick a
+  release at least two weeks old; Dependabot keeps the pins in `.github/workflows/` current.
+- The workflow the template renders into every instance
+  (`template/.github/workflows/*.jinja`) uses the same pins: Dependabot doesn't read it, so
+  update it in the same PR.
+- Give every `actions/checkout` `persist-credentials: false`, and each job only the
+  `permissions:` it needs.
+- `tests/test_workflows.py` checks all three; `render-check` runs it.
+- A job that branch protection requires is listed in `.github/required-checks.txt`. When
+  you rename, add or drop one, change the file in the same PR and tell the maintainer to
+  re-apply the settings after the merge; it needs admin rights.

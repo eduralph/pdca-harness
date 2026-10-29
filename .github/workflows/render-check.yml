@@ -19,14 +19,15 @@ jobs:
   render-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # Full history + tags: test_update_compat renders the previous RELEASE and
           # updates onto HEAD, so it needs the vX.Y.Z tags. The default depth-1 checkout
           # has none, and the test would skip itself into a permanent green (issue #342).
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
@@ -44,3 +45,7 @@ jobs:
 
       - name: copier update from the previous release (instance compatibility)
         run: python -m tests.run_root_suite tests.test_update_compat -v
+
+      # Reads the workflow files only (no copier), so plain unittest reports it truthfully.
+      - name: Workflows pin their actions and keep no credentials
+        run: python -m unittest tests.test_workflows -v

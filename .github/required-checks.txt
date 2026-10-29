@@ -1,0 +1,4 @@
+# The status checks main requires, one per line. Each is a job name in
+# .github/workflows/. scripts/repo-settings.py (eduralph/project-template) reads this file
+# from main: `python3 -I scripts/repo-settings.py check eduralph/pdca-harness`.
+require-linked-issue
