@@ -1,7 +1,7 @@
 # The quality cycle (PDCA)
 
 The model this harness automates. Project-agnostic — it ships verbatim. Your
-repo's concretizations live next door in [INTEGRATION.md](INTEGRATION.md).
+repo's concretizations live next door in [INTEGRATION.md](../docs/INTEGRATION.md).
 
 ## The cycle in one paragraph
 
@@ -98,7 +98,7 @@ This is the condensed model. The authoritative doc set is vendored under
 3. [Cycle Artifacts](quality-cycle/02-cycle-artifacts.md) — the files each beat produces
 4. [Cycle Automation](quality-cycle/03-cycle-automation.md) — the driver as a state machine
 5. [Validation Tooling](quality-cycle/04-validation-tooling.md) — what implements Check, and where it lives
-6. [Repository Integration](quality-cycle/05-repository-integration.md) — what each repo provides (see [INTEGRATION.md](INTEGRATION.md))
+6. [Repository Integration](quality-cycle/05-repository-integration.md) — what each repo provides (see [INTEGRATION.md](../docs/INTEGRATION.md))
 7. [Quality Cycle Guidelines](quality-cycle/06-quality-cycle-guidelines.md) — the per-beat MUST/SHOULD/MAY rules
 8. [Case Study — CI Hardening](quality-cycle/07-case-study-ci-hardening.md) — a worked example
 9. [Glossary](quality-cycle/08-glossary.md) — terms
