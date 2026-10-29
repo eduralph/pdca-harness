@@ -196,15 +196,18 @@ def check(root: str, tracked: list[str]) -> list[str]:
                 f"{where}: status `{status_cell}` differs from the file's `{adr['status']}`"
             )
         if adr["status"] == "Superseded":
-            successors = {n for n in numbers(" ".join(words[1:])) if n in by_num}
-            if not successors:
+            named = numbers(" ".join(words[1:]))
+            if not named:
                 problems.append(f"{where}: superseded ADR {adr['num']:04d} must name its "
                                 "successor (`Superseded by NNNN`)")
-            for n in successors:
+            for n in sorted(named - by_num.keys()):
+                problems.append(f"{where}: names successor {n:04d}, which does not exist")
+            successors = named & by_num.keys()
+            for n in sorted(successors):
                 if adr["num"] not in adrs[by_num[n]]["supersedes"]:
                     problems.append(f"{adrs[by_num[n]]['path']}: `supersedes:` does not name "
                                     f"{adr['num']:04d}, which the index says it replaces")
-            if adr["superseded_by"] and successors and adr["superseded_by"] != successors:
+            if adr["superseded_by"] and named and adr["superseded_by"] != named:
                 problems.append(f"{adr['path']}: the successors in `superseded-by:` or the status "
                                 "differ from the index")
 
