@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability Report
+    url: https://github.com/eduralph/pdca-harness/security/policy
+    about: Please report security vulnerabilities through the security policy process.
