@@ -74,5 +74,5 @@ sections:
 
   - eyebrow: "See it for real"
     heading: "A worked example, end to end."
-    note: "The [walkthrough](/guide/) drives one real contribution — a fix to the Gramps genealogy project — through every beat: the actual brief, the actual patch, the gate table, the §6 checklist, a two-iteration sign-off, and the Act entry that turned a maintainer's review comment into a new gate."
+    note: "The [walkthrough](/guide/) drives one real contribution — a change to Wyrd, a distributed file storage system written in Rust — through every beat: the actual brief, the actual patch, the gate table, the §6 checklist, an unattended iterate round, the stacked draft PR, and the Act review that traced a red gate row back to one line of configuration."
     quote: "Plan → Do → Check → Act, on a live codebase."

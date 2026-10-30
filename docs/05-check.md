@@ -21,53 +21,76 @@ flowchart LR
 ```
 
 Two parts follow: [**how to use**](#how-to-use) it — the commands, and two
-real worked examples (an accept, and a two-round iterate) — then
-[**how it works**](#how-it-works) underneath: the 5/5/1 model, the leaves
-involved, gate mechanics, the reviewer's isolation sandbox, SUMMARY assembly,
-the C6 accept-guard, and how a batch publishes as waves.
+real worked examples (an unattended iterate round followed by an accept, and a
+human reject) — then [**how it works**](#how-it-works) underneath: the 5/5/1
+model, the leaves involved, gate mechanics, the reviewer's isolation sandbox,
+SUMMARY assembly, the C6 accept-guard, and how a batch publishes as waves.
 
 ## How to use
 
 ### The gates run automatically
 
 The gates you wired in [step 01](01-render-and-integrate.md) run as part of
-`pdca flow` — nothing to type. Each emits a row: check, result, oracle, and
-whether it's gating. Here is the real `results/issue_11589/check-gates.md`:
+`pdca flow` — nothing to type. Each emits a row: check, result, oracle, the rule
+it belongs to, its evidence, and whether it's gating. Here is the real
+`results/issue_779/check-gates.md`, from the round that was accepted:
 
 ```markdown
-# Check gates — issue_11589
+# Check gates — issue_779
 
 **Overall (gating): pass**
 
+The Check 5/5/1: 5 correctness · 5 conformance · 1 validation.
+
 ## Correctness (5)
-| Check | Result | Oracle | Gating |
-|---|---|---|---|
-| C4 fix verified: test red pre-fix, green post-fix | pass | run-verify.sh | yes |
-| (C1/C2/C3/C5 — none configured / judgment) | none | — | no |
+
+| Check | Result | Oracle | Rule | Evidence | Gating |
+|---|---|---|---|---|---|
+| C1 Spec | none | brief.md | — | — | no |
+| C2 Reproduction (red pre-fix) | none | (no gate configured) | — | — | no |
+| C3 Change | none | patch.diff | — | — | no |
+| C4 Wyrd gate: cargo xtask ci (fmt/clippy/build/test/deny/conformance) | pass | ./engine/xtask.sh ci | C4-ci | xtask ci: all checks passed | yes |
+| C4 per-fix red->green: this patch's test red pre-fix, green post-fix | pass | ./engine/scripts/run-verify.sh | C4-verify | run-verify.sh: PASS — red without the fix, green with it (1 test(s) ran red). | no |
+| C4 diff coverage: changed lines executed by the patch's tests | unverifiable | ./engine/scripts/run-diff-cov.sh | C4-diff-cov | the -p wyrd-server --test s3_server_version_header target executed 0 tests, so diff coverage was not measured | no |
+| C5 surviving mutants on the bundle diff (cargo mutants --in-diff) | pass | scripts/mutants-in-diff | C5-mutants | 10 mutants tested in 2m: 8 caught, 2 unviable | no |
 
 ## Conformance (5)
-| Check | Result | Oracle | Rule | Gating |
-|---|---|---|---|---|
-| T1 structure | pass | gate.py T1 | 1 addon(s) conform | no |
-| T2 shape | fail | gate.py T2 | __init__.py: no GPL header (doc16:99) | no |
-| T3 runtime: core unit suite | fail | run-unit.sh | Trace/breakpoint trap (core dumped) [baseline] | no |
-| T3 runtime: addon unit suites | fail | run-addon-unit.sh | pip install logs (3 failures) [baseline] | no |
-| T4 contribution | pass | gate.py T4 | N/A: no commit-msg.txt | no |
+
+| Check | Result | Oracle | Rule | Evidence | Gating |
+|---|---|---|---|---|---|
+| T1 Structure | none | (no gate configured) | — | — | no |
+| T2 Shape | none | (no gate configured) | — | — | no |
+| T3 Runtime | none | (no gate configured) | — | — | no |
+| T4 batched multi-pass rubric review (3x codex, union, triaged) | pass | scripts/review-branch --bundle | T4-batch-review | review-branch: 0 blocking, 0 recorded-rejected, 0 noise-dropped -> /home/eddie/wyrd/wyrd-pdca/results/issue_779/review-b | yes |
+| T4 contribution artifacts complete (user-impact opener + tracker id in both) | deferred | scripts/pdca contribcheck | T4-contribution | pr-description.md not drafted yet — the substantive T4 audit of the contribution artifacts runs at publish | yes |
+| T4 tikv feature compiles (crate + server selection arms) | pass | WYRD_TIKV_TOOLCHAIN=1 sh -c 'cargo clippy -p wyrd-metadata-tikv --features tikv --tests && cargo clippy -p wyrd-server --features tikv,etcd --tests' | host-tikv |     Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.14s | yes |
+| T5 Judgment | none | reviewer + human sign-off | — | — | no |
+
+## Validation (1)
+
+| Check | Result | Oracle | Rule | Evidence | Gating |
+|---|---|---|---|---|---|
+| Validation — fitness-to-purpose | none | human at sign-off | — | — | no |
 ```
 
-**`Overall (gating): pass` even though three rows say `fail`.** The only gating
-check — `C4-verify`, the red→green proof — passed, so the contribution is
-*correct*. The failing rows are all **advisory**: a GPL-header gap in a file
-the patch never touched, and two runtime suites failing with `[baseline]`
-signatures (a pre-existing core segfault and an environmental pip issue). They
-don't block — but they don't vanish either. They become NEEDS-HUMAN items,
-below.
+**`Overall (gating): pass`, with one row `unverifiable` and one `deferred`.**
+Every gating row passed: the whole-tree `cargo xtask ci`, the batched rubric
+review, the host-CI `tikv` build. The per-fix red→green proof passed too, and
+says *how* — "1 test(s) ran red" — because a red leg in which no test ran would
+prove nothing (that is a lesson Wyrd's Act log paid for, [step 06](06-act.md)).
+The two rows that didn't say `pass` are telling you two different things. The
+`deferred` row is normal: the contribution check audits a commit message and a
+PR body that don't exist yet, so its verdict is owed at publish, not to you. The
+`unverifiable` row is not: the diff-coverage run compiled a test target that
+executed zero tests, so it could *measure nothing* — which is neither pass nor
+fail, and becomes a NEEDS-HUMAN item below. Hold on to that row; it turns out to
+be the most instructive line on this page.
 
 You can also run the gate set standalone, the same code the driver and CI both
 call:
 
 ```bash
-pdca gates 11589                # this bundle's gates, printed, nothing recorded
+pdca gates 779                  # this bundle's gates, printed, nothing recorded
 pdca gates --working-tree       # repo-scoped gates only — the CI merge re-gate
 pdca gates --promotions         # advisory checks clean for their promote_after cycles
 ```
@@ -77,25 +100,27 @@ pdca gates --promotions         # advisory checks clean for their promote_after 
 **passed in their N most-recent frozen cycles** — earned promotion from
 advisory to gating. It's a hint; you flip `gating = true` yourself, nothing is
 auto-mutated. That's the Act "promote a check" delta, with a concrete trigger
-(issue #156).
+(issue #156). Wyrd's `C4-verify` row carries `promote_after = 3` for exactly
+this.
 
 If your project already single-sources its gates in its own runner (`cargo
 xtask`, `make`, `just`, …), don't re-declare them in `pdca.toml` —
-**delegate**. Set a runner and give each check a bare `subcmd`:
+**delegate**. Set a runner and give each check a bare `subcmd`; that is what
+Wyrd's `C4-ci` row is:
 
 ```toml
 [gates]
-runner = "cargo xtask"
+runner = "./engine/xtask.sh"     # cd's into $PDCA_WORKTREE and execs `cargo xtask "$@"`
 checks = [
-  { id = "C4-verify", tier = "C4", label = "fix verified red->green", subcmd = "verify", gating = true,  scope = "bundle" },
-  { id = "T3-suite",  tier = "T3", label = "runtime suite",           subcmd = "test",   gating = false, scope = "repo" },
+  { id = "C4-ci", tier = "C4", label = "Wyrd gate: cargo xtask ci (fmt/clippy/build/test/deny/conformance)", subcmd = "ci", gating = true, scope = "repo" },
+  # ...
 ]
 ```
 
-PDCA runs `cargo xtask verify` / `cargo xtask test` and maps the results onto
-the 5/5/1 — the host runner stays the single source of truth; PDCA only
-orchestrates it. A full `cmd` (e.g. `cmd = "cargo xtask ci"`) still works for
-wholesale delegation. A missing runner surfaces as a clear failing row
+PDCA runs `./engine/xtask.sh ci` — `cargo xtask ci` in the cycle's worktree —
+and maps the result onto the 5/5/1; the host runner stays the single source of
+truth, and PDCA only orchestrates it. A row with its own `cmd` (every other Wyrd
+row) runs as written. A missing runner surfaces as a clear failing row
 (`runner '…' not found on PATH`), never a crash. Set it at render time with the
 `gates_runner` copier question, or later in `pdca.toml`.
 
@@ -110,12 +135,44 @@ role-distinct, model-agnostic (`family` + `argv`) leaf. Each writes
 reviewer's, and they're **always advisory** (never gate). Condition one on a
 brief field with `when = { field = …, substring = … }` (e.g. run a deeper
 review only when the brief says so). A shipped `code-review` agent realizes
-the correctness+cleanup lens for a `claude` instance; `family = "codex"` swaps
-the vendor. A second shipped agent, `adversary` (issue #151), is a
-**refutation** lens — it tries to *disprove* the red→green evidence and the
-reviewer's verdict, defaulting to "refuted" when uncertain; the `pdca.toml`
-example gates it on `Difficulty: high` so it runs only on the highest
-blast-radius bundles.
+the correctness+cleanup lens; a second shipped agent, `adversary` (issue #151),
+is a **refutation** lens — it tries to *disprove* the red→green evidence and the
+reviewer's verdict, defaulting to "refuted" when uncertain. Wyrd runs both, on
+every bundle, from opposite vendors to its reviewer and builder respectively:
+
+```toml
+[[leaves.advisory]]
+id = "adversary"
+role = "refute the red→green evidence and the reviewer's verdict; find the input that breaks the fix"
+mode = "command"
+family = "claude"
+model = "opus"
+effort = "xhigh"
+argv = ["claude", "-p", "--agent", "adversary", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
+
+[[leaves.advisory]]
+id = "code-review"
+role = "correctness bugs the patch introduces; reuse, simplification and efficiency cleanups"
+mode = "command"
+family = "codex"
+agent = "code-review"
+model = "gpt-6-astra"
+effort = "xhigh"
+argv = ["codex", "exec", "--sandbox", "workspace-write", "--skip-git-repo-check"]
+```
+
+The adversary used to be conditional on `Difficulty: high`, and the code-review
+lens did not run at all. An Act review made both always-on after a post-merge
+review found three defects on a `medium` bundle that had got no adversary pass
+([step 06](06-act.md)). Here is how the adversary
+opened on 779 — note that it *re-ran* the proof and then attacked it:
+
+```markdown
+**Verdict: I could not refute the fix.** I re-ran the red→green myself, wrote four mutants of
+partial fixes, sent edge-case requests to the real binary, and ran the release-step
+comparison against crafted inputs. Everything held. The two NEEDS-HUMAN items below are
+about the gate evidence (diff coverage, batch review), not about the patch.
+```
 
 **Automatic vendor complement (issue #200).** Cross-vendor decorrelation is the
 ideal, but the builder that *actually* runs isn't fixed — an explicit `Do
@@ -129,7 +186,9 @@ one leaf per vendor (same `role`, different `family`) and a Codex-built bundle
 gets the Claude advisory while a Claude-built bundle gets the Codex one, with
 no per-brief edits. If no leaf differs from the builder it falls back to the
 first applicable leaf and files the lapse as a §6 `NEEDS-HUMAN` so you can see
-decorrelation didn't hold.
+decorrelation didn't hold. Wyrd uses this mode for its *plan* reviewer
+([step 03](03-plan.md)) and declares its two Check lenses explicitly instead, one
+per vendor, so every patch is read by both.
 
 ### Trying the build by hand — `pdca try <id>`
 
@@ -140,49 +199,46 @@ patched build on demand from the bundle's `patch.diff`** and hands you the
 terminal so you can drive the app and see the fix for yourself:
 
 ```bash
-pdca try 11589
+pdca try 779
 ```
 
-It runs the project's `[manual_test].cmd` (e.g. `python -m gramps`) from
-`$PDCA_WORKTREE`, and imposes no timeout — you quit the app to return. It's
-**advisory**: it decides nothing and mutates nothing in the bundle; you record
-what you saw in a Manual-verification note and carry it into the §9 sign-off,
-below. It works for **any built/parked bundle in turn** — exactly the
-batch-then-review cadence, where you `pdca try` each bundle as you sign it off.
-Needs `[driver].worktree` on and a configured `[manual_test].cmd`; otherwise it
-prints a one-line hint and changes nothing.
+It runs the project's `[manual_test].cmd` — for Wyrd,
+`cargo run -p wyrd-server --bin wyrd -- demo` — from `$PDCA_WORKTREE`, and
+imposes no timeout — you quit the app to return. It's **advisory**: it decides
+nothing and mutates nothing in the bundle; you record what you saw in a
+Manual-verification note and carry it into the §9 sign-off, below. It works for
+**any built/parked bundle in turn** — exactly the batch-then-review cadence,
+where you `pdca try` each bundle as you sign it off. Needs `[driver].worktree`
+on and a configured `[manual_test].cmd`; otherwise it prints a one-line hint
+and changes nothing.
 
 ### What a real §6 looks like, and clearing it
 
 The driver folds brief + gates + review into `SUMMARY.md`. Here is the real
-§6 from issue 11589 — the advisory gate failures above, turned into explicit,
-adjudicable questions (shown already cleared, `- [x]`):
+§6 from issue 779's accepted round — the gate row that measured nothing, the
+reviewer's one open judgment, and the adversary's two findings, turned into
+explicit, adjudicable questions (shown already cleared, `- [x]`; one further
+row, which restates the diff-coverage finding in the first round's wording, is
+omitted here):
 
 ```markdown
 ## 6. NEEDS-HUMAN — items the human must clear before sign-off
-- [x] T2 — Gate failed on `__init__.py: no GPL licence header` — but no
-  `__init__.py` appears in `patch.diff`. Both files the patch *does* touch are
-  shape-clean. The violation sits in an untouched bundle file → human must decide
-  whether the pre-existing gap blocks this contribution.
-- [x] T3 — All three runtime suites are `fail` but the failure modes are not
-  plausibly caused by a 2-file addon change: core unit `Trace/breakpoint trap
-  (core dumped)` (segfault in gramps core, which the diff never touches),
-  addon-unit `pip install logs` (env), interface `_ErrorHolder`. Marked
-  "whole-suite baseline" — human must diff against baseline to confirm these are
-  pre-existing, not regressions.
-- [x] T5 — Always-human element. Overall contribution judgment — code quality,
-  idiom fit, whether the sibling-detection approach is the right shape.
-- [x] V — Validation — Whether the change solves the user's problem against the
-  *real* FilterRules pack layout (13 rule pairs in one dir), not just the temp-dir
-  stand-in, is a fitness-to-purpose call only the human can make.
+- [x] Validation — fitness-to-purpose — Decide whether the native evidence suffices for client version-keying now and accept release-time observation, or require an out-of-band distribution run — Docker packaging and the installed tarball's VERSION equality were not exercised (`brief.md:192`; `target/.github/workflows/release.yml:112`).
+- [x] **The `C4-diff-cov` row gives the wrong reason.** `check-gates.json` says the target "executed 0 tests" and the log guesses at a compiled-out cfg. The real cause is in `gate-logs/C4-diff-cov.log`: `error[E0433]: cannot find 'version' in 'crate'` at `crates/server/src/cli.rs:2657`, compiled in `/home/eddie/wyrd/wyrd-cov`. That coverage checkout is on a base without #778. The module exists on the real base (`crates/server/src/version.rs:48`), and the patch builds there (C4-ci, C4-verify, and my own run). So this is a stale harness worktree, not a patch defect. Diff coverage has not been measured for this round. Refresh the coverage checkout onto the bundle base if you want a coverage figure.
+- [x] **The `T4-batch-review` pass looks thin. Check it before counting it as the rubric's "one deep, multi-pass review".** `gate-logs/T4-batch-review.log` shows "3x codex" finishing in 26.8 s with `0 blocking, 0 recorded-rejected, 0 noise-dropped`. Zero findings of any kind, not even dropped noise, from three passes over a ~650-line diff fits an empty or cached result just as well as a clean one. I can't open `results/issue_779/review-batch.md` from here. Confirm it holds three real passes over this diff.
+- [x] C4 diff coverage: changed lines executed by the patch's tests unverifiable — the -p wyrd-server --test s3_server_version_header target executed 0 tests, so diff coverage was not measured
 ```
 
-This is the harness working as designed: the deterministic gate proved
-correctness (`C4` green) and *surfaced* everything it couldn't adjudicate — a
-header gap of ambiguous scope, environmental test noise, and the two
-irreducibly human checks (`T5` judgment, `V` validation) — as a short, specific
-checklist. You aren't re-reading the whole diff; you're answering four pointed
-questions.
+This is the harness working as designed: the deterministic gates proved
+correctness (`C4-ci` and `C4-verify` green, the adversary unable to refute) and
+*surfaced* everything they couldn't adjudicate — the one question only a
+maintainer can answer (is native evidence enough, or do we spend a Docker run
+before shipping?), and two findings that are **about the harness, not the
+patch**: a gate row whose stated reason was wrong, and a gating review whose
+26-second clean pass looked like no review at all. You aren't re-reading the
+whole diff; you're answering four pointed questions. And those two
+harness-shaped findings don't stop here — [step 06](06-act.md) shows what the
+next Act review made of them.
 
 ### Signing off — the four dispositions
 
@@ -198,69 +254,88 @@ on an iterate. `--accept` is refused while any §6 item is unchecked (the C6
 guard, below); the other three are not — you can redirect or abandon a bundle
 with §6 still open.
 
-**The simple case.** For issue 11589, the gates proved correctness and the four
-§6 items above were all cleared, so the maintainer accepted. The real
-`results/issue_11589/SUMMARY.md` §9:
+**The simple case.** For 779's second round, the gates proved correctness and
+the §6 items above were all cleared, so the maintainer accepted. The real
+`results/issue_779/SUMMARY.md` §9:
 
 ```markdown
 ## 9. Check sign-off                     ← human completes Check here
 - Disposition confirmed / overridden:
 - Outcome: merged-wider
 - Iteration delta (if iterating):
-- By / date: Eduard Ralph / 2026-06-06
+- By / date: Eduard Ralph / 2026-10-10
 ```
 
 `Outcome: merged-wider` ⇒ state `COMPLETE`. The bundle is frozen and ready for
 publish, below.
 
 **The instructive case.** Acceptance is the boring path — the cycle earns its
-keep on **iteration**, when you catch something the gates can't. gramps issue
-46 (a GraphView import-safety fix) took **two** iterations before it was
-accepted. The brief's own carry-forward records *why* the first attempt was
-rejected — a real `--iterate-do` rationale, verbatim:
+keep on **iteration**, when something is caught that the gates can't see. 779's
+*first* round went red→green just as cleanly, and the adversary couldn't refute
+it either. But the review leaves found two things in the patch that no gate
+owns: a sentence the patch added to the threat model claimed something false about what
+a release binary discloses, and the release workflow's new shell comparison
+could pass without comparing anything (two unquoted operands). Wyrd runs
+`[driver].auto_iterate = true`, so the driver didn't wait for a human: both
+findings are implementation work, so it recorded `iterate-do` itself and rebuilt,
+while the one finding that needs human judgment was held back in
+`deferred-findings.json` and re-surfaced in the next round's §6. The real
+`iteration-v1/SUMMARY.md` §9, trimmed:
 
 ```markdown
-## Iteration 1 — carry-forward (from the previous attempt)
-- Sign-off rationale: Reject: the regression test reimplements GTK load/version-
-  pinning (test_graphview_import.py:80-82, top-level `import gi` +
-  gi.require_version("Gtk","3.0")). GTK loading/pinning is already owned by gramps
-  at runtime and by PR 950 in unit testing, so this machinery must not be in the
-  addon test — it is redundant and is the likely cause of the two T3 addon-unit
-  exit-2 collection aborts. Rebuild the test without any manual gi/Gtk pinning;
-  keep the production change (removal of the two import-time raises) as-is.
-  Re-run T3 addon-unit and E2E ...
+## 9. Check sign-off                     ← human completes Check here
+- Disposition confirmed / overridden:
+- Outcome: iterated-to-Do
+- Iteration delta (if iterating): Auto-iterate (round 1): rebuilding for the implementation-level findings — ... `docs/design/architecture/14-threat-model.md:89` says the identity an anonymous caller learns is "(a commit, never a claim about the working tree)". That is false for the binaries operators actually run. `cargo xtask dist` derives the release version with `git describe --tags --always --dirty` ... Fix: reword the parenthetical to match `crates/server/src/version.rs:26-30` ...; `.github/workflows/release.yml:122` ...: the release version comparison can falsely pass because `$wire` and `$shipped` are unquoted. Duplicate `Server` headers yield newline-separated values, so `[` receives extra operands and errors; inside an `if` condition, `set -e` does not stop execution, and the mismatch branch is skipped. ... Quote both operands, escaping the quotes for the outer Docker command, update the pinned fixture, and verify malformed/duplicate values fail.. Deferred, not addressed here: 1 finding(s) that need human judgment, held in deferred-findings.json for the human at handover — not build work
+- By / date: auto-iterate / 2026-10-10
 ```
 
 What happened mechanically:
 
-1. **Iteration 1** built a fix whose *production change was correct* but whose
-   *test* carried redundant GTK-pinning machinery. The C4 gate went green (the
-   fix worked), but the maintainer noticed the test introduced two new
-   `[delta]` failures in the T3 addon-unit matrix — a regression the test
-   itself caused. (`[baseline]` = a known pre-existing failure, ignore;
-   `[delta]` = new, your fix may have caused it.)
-2. The maintainer ran `pdca signoff 46 --iterate-do --delta "rebuild the test
-   without the gi pin; keep the production change"`. The driver archived the
-   attempt into `iteration-v1/`, reverted to `PLANNED`, and re-ran the
-   builder — which got the rejection rationale folded into the brief (above),
-   so it didn't repeat the mistake.
-3. **Iteration 2** rebuilt the test without the pin. Accepted:
+1. **Round 1** built a fix whose *production change was correct* — `C4-ci` green,
+   `C4-verify` red→green, "no builder-fixable defect" from the adversary's
+   mutants — but whose *prose and release check* were wrong in ways only a
+   reader catches: a doc row overstating a security property, and a shell test
+   that would never fail.
+2. The driver recorded `iterate-do` (`By / date: auto-iterate`), archived the
+   attempt into `iteration-v1/`, carried the rationale into `brief.md` as an
+   `## Iteration 1 — carry-forward` section, and re-ran the builder — which the
+   escalation ladder moved to `opus` at `xhigh` effort for attempt 2
+   ([step 04](04-do.md)'s `loop-telemetry.json`).
+3. **Round 2** carried the production change over unchanged, reworded the
+   threat-model row to what a release binary really discloses, quoted the shell
+   operands and extended the pinned fixture. Every row of the reviewer's table
+   came back `PASS` (or `N/A` for the contribution text not yet drafted) except
+   fitness-to-purpose; the human cleared §6 and accepted.
+
+The lesson: **the deterministic gates said "correct," and they were right — but
+"correct fix" is not "good contribution."** A patch whose code is right and
+whose documentation lies about it is not shippable; only a reader of the
+diff caught that. The harness didn't prevent the mistake — it **surfaced it
+cheaply**, classified it as rebuild work, and **carried the reason forward** so
+the rebuild started smarter, without a human pressing a button or clearing a
+box it was never asked to clear.
+
+**When the judgment is the human's.** Not every reject is mechanical. Issue 576
+added gRPC health probes to Wyrd's storage server; its first round went green
+on every gate, and the maintainer rejected it anyway. The real `--iterate-do`
+rationale, now in that brief's carry-forward:
 
 ```markdown
-## 9. Check sign-off
-- Outcome: merged-wider
-- Iteration delta (if iterating): [iteration 2 — rebuilt test without gi pin]
-- By / date: Eduard Ralph / 2026-06-13
+- Sign-off rationale: Rejected per advisory review C3/C5: the health service binds a second,
+  ephemeral port exposed only via the in-process `health_endpoint()` getter, so a real
+  supervisor (systemd/k8s/LB) has no stable or configurable address to dial — the operational
+  root cause is not removed. Next attempt: keep the health semantics (mapping, fail-closed,
+  admission bypass — all reviewed as sound) but give the health listener a stable/configurable
+  bind address ...
 ```
 
-The lesson: **the deterministic C4 gate said "correct," and it was right — but
-"correct fix" is not "good contribution."** A test that pins GTK is correct
-*and* redundant *and* regression-inducing; only the human reading the §6/§7
-material caught it. The harness didn't prevent the mistake — it **surfaced it
-cheaply**, gave the human a clean "reject with reason" lever, and **carried
-the reason forward** so the rebuild started smarter.
+The test proved the probe answered. Whether anything *operational* could ever
+dial it was the brief's actual goal, and that is C5 — causal adequacy — which no
+gate adjudicates. The second round shipped with a configurable bind address and
+was accepted.
 
-### Publishing the accepted fix
+### Publishing the accepted change
 
 **Accept publishes by default everywhere** (#97): both `pdca flow` and a
 standalone `pdca signoff <id> --accept` run publish on an accept, so "approved"
@@ -268,8 +343,8 @@ doesn't silently stay "unpublished"; pass `--no-publish` to opt out (then it's
 *deliberately* unpublished, not by accident). You can also run it standalone:
 
 ```bash
-pdca publish 11589              # open the draft PR
-pdca publish 11589 --dry-run    # print the git/gh plan without pushing
+pdca publish 779                # open the draft PR
+pdca publish 779 --dry-run      # print the git/gh plan without pushing
 ```
 
 A fix whose tracker issue doesn't exist yet takes `--no-issue` (issue #384): it
@@ -283,23 +358,42 @@ what it is excusing.
 `[PR <url>]` when a PR was opened, `[unpublished]` when it wasn't (dry-run /
 no-target / failed / not-yet-run), `[close: no PR]` for a close/no-fix bundle —
 so an accepted-but-unpublished cycle is visible at a glance. It writes
-`publish.json` into the bundle and uses the project's PR conventions from
-INTEGRATION §8. For gramps that's a four-section body (Root cause / Fix /
-Verified against / Test), and — because 11589 touches an addon — an `## Affected
-addon` section that @-mentions the addon's maintainer (INTEGRATION §10).
+`publish.json` into the bundle. 779's records that this PR was **stacked**:
 
-In gramps' git history you can see cycles land this way — each result bundle
-gets a branch and a PR:
-
+```json
+{
+  "mode": "stacked-pr",
+  "branch": "enhancement/779-s3-server-version-header-stamp",
+  "pr_url": "https://github.com/getwyrd/wyrd/pull/886",
+  "base": "main",
+  "repo": "getwyrd/wyrd",
+  "by": "Eduard Ralph",
+  "date": "2026-10-10",
+  "id_pending": false,
+  "host_ci_base": "6032ff5c9da8703e7339733f5ca853ae12f1d48d",
+  "stacks_on": []
+}
 ```
-c52c6a4 Merge pull request #105 from eduralph/results/issue-46-graphview-import
-f1092ca results(46): record published GraphView import-safety cycle
+
+779 depends on 778, so its branch was cut from the run's integration line (the
+`host_ci_base` above is the fold commit `pdca-integrate: issue_778`) and its PR
+opened against the real base, `main`. The publisher said so in the PR body it
+drafted, following the project's PR conventions from INTEGRATION §8 (a Root
+cause / Fix / Verification / Known limits shape, `Fixes #779` as the trailer, a
+DCO sign-off on the commit, and no tool attribution anywhere):
+
+```markdown
+**Depends on #885** (#778), which bakes the build identity into the binary. This branch
+is stacked on it, so the diff shows #885's commits until that PR merges.
 ```
 
-That's one full cycle, [steps 03–05](03-plan.md), from tracker issue to merged
-record.
+This is also where the `deferred` T4 row from the gate table gets its verdict:
+`scripts/pdca contribcheck` runs against the commit message and PR body publish
+just drafted — a user-impact opener, the tracker id in both — and refuses the
+push if they fall short. The maintainer merged #885 and then #886, bottom-up,
+on 2026-10-14.
 
-Those record commits don't have to be hand-made. **`pdca record [<ids>…]`**
+Those result bundles don't have to be committed by hand. **`pdca record [<ids>…]`**
 (issue #317) commits every bundle whose cycle is *over* —
 `COMPLETE` / `DISCONTINUED` / `RESOLVED`, never one in motion or halted for a
 human — to the instance repo as **one batch commit**, so a bundle's provenance
@@ -307,7 +401,17 @@ stops living on the machine that ran it. Enable it via the `[records]` table in
 `pdca.toml` (`mode = "commit"` or `"pr"`, which pushes a `records/{date}` branch
 and opens one draft PR for the batch); once enabled, publish also triggers it,
 strictly after its `publish.json` write. Off by default — turn it on only if
-the instance versions its `results/` bundle root.
+the instance versions its `results/` bundle root. Wyrd does, which is why every
+artifact quoted in this walkthrough is a committed file; its history reads:
+
+```
+8a48843 chore(records): record the result bundles completed 2026-10-19 to 2026-10-29
+c683d7a chore(records): record the result bundles completed 2026-10-19
+e0d2c11 chore(records): record the result bundles completed 2026-10-10 to 2026-10-18
+```
+
+That's one full cycle, [steps 03–05](03-plan.md), from tracker issue to merged,
+recorded change.
 
 **Undoing one.** If a landed fix turns out wrong, `pdca revert <id>` undoes the
 contribution from its recorded `publish.json`: a **merged** PR gets a draft
@@ -365,6 +469,7 @@ being enough: a fix can make `C2`→`C4` go red→green by patching the symptom
 one call site at a time and still be structurally wrong — `C5` is the reviewer
 (and, if it can't settle it, you) asking whether the *class* of defect named in
 the brief's `Invariant to restore` ([step 03](03-plan.md)) is actually gone.
+Issue 576's reject above is a `C5` verdict in the wild.
 
 #### Conformance — is it *well-formed*, independent of whether it's right?
 
@@ -376,14 +481,17 @@ the brief's `Invariant to restore` ([step 03](03-plan.md)) is actually gone.
 | `T4` Contribution | Does the commit/PR itself follow convention — message format, branch target, tracker trailer? | **Gate** |
 | `T5` Judgment | Is it good code *as a contribution* — idiom fit, one logical fix, scope creep? | **Judgment** — reviewer (advisory) + you at sign-off |
 
-You've already seen these in the real gate table earlier on this page: T1
-"1 addon(s) conform," T2 "no GPL header," the two T3 runtime rows, T4 "N/A: no
-commit-msg.txt" — those five rows *are* T1–T5, run against one real bundle.
-Notice conformance says nothing about whether the fix *works* — a change can
-be perfectly well-formed (right directory, clean style, green suite,
-conventional commit) and still be the wrong fix, or vice versa. That
-independence is why they're a stack, not a chain: a `T2` failure never blocks
-on a `T1` result, and neither has anything to do with `C4`.
+In the real gate table earlier on this page, the `T1`–`T3` rows read `(no gate
+configured)` — not because Wyrd skips them, but because its format conformance,
+`rustfmt`/`clippy` and test suite all run *inside* `cargo xtask ci`, which is
+the gating `C4-ci` row (INTEGRATION §4 maps the tiers that way on purpose, so
+nothing double-runs). `T4` has two rows of its own: the batched rubric review
+and the contribution-artifact check. Notice conformance says nothing about
+whether the fix *works* — a change can be perfectly well-formed (right
+directory, clean style, green suite, conventional commit) and still be the
+wrong fix, or vice versa. That independence is why they're a stack, not a
+chain: a `T2` failure never blocks on a `T1` result, and neither has anything
+to do with `C4`.
 
 #### Validation — is it the *right thing*, at all?
 
@@ -407,9 +515,11 @@ reads to decide whether a rebuild without asking you has anything to do: only
 a §6 item tagged `gate` is work for the builder — the driver can plausibly fix a
 `C2`/`C4`/`T1`–`T4` finding by rebuilding, but it can never settle a
 `C5`/`T5`/validation finding that way, because those were never mechanical
-questions to begin with. Those are held for you instead; step 07 has how. A gate
+questions to begin with. Those are held for you instead; step 07 has how, and
+779's first round above is what it looks like. A gate
 can also come back **`unverifiable`** — it genuinely couldn't run its check
-(a missing fixture, a skipped environment) rather than having run and failed —
+(a missing fixture, a skipped environment, a coverage build that compiled no
+test) rather than having run and failed —
 which is neither pass nor fail; it routes to §6 like a judgment cell would,
 because "we don't know" and "we checked and it's wrong" need different
 responses from you. And it can come back **`deferred`** — it ran, but the thing
@@ -439,15 +549,18 @@ Three properties every row has, learned from rows that lacked them:
   hours, and the heartbeat's "still working" made it never *look* hung). On
   expiry the whole process group is killed and the row records UNVERIFIABLE —
   the oracle didn't answer, which is not a pass or a fail — landing in §6.
+  Wyrd's `default_timeout_secs = 7200` dates from that 19-hour row.
 - **Its full output is kept** (issue #370). Each check's complete stdout/stderr
   lands in `gate-logs/<id>.log` inside the bundle, so a red row is
   diagnosable after the fact — the matrix keeps its one-line summary, the log
-  keeps the reason.
+  keeps the reason. That is how 779's adversary could read
+  `gate-logs/C4-diff-cov.log` and show the row's one-line reason was wrong.
 - **Host-CI parity** (issue #311). CI jobs the host repo runs on every PR but
-  the gate ladder doesn't know about (a `typos` pass, a docs linter) used to
-  surface only after the draft PR opened red. Declare them in `[gates].host_ci`
-  and they run against the patched tree at Check like any other row — and
-  again right before publish pushes, where a failure refuses the push.
+  the gate ladder doesn't know about (a `typos` pass, a docs linter, a feature
+  build) used to surface only after the draft PR opened red. Declare them in
+  `[gates].host_ci` and they run against the patched tree at Check like any
+  other row — and again right before publish pushes, where a failure refuses
+  the push.
 - **A red is confirmed once** (issue #371). A gating row is one sample, and a
   single transient red used to park a bundle as if the patch were broken. At
   Check, a gating row that fails with a real exit code is re-run once with the
@@ -462,7 +575,8 @@ Three properties every row has, learned from rows that lacked them:
   project with `[gates] confirm_gating_fail = false`, or for one row with
   `confirm_fail = false` on its `[[gates.checks]]` or `host_ci` entry — do that
   for a model-backed row, where a second run is a fresh sample rather than a
-  re-check.
+  re-check. Wyrd's `T4-batch-review` row carries exactly that `confirm_fail =
+  false`, since its three passes are model runs.
 
 ### Reviewer — the decorrelated second opinion
 
@@ -499,6 +613,9 @@ test that does `TcpListener::bind("127.0.0.1:0")` (a loopback-gRPC server, a
 test HTTP listener) panics with `Operation not permitted` *before its
 assertion runs*. Compile and non-socket unit legs pass; only the socket-backed
 path fails, so C2/C4/T3 can never earn an automated red→green (issue #261).
+Wyrd hit exactly this: its reviewer's early reports carried a standing
+NEEDS-HUMAN that the loopback test "could not be independently rerun because
+this sandbox denies loopback bind".
 
 The rendered project's `.claude/settings.json` therefore sets:
 
@@ -548,7 +665,10 @@ Domain scoping is **claude** only. A `codex` leaf has no `allowedDomains`
 equivalent — its `--sandbox workspace-write` denies the network wholesale — so
 it takes the all-or-nothing `network_access` grant described under
 [Docker gates](#docker-backed-conformance-gates-opt-in) below, which reaches
-`api.github.com` too and settles its prior-art check the same way.
+`api.github.com` too and settles its prior-art check the same way. Wyrd's
+Codex reviewer runs with that grant, which is why 779's review could report
+"changed-file lists for all 374 closed PRs included 19 unmerged/rejected PRs"
+rather than a standing NEEDS-HUMAN.
 
 #### Docker-backed conformance gates (opt-in)
 
@@ -678,7 +798,8 @@ The driver then passes `-c sandbox_workspace_write.network_access=true` to
 codex leaves. That reaches the Docker socket **and** `api.github.com`, so it
 settles the prior-art check
 ([above](#letting-the-reviewer-settle-prior-art-mechanically-opt-in)) at the
-same time.
+same time. This is the one line Wyrd's `pdca.toml` carries under
+`[leaves.sandbox]`.
 
 **The two grants have different shapes, and neither is strictly tighter.**
 Read them together:
@@ -796,16 +917,19 @@ fix. Findings that need your judgment are held and handed to you in §6 when it
 stops. It never accepts and never ticks a `- [ ]` — the eligibility rule, the
 deferred findings, what stops the loop, and its guarantees are all in
 [step 07](07-crosscutting.md#auto-iterate-the-driver-deciding-for-itself).
+779's first round above is one of its rounds.
 
 ### Publish's STOP discipline, and batches
 
 The PR opens as a *draft*, and on the normal single-cycle and `stack`-mode
-paths a human marks it ready — the harness never does. gramps' governance
-makes this explicit (INTEGRATION §10): *"Eduard opens fork PRs as draft, marks
-ready himself; builder commits and stops — no push/PR-open/ready-mark without
-explicit instruction."* The one carve-out is the opt-in `wave_mode = "merge"`,
-where the driver readies and merges each *non-final* wave's PRs to advance the
-base; even there the **final** wave's PR stays a draft for your ready-mark.
+paths a human marks it ready — the harness never does. Wyrd's governance makes
+this explicit (INTEGRATION §10): *"PRs open as draft; the human re-reads and
+marks ready. The builder/publisher leaves never `gh pr ready` / `gh pr merge`
+(mechanically blocked by `builder_guard.py`). Under `wave_mode = "stack"` this
+gate holds for EVERY PR, non-final waves included: the driver merges nothing."*
+The one carve-out is the opt-in `wave_mode = "merge"`, where the driver readies
+and merges each *non-final* wave's PRs to advance the base; even there the
+**final** wave's PR stays a draft for your ready-mark.
 
 This holds for a **batch**, too. A multi-id `pdca flow` runs the batch as
 dependency waves ([09 parallel lanes in the spec](../template/PCDA/quality-cycle/09-parallel-lanes.md);
@@ -813,10 +937,10 @@ mechanics in [step 07](07-crosscutting.md#waves-in-execution)); in the default
 `stack` mode each wave's published PR branches are folded onto a run-scoped
 integration branch the next wave builds on, and each dependent opens a
 **stacked** draft PR against the real base — the harness still never merges,
-so you review and merge the stack bottom-up yourself, with merge commits.
-Only the opt-in `[driver].wave_mode = "merge"` (own-repo / CD, where you hold
-merge rights on the base) relaxes this, `gh pr merge`-ing each wave before the
-next builds.
+so you review and merge the stack bottom-up yourself, with merge commits. That
+is how #885 and #886 landed. Only the opt-in `[driver].wave_mode = "merge"`
+(own-repo / CD, where you hold merge rights on the base) relaxes this,
+`gh pr merge`-ing each wave before the next builds.
 
 State: `COMPLETE`, published. On to the cross-cycle beat — [step 06](06-act.md).
 

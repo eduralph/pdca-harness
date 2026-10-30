@@ -14,11 +14,14 @@ shape it does.
 ## How to use
 
 The Plan leaf is **interactive** — it opens Claude in your terminal so you and the
-planner co-author the brief from a tracker issue. gramps configured it to read a
-single Mantis CSV row for the issue id:
+planner co-author the brief from a tracker issue. Wyrd configures it to fetch the
+GitHub issue thread for you (`[tracker].notes_cmd` runs a one-line script around
+`gh issue view` and writes `notes.json` into the bundle) and to read the target's
+design corpus — its ADRs, proposals and specs under `../wyrd/docs/design/` — in
+place rather than copied (INTEGRATION §2):
 
 ```bash
-pdca flow 11589           # opens the planner; you converge on a brief, then the
+pdca flow 779             # opens the planner; you converge on a brief, then the
                           # driver continues unattended into Do + Check
 ```
 
@@ -34,7 +37,7 @@ seed it with `pdca init-issue <id> --from-brief path/to/brief.md` — but that
 bypasses the planner leaf entirely rather than running it.
 
 Under the hood the interactive session itself is the `planner` leaf from
-[step 01](01-render-and-integrate.md), writing `results/issue_11589/brief.md`.
+[step 01](01-render-and-integrate.md), writing `results/issue_779/brief.md`.
 
 ### Planning a specific id list in one session
 
@@ -42,7 +45,7 @@ Pass **several ids** to `pdca flow` to plan + drive exactly that set — e.g. bu
 seeded from per-bundle triage notes, not a tracker CSV:
 
 ```bash
-pdca flow 11589 12030 12044 
+pdca flow 778 779
 ```
 
 Any UNPLANNED id in the list is briefed in **one shared interactive session** before
@@ -55,7 +58,7 @@ in `pdca.toml` to your scrape tooling (a `{id}` shell template that writes
 `issue_<id>/notes.json`; `$PDCA_BUNDLE` is the bundle dir). The harness runs it before
 any Plan beat when `notes.json` is absent, so the planner has the comment thread
 without you scraping by hand. It's best-effort — a failure just falls back to the
-CSV / asking you.
+CSV / asking you. Wyrd's is `./engine/scripts/scrape-notes.sh {id}`.
 
 ### Composing several sources
 
@@ -78,6 +81,69 @@ type = "github"
 type = "file"
 path = "docs/adr/*{id}*.md"
 ```
+
+Wyrd deliberately does *not* wire its design corpus this way: INTEGRATION §2
+calls the ADRs, proposals and specs "reference foundation, not bundle
+artifacts" — the planner reads them live from the `../wyrd` checkout, so nothing
+is duplicated into `results/`.
+
+### A second opinion on the brief — plan-advisory leaves (issue #301)
+
+The reviewer in [step 05](05-check.md) reads the *patch*. A wrong brief is
+cheaper to catch before a builder, a reviewer and an adversary have each spent a
+pass on it, so the same open-list mechanism exists at Plan: each
+`[[leaves.plan_advisory]]` leaf reviews the **brief** (brief + tracker notes +
+sources — no patch exists yet) as an antagonist of the plan — wrong root-cause
+framing, an unverifiable success criterion, hidden scope, a prerequisite that
+cannot resolve, ignored tracker context. Its findings are `- NEEDS-HUMAN —`
+bullets in `plan-advisory-<id>.md`; the planner then gets **one** bounded
+revision pass over them, and the bundle records `plan-advisory-benefit.json` —
+the brief's hash before and after, whether it was revised, the finding count —
+which surfaces in SUMMARY §10 so Act can judge over cycles whether plan reviews
+pay for themselves. A finding left unrevised lands in §6 for you. Always
+advisory, never a gate; off by default. Wyrd's:
+
+```toml
+[[leaves.plan_advisory]]
+id = "plan-reviewer"
+role = "refute the brief: wrong root cause, untestable success criterion, hidden scope"
+mode = "command"
+family = "codex"
+agent = "plan-reviewer"
+model = "gpt-6-astra"
+effort = "xhigh"
+argv = ["codex", "exec", "--sandbox", "workspace-write", "--skip-git-repo-check"]
+
+[leaves.plan_advisory_selection]
+mode = "vendor-complement"   # anchor: the PLANNER family (the brief's author)
+```
+
+`vendor-complement` makes the pairing automatic: the driver runs the single leaf
+whose `family` differs from the *planner's* (pre-Do there is no builder to anchor
+on), so plan validation is cross-vendor without per-brief edits. If no leaf
+differs it falls back to the first applicable one and files the lapse as a §6
+note.
+
+It earns its keep. The brief below carries a "Plan-review response" section
+that records what the review changed — two of four findings were about the
+success criterion itself:
+
+```markdown
+* **The criterion did not falsify the server-error category** it claims. The invariant names
+  four response categories; legs 1-3 exercised three. **Leg 4 above is new** — a signed
+  `GET /wyrd-bucket?acl` refused `501` — and the old leg 4 (byte equality) is now leg 5.
+  Nothing else changed: no leg was weakened, and the honest limit about a real `500` is
+  stated rather than papered over.
+* **Equality with the tarball's `VERSION` has no PR-time gate.** True, and already declared
+  under Verification posture; what was missing is that it need not wait for a tag. The
+  `workflow_dispatch` route and the local `cargo xtask dist` comparison are now named there
+  as sign-off options. The binding criterion was NOT widened to include them — a criterion
+  no gate can evaluate is worse than a declared deferral.
+```
+
+A success criterion that names four response categories and tests three is the
+kind of hole a builder would have happily built to — and a Check would have
+passed. One revision pass, before Do, closed it.
 
 ### Ordering and routing the batch
 
@@ -117,60 +183,144 @@ anything, naming the bundle and the dependency (or the cycle) and the ways out.
 
 ### What a real brief looks like
 
-This is the **actual** brief the planner produced for gramps issue 11589, a
-PluginManager bug (trimmed for length — the real file has fuller prose in a few
-fields; nothing quoted below is altered). Read it as a checklist of what a good
-spec contains for *this* fix — not every optional field fires on every bug; see
-below for which ones sat this one out and why.
+This is the **actual** brief the planner produced for Wyrd issue 779 — the S3
+gateway sent no `Server` header, so nothing on the wire said which build a
+client was talking to. It is the second child of a split ([step 07](07-crosscutting.md#size--split)
+tells that story): its sibling, 778, bakes a build identity into the binary;
+this slice puts that identity on the wire. Trimmed for length — the real file
+is about 320 lines and far more specific in several fields; nothing quoted
+below is altered. Read it as a checklist of what a good spec contains for
+*this* change.
 
 ```markdown
-# Brief — issue 11589 / pluginmanager-uninstall-destroys-shared-dir
+# Brief — issue 779 / s3-server-version-header-stamp
 
-- **Slug:** pluginmanager-uninstall-destroys-shared-dir
-- **Defect:** In the enhanced Plugin Manager addon, uninstalling a single add-on
-  filter rule deletes the **entire** shared `FilterRules` plugin directory — all
-  the other rules in the pack *and* any unrelated user content the user placed
-  there. Root cause: `__uninstall` calls `shutil.rmtree(pdata.fpath)` on the
-  plugin's *directory* (`PluginManager.py:349`), but `pdata.fpath` is the
-  directory shared by every plugin in a multi-plugin pack ...
-- **Success criterion:** Uninstalling one plugin whose directory is shared by
-  other registered plugins removes only the files belonging to the selected
-  plugin; the sibling plugins' files and any unrelated files/sub-folders survive,
-  and the directory itself is **not** removed while other registered plugins still
-  live in it. (Uninstalling a plugin that is the sole occupant of its own
-  directory must still remove the directory, preserving today's behaviour.)
-- **Repo + branch target:** addons-source @ `maintenance/gramps60` (addons
-  production branch per INTEGRATION §2; maintainer cherry-picks forward to gramps61).
-- **Scope:** Make `PluginManager.__uninstall` (`...PluginManager.py:339-358`)
-  non-destructive for shared directories ... /
-  **out of scope:** repackaging the FilterRules pack; the reporter's secondary
-  observation; the core plugin manager; changing the install path.
-- **Repro instruction:** With the FilterRules pack installed ... select one rule
-  and click Uninstall. Observed: the whole directory is deleted. Expected: only
-  the selected rule's files are removed.
-- **Test file:** `../addons-source/PluginManager/tests/test_uninstall_shared_dir.py`
-  (addon convention per INTEGRATION §3 — `tests/` package, `test_*.py` prefix).
-- **Citations expected:** Do must cite path:line on the target branch for every change.
-- **Prior-art check (triage cycles):** Searched `addons-source` history by file path —
-  `git -C ../addons-source log -S "shutil.rmtree" -- PluginManager/PluginManager.py`
-  returns only `00794ec32` ("An enhanced addon/plugin manager (#78)"), i.e. the
-  `rmtree(pdata.fpath)` uninstall logic is unchanged since the addon was introduced;
-  no later fix on any branch. No prior fix or open PR found for this defect.
-- **Disposition hint:** likely-fix (Mantis status `confirmed`; root cause confirmed
-  in source and corroborated by maintainer prculley in the thread).
+> Plan artifact (docs 02 §PLAN). Do reads ONLY this file (plus the peer callsites cited
+> under **Citations expected**). The `- **Label:** value` lines are parsed by the driver.
+>
+> **Child 2 of 2** from the split of #736 (`results/issue_736/split-proposal.md`). #778 is
+> already on your base: it bakes the build identity into the binary, exposes it as
+> `wyrd_server::version::BUILD_IDENTITY`, and records it as the `version` field of the `s3`
+> role's `role started` log event. This slice puts that identity on the wire. It derives
+> nothing.
+>
+> Plan of record: `docs/design/proposals/draft/0017-blackbox-validation-tool.md`
+> §Dependencies ("The gateway advertises no version") and §3 ("The matrix must be keyed to
+> the server version"). Read in place in the target checkout — never copied here.
+
+- **Slug:** s3-server-version-header-stamp
+- **Kind:** enhancement
+- **Defect:** The S3 gateway advertises no version on the wire. Verified on `origin/main`
+  at `a801997`: `grep -rn "header::SERVER" crates/gateway-s3/src/` returns nothing, and the
+  only header `handle` stamps on every response is `x-amz-request-id`
+  (`crates/gateway-s3/src/lib.rs:1552-1556`). Real S3 sends `Server: AmazonS3`; sending
+  nothing is the unusual choice. A client cannot tell last month's deployment from today's,
+  a captured HTTP exchange does not identify the build that produced it ...
+- **Goal:** Every response the S3 front door emits carries `Server: wyrd/<version>`, where
+  `<version>` is the identity #778 baked in — success, client error, server error and the
+  streaming-GET head alike.
+- **Success criterion:** BINDING (demonstrable by C4-verify at Check — no container, no
+  cluster, no feature flag): a new integration test spawns the **built `wyrd` binary** as
+  an `s3` role (... killed on every exit path) and asserts, against that one child
+  process:
+  1. **the success plane carries it** — a signed `PUT` that succeeds returns a `Server`
+     header;
+  2. **the error plane carries it** — an UNSIGNED request refused `403` returns a `Server`
+     header. This is the load-bearing leg: an error response is the one most likely to end
+     up in a bug report, and it is the leg a per-handler implementation would miss;
+  3. **the streaming-GET head carries it** — a signed `GET` of the object just written
+     returns a `Server` header. ...
+  4. **the SERVER-ERROR class carries it** — a **signed** `GET /wyrd-bucket?acl` is refused
+     `501 NotImplemented` by the subresource denylist ... and that response returns a
+     `Server` header. ...
+  5. **the value is the real build identity, not a placeholder** — each of those four
+     header values is EXACTLY `wyrd/` + V, where V is the `version` field of the same child
+     process's `role started` JSON event (#778's observable, read from the same stderr
+     stream). Byte equality against an independently-observed value, not a shape test: this
+     is what makes the criterion unfakeable, and it is why this slice depends on #778.
+- **Falsifiability:** RED is producible on the ordinary developer harness Do is pointed at
+  — `cargo test -p wyrd-server --test s3_server_version_header`, no Docker, no cluster, no
+  feature flag. On the reverted tree there is no `Server` header on any response at all
+  ... This instance's `C4-verify` **reverts the production change and keeps the added test**
+  (`engine/scripts/run-verify.sh:508-517`), so the test must still COMPILE against the
+  reverted tree: drive `env!("CARGO_BIN_EXE_wyrd")` ... Do MUST NOT reference any symbol
+  this patch introduces ... from the test file; a test that calls net-new API fails to
+  compile on the red leg, which the gate correctly scores `UNVERIFIABLE` (exit 77 →
+  SUMMARY §6) rather than as a proven red. ...
+- **Invariant to restore:** *Every response the S3 front door emits identifies the build
+  that produced it.* Stated over the response CATEGORY — success, client error, server
+  error and the streaming-GET head alike — not over one handler and not over one status
+  code. SELF-TEST: this cannot be satisfied by touching a single handler, which is the
+  point; the gateway already has exactly one place where the property is expressible for
+  all of them (`handle`'s single stamp point, `crates/gateway-s3/src/lib.rs:1552-1556`,
+  reached by every request because the router is `Router::new().fallback(handle::<G>)`,
+  `:205`). ...
+- **Repo + branch target:** getwyrd/wyrd @ main
+- **Depends on:** 778
+- **Conflicts with:** 738, 742
+- **Ordering note:** `Depends on: 778` is a genuine build-on dependency, not just
+  sequencing: leg 5 asserts byte-equality against the `version` field #778 adds to the
+  `role started` event ... Built on a base without #778 this slice cannot go green. ...
+  `Conflicts with: 738` — #738 threads `--chunk-size` through `cmd_s3` → `serve_s3_role` →
+  `serve_s3_dispatch` → `serve_s3`, and this slice edits `serve_s3`'s body (`cli.rs:2377`).
+  `Conflicts with: 742` — #742's scope (f) rewrites the `release.yml` smoke step this slice
+  extends, and it is last in the batch, so the overlap is already scheduled apart.
+- **Surfaces:** data
+- **Difficulty:** medium
+- **Scope:** (a) `S3Config` gains a server-identity field, defaulted in `S3Config::new` so
+  every existing caller keeps compiling ...; (b) `handle` stamps `Server: wyrd/<v>` at its
+  single stamp point, beside the request id; (c) the composition root supplies the real
+  value — `serve_s3` sets the field from `wyrd_server::version::BUILD_IDENTITY` ...;
+  (d) `docs/design/architecture/14-threat-model.md` records the disclosure decision (see
+  Decision 2); (e) `.github/workflows/release.yml`'s existing installer smoke step gains
+  the ONE end-to-end check that closes the tracker's "matches `VERSION`" clause ...
+  **/ out of scope:** any derivation, build script, normalizer or packaging change — #778
+  owns the identity and it is already on your base ...; a configuration knob to suppress or
+  coarsen the header (Decision 2 — a follow-up issue if an operator ever asks); ...
+- **Repro instruction:** On `origin/main` at `a801997`, in the target checkout:
+  `grep -rn "header::SERVER\|\"server\"" crates/gateway-s3/src/` → nothing. ...
+- **External dependencies:** none.
+- **Test file:** `crates/server/tests/s3_server_version_header.rs` — a NEW file, and the
+  patch's **ONLY** added `*/tests/*.rs`. ... Appending to the existing `s3_http_wire.rs`
+  would silently degrade the gate to green-only and prove nothing; adding a SECOND
+  `*/tests/*.rs` would make it a second discriminator that must also go red with production
+  reverted, so do not.
+- **Verification posture:** The BINDING criterion above is the default posture — a flippable
+  test, red pre-fix and green post-fix at Check. One half IS deferred and is declared here
+  so it lands as a pre-declared sign-off item rather than a surprise NEEDS-HUMAN: the
+  tracker's "the wire version matches what `cargo xtask dist` stamps into the tarball's
+  `VERSION`" clause cannot be observed inside `cargo xtask ci`, because `dist` needs Docker
+  and a network ...
+- **Citations expected:** Do must cite `path:line` on the base for every change. Peer
+  callsites Do MAY open and should mirror: ... the `x-amz-request-id` stamp at the end of
+  `handle` ... Stamp the `Server` header there, the same way, for the same reason. ...
+- **Prior-art check (triage cycles):** searched by affected path on `origin/main` at
+  `a801997`. ... `gh pr list --state all --search "Server header"` → no PR, open or closed,
+  has attempted one. The only prior attempt is #736's own four rounds
+  (`results/issue_736/iteration-v{1,2,3,4}/`), whose header half was never refuted; this
+  brief is that half, re-scoped.
+- **Disposition hint:** new-feature
 ```
 
+Four of those labels — `Kind`, `Goal`, `Verification posture` and
+`Production reach` (not shown) — are not in the template's brief. Wyrd's own
+templates add them (`Kind` and `Goal` come from its design-proposal form, the
+other two sit in its brief template beside a `Track` field); the driver parses
+none of them, the planner, builder and reviewers read them. That is the designed
+seam: the template fixes the fields the *machine* consumes, and a project adds
+what its *reviewers* need.
+
 Fields from the field table in [How it works](#why-each-field-is-there) below
-that **don't** appear here: `Falsifiability`, `Invariant to restore`,
-`Onto branch`, `Surfaces`, `Difficulty`, `Do model`, `Depends on` /
-`Conflicts with` / `Ordering note`, and `External dependencies`. All optional,
-and this bug didn't need any of them — it's a single, unbatched fix with no
-scheduling constraints, no GUI/E2E surface split, no non-toolchain dependency,
-and no ambiguity worth a routing override. You'll see `Depends on` and
-`Conflicts with` in the [batch-ordering example](#ordering-and-routing-the-batch)
-above, `Difficulty` / `Do model` in [step 04](04-do.md), and
-`External dependencies` in [step 01](01-render-and-integrate.md)'s doctor
-section — they show up when a brief actually needs them, not by default.
+that **don't** appear here: `Onto branch`, `Do model`, `Merges with`,
+`Depends on (merged)` and `Stacks on`. All optional, and this change didn't need
+any of them — it opens its own PR rather than landing on an existing one, its
+default builder is the right one, and it is scheduled by a plain dependency
+rather than an atomic merge group. `External dependencies` is declared `none`
+explicitly: the brief even explains why the cargo dependency the build fetches is
+not one (a human never installs it). You'll see `Do model` in
+[step 04](04-do.md), and `External dependencies` in
+[step 01](01-render-and-integrate.md)'s doctor section — they show up when a
+brief actually needs them, not by default.
 
 ### The Plan can be a pointer
 
@@ -181,7 +331,10 @@ proposal, a normative spec under change control — you don't restate that here.
 driver parses (slug, success criterion, branch target, test file). Do reads the
 referenced artifact as the authoritative plan and cites it; the rest of the cycle is
 unchanged. This lets PDCA wrap a host's existing planning process instead of imposing
-its own document shape.
+its own document shape. Wyrd's INTEGRATION §6 says its Plan *is* "a set of existing
+artifacts" — the linked ADR, proposal or spec — and the brief above shows the
+hybrid in practice: a full brief whose "Plan of record" is proposal 0017, read in
+place, with the brief adding only what that proposal leaves to one Do cycle.
 
 ---
 
@@ -202,8 +355,8 @@ to the beat outright:
   children — both typed by the planner as tool calls in the same REPL the
   human is already sitting in, never a separate command remembered later.
   [Step 07](07-crosscutting.md#size--split) covers the full decomposition
-  process; the short version is that splitting is owned by Plan, not bolted on
-  after it.
+  process, with the split that produced the brief above; the short version is
+  that splitting is owned by Plan, not bolted on after it.
 - **`sizer`** — headless, and **not** invoked by the planner or by anything in
   this beat directly. It's called automatically by the driver's pre-dispatch
   policy: once right after Plan exits (a freshly-paid call, before Do), and
@@ -214,12 +367,16 @@ to the beat outright:
   [Entry and exit](#entry-and-exit-the-guards-around-plan) below for exactly
   when it fires.
 
+A fourth, the `[[leaves.plan_advisory]]` pool above, is dispatched by the driver
+right after the planner exits and before Do — an antagonist of the brief, not a
+co-author of it.
+
 One thing worth knowing: the vendored model spec
 (`../template/PCDA/quality-cycle/03-cycle-automation.md`) still describes "six"
-leaves (planner, builder, reviewer, signoff, publisher, act) — `sizer` and
-`splitter` are newer than that count and haven't been folded into the spec's own
-language yet, even though `pdca.toml`'s `[leaves.*]` tables already ship all
-eight.
+leaves (planner, builder, reviewer, signoff, publisher, act) — `sizer`,
+`splitter` and the advisory pools are newer than that count and haven't been
+folded into the spec's own language yet, even though `pdca.toml`'s `[leaves.*]`
+tables already ship all of them.
 
 ### Entry and exit: the guards around Plan
 
@@ -317,18 +474,23 @@ is *why* the harness can automate Do and Check at all:
 | **Prior-art check (triage cycles)** | Plan itself, sign-off | A duplicate or already-attempted fix reaches Do before anyone checks history |
 | **Disposition hint** | sets expectations for sign-off | — |
 
-Notice how **INTEGRATION.md is cited inline** — "addons production branch per
-INTEGRATION §2", "addon convention per INTEGRATION §3". That's the payoff of
-[step 01](01-render-and-integrate.md): the planner resolves abstract questions
-("which branch? where does the test go?") against your repo's concretizations
-instead of guessing.
+Notice how the brief **grounds itself in the project's own rules**: the target
+`getwyrd/wyrd @ main` is INTEGRATION §2's rule for single-slice work (one trunk,
+no maintenance branches to guess at); the plan of record is a proposal in the
+target's design corpus, read in place as INTEGRATION §2 asks; and the `Test
+file` reasoning quotes the instance's own verifier
+(`engine/scripts/run-verify.sh`) to explain why the test must be a *new* file.
+That's the payoff of [step 01](01-render-and-integrate.md): the planner resolves
+abstract questions ("which branch? where does the test go? what counts as red?")
+against your repo's concretizations instead of guessing.
 
 ## STOP discipline
 
 Every brief carries the rule that the cycle never ships before sign-off:
 
-> Draft only until Check sign-off. A draft PR MAY be opened for CI; the PR MUST
-> NOT be marked ready before sign-off accepts.
+> Draft only until Check sign-off. Pushing to a feature/draft branch and opening a
+> draft PR MAY happen during the cycle. The PR MUST NOT be marked ready before
+> sign-off accepts.
 
 The brief is now written. State: `PLANNED`. The driver advances unattended into
 the Do beat — [step 04](04-do.md).

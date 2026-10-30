@@ -85,8 +85,9 @@ depends on a maintainer remembering to ask for it on any given contribution.
 misses — something a maintainer caught at review that no gate owned — into
 permanent improvements: a new gate, a new brief field, a tightened rule. Each
 future cycle starts from a better baseline. (The walkthrough shows a real
-example: a maintainer's review comment about a translation-manifest rule became a
-proposed deterministic gate — see [step 06](06-act.md).)
+example: three defects a post-merge review found on an already-merged PR became
+two always-on review leaves and a builder escalation ladder — see
+[step 06](06-act.md).)
 
 **Scale without losing rigor.** Because state lives in files (not a database), the
 driver is **idempotent and resumable**, and one Plan session can brief *several*
@@ -180,8 +181,9 @@ The harness fits when you are **funnelling AI-generated contributions into a rea
 codebase** and need each one verified, scoped, and signed off — especially at
 volume, across multiple branches, or into a project with real conformance rules
 (tests, linters, contribution conventions). The worked example throughout this
-guide — [Gramps Testbed v2](README.md), which contributes fixes upstream to the
-Gramps genealogy project and its addons — is exactly that shape.
+guide — [Wyrd PDCA](README.md), which drives contributions into Wyrd, a
+distributed file storage system written in Rust, through Wyrd's own `cargo xtask`
+gates — is exactly that shape.
 
 It's heavier than you need for a one-off script or a solo throwaway. The payoff is
 in *repeated* contribution where correctness, traceability, and a maintainer's
