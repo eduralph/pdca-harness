@@ -926,6 +926,13 @@ wave builds on, via `[driver].wave_mode`:
   refuses a merge if the base moves after the driver's last read.
   `[driver].merge_requires = "required"` opts back into host-config-only
   semantics, and skips the behind check and the update too.
+  Under either setting, when `gh pr merge` fails on a PR the host reports
+  `BLOCKED` that has unresolved review threads or a review that requested
+  changes, the run stops naming them, each thread with its file and line, and
+  returns the PR to draft; because `BLOCKED` does not say which rule blocks the
+  merge, the stop also shows the PR's `reviewDecision`, and `merge-remarks.json`
+  in the bundle records that and the host's merge error beside the remarks (the
+  bundle's next merge attempt removes the file first).
   Under either setting, before it readies a PR the driver reads the PR's base on
   the host and compares it with the bundle's own target base (the `Repo + branch
   target` publish used). If they differ, the driver retargets the PR
