@@ -16,6 +16,13 @@ Output structure (served at the apex domain pdca.dev):
     /guide/<nn>-*.html      docs/<nn>-*.md                (the walkthrough steps)
     /spec/                  generated index of the quality-cycle model
     /spec/<nn>-*.html       template/PCDA/quality-cycle/<nn>-*.md
+    /design/                docs/design/README.md         (the design-docs index)
+    /design/<sub>/...html   docs/design/<sub>/...md       (ADRs, architecture, proposals,
+                                                           specs, templates; a README is
+                                                           its folder's index, a folder
+                                                           without one gets a generated index)
+    /governance/            generated index
+    /governance/<name>.html docs/governance/<NAME>.md     (stem lower-cased, _ -> -)
 
 Design notes:
   * Deterministic: same tree in, same site out.
@@ -75,6 +82,16 @@ GITHUB_TREE = "https://github.com/eduralph/pdca-harness/tree/main/"
 SECTION_CLASS = {
     "guide": "Walkthrough",
     "spec": "Quality-cycle model",
+    "design": "Design documentation",
+    "governance": "Governance",
+}
+
+# Titles for the index pages generated for published folders that have no README.
+DIR_INDEX_TITLES = {
+    "design/architecture": "Architecture overview",
+    "design/proposals/accepted": "Accepted proposals",
+    "design/proposals/draft": "Draft proposals",
+    "governance": "Governance",
 }
 
 MERMAID_VERSION = "11.4.1"
@@ -132,6 +149,14 @@ def out_url(rel: str) -> str | None:
         return "/guide/"
     if rel.startswith("docs/") and rel.endswith(".md") and "/" not in rel[len("docs/"):]:
         return f"/guide/{rel[len('docs/'):-len('.md')]}.html"
+    if rel.startswith("docs/design/") and rel.endswith(".md"):
+        sub = rel[len("docs/"):-len(".md")]            # design/adr/0001-...
+        if sub.endswith("/README"):
+            return "/" + sub[:-len("README")]          # a README is its folder's index
+        return f"/{sub}.html"
+    if rel.startswith("docs/governance/") and rel.endswith(".md") and "/" not in rel[len("docs/governance/"):]:
+        stem = rel[len("docs/governance/"):-len(".md")].lower().replace("_", "-")
+        return f"/governance/{stem}.html"
     if rel.startswith(SPEC_REL + "/") and rel.endswith(".md"):
         stem = rel[len(SPEC_REL) + 1:-len(".md")]
         if "/" in stem:
@@ -284,10 +309,12 @@ class Renderer:
     # -- discovery --
     def discover(self) -> list[tuple[str, Path, str]]:
         """Return (rel, path, url) for every published source; populate url_map."""
-        candidates = sorted(DOCS_ROOT.glob("*.md")) + sorted(SPEC_ROOT.glob("*.md"))
+        candidates = sorted(DOCS_ROOT.rglob("*.md")) + sorted(SPEC_ROOT.glob("*.md"))
         sources: list[tuple[str, Path, str]] = []
         for path in candidates:
             rel = path.relative_to(REPO_ROOT).as_posix()
+            if rel.startswith("docs/publishing/"):
+                continue  # the site's own tooling docs are not published
             url = out_url(rel)
             if url is None:
                 continue
@@ -296,6 +323,22 @@ class Renderer:
         # aliases so prose can link to the section folders / dirs
         self.url_map["docs"] = "/guide/"
         self.url_map[SPEC_REL] = "/spec/"
+        # every published folder resolves to an index: its README's URL, or the
+        # generated index build_dir_indexes() emits for a folder without one
+        self.dir_indexes: dict[str, str] = {}
+        for rel, _path, url in sources:
+            if not rel.startswith(("docs/design/", "docs/governance/")):
+                continue
+            folder = rel.rsplit("/", 1)[0]
+            while folder != "docs":
+                if folder not in self.url_map:
+                    index_url = "/" + folder[len("docs/"):] + "/"
+                    self.url_map[folder] = index_url
+                    self.dir_indexes[folder] = index_url
+                folder = folder.rsplit("/", 1)[0]
+        for rel, _path, url in sources:
+            if url.endswith("/"):  # a README: its folder needs no generated index
+                self.dir_indexes.pop(rel.rsplit("/", 1)[0], None)
         return sources
 
     # -- emit one templated page --
@@ -430,6 +473,24 @@ class Renderer:
                 f"<h2>Documents</h2>\n<ul>\n{lis}\n</ul>\n")
         self.emit("/spec/", "The quality-cycle model", body, "", False)
 
+    # -- generated indexes for published folders that have no README --
+    def build_dir_indexes(self):
+        for folder, index_url in sorted(self.dir_indexes.items()):
+            key = folder[len("docs/"):]
+            title = DIR_INDEX_TITLES.get(key, prettify(key.rsplit("/", 1)[-1]))
+            pages = sorted(
+                ((u, t) for u, t in self.titles.items()
+                 if u.startswith(index_url) and u != index_url
+                 and "/" not in u[len(index_url):].rstrip("/")),
+                key=lambda it: numeric_key(it[0].rstrip("/").split("/")[-1]),
+            )
+            if not pages:
+                continue
+            lis = "\n".join(f'    <li><a href="{u}">{html.escape(t)}</a></li>' for u, t in pages)
+            self.cur_desc = f"{title} — PDCA Harness design documentation."
+            body = f"<h1>{html.escape(title)}</h1>\n<ul>\n{lis}\n</ul>\n"
+            self.emit(index_url, title, body, SECTION_CLASS.get(section_of(index_url) or "", ""), False)
+
     # -- static assets + mermaid --
     def copy_site(self):
         for item in SITE_DIR.iterdir():
@@ -492,6 +553,7 @@ class Renderer:
             self.titles[url] = read_title(path.read_text(encoding="utf-8"), prettify(path.stem))
         for rel, path, url in sources:
             self.render_source(rel, path, url)
+        self.build_dir_indexes()
         self.build_spec_index()
         self.render_home()
         self.copy_site()

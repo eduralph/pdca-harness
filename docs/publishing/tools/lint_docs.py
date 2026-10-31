@@ -69,9 +69,14 @@ def check_wikilinks(path: Path, rel: str) -> list[str]:
 
 
 def iter_docs():
-    """Every published Markdown file, as (path, repo-relative posix string)."""
-    for md in sorted(DOCS_ROOT.glob("*.md")):
-        yield md, md.relative_to(REPO_ROOT).as_posix()
+    """Every published Markdown file, as (path, repo-relative posix string): the
+    guide, the design and governance docs (everything under docs/ except the site's
+    own tooling under publishing/), and the vendored spec."""
+    for md in sorted(DOCS_ROOT.rglob("*.md")):
+        rel = md.relative_to(REPO_ROOT).as_posix()
+        if rel.startswith("docs/publishing/"):
+            continue
+        yield md, rel
     if SPEC_ROOT.is_dir():
         for md in sorted(SPEC_ROOT.glob("*.md")):
             yield md, md.relative_to(REPO_ROOT).as_posix()
