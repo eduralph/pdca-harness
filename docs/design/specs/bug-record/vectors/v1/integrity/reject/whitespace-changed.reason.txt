@@ -1,0 +1,1 @@
+One space was added after `true`; the MAC covers exact bytes, so it no longer matches (§11).

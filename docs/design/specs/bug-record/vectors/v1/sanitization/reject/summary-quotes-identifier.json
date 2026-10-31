@@ -9,6 +9,8 @@
   },
   "summary": {
     "title": "Concurrent commit to the same inode can report success for both writers",
+    "description": "Two clients saving the same file at the same moment can both be told they succeeded, although only one of their versions is kept.",
+    "impact": "Whoever saved second loses their changes without any error, so data loss goes unnoticed until someone opens the file.",
     "observed": "Writing to tenant-acme/bucket7/report.pdf returns 200 for both writers.",
     "expected": "Exactly one commit succeeds; the other receives a version conflict and can retry.",
     "trigger": "Two writers commit to one file within a short window, after both have read the same prior version.",

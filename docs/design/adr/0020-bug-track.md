@@ -45,8 +45,9 @@ lanes are already the parallel worktrees of §8.8.)
 1. **Intake.** The priority triage of ADR-0017 runs as today. It adds no labels for this
    track and gains no permissions.
 2. **Summarize.** A leaf with no write access and no tools beyond reading the issue
-   produces a **sanitized summary**: expected and observed behaviour, the area, and the
-   conditions to trigger it, in its own words, under the same quoting rules as ADR-0017
+   produces a **sanitized summary**: a short plain-language description of the bug and its
+   impact for people reading the tracker or the bundle, expected and observed behaviour, the
+   area, and the conditions to trigger it, all in its own words, under the same quoting rules as ADR-0017
    section 4. Every later stage reads the summary, never the issue. The summary and
    everything later stages add to it form the **bug record**, specified in the
    `bug-record/v1` spec, which also states the sanitization rules the driver enforces.
@@ -148,10 +149,57 @@ Plan like milestone work. Budgets live in the runner (ADR-0010).
 ### 7. Credentials
 
 No leaf of the track holds a credential that can write to a repository. The driver, which
-runs no model and runs on the workflow host, pushes branches and opens the draft pull request, as in every cycle. Where
-the leaves run is decided in ADR-0021.
+runs no model and runs on the workflow host, pushes branches and opens the draft pull
+request, as in every cycle. Where the leaves run is decided in ADR-0021.
 
-### 8. Telemetry
+### 8. Bug bundles and publication
+
+Instances that record their bundles (`pdca record`) commit them to the instance
+repository, and the draft pull request goes to the target repository; either can be
+public. Everything the track keeps is therefore written to be published.
+
+**Layout.** Bug bundles live apart from milestone bundles, under a `bug_root` (default
+`results/bugs/`), grouped by milestone so no directory grows without bound:
+
+```
+results/bugs/
+  <milestone>/            the issue's milestone when the bundle is recorded,
+                          or `unscheduled` when it has none
+    issue_<n>/
+      README.md           rendered from the record: description, impact, status,
+                          target ref, links to the issue and pull requests
+      bug-record.json     the bug record, and its MAC (spec bug-record/v1)
+      bug-record.json.mac
+      cycles/<ref>/       one normal cycle bundle per fix or backport, `/` in the
+                          ref replaced by `-`
+```
+
+The milestone only places the directory; the fix still targets a ref (section 4). A bundle
+is recorded once, when its track ends, and is not moved if the milestone changes later.
+A track that ends without a cycle (not reproduced, answered for an unsupported release, or
+withdrawn) is recorded too, as a directory holding only the README and the record.
+
+**Security bugs never enter the track.** A reproducing test and a patch published before a
+release are an exploit with instructions. The poller skips any issue that ADR-0017's triage
+marks as a possible undisclosed vulnerability, and such reports go through the target
+repository's private vulnerability reporting, which MUST be enabled for the track to run
+(`doctor` checks it). If the mark appears after Reproduce has run, nothing of that track is
+committed or pushed; its files stay on the workflow host until the maintainer decides.
+
+**Contents are allowlisted.** A bug bundle holds only: the README, the record and its MAC,
+and per cycle the files of a normal bundle that are already published today (brief,
+patch, test, review findings, gate verdicts, `SUMMARY.md`, token rows). Leaf transcripts,
+in particular Summarize's, which contains the issue text, raw runner logs, instance
+metadata and signed URLs never enter a bundle; they stay on the workflow host or are
+deleted with the VM. An allowlist fails closed when a new kind of file appears; a filter
+fails open.
+
+**A redaction check runs before every commit and push.** `pdca record` and publish refuse
+to commit or push a bug bundle that contains a string matching a secret pattern or an
+entry of the instance's list of internal identifiers (host names, absolute paths of the
+workflow host, cloud project IDs). A match is a NEEDS-HUMAN item, never a silent scrub.
+
+### 9. Telemetry
 
 Each run records, per instance: how many bugs reproduced, how many automatically started
 cycles reached a draft pull request, how many of those the maintainer accepted, how many
@@ -183,6 +231,12 @@ without a maintainer's go. It should be reviewed whenever an ADR of the target p
 or changes a protected area. The maintainer's review of draft pull requests remains the
 throughput limit, by design.
 
+Every bug leaves a short, readable entry under its milestone, so the bug history of a
+release can be read without opening the tracker. Because everything the track keeps is
+publishable by construction, an instance can record bug bundles in a public repository
+without a review pass for leaks; the allowlist and the redaction check are what make
+that safe, and both must be kept current when the bundle gains a new kind of file.
+
 Fixing against refs instead of milestones keeps one line of development and no branch per
 plan to keep in sync. Each supported release adds a backport cycle to every fix that
 reaches it, so declaring a release supported has a running cost the instance should choose
@@ -193,8 +247,10 @@ Follow-on work: the `pdca.toml` keys for protected paths, budgets, the poll sche
 the per-run limit (they move to the `Policy` protocol of ADR-0013 when step 5 lands), the
 poll command, the `track:bug` and stage labels, the summarize and reproduce roles (data,
 per ADR-0011), the gate check that the reproduced test is unchanged, the run of a test
-across candidate refs with bisection, and a version or commit field in the instances'
-bug issue template.
+across candidate refs with bisection, a version or commit field in the instances' bug
+issue template, the `bug_root` layout and README renderer, the bundle allowlist and
+redaction check, a `doctor` check for private vulnerability reporting, and a visible
+vulnerability mark in ADR-0017's triage (today the flag only shapes the bot's comment).
 
 Left open:
 
