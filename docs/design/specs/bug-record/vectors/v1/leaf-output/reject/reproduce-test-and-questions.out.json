@@ -1,0 +1,10 @@
+{
+  "test": {
+    "kind": "unit",
+    "path": "crates/core/tests/commit_conflict.rs",
+    "seed": null
+  },
+  "questions": [
+    "Which client version?"
+  ]
+}

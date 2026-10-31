@@ -62,10 +62,11 @@ variable "job_limit_seconds" {
 }
 
 variable "egress_fqdns" {
-  description = "The only destinations the runner may reach (TCP 443): the model endpoint and Cloud Storage. Dependencies come from the cache bucket, never from a registry; nothing on the runner reaches the tracker."
+  description = "The only destinations the runner may reach (TCP 443): the endpoints of the model vendors the instance's leaves use (at least two, ADR-0005) and Cloud Storage. Dependencies come from the cache bucket, never from a registry; nothing on the runner reaches the tracker."
   type        = list(string)
   default = [
     "api.anthropic.com",
+    "api.openai.com",
     "storage.googleapis.com",
   ]
 }

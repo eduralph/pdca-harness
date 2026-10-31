@@ -92,7 +92,9 @@ VM when, and only when, the poll found work; a quiet day creates nothing.
 - **Containers per job.** Each job runs in a fresh container from a pinned image: read-only
   root, a tmpfs working directory, no capabilities, seccomp, user namespaces, cgroup
   limits, a timeout of the job limit. Produce containers run under gVisor (`runsc`) and
-  reach one network destination, the model endpoint; verify containers run under plain
+  reach only the endpoints of the model vendors the instance configures for its leaves
+  (at least two, since ADR-0005 wants the reviewer decorrelated from the builder); verify
+  containers run under plain
   rootless Podman with no network. Dependencies come from a read-only cache volume that a
   trusted job writes from the target's `main`; no container fetches from a registry.
 - **One VM, with a taint rule.** Produce and verify containers share the runner's kernel.
@@ -110,7 +112,7 @@ VM when, and only when, the poll found work; a quiet day creates nothing.
 - A service account that can read the job bucket and the cache bucket and write to one
   result prefix; never the default compute service account, never a role on the project.
 - No external IP, no SSH (OS Login off), no serial console; outbound through NAT to the
-  model endpoint, the job and cache buckets, and nothing else. The egress rule is by
+  configured model endpoints, the job and cache buckets, and nothing else. The egress rule is by
   destination, logged in full, not errors only.
 - The model credential for produce containers: a key bound to a workspace with its own
   spending limit, placed in the runner's metadata for the batch, never a subscription

@@ -63,8 +63,9 @@ accept, unchanged. ("Track", not "lane": lanes are the parallel worktrees of §8
    Otherwise the track stops and posts the open questions to the issue for the reporter.
 5. **Fix.** The builder gets the record and the test, never the issue, and returns a diff.
    The driver verifies the diff the same way: the test green N times on the recorded base
-   plus the diff, in a fresh verify container; the diff may not touch the test file, or the
-   C4 row is unverifiable and goes to §6 under C6.
+   plus the diff, in a fresh verify container. The diff may not touch any file under the
+   instance's test directories (the test itself, or a helper it depends on), or the C4 row
+   is unverifiable and goes to §6 under C6: a fix changes source, not tests.
 6. **Review.** The reviewer (ADR-0005) adjudicates from the verify logs; it does not
    re-execute them for bug bundles (ADR-0021 §1).
 7. **Sign-off: the bundle pull request.** The driver opens a draft pull request on the
@@ -255,7 +256,9 @@ The track follows the issue, but never lets a change to it restart work silently
   last, the record is closed as not reproduced.
 - **Closure and triage.** An issue that is closed ends its track as withdrawn. An issue that
   gets `needs-triage`, or loses `bug`, its priority or `track:go`, pauses the track until it
-  has them again. Reopening an issue whose record is closed starts a new record.
+  has them again. When a record closes, the driver removes `track:go`; reopening the issue
+  starts a new record only once a maintainer sets it again, so a reporter cannot restart
+  the track by closing and reopening.
 - **The maintainer's switches.** `track:paused` stops the track for one issue until it is
   removed; removing `track:bug` ends it as handed over. An instance setting turns the whole
   track off; the poller then starts nothing new and lets the running batch end.

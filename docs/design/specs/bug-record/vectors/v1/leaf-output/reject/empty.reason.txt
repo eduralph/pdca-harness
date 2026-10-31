@@ -1,0 +1,1 @@
+An empty output file means the stage failed; it is never read as an empty result (§9).
