@@ -1,0 +1,1 @@
+`test.kind` is simulation-seed but `test.seed` is null (§4).

@@ -1,0 +1,60 @@
+{
+  "format": "pdca.bug-record",
+  "version": 1,
+  "source": {
+    "kind": "scheduled-run",
+    "repository": "getwyrd/wyrd",
+    "issue": null,
+    "run": "nightly-sweep-2026-10-30"
+  },
+  "summary": {
+    "title": "Concurrent commit to the same inode can report success for both writers",
+    "observed": "When two clients commit new versions of the same file at nearly the same time, both receive a success response and one version is silently lost.",
+    "expected": "Exactly one commit succeeds; the other receives a version conflict and can retry.",
+    "trigger": "Two writers commit to one file within a short window, after both have read the same prior version.",
+    "areas": [
+      "commit"
+    ],
+    "reported_ref": {
+      "kind": "none",
+      "value": null
+    },
+    "truncated": false
+  },
+  "reproduction": {
+    "status": "reproduced",
+    "test": {
+      "kind": "simulation-seed",
+      "path": "crates/core/tests/commit_conflict.rs",
+      "sha256": "1effffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "seed": "90211",
+      "command": [
+        "cargo",
+        "test",
+        "--test",
+        "commit_conflict"
+      ]
+    },
+    "results": [
+      {
+        "ref": "main",
+        "commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "outcome": "green"
+      },
+      {
+        "ref": "release/0.1",
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "outcome": "red"
+      }
+    ],
+    "questions": []
+  },
+  "target": {
+    "decision": "backport-existing",
+    "ref": "release/0.1",
+    "backports": [],
+    "fixing_commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "answered_release": null
+  },
+  "routing": null
+}

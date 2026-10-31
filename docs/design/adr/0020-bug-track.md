@@ -47,7 +47,9 @@ lanes are already the parallel worktrees of §8.8.)
 2. **Summarize.** A leaf with no write access and no tools beyond reading the issue
    produces a **sanitized summary**: expected and observed behaviour, the area, and the
    conditions to trigger it, in its own words, under the same quoting rules as ADR-0017
-   section 4. Every later stage reads the summary, never the issue.
+   section 4. Every later stage reads the summary, never the issue. The summary and
+   everything later stages add to it form the **bug record**, specified in the
+   `bug-record/v1` spec, which also states the sanitization rules the driver enforces.
 3. **Reproduce.** A leaf writes a test from the summary that fails on the ref the report
    names, or on `main` when it names none: a unit or property test, or for an instance
    that has one, a deterministic-simulation seed. The result is the red leg of the C4

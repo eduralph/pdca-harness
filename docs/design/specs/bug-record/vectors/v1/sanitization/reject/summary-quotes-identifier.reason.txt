@@ -1,0 +1,1 @@
+`summary.observed` contains `tenant-acme/bucket7/report.pdf`, a token that looks like a path, and the three-digit number 200; both appear in the matching .issue.txt (§3).
