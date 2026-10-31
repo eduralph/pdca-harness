@@ -1,0 +1,61 @@
+{
+  "format": "pdca.bug-record",
+  "version": 1,
+  "source": {
+    "kind": "issue",
+    "repository": "getwyrd/wyrd",
+    "issue": 412,
+    "run": null,
+    "issue_digest": "6c4808082f8ca590a1c692ff317e6f722e7a39a2e1d9bf2c5be4611e7b2e47ba",
+    "attempt": 1
+  },
+  "summary": {
+    "title": "Concurrent commit to the same inode can report success for both writers",
+    "description": "Two clients saving the same file at the same moment can both be told they succeeded, although only one of their versions is kept.",
+    "impact": "Whoever saved second loses their changes without any error, so data loss goes unnoticed until someone opens the file.",
+    "observed": "When two clients commit new versions of the same file at nearly the same time, both receive a success response and one version is silently lost.",
+    "expected": "Exactly one commit succeeds; the other receives a version conflict and can retry.",
+    "trigger": "Two writers commit to one file within a short window, after both have read the same prior version.",
+    "areas": [
+      "commit"
+    ],
+    "reported_ref": {
+      "kind": "ref",
+      "value": "main"
+    },
+    "truncated": false
+  },
+  "reproduction": {
+    "status": "flaky",
+    "test": {
+      "kind": "unit",
+      "path": "crates/core/tests/commit_race.rs",
+      "sha256": "abababababababababababababababababababababababababababababababab",
+      "seed": null,
+      "command": [
+        "cargo",
+        "test",
+        "--test",
+        "commit_race"
+      ]
+    },
+    "signature": null,
+    "results": [
+      {
+        "ref": "main",
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "runs": 5,
+        "failures": 3,
+        "outcome": "flaky"
+      }
+    ],
+    "questions": []
+  },
+  "target": null,
+  "routing": null,
+  "closure": {
+    "reason": "flaky",
+    "pull_requests": [],
+    "duplicate_of": null
+  }
+}

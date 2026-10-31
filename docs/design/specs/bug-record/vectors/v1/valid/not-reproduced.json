@@ -5,7 +5,9 @@
     "kind": "issue",
     "repository": "getwyrd/wyrd",
     "issue": 412,
-    "run": null
+    "run": null,
+    "issue_digest": "6c4808082f8ca590a1c692ff317e6f722e7a39a2e1d9bf2c5be4611e7b2e47ba",
+    "attempt": 2
   },
   "summary": {
     "title": "Concurrent commit to the same inode can report success for both writers",
@@ -26,11 +28,17 @@
   "reproduction": {
     "status": "not-reproduced",
     "test": null,
+    "signature": null,
     "results": [],
     "questions": [
       "Does the lost version occur only when both writers use the same client process?"
     ]
   },
   "target": null,
-  "routing": null
+  "routing": null,
+  "closure": {
+    "reason": "not-reproduced",
+    "pull_requests": [],
+    "duplicate_of": null
+  }
 }

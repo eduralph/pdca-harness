@@ -1,0 +1,1 @@
+`failures` is 3 of 5 `runs` but `outcome` is red; red means every run failed (§4).

@@ -54,13 +54,15 @@ lanes are already the parallel worktrees of §8.8.)
 3. **Reproduce.** A leaf writes a test from the summary that fails on the ref the report
    names, or on `main` when it names none: a unit or property test, or for an instance
    that has one, a deterministic-simulation seed. The result is the red leg of the C4
-   gate (ADR-0006), produced before any fix. The driver then runs the test on the other
-   candidate refs to choose where the fix goes (section 4).
+   gate (ADR-0006), produced before any fix, and it counts as red only if it fails on
+   every run (section 9). The driver then runs the test on the other candidate refs to
+   choose where the fix goes (section 4) and checks it against open tracks for a
+   duplicate (section 10).
    If no failing test is found within the stage's budget, the track stops and posts the
    open questions to the issue for the reporter. It never proceeds to Build.
 4. **Cycle.** The test and summary enter a normal PDCA cycle as the bundle's brief. The
-   builder must turn the test green without editing it; the gate checks the test file is
-   unchanged since Reproduce. Review (ADR-0005), sign-off and C6 (ADR-0004), and publish
+   builder must turn the test green without editing it, on every run; the gate checks the
+   test file is unchanged since Reproduce. Review (ADR-0005), sign-off and C6 (ADR-0004), and publish
    are unchanged: the track ends at a draft pull request, like every cycle.
 
 Failing tests from an instance's own scheduled runs (a simulation seed sweep, a nightly
@@ -199,9 +201,83 @@ to commit or push a bug bundle that contains a string matching a secret pattern 
 entry of the instance's list of internal identifiers (host names, absolute paths of the
 workflow host, cloud project IDs). A match is a NEEDS-HUMAN item, never a silent scrub.
 
-### 9. Telemetry
+### 9. Reliable reds
 
-Each run records, per instance: how many bugs reproduced, how many automatically started
+A test that fails only some of the time is not evidence: the builder chases noise, and a
+pass after the fix proves nothing. So the driver runs a reproduced test several times per
+ref (`runs`, default 5, set per instance) and records how many runs failed.
+
+- The test is **red** on a ref only if every run fails, and **green** only if every run
+  passes. Anything in between is **flaky**.
+- A flaky result on the ref the report names, or on `main`, stops the track with a
+  NEEDS-HUMAN item; the test is kept for the maintainer. A flaky result on another
+  candidate ref removes that ref from the candidates and is reported.
+- The C4 gate of a bug cycle requires the test green on every one of the same number of
+  runs after the fix.
+- A deterministic-simulation seed needs one run, since the same seed gives the same result.
+
+### 10. Duplicates
+
+Two reports of one bug would otherwise start two tracks and two pull requests. ADR-0017's
+triage does not detect that; the reproduced test can, mechanically.
+
+The instance's gate reports where a failing test fails with a marker line,
+`PDCA-FAILURE-AT: <path>:<line>`, naming the source location of the failing assertion or
+panic, in the same marker protocol as `PDCA-UNVERIFIABLE:`. That location is the bug's
+**failure signature**. When a newly reproduced test has the same signature on the same
+target ref as a track that is still open, the newer issue is linked to the older one with
+a comment, its track stops as a duplicate, and nothing further is built for it. A
+different signature is never treated as a duplicate, even when the summaries read alike;
+two tracks that turn out to be one are closed by the maintainer.
+
+### 11. Issue lifecycle
+
+The track follows the issue, but never lets a change to it restart work silently.
+
+- **Edits.** The record keeps a digest of the issue title and body that Summarize read.
+  An edit after that does not change the record or restart a stage. While the track waits
+  on the reporter (below), an edit counts as an answer.
+- **Answers.** After "not reproduced", the track waits for the reporter: an edit, or a
+  comment by the reporter after the track's questions. On the next poll it then runs
+  Summarize and Reproduce once more, on the issue and only the reporter's comments since
+  the questions. The number of attempts is limited (default 2, set per instance); after
+  the last, the track ends as not reproduced.
+- **Closure and triage.** An issue that is closed ends its track as withdrawn. An issue
+  that gets `needs-triage`, or loses `bug` or its priority, pauses the track until it has
+  them again.
+- **The maintainer's switches.** A `track:paused` label stops the track for one issue
+  until it is removed. An instance setting turns the whole track off; the poller then
+  starts nothing new and lets running jobs finish or reach their time limit.
+- **Hand-over.** When the maintainer sets a milestone on an issue whose track is held,
+  the cycle starts under the maintainer, as section 3 says. When the maintainer takes the
+  issue out of the track (removes `track:bug`), the track ends as handed over and records
+  what it had.
+
+Every ending (a pull request, an answer, not reproduced, flaky, duplicate, withdrawn,
+handed over) is written to the record and rendered into the bundle's README.
+
+### 12. Claims and retries
+
+A poll run ends long before the jobs it started, and a spot VM can disappear mid-job, so
+the drive claims of `process/.drive-claims/` (user documentation, chapter 07), which last only as
+long as the process holding them, are not enough on their own.
+
+- For each issue and stage, the driver records a **job claim** on the workflow host: the
+  runner's handle, when the job started, and a lease of the stage's time budget plus a
+  margin. Job claims live under `process/`, outside every bundle, and are never committed.
+- A poll first collects finished jobs, then retries jobs whose lease has expired and whose
+  runner reports them gone, and only then starts new ones. It never starts a stage for an
+  issue that holds a live job claim for it.
+- A stage is retried at most twice for infrastructure reasons (a lost VM, a runner
+  error). After that the track stops with a NEEDS-HUMAN item. Infrastructure failures do
+  not count as attempts in the sense of section 11.
+- A poll run holds the ordinary drive claim while it changes a track's state, so two poll
+  runs never advance the same track at once.
+
+### 13. Telemetry
+
+Each run records, per instance: how many bugs reproduced, how many were flaky or
+duplicates, how many automatically started
 cycles reached a draft pull request, how many of those the maintainer accepted, how many
 were later reopened or reverted, and how many were held for exceeding their budget. The
 last number shows whether the protected list and budgets sit in the right place.
@@ -237,18 +313,24 @@ publishable by construction, an instance can record bug bundles in a public repo
 without a review pass for leaks; the allowlist and the redaction check are what make
 that safe, and both must be kept current when the bundle gains a new kind of file.
 
+Running each test several times per ref multiplies the runner time of Reproduce and of the
+C4 gate; it is the price of a red that means something. Duplicate detection by failure
+location misses duplicates that fail in different places; it never merges two different
+bugs, which is the failure that would cost a fix.
+
 Fixing against refs instead of milestones keeps one line of development and no branch per
 plan to keep in sync. Each supported release adds a backport cycle to every fix that
 reaches it, so declaring a release supported has a running cost the instance should choose
 deliberately. Running the test on several refs and bisecting costs runner time on every
 reproduced bug.
 
-Follow-on work: the `pdca.toml` keys for protected paths, budgets, the poll schedule and
+Follow-on work, sequenced in proposal 0003: the `pdca.toml` keys for protected paths, budgets, the poll schedule and
 the per-run limit (they move to the `Policy` protocol of ADR-0013 when step 5 lands), the
 poll command, the `track:bug` and stage labels, the summarize and reproduce roles (data,
 per ADR-0011), the gate check that the reproduced test is unchanged, the run of a test
 across candidate refs with bisection, a version or commit field in the instances' bug
-issue template, the `bug_root` layout and README renderer, the bundle allowlist and
+issue template, the `bug_root` layout and README renderer, repeated runs and the
+`PDCA-FAILURE-AT:` marker, the issue digest and reporter-answer handling, job claims, the bundle allowlist and
 redaction check, a `doctor` check for private vulnerability reporting, and a visible
 vulnerability mark in ADR-0017's triage (today the flag only shapes the bot's comment).
 
