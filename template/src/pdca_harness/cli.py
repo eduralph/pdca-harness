@@ -1535,6 +1535,11 @@ def _signoff(cfg: Config, args: argparse.Namespace) -> int:
         # CLI boundary with nothing to contain a traceback.
         print(f"cannot sign off — {exc}", file=sys.stderr)
         return 1
+    # Consume any decision an earlier flow session left on disk (#780), as
+    # `flow._apply_decision` does once it records. Kept, a stale `accept` outlives this
+    # attempt and the next `flow` pre-apply finishes the rebuilt bundle with no session.
+    # Before `run_issue`, so a held or failed transition cannot leave it behind either.
+    (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
 
     # Apply the transition: accept freezes; iterate clears and re-runs the body.
     final = driver.run_issue(d, cfg)
