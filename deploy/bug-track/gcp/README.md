@@ -8,7 +8,7 @@ per job. Decision and rationale:
 
 This directory is operator infrastructure. It is not rendered into instances by Copier
 (ADR-0007): it carries the operator's project, billing and network. The "orchestrator"
-below is the host that runs the instance's driver.
+below is the workflow host that runs the instance's driver (ADR-0020).
 
 ## What this creates
 
@@ -29,7 +29,7 @@ below is the host that runs the instance's driver.
 - **Service account keys.** Keep them out of state. Create the orchestrator and
   cache-writer credentials out of band, or use Workload Identity Federation.
 - **The orchestrator, the publisher, the model-key gateway.** These run on the
-  trusted side (n8n / control Pi), never in this project.
+  trusted side, on the workflow host, never in this project.
 
 ## Usage
 

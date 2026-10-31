@@ -14,8 +14,8 @@ tags:
 The bug track (ADR-0020) runs leaves on issues anyone can file. Reproduce writes and runs a
 test shaped by a stranger's report, the builder runs `Bash` against the target project, and
 the C4 gate executes both. Architecture §8.10 treats a leaf as able to leave any file in any
-state, and the claude builder is not confined to its worktree today (#710). On the host
-that runs the driver, that host's credentials, mounts and sessions are within reach.
+state, and the claude builder is not confined to its worktree today (#710). On the workflow host
+that runs the driver (ADR-0020), that host's credentials and sessions are within reach.
 
 A runner for these jobs needs:
 
@@ -32,11 +32,10 @@ The options weighed:
 
 | Option | Verdict |
 |---|---|
-| The maintainer's desktop or workstation | Rejected: personal credentials and sessions on the same machine |
-| Raspberry Pis | Rejected as runners: aarch64 and too slow. Suitable for the driver, orchestration and aarch64 conformance runs |
-| An old Intel laptop | Rejected: dual-core, throttles, unsafe as an always-on host |
+| Machines that also serve personal use | Rejected: personal credentials and sessions on the same machine |
+| Small Arm boards and other low-power machines | Rejected as runners: the wrong architecture or too slow for builds and seed sweeps |
 | Hetzner Cloud | Rejected for now: provisioning of new cloud servers has been restricted since 26 June 2026, which breaks a VM-per-job design, and the dedicated-vCPU lines were repriced sharply in June 2026 |
-| An on-premise rack server (Proxmox, a linked clone per job) | Deferred: needs hardware and lead time, and its size cannot be chosen before the load is known |
+| A self-hosted server with a fresh VM per job | Deferred: needs hardware and lead time, and its size cannot be chosen before the load is known |
 | OVHcloud, STACKIT | Viable; candidates for later backends |
 | Google Cloud spot VMs | Chosen |
 
@@ -44,7 +43,7 @@ The options weighed:
 
 We will run the bug track's Reproduce leaf, its builder leaf and its gates on **one
 ephemeral VM per job**. The driver, the reviewer leaf (already OS-sandboxed, §8.10) and
-publishing stay on the host that runs the driver.
+publishing stay on the workflow host.
 
 1. **Behind the LeafRunner seam.** The VM backend is a `LeafRunner` implementation
    (ADR-0010), so budgets and the token ledger work as for local leaves. Its contract is
@@ -84,8 +83,8 @@ not a precedent for any workload with data that is not public. Gaining hands-on 
 with Google Cloud is a stated secondary reason.
 
 **When to revisit.** When the monthly spot spend, averaged over three months, exceeds the
-cost of a rack server amortised over three years plus electricity, a Proxmox backend
-becomes the default and Google Cloud the overflow.
+cost of a self-hosted server amortised over three years plus running costs, a self-hosted
+backend becomes the default and Google Cloud the overflow.
 
 We reject GitHub-hosted runners for these jobs: workflows triggered by issues sit next to
 repository tokens, and keeping the publisher apart from the job inside Actions is much
@@ -100,7 +99,7 @@ driver a diff, which the review, the C6 guard and the maintainer still judge. Fo
 track this closes the practical effect of #710; the gap remains for ordinary cycles.
 
 The track can run without buying hardware, and the first months give the numbers (job
-hours, sweep sizes, how many bugs reproduce) that the rack-server decision lacks.
+hours, sweep sizes, how many bugs reproduce) that the self-hosted decision lacks.
 
 A cold VM with no build cache makes the builder slow; the cache must exist before the track
 is useful for a large Rust project.
@@ -119,4 +118,4 @@ Left open:
   identity, as ADR-0017's bot does from GitHub's, instead of a workspace key placed in its
   metadata for each job.
 - **[OPEN]** Whether reproduction for aarch64-only reports runs on a separate backend (a
-  Raspberry Pi or an Arm VM), or such reports always need a maintainer's go.
+  an Arm machine or an Arm VM), or such reports always need a maintainer's go.

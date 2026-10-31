@@ -62,7 +62,30 @@ Failing tests from an instance's own scheduled runs (a simulation seed sweep, a 
 conformance run) enter at stage 4: they are reproduced already and were not written by a
 stranger.
 
-### 2. Who starts which stage
+### 2. Trigger and state
+
+The track is started by polling, not by repository events. A workflow engine on a
+**workflow host** (a trusted machine that runs the instance's driver and holds its
+credentials) runs the track's poll command on a schedule set per instance. Hourly or daily
+is enough: a bug report does not need an answer within minutes. Any engine that runs a
+command on a schedule will do; the harness does not depend on a particular one.
+
+Each run:
+
+- lists the open issues that carry `bug` and a `priority:*` label, with a token that can
+  only read. Requiring a priority means the track starts only after ADR-0017's triage has
+  classified the issue.
+- starts at most a configured number of new Summarize and Reproduce jobs. This is the
+  trusted side's limit against a flood of issues, in addition to the model spending limit.
+- keeps each issue's progress in labels (`track:bug` and one stage label), so the state is
+  visible in the tracker and the run keeps none of its own, in the spirit of ADR-0003.
+
+We reject a GitHub workflow triggered by `issues` events: it runs in a context any issue
+author can trigger, next to repository tokens, would need the runner's and the publisher's
+credentials inside Actions, and would race ADR-0017's triage. We reject a webhook: it needs
+an endpoint on the workflow host that accepts inbound traffic.
+
+### 3. Who starts which stage
 
 - **Summarize and Reproduce start on their own** for any open issue with `bug` and a
   priority. They publish no code, only a comment with the result (and, on success, the
@@ -70,13 +93,13 @@ stranger.
   maintainer would.
 - **Cycle starts automatically only when all of these hold:** the reproduced test exists;
   the issue has no `needs-triage`; and the bug's area is outside the instance's
-  **protected paths** (section 3). Otherwise the track stops with the test attached and
+  **protected paths** (section 4). Otherwise the track stops with the test attached and
   the issue waits for the maintainer, who starts the cycle by setting the milestone, as
   ADR-0017 already provides.
 - The milestone is never set by the track. An automatically started cycle runs without
   one and is visible by its `track:bug` label.
 
-### 3. Protected paths
+### 4. Protected paths
 
 Each instance lists in `pdca.toml` the paths whose bugs always need a maintainer's go before
 a fix is built. For getwyrd/wyrd-pdca, these are at least the on-disk format (the
@@ -86,20 +109,20 @@ deterministic, on the paths the reproduced test touches and on the paths a later
 touches; a model may move a bug toward protection, never away from it. A cycle whose diff
 reaches a protected path is held as a NEEDS-HUMAN item, even when Reproduce did not.
 
-### 4. Budgets
+### 5. Budgets
 
 Each stage has a budget: Summarize and Reproduce in tokens and wall-clock time, Cycle
 additionally in files touched and diff size. A fix that exceeds its budget is not treated as
 a bug fix: the bundle is held with a NEEDS-HUMAN item proposing that the issue go through
 Plan like milestone work. Budgets live in the runner (ADR-0010).
 
-### 5. Credentials
+### 6. Credentials
 
 No leaf of the track holds a credential that can write to a repository. The driver, which
-runs no model, pushes branches and opens the draft pull request, as in every cycle. Where
+runs no model and runs on the workflow host, pushes branches and opens the draft pull request, as in every cycle. Where
 the leaves run is decided in ADR-0021.
 
-### 6. Telemetry
+### 7. Telemetry
 
 Each run records, per instance: how many bugs reproduced, how many automatically started
 cycles reached a draft pull request, how many of those the maintainer accepted, how many
@@ -131,10 +154,10 @@ without a maintainer's go. It should be reviewed whenever an ADR of the target p
 or changes a protected area. The maintainer's review of draft pull requests remains the
 throughput limit, by design.
 
-Follow-on work: the `pdca.toml` keys for protected paths and budgets (they move to the
-`Policy` protocol of ADR-0013 when step 5 lands), the `track:bug` label, the summarize and
-reproduce roles (data, per ADR-0011), and the gate check that the reproduced test is
-unchanged.
+Follow-on work: the `pdca.toml` keys for protected paths, budgets, the poll schedule and
+the per-run limit (they move to the `Policy` protocol of ADR-0013 when step 5 lands), the
+poll command, the `track:bug` and stage labels, the summarize and reproduce roles (data,
+per ADR-0011), and the gate check that the reproduced test is unchanged.
 
 Left open:
 

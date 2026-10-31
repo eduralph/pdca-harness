@@ -1,6 +1,6 @@
 # Three identities, strictly separated:
 #   runner        - attached to track VMs; can only read the build cache.
-#   orchestrator  - n8n / control Pi; creates and deletes VMs, signs upload URLs,
+#   orchestrator  - the workflow host; creates and deletes VMs, signs upload URLs,
 #                   reads job artifacts. Never runs agent code.
 #   cache_writer  - trusted builds of main; the only identity that writes the cache.
 #
