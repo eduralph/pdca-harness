@@ -403,24 +403,96 @@ def partition_schedulable(cfg: Config, bundles: list[Path]
 
 
 _DIFF_GIT_RE = re.compile(r"^diff --git a/(.+) b/(.+)$")
+_DIFF_GIT = "diff --git "
+# Git's C-quoting (quote.c) writes these one-letter escapes, and a three-digit octal escape
+# for any other byte it quotes (first digit 0-3, so the value fits in one byte).
+_C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+_C_OCTAL = re.compile(r"[0-3][0-7][0-7]")
+
+
+def _unquote_c(s: str) -> tuple[str, str] | None:
+    """Decode the Git C-quoted string that ``s`` starts with (``s[0]`` is ``"``).
+
+    Returns the decoded text and what follows its closing quote, or ``None`` when the
+    quoting is malformed: an unknown escape (``\\q``), an octal escape that is short or
+    more than a byte (``\\3``, ``\\477``), or no closing quote. Octal escapes are bytes;
+    the bytes are decoded as UTF-8 with U+FFFD for an invalid sequence — the same
+    ``errors="replace"`` the patch text itself is read with.
+    """
+    out = bytearray()
+    i = 1
+    while i < len(s):
+        c = s[i]
+        if c == '"':
+            return out.decode("utf-8", errors="replace"), s[i + 1:]
+        if c != "\\":
+            out += c.encode("utf-8", errors="replace")
+            i += 1
+        elif s[i + 1:i + 2] in _C_ESCAPES:
+            out.append(_C_ESCAPES[s[i + 1]])
+            i += 2
+        elif _C_OCTAL.match(s, i + 1):
+            out.append(int(s[i + 1:i + 4], 8))
+            i += 4
+        else:
+            return None
+    return None
+
+
+def _header_paths(line: str) -> list[str]:
+    """The old and new path in one ``diff --git`` header line, or ``[]`` when it cannot be
+    read.
+
+    Each side is ``a/<path>`` / ``b/<path>``, plain or C-quoted (``"a/caf\\303\\251.txt"``),
+    and a rename can mix the two (``a/plain.txt "b/caf\\303\\251.txt"``). A quoted side
+    starts the header or follows the space between the sides. A header with no quoted
+    side is read by ``_DIFF_GIT_RE`` exactly as before. With one, both sides must parse —
+    valid quoting, the ``a/`` / ``b/`` prefix, a non-empty path, nothing after the second
+    side — or the header yields ``[]``. A plain side next to a quoted one is taken as
+    written.
+    """
+    rest = line[len(_DIFF_GIT):]
+    if not rest.startswith('"') and ' "' not in rest:
+        m = _DIFF_GIT_RE.match(line)
+        return [q.strip() for q in m.groups()] if m else []
+    if rest.startswith('"'):
+        first = _unquote_c(rest)
+        if first is None or not first[1].startswith(" "):
+            return []
+        old, new = first[0], first[1][1:]
+    else:
+        old, _, new = rest.partition(' "')
+        new = '"' + new
+    if new.startswith('"'):
+        second = _unquote_c(new)
+        if second is None or second[1].strip():
+            return []
+        new = second[0]
+    if old[:2] != "a/" or new[:2] != "b/" or not old[2:] or not new[2:]:
+        return []
+    return [old[2:], new[2:]]
 
 
 def diff_files(patch_path: Path) -> set[str]:
     """The repo-relative paths a unified diff (``patch.diff``) touches.
 
     Parses the ``diff --git a/<old> b/<new>`` headers (covering modify / add / delete /
-    rename); ``/dev/null`` is ignored. A best-effort heuristic for the overlap audit —
-    a path containing a space is ambiguous in the git header and may be imperfect — so
-    the audit it feeds is advisory (it flags a likely-undeclared conflict for a human),
-    never a hard gate.
+    rename); ``/dev/null`` is ignored. A side Git C-quoted — a name with a non-ASCII byte
+    (``core.quotePath``), a ``"``, a ``\\`` or a control character, e.g.
+    ``"a/caf\\303\\251.txt"`` — is decoded to the real path. Its octal escapes are bytes,
+    decoded as UTF-8 with U+FFFD in place of bytes that are not valid UTF-8, so such a name
+    is still counted. A header whose quoting is malformed (a bad escape, no closing quote)
+    is skipped; patch content never makes this raise. A best-effort heuristic for the
+    overlap audit — an unquoted path containing a space is ambiguous in the git header and
+    may be imperfect — so the audit it feeds is advisory (it flags a likely-undeclared
+    conflict for a human), never a hard gate.
     """
     if not patch_path.is_file():
         return set()
     files: set[str] = set()
     for line in patch_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        m = _DIFF_GIT_RE.match(line)
-        if m:
-            for p in (q.strip() for q in m.groups()):
+        if line.startswith(_DIFF_GIT):
+            for p in _header_paths(line):
                 if p and p != "/dev/null":
                     files.add(p)
     return files
