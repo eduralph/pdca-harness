@@ -323,6 +323,7 @@ class Renderer:
         # aliases so prose can link to the section folders / dirs
         self.url_map["docs"] = "/guide/"
         self.url_map[SPEC_REL] = "/spec/"
+        self.url_map[SPEC_REL + ".md"] = "/spec/"   # the model's own index file -> the /spec/ index
         # every published folder resolves to an index: its README's URL, or the
         # generated index build_dir_indexes() emits for a folder without one
         self.dir_indexes: dict[str, str] = {}
