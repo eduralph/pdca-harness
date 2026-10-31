@@ -1,1 +1,0 @@
-`reproduction.status` is reproduced but `reproduction.signature` is null (§4).

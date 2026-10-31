@@ -8,13 +8,12 @@ tags:
   - triage
   - security
 ---
-# 0020. Bug track: a reported bug is reproduced as a red C4 test before any fix is built, from a sanitized summary, and only paths outside an instance's protected list are fixed without a maintainer's go
+# 0020. Bug track: reported bugs are reproduced as a red test before any fix, verified where the stranger's code never ran, and accepted by merging a bundle pull request
 
 ## Context
 
 An instance's cycles centre on the open milestone, so bug reports either wait for it or
-interrupt it (architecture §8.8 runs lanes in parallel, but in practice one milestone's work
-fills them). Most bugs need a smaller change than milestone work, which makes them a
+interrupt it. Most bugs need a smaller change than milestone work, which makes them a
 candidate for a flow that runs alongside it with less human involvement up front.
 
 Four forces shape such a flow.
@@ -26,320 +25,337 @@ Four forces shape such a flow.
 - **Issue text is hostile input.** Architecture §8.10 and ADR-0017 already treat tracker
   text as written by strangers. Today a builder leaf reads it with `Edit`, `Write` and
   `Bash` (§8.10, #710). A flow triggered by new issues makes that path reachable by anyone
-  who can open an issue.
+  who can open an issue, and it makes three weaknesses of the current cycle matter: the
+  publisher leaf holds the operator's credentials (#853), evidence files can be written by
+  the thing under test (#854), and the reviewer executes bundle code on the host (#855).
 - **Red-before / green-after is already the blocking evidence (ADR-0006).** The C4 gate
   asks whether the defect existed and is gone. For a bug, the red leg can be produced
-  before any fix exists, by a leaf other than the builder.
+  before any fix exists, by a leaf other than the builder, and verified by nobody's leaf.
 - **Whoever starts the work matters (ADR-0017).** The milestone stays a maintainer's
   decision because setting it starts the instance's PDCA cycle on an issue. A flow that
-  starts itself must not quietly take over that decision.
+  starts itself must not quietly take over that decision, and ADR-0004 keeps the accept a
+  human's and publish after it.
 
 ## Decision
 
 We will add a **bug track** to the harness: a flow for issues labelled `bug` that runs
-beside milestone work and reuses the cycle's sign-off unchanged. ("Track", not "lane":
-lanes are already the parallel worktrees of §8.8.)
+beside milestone work in daily batches, produces a red test before any fix, has every
+verdict computed where no stranger's code ran (ADR-0021 §1), and ends in a **bundle pull
+request** on the pdca repository whose merge is the maintainer's accept. Publish follows
+accept, unchanged. ("Track", not "lane": lanes are the parallel worktrees of §8.8.)
 
 ### 1. Stages
 
 1. **Intake.** The priority triage of ADR-0017 runs as today. It adds no labels for this
    track and gains no permissions.
-2. **Summarize.** A leaf with no write access and no tools beyond reading the issue
-   produces a **sanitized summary**: a short plain-language description of the bug and its
-   impact for people reading the tracker or the bundle, expected and observed behaviour, the
-   area, and the conditions to trigger it, all in its own words, under the same quoting rules as ADR-0017
-   section 4. Every later stage reads the summary, never the issue. The summary and
-   everything later stages add to it form the **bug record**, specified in the
-   `bug-record/v1` spec, which also states the sanitization rules the driver enforces.
-3. **Reproduce.** A leaf writes a test from the summary that fails on the ref the report
-   names, or on `main` when it names none: a unit or property test, or for an instance
-   that has one, a deterministic-simulation seed. The result is the red leg of the C4
-   gate (ADR-0006), produced before any fix, and it counts as red only if it fails on
-   every run (section 9). The driver then runs the test on the other candidate refs to
-   choose where the fix goes (section 4) and checks it against open tracks for a
-   duplicate (section 10).
-   If no failing test is found within the stage's budget, the track stops and posts the
-   open questions to the issue for the reporter. It never proceeds to Build.
-4. **Cycle.** The test and summary enter a normal PDCA cycle as the bundle's brief. The
-   builder must turn the test green without editing it, on every run; the gate checks the
-   test file is unchanged since Reproduce. Review (ADR-0005), sign-off and C6 (ADR-0004), and publish
-   are unchanged: the track ends at a draft pull request, like every cycle.
+2. **Summarize.** A leaf with no tools beyond the issue text it is given produces the
+   **bug record**'s summary (spec `bug-record/v1`): a plain-language description and
+   impact, expected and observed behaviour, the area and the conditions to trigger it, in
+   its own words, under the spec's sanitization rules. Every later stage reads the record,
+   never the issue.
+3. **Reproduce.** A leaf writes a test from the summary. The test file MUST lie in one of
+   the instance's configured test directories; the command that runs it comes from
+   `pdca.toml`, not from the leaf. The driver takes the test's bytes and nothing else.
+4. **Verify.** The driver runs the recorded test against the recorded commit of each
+   candidate ref (section 4), N times each (section 9), in verify containers (ADR-0021 §1),
+   and writes the outcome itself. Red on the ref the report names, or on `main` when it
+   names none, is the red leg of the C4 gate (ADR-0006), produced before any fix.
+   Otherwise the track stops and posts the open questions to the issue for the reporter.
+5. **Fix.** The builder gets the record and the test, never the issue, and returns a diff.
+   The driver verifies the diff the same way: the test green N times on the recorded base
+   plus the diff, in a fresh verify container; the diff may not touch the test file, or the
+   C4 row is unverifiable and goes to §6 under C6.
+6. **Review.** The reviewer (ADR-0005) adjudicates from the verify logs; it does not
+   re-execute them for bug bundles (ADR-0021 §1).
+7. **Sign-off: the bundle pull request.** The driver opens a draft pull request on the
+   pdca repository with the bundle (section 7). Merging it is the accept.
+8. **Publish.** After accept, the regular publish: a `bugfix/<n>` branch and a draft pull
+   request on the target repository, pushed by the driver as code (section 7).
 
 Failing tests from an instance's own scheduled runs (a simulation seed sweep, a nightly
 conformance run) enter at stage 4: they are reproduced already and were not written by a
 stranger.
 
-### 2. Trigger and state
+### 2. Trigger, batches and state
 
-The track is started by polling, not by repository events. A workflow engine on a
-**workflow host** (a trusted machine that runs the instance's driver and holds its
-credentials) runs the track's poll command on a schedule set per instance. Hourly or daily
-is enough: a bug report does not need an answer within minutes. Any engine that runs a
-command on a schedule will do; the harness does not depend on a particular one.
+The track is started by polling, not by repository events. A workflow engine on the
+**workflow host** (the driver container of ADR-0021 §4) runs the track's poll on a schedule
+set per instance; daily is enough, since a bug report does not need an answer within
+minutes. Any engine that runs a command on a schedule will do.
 
-Each run:
+A poll run is the start of a **batch**:
 
-- lists the open issues that carry `bug` and a `priority:*` label, with a token that can
-  only read. Requiring a priority means the track starts only after ADR-0017's triage has
-  classified the issue.
-- starts at most a configured number of new Summarize and Reproduce jobs. This is the
-  trusted side's limit against a flood of issues, in addition to the model spending limit.
-- keeps each issue's progress in labels (`track:bug` and one stage label), so the state is
-  visible in the tracker and the run keeps none of its own, in the spirit of ADR-0003.
+- it lists the open issues that carry `bug`, a `priority:*` label and, for issues filed by
+  anyone but the instance's own scheduled runs, the **`track:go`** label a maintainer sets.
+  Requiring a priority means ADR-0017's triage has classified the issue; requiring
+  `track:go` keeps the decision to spend on a stranger's issue a human's, one click per
+  bug. An instance MAY turn `track:go` off once the pilot has shown the spend is bounded
+  without it;
+- it fetches the pdca repository first, so merged and closed bundle pull requests
+  (section 7) are seen before anything new starts;
+- it collects finished jobs, reclaims expired ones, then starts at most a configured
+  number of new Summarize jobs. If nothing is eligible, no runner is created;
+- it creates one runner (ADR-0021 §2) and drives the stages for every issue in the batch
+  until the queue is empty or intake closes;
+- it keeps each issue's progress in labels (`track:bug` and one stage label), so the state
+  is visible in the tracker, and in the bug record, which is the authoritative state when
+  the two disagree. Labels are the maintainer's switches (section 11); the record is what
+  the driver believes.
 
 We reject a GitHub workflow triggered by `issues` events: it runs in a context any issue
-author can trigger, next to repository tokens, would need the runner's and the publisher's
-credentials inside Actions, and would race ADR-0017's triage. We reject a webhook: it needs
-an endpoint on the workflow host that accepts inbound traffic.
+author can trigger, next to repository tokens, and would race ADR-0017's triage. We reject
+a webhook: it needs an endpoint on the workflow host that accepts inbound traffic.
 
-### 3. Who starts which stage
+### 3. What may start without a maintainer
 
-- **Summarize and Reproduce start on their own** for any open issue with `bug` and a
-  priority. They publish no code, only a comment with the result (and, on success, the
-  test as a workflow artifact or a branch the driver pushes), so they decide nothing a
-  maintainer would.
-- **Cycle starts automatically only when all of these hold:** the reproduced test exists;
-  the issue has no `needs-triage`; and the bug's area is outside the instance's
-  **protected paths** (section 5). Otherwise the track stops with the test attached and
-  the issue waits for the maintainer, who starts the cycle by setting the milestone, as
-  ADR-0017 already provides.
-- The milestone is never set by the track. An automatically started cycle runs without
-  one and is visible by its `track:bug` label.
+- **Summarize, Reproduce and Verify start on their own** for eligible issues. They publish
+  no code: a comment on the issue with the result, and the test as a file in the bundle.
+- **Fix starts automatically** when the test is red, the issue has no `needs-triage`, and
+  neither the test file nor, once known, the diff touches a protected path (section 5).
+  Otherwise the track stops with the test attached, opens the bundle pull request with the
+  test only and the label `track:needs-plan`, and waits for the maintainer to decide how
+  the bug is fixed.
+- **Nothing reaches the target repository without a merged bundle pull request.** An
+  automatically started fix still ends at a human's merge. The milestone is never set by
+  the track.
 
 ### 4. Target ref
 
 A bug is found in something that was built and fixed in something that will ship, so the
-track fixes against a ref, never against a milestone. Milestones stay plans; we do not keep
-a branch per milestone. The candidate refs are:
+track fixes against a ref, never a milestone. The candidate refs are:
 
 - `main`, the default;
-- a **release branch** (`release/X.Y`) for each release the instance still supports,
-  created when that release ships, not when its milestone opens;
-- an open **integration line** (§8.8) carrying accepted milestone work that has not
-  reached `main`.
+- a **release branch** (`release/X.Y`) for each release the instance declares supported in
+  `pdca.toml`, created when that release ships, not when its milestone opens.
 
-The driver runs the reproduced test on every candidate ref and chooses mechanically:
+Integration lines (§8.8) are run-scoped and rewritten by the next run, so they are not
+candidates; a bug in milestone work not yet on `main` is reproduced when it lands there.
+
+The driver verifies the test on every candidate ref and chooses mechanically:
 
 - **Red on `main`:** the fix is built on `main`. Each supported release branch where the
   test is also red then gets a backport, as its own cycle with the same test as its red
   leg.
 - **Red on a release branch, green on `main`:** the bug is already fixed. The driver
-  bisects `main` for the commit that turned the test green and backports that commit
-  instead of building a new fix.
-- **Red only on an integration line:** the fix is built on that line and reaches `main`
-  with the milestone's work.
+  bisects `main` for the commit that turned the test green, within one job limit and
+  treating `error` outcomes as unknown, and backports that commit. If bisection does not
+  finish, the fix is built on the release branch instead.
 - **Red only on a release that is no longer supported:** no fix is built; the issue is
-  answered with the first release in which the test is green.
+  answered with the first supported release in which the test is green.
 
 ### 5. Protected paths
 
 Each instance lists in `pdca.toml` the paths whose bugs always need a maintainer's go before
-a fix is built. For getwyrd/wyrd-pdca, these are at least the on-disk format (the
-`chunk-format` crate and `docs/design/specs/`), the commit protocol, the consistency
-contract, and anything an accepted ADR of that project declares protected. Matching is
-deterministic, on the paths the reproduced test touches and on the paths a later diff
-touches; a model may move a bug toward protection, never away from it. A cycle whose diff
-reaches a protected path is held as a NEEDS-HUMAN item, even when Reproduce did not.
+a fix is built: typically its on-disk formats and specifications, its commit protocol, and
+whatever its own accepted decisions declare protected; the list is the instance's, not the
+harness's. Matching is deterministic on two inputs only: the path of the reproduced test
+file, and the paths the diff touches once a diff exists. Both are files, not model
+judgement; the summary's `areas` are informational and never route. A fix whose diff reaches
+a protected path is held as a NEEDS-HUMAN item even when the test did not.
 
-### 6. Budgets
+### 6. Budgets and delegation
 
-Each stage has a budget: Summarize and Reproduce in tokens and wall-clock time, Cycle
-additionally in files touched and diff size. A fix that exceeds its budget is not treated as
-a bug fix: the bundle is held with a NEEDS-HUMAN item proposing that the issue go through
-Plan like milestone work. Budgets live in the runner (ADR-0010).
+Every job has the same wall-clock limit, the runner's drain window (3 h by default,
+ADR-0021 §2), and token budgets per leaf. The per-issue budget is counted in jobs: one
+Summarize, one Reproduce per attempt (section 11), one Fix with no automatic iteration
+round, one backport per supported release. A Fix job that does not turn the test green
+within its limit is not treated as a bug fix: the bundle pull request opens with the test
+and the partial diff, labelled `track:needs-plan`, for the issue to go through Plan like
+milestone work. A test that exists is the asset; the fix is optional.
 
-### 7. Credentials
+### 7. Sign-off and publish
 
-No leaf of the track holds a credential that can write to a repository. The driver, which
-runs no model and runs on the workflow host, pushes branches and opens the draft pull
-request, as in every cycle. Where the leaves run is decided in ADR-0021.
+**The bundle pull request is the accept.** When a track has a verified test (and a
+verified diff, if Fix ran), the driver commits the bundle to a branch `bug/<n>` of the pdca
+repository and opens a draft pull request:
 
-### 8. Bug bundles and publication
+- the body carries the README's description and impact, the verdicts, the review findings
+  and the §6 NEEDS-HUMAN items as a checklist;
+- a required status check reads the record and stays red until a maintainer has ticked
+  every §6 item: this is the C6 guard, enforced by the tracker;
+- the bundle is data in a directory; the pdca repository's CI compiles and runs none of it;
+- **merging the pull request is the §9 decision.** The driver records `Outcome: accepted`
+  from the merge event at the next batch, into `SUMMARY.md` and the record; closing it
+  unmerged records `rejected`. Code writes §9, never a model, so ADR-0004 holds as written.
+  `pdca signoff` remains available as the interactive path and ends in the same §9.
 
-Instances that record their bundles (`pdca record`) commit them to the instance
-repository, and the draft pull request goes to the target repository; either can be
-public. Everything the track keeps is therefore written to be published.
+**Publish follows accept, unchanged in order and changed in means.** The driver, as code,
+applies the recorded diff to the recorded base commit, commits with the text the publisher
+leaf wrote into the bundle, pushes `bugfix/<n>` and opens the draft pull request on the
+target repository; Codex review and the maintainer's ready-mark and merge follow as for every
+cycle. The target's CI runs the code only after a human accepted those exact bytes. The
+credential that pushes is scoped to `bugfix/*` and lives in the driver container (ADR-0021
+§4), or publish runs from the maintainer's machine if the operator prefers no target
+credential there. `pdca try` is refused for bug bundles; the verify log and the reviewer's
+adjudication are what the maintainer signs off on, and a bug the maintainer wants to run by
+hand is a NEEDS-HUMAN item.
 
-**Layout.** Bug bundles live apart from milestone bundles, under a `bug_root` (default
-`results/bugs/`), grouped by milestone so no directory grows without bound:
+### 8. Bundles and publication
 
-```
-results/bugs/
-  <milestone>/            the issue's milestone when the bundle is recorded,
-                          or `unscheduled` when it has none
-    issue_<n>/
-      README.md           rendered from the record: description, impact, status,
-                          target ref, links to the issue and pull requests
-      bug-record.json     the bug record, and its MAC (spec bug-record/v1)
-      bug-record.json.mac
-      cycles/<ref>/       one normal cycle bundle per fix or backport, `/` in the
-                          ref replaced by `-`
-```
+Bug bundles are ordinary bundles under the grouped layout of #856: `results/<group>/`,
+grouped by the issue's milestone at creation or `unscheduled`, with ids `issue_<n>` for the
+fix on `main` and `issue_<n>-r<ref>` for each backport (whose trailer is `Refs #<n>`, so
+only the main fix closes the issue). The bug record, its MAC and a README rendered from the
+record sit in the `issue_<n>` bundle. A track that ends without a fix (not reproduced,
+flaky, duplicate, answered, delegated, withdrawn) needs no decision, so the driver commits
+its bundle directly, as `pdca record` does today.
 
-The milestone only places the directory; the fix still targets a ref (section 4). A bundle
-is recorded once, when its track ends, and is not moved if the milestone changes later.
-A track that ends without a cycle (not reproduced, answered for an unsupported release, or
-withdrawn) is recorded too, as a directory holding only the README and the record.
+Everything the track keeps is written to be published: the pdca repository and the target
+repository may both be public.
 
-**Security bugs never enter the track.** A reproducing test and a patch published before a
-release are an exploit with instructions. The poller skips any issue that ADR-0017's triage
-marks as a possible undisclosed vulnerability, and such reports go through the target
-repository's private vulnerability reporting, which MUST be enabled for the track to run
-(`doctor` checks it). If the mark appears after Reproduce has run, nothing of that track is
-committed or pushed; its files stay on the workflow host until the maintainer decides.
-
-**Contents are allowlisted.** A bug bundle holds only: the README, the record and its MAC,
-and per cycle the files of a normal bundle that are already published today (brief,
-patch, test, review findings, gate verdicts, `SUMMARY.md`, token rows). Leaf transcripts,
-in particular Summarize's, which contains the issue text, raw runner logs, instance
-metadata and signed URLs never enter a bundle; they stay on the workflow host or are
-deleted with the VM. An allowlist fails closed when a new kind of file appears; a filter
-fails open.
-
-**A redaction check runs before every commit and push.** `pdca record` and publish refuse
-to commit or push a bug bundle that contains a string matching a secret pattern or an
-entry of the instance's list of internal identifiers (host names, absolute paths of the
-workflow host, cloud project IDs). A match is a NEEDS-HUMAN item, never a silent scrub.
+- **Security bugs never enter the track.** A reproducing test and a patch published before a
+  release are an exploit with instructions. The poller skips any issue carrying the
+  vulnerability mark ADR-0017's triage sets (#852), and such reports go through the target
+  repository's private vulnerability reporting, which `doctor` requires to be enabled. The
+  mark is a model's judgement over hostile text and will miss cases; it is a filter, not a
+  guarantee, and the maintainer's `track:go` is the second filter. If the mark appears after
+  a bundle exists, nothing further of that track is committed or pushed.
+- **Contents are allowlisted.** A bug bundle holds only: the README, the record and its MAC,
+  and the files of a normal bundle that are already published today (brief, patch, test,
+  review findings, gate verdicts, `SUMMARY.md`, token rows). Leaf transcripts, in particular
+  Summarize's, which contains the issue text, runner logs, job specifications and signed
+  URLs never enter a bundle; they stay in the driver container or die with the runner.
+- **A redaction check runs before every commit and push.** The driver refuses to commit or
+  push a bug bundle that contains a string matching a secret pattern or an entry of the
+  instance's list of internal identifiers (host names, absolute paths of the workflow host,
+  cloud project IDs). A match is a NEEDS-HUMAN item, never a silent scrub.
 
 ### 9. Reliable reds
 
-A test that fails only some of the time is not evidence: the builder chases noise, and a
-pass after the fix proves nothing. So the driver runs a reproduced test several times per
-ref (`runs`, default 5, set per instance) and records how many runs failed.
-
-- The test is **red** on a ref only if every run fails, and **green** only if every run
-  passes. Anything in between is **flaky**.
-- A flaky result on the ref the report names, or on `main`, stops the track with a
-  NEEDS-HUMAN item; the test is kept for the maintainer. A flaky result on another
-  candidate ref removes that ref from the candidates and is reported.
-- The C4 gate of a bug cycle requires the test green on every one of the same number of
-  runs after the fix.
-- A deterministic-simulation seed needs one run, since the same seed gives the same result.
+A test that fails only some of the time is not evidence. Verify runs a test `runs` times
+per ref (default 5, set per instance), each run on a fresh copy of the tree, and records the
+counts. The test is **red** on a ref only if every run fails, **green** only if every run
+passes, **flaky** otherwise. A flaky result on the ref that matters stops the track with a
+NEEDS-HUMAN item and the test attached; on another candidate ref it removes that ref. After
+a fix, the C4 row requires green on every one of the same number of runs; anything less is
+not a pass, and the row goes to §6 under C6 as today's confirm-once rule does for a
+once-failing gate. A deterministic-simulation seed runs once, since the same seed gives the
+same result.
 
 ### 10. Duplicates
 
-Two reports of one bug would otherwise start two tracks and two pull requests. ADR-0017's
-triage does not detect that; the reproduced test can, mechanically.
-
-The instance's gate reports where a failing test fails with a marker line,
-`PDCA-FAILURE-AT: <path>:<line>`, naming the source location of the failing assertion or
-panic, in the same marker protocol as `PDCA-UNVERIFIABLE:`. That location is the bug's
-**failure signature**. When a newly reproduced test has the same signature on the same
-target ref as a track that is still open, the newer issue is linked to the older one with
-a comment, its track stops as a duplicate, and nothing further is built for it. A
-different signature is never treated as a duplicate, even when the summaries read alike;
-two tracks that turn out to be one are closed by the maintainer.
+The gate reports where a failing test fails with a marker line, `PDCA-FAILURE-AT:
+<path>:<line>`, in the marker protocol of `PDCA-UNVERIFIABLE:`. Two open tracks with the
+same location on the same ref are **linked** in their READMEs and in a comment on the newer
+issue. A link never stops a track: simulation seeds and property tests fail at shared
+invariant checkers, so a shared location does not mean one bug, and the location is printed
+by the test itself. Closing one issue as a duplicate of another is the maintainer's call.
 
 ### 11. Issue lifecycle
 
 The track follows the issue, but never lets a change to it restart work silently.
 
-- **Edits.** The record keeps a digest of the issue title and body that Summarize read.
-  An edit after that does not change the record or restart a stage. While the track waits
-  on the reporter (below), an edit counts as an answer.
-- **Answers.** After "not reproduced", the track waits for the reporter: an edit, or a
-  comment by the reporter after the track's questions. On the next poll it then runs
-  Summarize and Reproduce once more, on the issue and only the reporter's comments since
-  the questions. The number of attempts is limited (default 2, set per instance); after
-  the last, the track ends as not reproduced.
-- **Closure and triage.** An issue that is closed ends its track as withdrawn. An issue
-  that gets `needs-triage`, or loses `bug` or its priority, pauses the track until it has
-  them again.
-- **The maintainer's switches.** A `track:paused` label stops the track for one issue
-  until it is removed. An instance setting turns the whole track off; the poller then
-  starts nothing new and lets running jobs finish or reach their time limit.
-- **Hand-over.** When the maintainer sets a milestone on an issue whose track is held,
-  the cycle starts under the maintainer, as section 3 says. When the maintainer takes the
-  issue out of the track (removes `track:bug`), the track ends as handed over and records
-  what it had.
+- **Edits.** The record keeps a digest of the issue text Summarize read (title, body and the
+  reporter's comments it was given). An edit after that does not change the record or
+  restart a stage. While the track waits on the reporter, an edit counts as an answer.
+- **Answers.** After "not reproduced", the record stays open and the track waits: an edit,
+  or a comment by the reporter after the track's questions, lets the next batch run
+  Summarize and Reproduce once more, on the issue and the reporter's comments since the
+  questions. The number of attempts is limited (default 2, set per instance); after the
+  last, the record is closed as not reproduced.
+- **Closure and triage.** An issue that is closed ends its track as withdrawn. An issue that
+  gets `needs-triage`, or loses `bug`, its priority or `track:go`, pauses the track until it
+  has them again. Reopening an issue whose record is closed starts a new record.
+- **The maintainer's switches.** `track:paused` stops the track for one issue until it is
+  removed; removing `track:bug` ends it as handed over. An instance setting turns the whole
+  track off; the poller then starts nothing new and lets the running batch end.
+- **Hand-over.** Setting a milestone on an issue whose track is held starts an ordinary
+  cycle under the maintainer, as ADR-0017 provides; the test stays in the bundle for it.
 
-Every ending (a pull request, an answer, not reproduced, flaky, duplicate, withdrawn,
+Every ending (accepted, rejected, answered, not reproduced, flaky, delegated, withdrawn,
 handed over) is written to the record and rendered into the bundle's README.
 
 ### 12. Claims and retries
 
-A poll run ends long before the jobs it started, and a spot VM can disappear mid-job, so
-the drive claims of `process/.drive-claims/` (user documentation, chapter 07), which last only as
-long as the process holding them, are not enough on their own.
+A batch runs for hours and a runner can disappear mid-job, so the drive claims of
+`process/.drive-claims/` (user documentation, chapter 07), which last only as long as the
+process holding them, are not enough on their own.
 
-- For each issue and stage, the driver records a **job claim** on the workflow host: the
-  runner's handle, when the job started, and a lease of the stage's time budget plus a
-  margin. Job claims live under `process/`, outside every bundle, and are never committed.
-- A poll first collects finished jobs, then retries jobs whose lease has expired and whose
-  runner reports them gone, and only then starts new ones. It never starts a stage for an
-  issue that holds a live job claim for it.
-- A stage is retried at most twice for infrastructure reasons (a lost VM, a runner
-  error). After that the track stops with a NEEDS-HUMAN item. Infrastructure failures do
-  not count as attempts in the sense of section 11.
-- A poll run holds the ordinary drive claim while it changes a track's state, so two poll
-  runs never advance the same track at once.
+- For each issue and stage, the driver records a **job claim** under `process/` in the
+  driver container: the job's handle, when it started, and a lease of one job limit plus a
+  margin. Job claims are never committed. They are the same kind of scratch as the drive
+  claims ADR-0003 already allows beside the bundles: the state of a bug is in its record and
+  its bundle, and a lost `process/` directory loses at most the knowledge of which jobs are
+  running, which the next batch rediscovers from the runner or lets expire.
+- A batch first collects finished jobs, then reclaims jobs whose lease has expired, and only
+  then starts new ones. It never starts a stage for an issue that holds a live claim for it.
+- A stage is retried in at most two later batches for infrastructure reasons (a lost
+  runner, a container error). After that the track stops with a NEEDS-HUMAN item.
+  Infrastructure failures are not attempts in the sense of section 11.
 
 ### 13. Telemetry
 
-Each run records, per instance: how many bugs reproduced, how many were flaky or
-duplicates, how many automatically started
-cycles reached a draft pull request, how many of those the maintainer accepted, how many
-were later reopened or reverted, and how many were held for exceeding their budget. The
-last number shows whether the protected list and budgets sit in the right place.
+Each batch records, per instance: how many bugs reproduced, how many were flaky or linked,
+how many fixes were verified green, how many bundle pull requests the maintainer merged and
+how many they closed, how many fixes were later reverted, how many issues were delegated
+with `track:needs-plan`, and the runner hours spent. The delegation count shows whether the
+job limit and the protected list sit in the right place.
 
-We reject letting a fix leaf read the issue directly: a summary loses detail, but it cuts
-the path from a stranger's text to a leaf that runs `Bash` on the target project. We reject
-classifying by expected diff size: it is not known before the fix and misjudges exactly the
-bugs that matter. We reject a separate triage for the track: ADR-0017 already classifies
-every issue, and a second classifier would disagree with it.
+### Rejected
+
+- **Letting a fix leaf read the issue.** A summary loses detail, but it cuts the path from a
+  stranger's text to a leaf that runs `Bash` on the target project.
+- **Classifying by expected diff size.** It is not known before the fix and misjudges
+  exactly the bugs that matter.
+- **A separate triage for the track.** ADR-0017 already classifies every issue; a second
+  classifier would disagree with it.
+- **Trusting anything a produce job writes besides its bytes.** Gate output, counts and
+  signatures from the job's own container are what #854 shows to be forgeable.
+- **Publishing the fix before accept, from a bot-owned fork.** It would keep the target's
+  CI from running stranger code unapproved, but it moves the accept out of the harness and
+  needs a bot identity per target; the bundle pull request gives the same human decision
+  without either.
+- **Auto-closing duplicates by failure location.** It lets a deliberately failing test
+  suppress a genuine report.
 
 ## Consequences
 
-Bugs get a fix candidate without waiting for a milestone, and every one leaves a regression
-test behind. The test that blocks sign-off is written by a different leaf than the fix and
-before it, which closes a gap ADR-0006 leaves open for ordinary cycles: a builder writing a
-test that passes because it was written to.
+Bugs get a verified red test and, where the model manages it, a verified fix, without
+waiting for a milestone, and nothing reaches the target repository that a maintainer has
+not accepted in a pull request they can review from anywhere. The test that blocks sign-off
+is written by one leaf, verified by no leaf, and the fix by another: this closes a gap
+ADR-0006 leaves open for ordinary cycles, a builder writing a test that passes because it
+was written to.
 
 Bugs that do not reproduce mechanically are never fixed by the track: environment-specific
 failures, races the instance's tests cannot capture, reports too vague to act on. That is
-the class where a plausible but wrong fix does most damage, so the cost is accepted.
+the class where a plausible but wrong fix does most damage, so the cost is accepted. Bugs
+whose fix needs more than one job go to Plan with a red test already written.
 
-Summarize and Reproduce run on every bug a stranger files, so the cost of a flood of issues
-lands there; the spending limit of ADR-0017 section 5 applies to them as well.
+The accept moves, for bug bundles, from the interactive sign-off session to a pull request
+review, which is a thinner ritual; the pull request body has to carry what the session would
+have shown. ADR-0004's rule is unchanged, and so is ADR-0006's: verify is the C4 gate, run
+by the driver on the engine's containers, and a test the diff edits makes the row
+unverifiable rather than adding a blocking gate.
 
-The protected list is a maintained artifact per instance; a stale list widens what is fixed
-without a maintainer's go. It should be reviewed whenever an ADR of the target project adds
-or changes a protected area. The maintainer's review of draft pull requests remains the
-throughput limit, by design.
+`track:go` costs the maintainer one click per public bug during the pilot and removes the
+class of attacks that start with a flood of issues; the phase-3 review of proposal 0003
+decides whether it stays.
 
-Every bug leaves a short, readable entry under its milestone, so the bug history of a
-release can be read without opening the tracker. Because everything the track keeps is
+Every bug leaves a readable entry under its milestone; because everything the track keeps is
 publishable by construction, an instance can record bug bundles in a public repository
-without a review pass for leaks; the allowlist and the redaction check are what make
-that safe, and both must be kept current when the bundle gains a new kind of file.
+without a review pass for leaks, as long as the allowlist and the redaction check are kept
+current when the bundle gains a new kind of file.
 
-Running each test several times per ref multiplies the runner time of Reproduce and of the
-C4 gate; it is the price of a red that means something. Duplicate detection by failure
-location misses duplicates that fail in different places; it never merges two different
-bugs, which is the failure that would cost a fix.
+Verify multiplies runner time by `runs` per candidate ref and adds a container per verdict;
+it is the price of evidence that means something.
 
-Fixing against refs instead of milestones keeps one line of development and no branch per
-plan to keep in sync. Each supported release adds a backport cycle to every fix that
-reaches it, so declaring a release supported has a running cost the instance should choose
-deliberately. Running the test on several refs and bisecting costs runner time on every
-reproduced bug.
-
-Follow-on work, sequenced in proposal 0003: the `pdca.toml` keys for protected paths, budgets, the poll schedule and
-the per-run limit (they move to the `Policy` protocol of ADR-0013 when step 5 lands), the
-poll command, the `track:bug` and stage labels, the summarize and reproduce roles (data,
-per ADR-0011), the gate check that the reproduced test is unchanged, the run of a test
-across candidate refs with bisection, a version or commit field in the instances' bug
-issue template, the `bug_root` layout and README renderer, repeated runs and the
-`PDCA-FAILURE-AT:` marker, the issue digest and reporter-answer handling, job claims, the bundle allowlist and
-redaction check, a `doctor` check for private vulnerability reporting, and a visible
-vulnerability mark in ADR-0017's triage (today the flag only shapes the bot's comment).
+Follow-on work, sequenced in proposal 0003: the `pdca.toml` keys (test directories, runner
+command, protected paths, supported releases, `runs`, attempts, the poll schedule, the
+per-batch limit, the job limit, the redaction list), the poll and batch commands, the
+`track:*` labels and the required check for the bundle pull request, the summarize and
+reproduce roles, the verify job and its parser, the `PDCA-FAILURE-AT:` marker, the README
+renderer, the allowlist and redaction check, `doctor` checks (private vulnerability
+reporting, the job-limit inequality, the labels), the driver image under `deploy/driver/`,
+and the visible vulnerability mark in ADR-0017's triage (#852). The grouped bundle layout is
+#856. The `pdca.toml` keys move behind the `Policy` protocol if ADR-0013 lands as planned.
 
 Left open:
 
-- **[OPEN]** Which releases an instance supports, and where that list lives: release
+- **[OPEN]** Where the list of supported releases lives and who declares one: release
   branches only become candidates once an instance declares them.
-- **[OPEN]** Whether a reproduced test reaches the cycle as a pushed branch or only as an
-  artifact the driver commits into the worktree.
 - **[OPEN]** Whether Summarize can be the same model call as ADR-0017's classification, or
-  must stay separate because that bot is repository tooling and is not rendered into
-  instances.
+  must stay separate because that bot is repository tooling not rendered into instances.
+- **[OPEN]** Whether the required check on the bundle pull request reads the record from
+  the branch or from a status the driver posts; the former needs no credential, the latter
+  no code in the pdca repository's CI.

@@ -1,0 +1,1 @@
+`summary.observed` repeats `req-7f3a9c-01`, a token of eight or more characters with two hyphens and digits that also appears in the issue text (§3).

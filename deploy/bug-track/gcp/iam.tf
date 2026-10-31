@@ -1,7 +1,8 @@
 # Three identities, strictly separated:
-#   runner        - attached to track VMs; can only read the build cache.
-#   orchestrator  - the workflow host; creates and deletes VMs, signs upload URLs,
-#                   reads job artifacts. Never runs agent code.
+#   runner        - attached to the batch runner; reads the cache bucket and the
+#                   job prefix, writes results only through signed URLs.
+#   orchestrator  - the driver container (ADR-0021 §4); creates and deletes runners,
+#                   signs upload URLs, reads results. Runs no leaf.
 #   cache_writer  - trusted builds of main; the only identity that writes the cache.
 #
 # No service account keys are created here: keys in state are a liability.

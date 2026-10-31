@@ -71,5 +71,5 @@ frontmatter, and both sides of every supersession agree. Run
 | [0017](0017-issue-priority-and-automated-triage.md) | Issue priority and automated triage: severity × reach set P0–P3 with security and decision-integrity overrides; a GitHub Action applies it to this repository's issues with one Claude API call per issue | — | Proposed |
 | [0018](0018-proposal-and-spec-process.md) | Proposal and specification process, lifecycle, and immutability | — | Proposed |
 | [0019](0019-supersession.md) | How a frozen document is superseded | — | Proposed |
-| [0020](0020-bug-track.md) | Bug track: a reported bug is reproduced as a red C4 test before any fix is built, from a sanitized summary, and only paths outside an instance's protected list are fixed without a maintainer's go | — | Proposed |
-| [0021](0021-bug-track-runner.md) | Bug-track leaves and gates run on an ephemeral VM per job, behind the LeafRunner seam, with Google Cloud spot VMs as the first backend | — | Proposed |
+| [0020](0020-bug-track.md) | Bug track: reported bugs are reproduced as a red test before any fix, verified where the stranger's code never ran, and accepted by merging a bundle pull request | — | Proposed |
+| [0021](0021-bug-track-runner.md) | Bug-track jobs run in containers on one disposable runner per batch; the driver runs in an operator's container and holds no leaf credential | — | Proposed |

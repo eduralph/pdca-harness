@@ -1,0 +1,1 @@
+`summary.observed` repeats the five-word run "at the same time both" from the issue text, and the number 200 (§3).

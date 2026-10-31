@@ -1,1 +1,0 @@
-`summary.observed` repeats the issue: the path-like token `tenant-acme/bucket7/report.pdf` (and with it a five-word run), and the three-digit number 200 (§3). Checked against the matching .issue.txt.

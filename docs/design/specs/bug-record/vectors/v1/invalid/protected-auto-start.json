@@ -6,14 +6,14 @@
     "repository": "getwyrd/wyrd",
     "issue": 412,
     "run": null,
-    "issue_digest": "6c4808082f8ca590a1c692ff317e6f722e7a39a2e1d9bf2c5be4611e7b2e47ba",
+    "issue_digest": "db160d797c1b5fabd89d7ea92981e0576b78a4c3f1eec0de1a9ae079cac355d2",
     "attempt": 1
   },
   "summary": {
     "title": "Concurrent commit to the same inode can report success for both writers",
     "description": "Two clients saving the same file at the same moment can both be told they succeeded, although only one of their versions is kept.",
     "impact": "Whoever saved second loses their changes without any error, so data loss goes unnoticed until someone opens the file.",
-    "observed": "When two clients commit new versions of the same file at nearly the same time, both receive a success response and one version is silently lost.",
+    "observed": "When two clients commit new versions of the same file at nearly the same moment, both receive a success response and one version is silently lost.",
     "expected": "Exactly one commit succeeds; the other receives a version conflict and can retry.",
     "trigger": "Two writers commit to one file within a short window, after both have read the same prior version.",
     "areas": [
@@ -31,15 +31,7 @@
       "kind": "simulation-seed",
       "path": "crates/core/tests/commit_conflict.rs",
       "sha256": "9f2c000000000000000000000000000000000000000000000000000000000000",
-      "seed": "7731",
-      "command": [
-        "cargo",
-        "test",
-        "-p",
-        "wyrd-core",
-        "--test",
-        "commit_conflict"
-      ]
+      "seed": "7731"
     },
     "signature": "crates/core/src/commit/apply.rs:214",
     "results": [

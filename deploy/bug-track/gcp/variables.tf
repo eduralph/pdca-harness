@@ -21,13 +21,14 @@ variable "runner_image" {
 }
 
 variable "machine_type" {
-  description = "Default machine type. x86_64 only (SIMD-path parity). The orchestrator may override per stage."
+  description = "Runner machine type for the batch. x86_64 only (SIMD-path parity); the driver never overrides it."
   type        = string
   default     = "n2d-standard-16"
 
   validation {
-    condition     = !can(regex("^(t2a|c4a)-", var.machine_type))
-    error_message = "Runner must be x86_64; Arm machine types are not allowed."
+    # Allowlist of x86_64 families, not a denylist of Arm ones.
+    condition     = can(regex("^(n2|n2d|c2|c2d|c3|c3d|c4|n4|e2)-", var.machine_type))
+    error_message = "Runner must be an x86_64 family (n2, n2d, c2, c2d, c3, c3d, c4, n4, e2)."
   }
 }
 
@@ -37,23 +38,34 @@ variable "boot_disk_gb" {
   default     = 100
 }
 
-variable "max_run_duration_seconds" {
-  description = "Hard VM lifetime enforced by GCP; the VM is deleted when it expires."
+variable "lifetime_seconds" {
+  description = "Hard runner lifetime enforced by GCP (max_run_duration); the VM is deleted when it expires. ADR-0021 §2: 23 h."
+  type        = number
+  default     = 82800
+}
+
+variable "intake_cutoff_seconds" {
+  description = "After this many seconds the runner's agent takes no new job and powers off when the last one ends. ADR-0021 §2: 20 h."
+  type        = number
+  default     = 72000
+}
+
+variable "job_limit_seconds" {
+  description = "Per-container timeout. Must not exceed lifetime - intake cutoff (the drain window), so a job started at the cutoff still ends before the hard stop."
   type        = number
   default     = 10800
+
+  validation {
+    condition     = var.job_limit_seconds <= var.lifetime_seconds - var.intake_cutoff_seconds
+    error_message = "job_limit_seconds must be <= lifetime_seconds - intake_cutoff_seconds."
+  }
 }
 
 variable "egress_fqdns" {
-  description = "The only destinations runner VMs may reach (TCP 443)."
+  description = "The only destinations the runner may reach (TCP 443): the model endpoint and Cloud Storage. Dependencies come from the cache bucket, never from a registry; nothing on the runner reaches the tracker."
   type        = list(string)
   default = [
     "api.anthropic.com",
-    "crates.io",
-    "index.crates.io",
-    "static.crates.io",
-    "github.com",
-    "codeload.github.com",
-    "objects.githubusercontent.com",
     "storage.googleapis.com",
   ]
 }
@@ -65,7 +77,7 @@ variable "bucket_location" {
 }
 
 variable "artifact_retention_days" {
-  description = "Job artifacts (diffs, test files, logs) are deleted after this many days."
+  description = "Job results (test and diff bytes, verify output, token rows; never runner logs) are deleted after this many days."
   type        = number
   default     = 14
 }

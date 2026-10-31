@@ -1,0 +1,1 @@
+`closure.reason` is accepted but `closure.bundle_pull_request` is null (§13).

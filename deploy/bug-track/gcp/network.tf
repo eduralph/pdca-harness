@@ -7,6 +7,7 @@ resource "google_project_service" "services" {
     "storage.googleapis.com",
     "iam.googleapis.com",
     "iamcredentials.googleapis.com",
+    "billingbudgets.googleapis.com",
   ])
 
   service            = each.value
@@ -48,16 +49,19 @@ resource "google_compute_router_nat" "track" {
 
   log_config {
     enable = true
-    filter = "ERRORS_ONLY"
+    filter = "ALL" # every connection, not only errors: exfiltration attempts look like successes
   }
 }
 
 # Egress policy. Ingress needs no rule: the VPC's implied ingress rule denies
-# everything, and runners have no external IP and no SSH.
+# everything, and the runner has no external IP and no SSH.
 #
+# FQDN rules match the resolved addresses, not the TLS name, so a destination that
+# shares addresses with an allowlisted host is reachable too. The allowlist is
+# therefore short (model endpoint, Cloud Storage), and the produce containers'
+# own network namespace carries a second, name-based filter in the runner image.
 # FQDN matching is a Cloud NGFW feature; verify the tier and its pricing before
-# applying. Fallback: replace the FQDN rule with an egress proxy on the trusted
-# side and allow only the proxy's address.
+# applying.
 
 resource "google_compute_network_firewall_policy" "egress" {
   name        = "bug-track-egress"

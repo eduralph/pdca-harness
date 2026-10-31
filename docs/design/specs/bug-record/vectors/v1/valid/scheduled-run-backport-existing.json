@@ -13,7 +13,7 @@
     "title": "Concurrent commit to the same inode can report success for both writers",
     "description": "Two clients saving the same file at the same moment can both be told they succeeded, although only one of their versions is kept.",
     "impact": "Whoever saved second loses their changes without any error, so data loss goes unnoticed until someone opens the file.",
-    "observed": "When two clients commit new versions of the same file at nearly the same time, both receive a success response and one version is silently lost.",
+    "observed": "When two clients commit new versions of the same file at nearly the same moment, both receive a success response and one version is silently lost.",
     "expected": "Exactly one commit succeeds; the other receives a version conflict and can retry.",
     "trigger": "Two writers commit to one file within a short window, after both have read the same prior version.",
     "areas": [
@@ -31,15 +31,9 @@
       "kind": "simulation-seed",
       "path": "crates/core/tests/commit_conflict.rs",
       "sha256": "1effffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-      "seed": "90211",
-      "command": [
-        "cargo",
-        "test",
-        "--test",
-        "commit_conflict"
-      ]
+      "seed": "90211"
     },
-    "signature": "crates/core/src/commit/apply.rs:214",
+    "signature": null,
     "results": [
       {
         "ref": "main",
