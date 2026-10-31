@@ -23,6 +23,10 @@ Design notes:
     their output URLs; relative links to OTHER repo files (e.g. ../template/,
     ../copier.yml) are rewritten to GitHub blob/tree URLs so they still work on the
     site. The `--check` pass then fails the build on any dangling local link.
+  * Heading ids: every heading gets the id GitHub would give it (lowercase, punctuation
+    dropped, spaces to hyphens, duplicates suffixed -1, -2, ...), so a `#section` link
+    that works in the repo's Markdown view works on the site too. `--check` verifies
+    every fragment of a local link names a heading of its target page.
   * Mermaid: a ```mermaid fence renders client-side via a pinned mermaid.min.js,
     fetched into the build at build time (never committed). No diagrams today; the
     support is here so adding one needs no tooling change.
@@ -219,6 +223,40 @@ def rewrite_links(tokens, src_rel: str, url_map: dict[str, str], dangling: list[
     walk(tokens)
 
 
+_SLUG_DROP_RE = re.compile(r"[^\w\s-]", re.UNICODE)
+
+
+def github_slug(text: str) -> str:
+    """The anchor GitHub generates for a heading: lowercase, every character that is
+    not a letter, digit, underscore, space or hyphen removed, spaces turned into
+    hyphens. Two spaces (from an em dash or an ampersand with spaces around it)
+    become two hyphens, which is why the docs' anchors read `size--split`."""
+    return _SLUG_DROP_RE.sub("", text.strip().lower()).replace(" ", "-")
+
+
+def add_heading_ids(tokens) -> None:
+    """Give every heading_open token an `id`, GitHub-style, unique within the page."""
+    seen: dict[str, int] = {}
+    for i, t in enumerate(tokens):
+        if t.type != "heading_open" or i + 1 >= len(tokens):
+            continue
+        inline = tokens[i + 1]
+        if inline.type != "inline":
+            continue
+        parts: list[str] = []
+        for c in inline.children or []:
+            if c.type in ("text", "code_inline"):
+                parts.append(c.content)
+            elif c.type in ("softbreak", "hardbreak"):
+                parts.append(" ")
+        slug = github_slug("".join(parts))
+        if not slug:
+            continue
+        n = seen.get(slug, 0)
+        seen[slug] = n + 1
+        t.attrSet("id", slug if n == 0 else f"{slug}-{n}")
+
+
 _TASK_RE = re.compile(r"<li>\[([ xX])\]\s")
 
 
@@ -293,6 +331,7 @@ class Renderer:
     def render_markdown(self, rel: str, text: str) -> tuple[str, bool]:
         env: dict = {}
         tokens = self.md.parse(strip_frontmatter(text), env)
+        add_heading_ids(tokens)
         rewrite_links(tokens, rel, self.url_map, self.dangling)
         body = self.md.renderer.render(tokens, self.md.options, env)
         return finish_tasklists(body), bool(env.get("has_mermaid"))
@@ -416,19 +455,30 @@ class Renderer:
 
     # -- link audit --
     def audit(self) -> list[str]:
+        """Every local href/src must name an existing output file, and a fragment on a
+        local link must name an id in the page it points at (its own page for a bare
+        `#section`)."""
         broken = []
         attr_re = re.compile(r'(?:href|src)="([^"]+)"')
-        for html_file in sorted(self.out.rglob("*.html")):
+        id_re = re.compile(r'\sid="([^"]+)"')
+        pages = {f: f.read_text(encoding="utf-8") for f in sorted(self.out.rglob("*.html"))}
+        ids = {f: set(id_re.findall(text)) for f, text in pages.items()}
+        for html_file, text in pages.items():
             base = html_file.parent
-            for ref in attr_re.findall(html_file.read_text(encoding="utf-8")):
-                target, _, _ = ref.partition("#")
-                if not target or re.match(r"^[a-z]+:", target) or target.startswith(("//", "mailto:")):
+            for ref in attr_re.findall(text):
+                target, _, frag = ref.partition("#")
+                if re.match(r"^[a-z]+:", target) or target.startswith(("//", "mailto:")):
                     continue
-                p = (self.out / target.lstrip("/")) if target.startswith("/") else (base / target)
-                if target.endswith("/"):
-                    p = p / "index.html"
+                if not target:
+                    p = html_file  # a bare in-page anchor
+                else:
+                    p = (self.out / target.lstrip("/")) if target.startswith("/") else (base / target)
+                    if target.endswith("/"):
+                        p = p / "index.html"
                 if not p.exists():
                     broken.append(f"{html_file.relative_to(self.out)} -> {ref}")
+                elif frag and p in ids and frag not in ids[p]:
+                    broken.append(f"{html_file.relative_to(self.out)} -> {ref} (no such anchor)")
         return broken
 
     # -- orchestration --

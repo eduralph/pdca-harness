@@ -24,7 +24,7 @@ An adapted project is the template's **machinery** (a Python package + determini
 **The rule that makes it work, both directions:**
 
 - *Adapting (template → instance):* you only ever touch the **render-time** answers, the **`[[gates.checks]]`** rows, and the **`engine/`**. You do **not** edit `src/pdca_harness/*` — if you feel the urge to, that is a signal the *template* needs a change (see the feedback discipline below), not the instance.
-- *Improving (instance → template):* a fix you make to the machinery while running a real cycle is a **template** change wearing an instance's clothes. It must flow back, or the next `copier update` overwrites it. File it as an `enhancement` issue on the template repo for exactly this — see [§ Feeding improvements back](#feeding-improvements-back-the-non-optional-part).
+- *Improving (instance → template):* a fix you make to the machinery while running a real cycle is a **template** change wearing an instance's clothes. It must flow back, or the next `copier update` overwrites it. File it as an `enhancement` issue on the template repo for exactly this — see [§ Feeding improvements back](#feeding-improvements-back--the-non-optional-part).
 
 Everything below is organised by that boundary.
 
