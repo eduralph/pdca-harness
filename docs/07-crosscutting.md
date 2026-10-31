@@ -1,6 +1,6 @@
 # Step 07 — Cross-cutting: size, iteration, and parallel execution
 
-← [06 Act](06-act.md) · [Index](README.md)
+← [06 Act](06-act.md) · [Index](README.md) · next: [08 Command reference →](08-command-reference.md)
 
 Everything through [step 06](06-act.md) is one contribution moving
 linearly through Plan → Do → Check → Act, with sign-off and publish as Check's
@@ -1045,6 +1045,7 @@ You now have the full picture: the linear cycle from [step 00](00-introduction.m
 through [step 06](06-act.md), plus the three mechanisms that cut across it.
 From here, [render the harness into your own project](01-render-and-integrate.md)
 if you haven't, or go back to the [reference spec](../template/PCDA/quality-cycle/)
-for the full reasoning behind any of it.
+for the full reasoning behind any of it. Every command this guide mentions is
+listed, with its options and exit codes, in the [command reference](08-command-reference.md).
 
-← [06 Act](06-act.md) · [Index](README.md)
+← [06 Act](06-act.md) · [Index](README.md) · next: [08 Command reference →](08-command-reference.md)

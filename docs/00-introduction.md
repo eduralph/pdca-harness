@@ -124,7 +124,7 @@ project-specific parts are yours.
 | **Iterate carry-forward** | A rejection archives the attempt and folds the *reason* into the next build | [05](05-check.md) |
 | **Draft-PR publish** | Contribute the accepted fix as a *draft* — a human marks it ready (except non-final wave PRs under opt-in `wave_mode = "merge"`) | [05](05-check.md) |
 | **Cross-cycle Act loop** | Periodic review that turns recurring misses into spec/gate/rule deltas | [06](06-act.md) |
-| **Console-script front door** | `pdca flow <id>` orchestrates the whole cycle; `pdca flow <ids…>` batches, bare `pdca` is status; `make` is bootstrap-only | [README](README.md) |
+| **Console-script front door** | `pdca flow <id>` orchestrates the whole cycle; `pdca flow <ids…>` batches, bare `pdca` is status; `make` is bootstrap-only | [README](README.md), [08](08-command-reference.md) |
 
 ---
 
