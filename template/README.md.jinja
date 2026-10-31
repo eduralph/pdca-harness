@@ -3,7 +3,8 @@
 {{ project_description or "Runs the **PDCA quality cycle** over this project, driven by the Claude CLI." }}
 
 One command takes an issue from a brief all the way to a human-signed-off, verified
-change — `Plan → Do → Check → sign-off → Act` — pausing only where a human belongs.
+change — `Plan → Do → Check (gates → review → sign-off → publish) → Act` — pausing
+only where a human belongs.
 
 The driver is deterministic (state machine + gates + the C6 accept-guard are plain
 code); a model is invoked only at the five **leaves**. See

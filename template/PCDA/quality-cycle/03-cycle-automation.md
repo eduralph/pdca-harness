@@ -235,7 +235,7 @@ So a contribution-batch is: one human pass at the **Plan** beat to author specs,
 Build the automation in order. **The three human touch points — Plan authoring, Check sign-off, and Act — stay human at every level.** (Those are three touch points across three beats: Plan and Act are fully human beats; Check is a mixed beat whose sign-off step is its human portion. Do is the fourth beat and has no human touch.)
 
 - **L1 — scripted handoff.** **[project-provided]** A tracker scraper + handoff generator emits draft briefs and bundle directories from a candidate pool (see [Batch selection](#batch-selection-upstream-of-fan-out)). This is tracker-specific, so the template does not ship it; each project supplies it as the per-repo specification's item-9 tooling.
-- **L2 — unattended per-issue body.** **[built]** `pdca run <id>` runs Do→Check→assemble→STOP for a single issue: the state machine + the two headless leaf calls + the single-sourced gate runner. (The leaves run as offline stubs until a model command is wired, and the gates use the all-PASS stub fallback until real check rows are filled — fill the gates first, per [Build order](#build-order).)
+- **L2 — unattended per-issue body.** **[built]** `pdca run <id>` runs Do→Check→assemble→STOP for a single issue: the state machine + the two headless leaf calls + the single-sourced gate runner. (The leaves run as offline stubs until a model command is wired, and the gates use the all-PASS stub fallback until real check rows are filled — fill the gates first, per [Build order](#build-order-restated-as-concrete-deliverables).)
 - **L3 — unattended contribution-batch + sign-off queue.** **[built]** `pdca flow <ids…>` produces N bundles; `pdca queue` is the cheap-first sign-off burn-down.
 - **L4 — Act review tooling.** **[built]** `pdca act index` is the bundle index across frozen cycles; `pdca act log` scaffolds the dated entry (the deltas are left to the human). L4 is independent of L1–L3 — you can run Act manually against L3 bundles regardless.
 
@@ -278,7 +278,7 @@ Each model leaf's instructions live in a canonical, vendor-neutral body `agents/
 > `driver.py`, `gates.py`, `leaves.py`, `assemble.py`) follows it. The
 > sketch below is kept as the readable model — read the modules for the
 > exact code. Each function corresponds to a piece in the
-> [Build order](#build-order) below.
+> [Build order](#build-order-restated-as-concrete-deliverables) below.
 
 The driver is a thin loop: read each issue's file-state, run the next
 beat's command, write its artifact, advance, STOP at AWAITING_SIGNOFF.
@@ -435,7 +435,7 @@ the real gate rows, and the real leaf commands.
 4. **The two leaf instruction files** **[built]** — the builder subagent
    (`.claude/agents/builder.md`) and the reviewer (`AGENTS.md` +
    `.claude/agents/reviewer.md`), with the ready-mark enforced by
-   `.claude/hooks/builder_guard.py` (see [Do — full](#do--full)). The
+   `.claude/hooks/builder_guard.py` (see [Do — full](#do--full-headless-builder-subagent-scope)). The
    configs ship; the leaves run as offline stubs until
    `leaves_mode = "command"` in `pdca.toml` wires a real model.
 5. **Act tooling (L4)** **[built]** — `pdca act index` (bundle index

@@ -31,9 +31,13 @@ stylesheet and templates live here under `publishing/`. CI overwrites pdca.dev's
 |-----|--------|
 | `/` | `docs/index.yml` through `templates/home.html` (the bespoke landing) |
 | `/guide/` | `docs/README.md` (the walkthrough index) |
-| `/guide/<nn>-*.html` | `docs/<nn>-*.md` (the walkthrough steps 00–07) |
+| `/guide/<nn>-*.html` | `docs/<nn>-*.md` (the walkthrough steps 00–07 and the reference pages 08–11) |
 | `/spec/` | generated index of the quality-cycle model |
 | `/spec/<nn>-*.html` | `template/PCDA/quality-cycle/<nn>-*.md` (the vendored model) |
+| `/design/` | `docs/design/README.md` (the design-docs index) |
+| `/design/<sub>/…html` | `docs/design/<sub>/…md` — ADRs, architecture, proposals, specs, templates; a folder's `README.md` is its index, a folder without one gets a generated index |
+| `/governance/` | generated index |
+| `/governance/<name>.html` | `docs/governance/<NAME>.md` (stem lower-cased, `_` → `-`) |
 
 ## Layout
 
@@ -44,7 +48,9 @@ stylesheet and templates live here under `publishing/`. CI overwrites pdca.dev's
 │   └── docs-check.yml    ← CI: lint → render --check on every PR (no deploy)
 └── docs/
     ├── README.md         ← GitHub-facing index of docs/     → /guide/
-    ├── 00-introduction.md … 07-publish-and-act.md           → /guide/<nn>-*.html
+    ├── 00-introduction.md … 11-troubleshooting.md           → /guide/<nn>-*.html
+    ├── design/**            ← ADRs, architecture, proposals, specs → /design/…
+    ├── governance/*.md      ← GOVERNANCE, CODE_OF_CONDUCT          → /governance/…
     ├── index.yml         ← landing page as structured content → /
     └── publishing/       ← build tooling + site inputs (not published)
         ├── site/
@@ -61,15 +67,16 @@ stylesheet and templates live here under `publishing/`. CI overwrites pdca.dev's
 
 ## How a page is built
 
-`render_site.py` discovers the published sources (the top-level `docs/*.md` and the
-flat `template/PCDA/quality-cycle/*.md` set), computes each one's output URL,
+`render_site.py` discovers the published sources (every `docs/**/*.md` outside
+`publishing/`, and the flat `template/PCDA/quality-cycle/*.md` set), computes each one's output URL,
 renders Markdown to HTML, **rewrites relative links** — to a published page → its
 site URL; to any other in-repo file (e.g. `../template/`, `../copier.yml`) → a
-GitHub blob/tree URL so it still resolves — and wraps the result in
-`templates/page.html`. The landing page renders to `/` from `docs/index.yml`
+GitHub blob/tree URL so it still resolves — gives every heading the `id` GitHub
+would (so `#section` links work on the site as they do in the repo), and wraps the
+result in `templates/page.html`. The landing page renders to `/` from `docs/index.yml`
 through `templates/home.html`; the `/spec/` index is generated from the model's
 numbered files. A `--check` pass then fails the build on any dangling internal
-link.
+link, including a fragment that names no heading of its target page.
 
 See [tools/README.md](tools/README.md) for build and deploy instructions.
 

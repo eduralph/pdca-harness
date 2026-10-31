@@ -65,8 +65,9 @@ PYTHONPATH=src python -m pdca_harness.cli signoff TOY --discontinue   # → DISC
 ## The one-shot rehearsal
 
 Typing the beats individually is good for *seeing* the state machine. To rehearse
-the **same orchestration `pdca flow` uses** — Plan → Do → Check → sign-off →
-publish — but entirely stubbed, use the `--rehearse` flag:
+the **same orchestration `pdca flow` uses** — Plan → Do → Check, through
+Check's sign-off and publish steps — but entirely stubbed, use the `--rehearse`
+flag:
 
 ```bash
 pdca flow TOY --rehearse
@@ -74,9 +75,10 @@ pdca flow TOY --rehearse
 
 This forces `PDCA_LEAVES_MODE=stub`, stubs the gates, dry-runs the publish, and
 writes to a throwaway bundle root (`.rehearse/`, not your real `results/`). No
-Claude, no Docker, no network — just the control flow, instantly. gramps used
-this constantly while building out its `engine/` gates, because it answers "did I
-break the driver?" without "is the model having a bad day?" muddying the signal.
+Claude, no Codex, no `cargo`, no network — just the control flow, instantly. Wyrd's
+maintainer used this constantly while wiring `engine/xtask.sh` and the per-fix
+verifier, because it answers "did I break the driver?" without "is the model
+having a bad day?" muddying the signal.
 
 ## What you've proven
 
@@ -84,6 +86,7 @@ After a green rehearsal you know the **plumbing** is sound: states derive
 correctly from files, the SUMMARY assembles, iterate archives into
 `iteration-v<N>/`, and the sign-off transitions fire. Now — and only now — is it
 worth pointing the beats at real models and real gates. The next five steps walk
-one **live** gramps cycle through each beat.
+one **live** Wyrd cycle — issue 779, a `Server` header on every response of
+Wyrd's S3 gateway — through each beat.
 
 ← [01 Render & integrate](01-render-and-integrate.md) · [Index](README.md) · next: [03 Plan →](03-plan.md)

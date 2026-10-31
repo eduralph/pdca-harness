@@ -85,8 +85,9 @@ depends on a maintainer remembering to ask for it on any given contribution.
 misses — something a maintainer caught at review that no gate owned — into
 permanent improvements: a new gate, a new brief field, a tightened rule. Each
 future cycle starts from a better baseline. (The walkthrough shows a real
-example: a maintainer's review comment about a translation-manifest rule became a
-proposed deterministic gate — see [step 06](06-act.md).)
+example: three defects a post-merge review found on an already-merged PR became
+two always-on review leaves and a builder escalation ladder — see
+[step 06](06-act.md).)
 
 **Scale without losing rigor.** Because state lives in files (not a database), the
 driver is **idempotent and resumable**, and one Plan session can brief *several*
@@ -110,7 +111,7 @@ project-specific parts are yours.
 | Feature | What it is | Walkthrough step |
 |---------|------------|------------------|
 | **Copier template** | Render the harness into any repo; pull template updates later with `copier update` | [01](01-render-and-integrate.md) |
-| **`pdca.toml` wiring** | One config file binds the driver to your repo's leaves (the per-beat commands) and gates | [01](01-render-and-integrate.md) |
+| **`pdca.toml` wiring** | One config file binds the driver to your repo's leaves (the per-beat commands) and gates | [01](01-render-and-integrate.md), [09](09-configuration-reference.md) |
 | **`INTEGRATION.md` (11 items)** | The contract for concretizing the generic model to your tracker, branches, fixtures, ruleset | [01](01-render-and-integrate.md) |
 | **File-derived state machine** | A bundle's state is *computed from which files exist* — no DB, fully resumable | [02](02-rehearse-offline.md) |
 | **Offline rehearsal** | `pdca flow <id> --rehearse` drives the whole flow with stubs — instant, free | [02](02-rehearse-offline.md) |
@@ -123,7 +124,7 @@ project-specific parts are yours.
 | **Iterate carry-forward** | A rejection archives the attempt and folds the *reason* into the next build | [05](05-check.md) |
 | **Draft-PR publish** | Contribute the accepted fix as a *draft* — a human marks it ready (except non-final wave PRs under opt-in `wave_mode = "merge"`) | [05](05-check.md) |
 | **Cross-cycle Act loop** | Periodic review that turns recurring misses into spec/gate/rule deltas | [06](06-act.md) |
-| **Console-script front door** | `pdca flow <id>` orchestrates the whole cycle; `pdca flow <ids…>` batches, bare `pdca` is status; `make` is bootstrap-only | [README](README.md) |
+| **Console-script front door** | `pdca flow <id>` orchestrates the whole cycle; `pdca flow <ids…>` batches, bare `pdca` is status; `make` is bootstrap-only | [README](README.md), [08](08-command-reference.md) |
 
 ---
 
@@ -180,8 +181,9 @@ The harness fits when you are **funnelling AI-generated contributions into a rea
 codebase** and need each one verified, scoped, and signed off — especially at
 volume, across multiple branches, or into a project with real conformance rules
 (tests, linters, contribution conventions). The worked example throughout this
-guide — [Gramps Testbed v2](README.md), which contributes fixes upstream to the
-Gramps genealogy project and its addons — is exactly that shape.
+guide — [Wyrd PDCA](README.md), which drives contributions into Wyrd, a
+distributed file storage system written in Rust, through Wyrd's own `cargo xtask`
+gates — is exactly that shape.
 
 It's heavier than you need for a one-off script or a solo throwaway. The payoff is
 in *repeated* contribution where correctness, traceability, and a maintainer's

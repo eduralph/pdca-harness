@@ -19,10 +19,11 @@ starts from a prepared harness instead of tribal knowledge.
 
 New here? **[`docs/`](docs/README.md)** is a step-by-step walkthrough that drives
 one real contribution through every beat of the cycle, using a live project
-([Gramps Testbed v2](docs/README.md)) as the worked example. Start with the
+([Wyrd PDCA](docs/README.md), the instance that contributes to the Wyrd
+distributed file storage system) as the worked example. Start with the
 **[introduction](docs/00-introduction.md)** for the why-and-what, then follow
-steps 01–07 from rendering the template to publishing a fix and the cross-cycle
-Act review.
+steps 01–07 from rendering the template to publishing a change and the
+cross-cycle Act review.
 
 ## What you get when you render it
 
@@ -117,7 +118,7 @@ command with `PYTHONPATH=src python -m pdca_harness.cli …`.
 
 ```bash
 pdca init-issue TOY --from-brief examples/toy/brief.md   # seed a bundle from a brief
-pdca flow TOY            # the whole cycle: Plan→Do→Check→sign-off→publish→Act
+pdca flow TOY            # the whole cycle: Plan→Do→Check(gates→review→sign-off→publish)→Act
 pdca flow A B C          # several ids → batch fan-out + cheap-first sign-off queue
 pdca status              # all bundle states (cheap-first); bare `pdca` does the same
 pdca queue               # the cheap-first sign-off burn-down

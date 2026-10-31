@@ -32,30 +32,25 @@ sections:
   - eyebrow: "How it works"
     heading: "One contribution, one cycle."
     diagram: |
-      PLAN      ◆  author the brief — the spec every beat is measured against
+      PLAN   ◆  author the brief — the spec every beat is measured against
         │
         ▼
-      DO           a headless builder writes the patch + a red→green test
+      DO        a headless builder writes the patch + a red→green test
         │
         ▼
-      CHECK        deterministic gates (red→green) + a decorrelated reviewer
-        │
-        ▼
-      SIGN-OFF  ◆  the human verdict — accept · iterate · discontinue
-        │
-        ▼
-      PUBLISH      a draft PR — the harness never marks it ready
+      CHECK  ◆  deterministic gates (red→green) + a decorrelated reviewer,
+                then the human verdict — accept · iterate · discontinue —
+                and a draft PR the harness never marks ready
         ┊
-      ACT       ◆  every N cycles: recurring misses → new gates · rules · fields
+      ACT    ◆  every N cycles: recurring misses → new gates · rules · fields
         └──▶ back to a better-baselined PLAN
 
-      ◆  one of the three human touch points — everything else is automated
+      ◆  a beat with a human touch point — everything else is automated
     props:
-      - { term: "Plan",  desc: "**Author the brief.** A precise, field-structured spec every later beat is measured against." }
+      - { term: "Plan",  desc: "**Author the brief.** A precise, field-structured spec every later beat is measured against. Human touch point #1." }
       - { term: "Do",    desc: "**Build against the spec.** A headless builder writes the patch, a shipped test, and its rationale — and can't open a PR." }
-      - { term: "Check", desc: "**Verify it.** Deterministic gates (red→green), a decorrelated reviewer, and a 5/5/1 verdict assembled into one SUMMARY." }
-      - { term: "Sign-off", desc: "**The human verdict.** Accept, iterate-do, iterate-plan, or discontinue — accept is refused while anything is unresolved." }
-      - { term: "Act",   desc: "**Improve the process.** Across cycles, recurring misses become new gates, brief fields, and rules — a better baseline every time." }
+      - { term: "Check", desc: "**Verify it, then decide.** Deterministic gates (red→green), a decorrelated reviewer, and a 5/5/1 verdict assembled into one SUMMARY. The human completes Check at sign-off — accept, iterate-do, iterate-plan, or discontinue; accept is refused while anything is unresolved — and an accepted bundle publishes as a draft PR the harness never marks ready. Human touch point #2." }
+      - { term: "Act",   desc: "**Improve the process.** Across cycles, recurring misses become new gates, brief fields, and rules — a better baseline every time. Human touch point #3." }
 
   - eyebrow: "Key features"
     heading: "Built for a backlog, not a single fix."
@@ -72,7 +67,12 @@ sections:
       - "The one thing allowed to block a sign-off is a deterministic, LLM-free check: a test that is red before the fix and green after it. Everything a gate can't adjudicate — an ambiguous-scope lint, an environmental failure, the irreducibly human judgments — surfaces as an explicit checklist for a person, never silently passed or silently blocked."
       - "State lives in files, so the driver is idempotent and resumable; one planning session can brief several issues that build unattended and queue for a fast, cheap-first sign-off. And a full cycle rehearses entirely offline — stub models, stub gates — so you can learn it and prove the plumbing before spending a token."
 
+  - eyebrow: "How it is built"
+    heading: "Documented the way it asks you to document."
+    body:
+      - "The harness keeps the four document classes it gives every rendered project: a living [architecture overview](/design/architecture/), append-only [decision records](/design/adr/), [proposals](/design/proposals/) that move from draft to accepted, and [specifications](/design/specs/) under change control — all in the repo, all published here. The project's [governance](/governance/) and code of conduct sit beside them."
+
   - eyebrow: "See it for real"
     heading: "A worked example, end to end."
-    note: "The [walkthrough](/guide/) drives one real contribution — a fix to the Gramps genealogy project — through every beat: the actual brief, the actual patch, the gate table, the §6 checklist, a two-iteration sign-off, and the Act entry that turned a maintainer's review comment into a new gate."
+    note: "The [walkthrough](/guide/) drives one real contribution — a change to Wyrd, a distributed file storage system written in Rust — through every beat: the actual brief, the actual patch, the gate table, the §6 checklist, an unattended iterate round, the stacked draft PR, and the Act review that traced a red gate row back to one line of configuration."
     quote: "Plan → Do → Check → Act, on a live codebase."

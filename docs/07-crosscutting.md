@@ -1,9 +1,10 @@
 # Step 07 — Cross-cutting: size, iteration, and parallel execution
 
-← [06 Act](06-act.md) · [Index](README.md)
+← [06 Act](06-act.md) · [Index](README.md) · next: [08 Command reference →](08-command-reference.md)
 
 Everything through [step 06](06-act.md) is one contribution moving
-linearly through Plan → Do → Check → sign-off → Publish → Act. Three mechanisms
+linearly through Plan → Do → Check → Act, with sign-off and publish as Check's
+last two steps. Three mechanisms
 don't fit that line — they modify *how* the beats run rather than being a beat
 themselves, and each one touches more than one of them:
 
@@ -296,6 +297,40 @@ parent's is written before the close marker, and a failed accept restores the
 parent's prior record byte-for-byte (a record that can't be *read* refuses the
 accept up front, since one that can't be read can't be restored).
 
+**A real split.** Wyrd issue 736 — "the S3 gateway advertises no version" —
+went through four Do rounds as one slice before the planner split it. The
+proposal (`results/issue_736/split-proposal.md`) names the seam by where the
+blocking findings landed, not by byte count: every blocker of rounds 3 and 4 sat
+in *deriving* a build identity (a build script, the packaging path, a rerun-watch
+set), while *stamping* it on the wire "was never the problem: v4's adversary could
+not refute its red→green and it passed every rubric every round". Its wave sketch
+says why the children stack rather than run in parallel:
+
+```markdown
+- `child-2` **depends on** `child-1` because its success criterion is defined *against*
+  child-1's artifact: the header's remainder must be byte-equal to the `version` field of
+  the `role started` log event that child-1 introduces. Built on a base without child-1
+  there is no field to compare against and the header could only go green on a
+  placeholder — the exact `wyrd/unknown` hole this ordering exists to close.
+```
+
+`pdca split 736 --accept` filed the children as tracker sub-issues #778 and
+#779, rewrote `child-1` / `child-2` to those ids, and left the parent as a
+`split` close-disposition with this `build-notes.md`:
+
+```markdown
+# Build notes — NO PATCH (split)
+
+This slice was decomposed rather than built. The work lives in the child bundles: issue_778, issue_779.
+```
+
+and this `split-lineage.json` on the parent
+(`{"children": ["778", "779"], "id": "736", "version": 1}`) and on each child
+(`{"depth": 1, "id": "779", "parent": "736", "siblings": ["778"], "version": 1}`).
+[Step 03](03-plan.md) picks up 779's brief from here, and
+[step 05](05-check.md#publishing-the-accepted-change) shows the two PRs landing as
+a stack.
+
 That record is what lets **a split hand its children back to the run that is
 driving it**. When a bundle in the drive set reaches `close-disposition =
 split`, the flow reads its `children`, drops the ones it can't drive (no brief,
@@ -514,7 +549,12 @@ Three guarantees hold by construction, worth knowing before you flip it on:
   and the deferred findings survive across rebuilds instead of resetting every
   iterate.
 
-gramps runs `auto_iterate = true` with the default `max_auto_iters = 3`.
+Wyrd runs `auto_iterate = true` with `max_auto_iters = 5`, and has switched the
+size backstop's rounds rule off (`[driver.size_signal] rounds = 0`) after an Act
+review found that rule counting rounds lost to a stale host tool as churn
+([step 06](06-act.md)). [Step 05](05-check.md#signing-off--the-four-dispositions)
+shows a real auto-iterate round on issue 779: two implementation findings
+rebuilt unattended, the fitness-to-purpose question deferred to the human.
 
 ---
 
@@ -571,9 +611,11 @@ exist — the same `per_lane` `[[doctor.checks]]` rows from
 [step 01](01-render-and-integrate.md#pdca-doctor--verify-prerequisites-change-nothing)
 run automatically, or a `lane_preflight` command covers a resource that isn't
 expressible as a doctor row. Either way, a missing lane aborts the whole run
-*before* it produces a pile of false-red bundles, not partway through. gramps
-runs `lanes = 6`, backed by `make worktrees LANES=6` provisioning the sibling
-checkouts those doctor rows check for.
+*before* it produces a pile of false-red bundles, not partway through. Wyrd runs
+`lanes = 3` and needs no `per_lane` rows: the driver's worktree isolation gives
+each lane its own checkout of the target (`wyrd.pdca-wt-l0` … `l2`), and the
+engine's per-fix verifier and coverage runner scope their own worktrees by
+`$PDCA_LANE` the same way (`wyrd-verify-l<N>`, `wyrd-cov-l<N>`).
 
 ### Bounding what a leaf may use
 
@@ -930,8 +972,14 @@ brief names. It never changes a brief's target.
 `[driver].regate_between_waves` (default `false`) optionally re-runs your
 repo-scoped gates over each folded integration tip before the next wave builds
 on it — catching a combination that's red even though every fix in it was green
-alone. gramps runs the default `wave_mode = "stack"` with `merge_method =
-"merge"` for when a human merges the stack.
+alone. Wyrd runs `wave_mode = "stack"` with `merge_method = "merge"` for when a
+human merges the stack — again since 2026-10-01, after two months in `"merge"`
+mode in which one red check on a non-final wave's PR stopped the whole run at
+that wave boundary (its `docs/INTEGRATION.md` §2 keeps the history). The
+778 → 779 pair in [step 05](05-check.md#publishing-the-accepted-change) ran this
+way: 779 was built on the run's integration line
+`pdca-integration/main-r6da1b5689252` (recorded in the bundle's `stack-base`
+file), and its PR opened against `main`, stacked on #885.
 
 ### Housekeeping: sweep & cleanup
 
@@ -997,6 +1045,7 @@ You now have the full picture: the linear cycle from [step 00](00-introduction.m
 through [step 06](06-act.md), plus the three mechanisms that cut across it.
 From here, [render the harness into your own project](01-render-and-integrate.md)
 if you haven't, or go back to the [reference spec](../template/PCDA/quality-cycle/)
-for the full reasoning behind any of it.
+for the full reasoning behind any of it. Every command this guide mentions is
+listed, with its options and exit codes, in the [command reference](08-command-reference.md).
 
-← [06 Act](06-act.md) · [Index](README.md)
+← [06 Act](06-act.md) · [Index](README.md) · next: [08 Command reference →](08-command-reference.md)

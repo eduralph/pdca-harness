@@ -16,6 +16,13 @@ Output structure (served at the apex domain pdca.dev):
     /guide/<nn>-*.html      docs/<nn>-*.md                (the walkthrough steps)
     /spec/                  generated index of the quality-cycle model
     /spec/<nn>-*.html       template/PCDA/quality-cycle/<nn>-*.md
+    /design/                docs/design/README.md         (the design-docs index)
+    /design/<sub>/...html   docs/design/<sub>/...md       (ADRs, architecture, proposals,
+                                                           specs, templates; a README is
+                                                           its folder's index, a folder
+                                                           without one gets a generated index)
+    /governance/            generated index
+    /governance/<name>.html docs/governance/<NAME>.md     (stem lower-cased, _ -> -)
 
 Design notes:
   * Deterministic: same tree in, same site out.
@@ -23,6 +30,10 @@ Design notes:
     their output URLs; relative links to OTHER repo files (e.g. ../template/,
     ../copier.yml) are rewritten to GitHub blob/tree URLs so they still work on the
     site. The `--check` pass then fails the build on any dangling local link.
+  * Heading ids: every heading gets the id GitHub would give it (lowercase, punctuation
+    dropped, spaces to hyphens, duplicates suffixed -1, -2, ...), so a `#section` link
+    that works in the repo's Markdown view works on the site too. `--check` verifies
+    every fragment of a local link names a heading of its target page.
   * Mermaid: a ```mermaid fence renders client-side via a pinned mermaid.min.js,
     fetched into the build at build time (never committed). No diagrams today; the
     support is here so adding one needs no tooling change.
@@ -71,6 +82,16 @@ GITHUB_TREE = "https://github.com/eduralph/pdca-harness/tree/main/"
 SECTION_CLASS = {
     "guide": "Walkthrough",
     "spec": "Quality-cycle model",
+    "design": "Design documentation",
+    "governance": "Governance",
+}
+
+# Titles for the index pages generated for published folders that have no README.
+DIR_INDEX_TITLES = {
+    "design/architecture": "Architecture overview",
+    "design/proposals/accepted": "Accepted proposals",
+    "design/proposals/draft": "Draft proposals",
+    "governance": "Governance",
 }
 
 MERMAID_VERSION = "11.4.1"
@@ -128,6 +149,14 @@ def out_url(rel: str) -> str | None:
         return "/guide/"
     if rel.startswith("docs/") and rel.endswith(".md") and "/" not in rel[len("docs/"):]:
         return f"/guide/{rel[len('docs/'):-len('.md')]}.html"
+    if rel.startswith("docs/design/") and rel.endswith(".md"):
+        sub = rel[len("docs/"):-len(".md")]            # design/adr/0001-...
+        if sub.endswith("/README"):
+            return "/" + sub[:-len("README")]          # a README is its folder's index
+        return f"/{sub}.html"
+    if rel.startswith("docs/governance/") and rel.endswith(".md") and "/" not in rel[len("docs/governance/"):]:
+        stem = rel[len("docs/governance/"):-len(".md")].lower().replace("_", "-")
+        return f"/governance/{stem}.html"
     if rel.startswith(SPEC_REL + "/") and rel.endswith(".md"):
         stem = rel[len(SPEC_REL) + 1:-len(".md")]
         if "/" in stem:
@@ -219,6 +248,40 @@ def rewrite_links(tokens, src_rel: str, url_map: dict[str, str], dangling: list[
     walk(tokens)
 
 
+_SLUG_DROP_RE = re.compile(r"[^\w\s-]", re.UNICODE)
+
+
+def github_slug(text: str) -> str:
+    """The anchor GitHub generates for a heading: lowercase, every character that is
+    not a letter, digit, underscore, space or hyphen removed, spaces turned into
+    hyphens. Two spaces (from an em dash or an ampersand with spaces around it)
+    become two hyphens, which is why the docs' anchors read `size--split`."""
+    return _SLUG_DROP_RE.sub("", text.strip().lower()).replace(" ", "-")
+
+
+def add_heading_ids(tokens) -> None:
+    """Give every heading_open token an `id`, GitHub-style, unique within the page."""
+    seen: dict[str, int] = {}
+    for i, t in enumerate(tokens):
+        if t.type != "heading_open" or i + 1 >= len(tokens):
+            continue
+        inline = tokens[i + 1]
+        if inline.type != "inline":
+            continue
+        parts: list[str] = []
+        for c in inline.children or []:
+            if c.type in ("text", "code_inline"):
+                parts.append(c.content)
+            elif c.type in ("softbreak", "hardbreak"):
+                parts.append(" ")
+        slug = github_slug("".join(parts))
+        if not slug:
+            continue
+        n = seen.get(slug, 0)
+        seen[slug] = n + 1
+        t.attrSet("id", slug if n == 0 else f"{slug}-{n}")
+
+
 _TASK_RE = re.compile(r"<li>\[([ xX])\]\s")
 
 
@@ -246,10 +309,12 @@ class Renderer:
     # -- discovery --
     def discover(self) -> list[tuple[str, Path, str]]:
         """Return (rel, path, url) for every published source; populate url_map."""
-        candidates = sorted(DOCS_ROOT.glob("*.md")) + sorted(SPEC_ROOT.glob("*.md"))
+        candidates = sorted(DOCS_ROOT.rglob("*.md")) + sorted(SPEC_ROOT.glob("*.md"))
         sources: list[tuple[str, Path, str]] = []
         for path in candidates:
             rel = path.relative_to(REPO_ROOT).as_posix()
+            if rel.startswith("docs/publishing/"):
+                continue  # the site's own tooling docs are not published
             url = out_url(rel)
             if url is None:
                 continue
@@ -258,6 +323,23 @@ class Renderer:
         # aliases so prose can link to the section folders / dirs
         self.url_map["docs"] = "/guide/"
         self.url_map[SPEC_REL] = "/spec/"
+        self.url_map[SPEC_REL + ".md"] = "/spec/"   # the model's own index file -> the /spec/ index
+        # every published folder resolves to an index: its README's URL, or the
+        # generated index build_dir_indexes() emits for a folder without one
+        self.dir_indexes: dict[str, str] = {}
+        for rel, _path, url in sources:
+            if not rel.startswith(("docs/design/", "docs/governance/")):
+                continue
+            folder = rel.rsplit("/", 1)[0]
+            while folder != "docs":
+                if folder not in self.url_map:
+                    index_url = "/" + folder[len("docs/"):] + "/"
+                    self.url_map[folder] = index_url
+                    self.dir_indexes[folder] = index_url
+                folder = folder.rsplit("/", 1)[0]
+        for rel, _path, url in sources:
+            if url.endswith("/"):  # a README: its folder needs no generated index
+                self.dir_indexes.pop(rel.rsplit("/", 1)[0], None)
         return sources
 
     # -- emit one templated page --
@@ -293,6 +375,7 @@ class Renderer:
     def render_markdown(self, rel: str, text: str) -> tuple[str, bool]:
         env: dict = {}
         tokens = self.md.parse(strip_frontmatter(text), env)
+        add_heading_ids(tokens)
         rewrite_links(tokens, rel, self.url_map, self.dangling)
         body = self.md.renderer.render(tokens, self.md.options, env)
         return finish_tasklists(body), bool(env.get("has_mermaid"))
@@ -391,6 +474,24 @@ class Renderer:
                 f"<h2>Documents</h2>\n<ul>\n{lis}\n</ul>\n")
         self.emit("/spec/", "The quality-cycle model", body, "", False)
 
+    # -- generated indexes for published folders that have no README --
+    def build_dir_indexes(self):
+        for folder, index_url in sorted(self.dir_indexes.items()):
+            key = folder[len("docs/"):]
+            title = DIR_INDEX_TITLES.get(key, prettify(key.rsplit("/", 1)[-1]))
+            pages = sorted(
+                ((u, t) for u, t in self.titles.items()
+                 if u.startswith(index_url) and u != index_url
+                 and "/" not in u[len(index_url):].rstrip("/")),
+                key=lambda it: numeric_key(it[0].rstrip("/").split("/")[-1]),
+            )
+            if not pages:
+                continue
+            lis = "\n".join(f'    <li><a href="{u}">{html.escape(t)}</a></li>' for u, t in pages)
+            self.cur_desc = f"{title} — PDCA Harness design documentation."
+            body = f"<h1>{html.escape(title)}</h1>\n<ul>\n{lis}\n</ul>\n"
+            self.emit(index_url, title, body, SECTION_CLASS.get(section_of(index_url) or "", ""), False)
+
     # -- static assets + mermaid --
     def copy_site(self):
         for item in SITE_DIR.iterdir():
@@ -416,19 +517,30 @@ class Renderer:
 
     # -- link audit --
     def audit(self) -> list[str]:
+        """Every local href/src must name an existing output file, and a fragment on a
+        local link must name an id in the page it points at (its own page for a bare
+        `#section`)."""
         broken = []
         attr_re = re.compile(r'(?:href|src)="([^"]+)"')
-        for html_file in sorted(self.out.rglob("*.html")):
+        id_re = re.compile(r'\sid="([^"]+)"')
+        pages = {f: f.read_text(encoding="utf-8") for f in sorted(self.out.rglob("*.html"))}
+        ids = {f: set(id_re.findall(text)) for f, text in pages.items()}
+        for html_file, text in pages.items():
             base = html_file.parent
-            for ref in attr_re.findall(html_file.read_text(encoding="utf-8")):
-                target, _, _ = ref.partition("#")
-                if not target or re.match(r"^[a-z]+:", target) or target.startswith(("//", "mailto:")):
+            for ref in attr_re.findall(text):
+                target, _, frag = ref.partition("#")
+                if re.match(r"^[a-z]+:", target) or target.startswith(("//", "mailto:")):
                     continue
-                p = (self.out / target.lstrip("/")) if target.startswith("/") else (base / target)
-                if target.endswith("/"):
-                    p = p / "index.html"
+                if not target:
+                    p = html_file  # a bare in-page anchor
+                else:
+                    p = (self.out / target.lstrip("/")) if target.startswith("/") else (base / target)
+                    if target.endswith("/"):
+                        p = p / "index.html"
                 if not p.exists():
                     broken.append(f"{html_file.relative_to(self.out)} -> {ref}")
+                elif frag and p in ids and frag not in ids[p]:
+                    broken.append(f"{html_file.relative_to(self.out)} -> {ref} (no such anchor)")
         return broken
 
     # -- orchestration --
@@ -442,6 +554,7 @@ class Renderer:
             self.titles[url] = read_title(path.read_text(encoding="utf-8"), prettify(path.stem))
         for rel, path, url in sources:
             self.render_source(rel, path, url)
+        self.build_dir_indexes()
         self.build_spec_index()
         self.render_home()
         self.copy_site()
