@@ -3,10 +3,12 @@
 ← [07 Cross-cutting](07-crosscutting.md) · [Index](README.md)
 
 The walkthrough introduces each command where the cycle first needs it. This
-page lists all of them in one place: what each does, its options, what its exit
-code means, and where the walkthrough explains it. The usage lines are the
-tool's own `--help` output at template `v0.59.0`; `pdca <command> --help` is
-always the authority for the version you have installed.
+page lists all of them in one place — first the commands that get an instance
+rendered, installed and checked, then every `pdca` subcommand: what each does,
+its options, what its exit code means, and where the walkthrough explains it.
+The usage lines are the tool's own `--help` output at template `v0.59.0`;
+`pdca <command> --help` is always the authority for the version you have
+installed.
 
 ## Conventions
 
@@ -23,6 +25,32 @@ always the authority for the version you have installed.
   unknown id, an unschedulable graph). `pdca flow` adds **3** — see below.
 - **`<id>`** is a tracker issue id as it appears in `results/issue_<id>/`.
   Several commands take none and then act on every bundle that fits.
+
+## Getting set up
+
+These run once per instance, or once per machine, before any `pdca` command.
+[Step 01](01-render-and-integrate.md) walks through them in order with Wyrd's
+real answers.
+
+| Command | What it does | Covered in |
+|---|---|---|
+| `copier copy gh:eduralph/pdca-harness <dir>` | Renders the template into a new project, asking the `copier.yml` questions. Use a `gh:`/`https:` URL or an **absolute** path, never a relative one. | [01](01-render-and-integrate.md#1a-render-the-template) |
+| `copier update` | From inside the rendered project: re-applies a newer template release over your render, keeping your answers and your instance files. Do it in a separate worktree, never under a live flow. | [01](01-render-and-integrate.md#1a-render-the-template), [04](04-do.md#the-harness-checkout-is-not-isolated--dont-do-git-maintenance-under-a-live-flow-issue-130) |
+| `make install` | Bootstraps every tool `flow` needs, idempotently, then creates `.venv/` and installs the console script with `pip install -e .`. Three tiers: harness-universal tools (`git`, `gh`, a pip-capable venv), the leaf CLIs your `pdca.toml` configures, and your own gate toolchain hook. Re-runs when `pdca.toml` or the bootstrap scripts change. | [01](01-render-and-integrate.md#make-install--provision-every-tool-flow-needs) |
+| `make install-check` | The same checks, installing nothing: one `OK\|MISSING\|INSTALLED\|FAILED\|WARN` row per tool. Exit non-zero only if a REQUIRED tool is missing — the CI preflight. | [01](01-render-and-integrate.md#make-install--provision-every-tool-flow-needs) |
+| `scripts/bootstrap-tools.sh [--check]` | What `make install` and `make install-check` call. Ships verbatim from the template; your toolchain goes in `scripts/bootstrap-tools.d/*.sh` and `[install].extra_bootstrap`. | [01](01-render-and-integrate.md#make-install--provision-every-tool-flow-needs) |
+| `pwsh -File scripts/install.ps1` | Windows: the equivalent of `make install` plus `make setup`, where GNU make is not standard. | [01](01-render-and-integrate.md#1d-install--doctor-verify-the-toolchain) |
+| `make setup` | One-time, Claude leaves only: writes the gitignored `.claude/settings.local.json` granting the interactive leaves read of the sibling workspace and `/tmp`, so they don't prompt per file. Permissions, not trust — the first interactive `pdca flow` still asks once to trust the project. | [01](01-render-and-integrate.md#make-setup--grant-the-interactive-claude-leaves-workspace-read) |
+| `pdca doctor [--strict]` | Reports every prerequisite — derived from `pdca.toml` plus your `[[doctor.checks]]` rows — and changes nothing. Run it after `make install` and whenever a red gate might be a missing tool. Full contract [below](#pdca-doctor--report-every-prerequisite-change-nothing). | [01](01-render-and-integrate.md#pdca-doctor--verify-prerequisites-change-nothing) |
+| `make check` | The fast offline self-test: the driver's unit tests (`python3 -m unittest discover -s tests`), about a second. | [02](02-rehearse-offline.md) |
+| `make` / `make test` | `check`, then a full driver cycle on a throwaway bundle with stub leaves — `init-issue selftest` and `run selftest` under `PDCA_LEAVES_MODE=stub`. Inspect `results/issue_selftest/`. | [02](02-rehearse-offline.md) |
+| `pdca flow TOY --rehearse` | The same orchestration `flow` uses, entirely stubbed, in `.rehearse/`: the first command to run once the install is green. | [02](02-rehearse-offline.md#the-one-shot-rehearsal) |
+
+The order matters: render, then `make install`, then `pdca doctor`, then the
+offline rehearsal — and only then point a leaf at a real model. If
+`ship_ci_workflow` was left on at render, the shipped `check-gates.yml` runs
+`pdca gates --working-tree` on every PR of the instance, the same gate set the
+driver runs.
 
 ## Drive the cycle
 

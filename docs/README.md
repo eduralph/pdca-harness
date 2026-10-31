@@ -72,7 +72,7 @@ every response the S3 gateway sends.
 | [05](05-check.md) | Check (gates, reviewer, sign-off, publish) | **C** | Gates, reviewer and two advisory lenses run; you record §9 (`--accept` / `--iterate-do` / `--iterate-plan` / `--discontinue`; real: 779's auto-iterate round and accept, and a human reject from issue 576); accept publishes a draft PR, stacked on its prerequisite |
 | [06](06-act.md) | Act | **A** | The cross-cycle review that turns recurring misses into spec/gate/rule deltas (real: the reviews of 2026-09-20 and 2026-10-14) |
 | [07](07-crosscutting.md) | Cross-cutting | — | Mechanisms that span beats, not owned by one: size & `pdca split` (real: issue 736 split into 778 and 779), iteration/carry-forward + auto-iterate, parallel lanes, waves, sweep & cleanup |
-| [08](08-command-reference.md) | Command reference | — | Every `pdca` subcommand with its options, exit codes and environment variables, including `pdca doctor` |
+| [08](08-command-reference.md) | Command reference | — | Getting set up (`copier`, `make install`, `make setup`, `pdca doctor`), then every `pdca` subcommand with its options, exit codes and environment variables |
 
 ## The whole cycle in one command
 
