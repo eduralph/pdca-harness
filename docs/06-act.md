@@ -279,7 +279,7 @@ of 2026-09-20 were one.
 
 ```mermaid
 flowchart LR
-    Plan --> Do --> Check --> signoff["(sign-off)"] --> COMPLETE --> publish["publish (draft PR)"]
+    Plan --> Do --> Check["Check<br/><small>gates → review → sign-off → publish (draft PR)</small>"] --> COMPLETE
     COMPLETE -.-> Act["Act<br/><small>every N cycles: turn recurring<br/>misses into spec/gate/rule deltas</small>"]
     Act -.-> Plan
 ```

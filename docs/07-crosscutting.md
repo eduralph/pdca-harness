@@ -3,7 +3,8 @@
 ← [06 Act](06-act.md) · [Index](README.md)
 
 Everything through [step 06](06-act.md) is one contribution moving
-linearly through Plan → Do → Check → sign-off → Publish → Act. Three mechanisms
+linearly through Plan → Do → Check → Act, with sign-off and publish as Check's
+last two steps. Three mechanisms
 don't fit that line — they modify *how* the beats run rather than being a beat
 themselves, and each one touches more than one of them:
 

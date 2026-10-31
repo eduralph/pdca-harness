@@ -118,7 +118,7 @@ command with `PYTHONPATH=src python -m pdca_harness.cli …`.
 
 ```bash
 pdca init-issue TOY --from-brief examples/toy/brief.md   # seed a bundle from a brief
-pdca flow TOY            # the whole cycle: Plan→Do→Check→sign-off→publish→Act
+pdca flow TOY            # the whole cycle: Plan→Do→Check(gates→review→sign-off→publish)→Act
 pdca flow A B C          # several ids → batch fan-out + cheap-first sign-off queue
 pdca status              # all bundle states (cheap-first); bare `pdca` does the same
 pdca queue               # the cheap-first sign-off burn-down

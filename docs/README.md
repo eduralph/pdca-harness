@@ -79,7 +79,7 @@ Once a repo is integrated, a maintainer rarely types the per-beat commands. The
 front door is the **console script** (`pdca`, named per the project):
 
 ```bash
-pdca flow 779                 # Plan → Do → Check → sign-off → publish, for one issue
+pdca flow 779                 # Plan → Do → Check (through sign-off and publish), for one issue
 pdca flow 778 779             # several ids → batch; unbriefed are auto-planned,
                               # dependencies schedule the waves
 pdca flow --from-csv issues.csv   # one Plan session briefs SEVERAL from the export, then drives all
