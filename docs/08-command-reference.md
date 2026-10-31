@@ -1,6 +1,6 @@
 # Command reference — every `pdca` subcommand
 
-← [07 Cross-cutting](07-crosscutting.md) · [Index](README.md)
+← [07 Cross-cutting](07-crosscutting.md) · [Index](README.md) · next: [09 Configuration reference →](09-configuration-reference.md)
 
 The walkthrough introduces each command where the cycle first needs it. This
 page lists all of them in one place — first the commands that get an instance
@@ -485,6 +485,7 @@ scripts can read them.
 
 The three base variables form a ladder the per-fix red→green row resolves in
 that order; Wyrd's `run-verify.sh` in [step 01](01-render-and-integrate.md#the-gates--your-deterministic-check-oracles)
-reads them exactly so.
+reads them exactly so. Every `pdca.toml` key those commands read is in the
+[configuration reference](09-configuration-reference.md).
 
-← [07 Cross-cutting](07-crosscutting.md) · [Index](README.md)
+← [07 Cross-cutting](07-crosscutting.md) · [Index](README.md) · next: [09 Configuration reference →](09-configuration-reference.md)

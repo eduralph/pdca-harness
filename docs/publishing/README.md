@@ -31,7 +31,7 @@ stylesheet and templates live here under `publishing/`. CI overwrites pdca.dev's
 |-----|--------|
 | `/` | `docs/index.yml` through `templates/home.html` (the bespoke landing) |
 | `/guide/` | `docs/README.md` (the walkthrough index) |
-| `/guide/<nn>-*.html` | `docs/<nn>-*.md` (the walkthrough steps 00–07 and the command reference 08) |
+| `/guide/<nn>-*.html` | `docs/<nn>-*.md` (the walkthrough steps 00–07 and the reference pages 08–11) |
 | `/spec/` | generated index of the quality-cycle model |
 | `/spec/<nn>-*.html` | `template/PCDA/quality-cycle/<nn>-*.md` (the vendored model) |
 
@@ -44,7 +44,7 @@ stylesheet and templates live here under `publishing/`. CI overwrites pdca.dev's
 │   └── docs-check.yml    ← CI: lint → render --check on every PR (no deploy)
 └── docs/
     ├── README.md         ← GitHub-facing index of docs/     → /guide/
-    ├── 00-introduction.md … 08-command-reference.md         → /guide/<nn>-*.html
+    ├── 00-introduction.md … 11-troubleshooting.md           → /guide/<nn>-*.html
     ├── index.yml         ← landing page as structured content → /
     └── publishing/       ← build tooling + site inputs (not published)
         ├── site/

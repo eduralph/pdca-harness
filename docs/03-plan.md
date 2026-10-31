@@ -308,7 +308,8 @@ templates add them (`Kind` and `Goal` come from its design-proposal form, the
 other two sit in its brief template beside a `Track` field); the driver parses
 none of them, the planner, builder and reviewers read them. That is the designed
 seam: the template fixes the fields the *machine* consumes, and a project adds
-what its *reviewers* need.
+what its *reviewers* need. How to add a field without fighting the next
+`copier update` is in [step 10](10-upgrading-an-instance.md#the-templates-folder).
 
 Fields from the field table in [How it works](#why-each-field-is-there) below
 that **don't** appear here: `Onto branch`, `Do model`, `Merges with`,

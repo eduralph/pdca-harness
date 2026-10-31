@@ -111,7 +111,7 @@ project-specific parts are yours.
 | Feature | What it is | Walkthrough step |
 |---------|------------|------------------|
 | **Copier template** | Render the harness into any repo; pull template updates later with `copier update` | [01](01-render-and-integrate.md) |
-| **`pdca.toml` wiring** | One config file binds the driver to your repo's leaves (the per-beat commands) and gates | [01](01-render-and-integrate.md) |
+| **`pdca.toml` wiring** | One config file binds the driver to your repo's leaves (the per-beat commands) and gates | [01](01-render-and-integrate.md), [09](09-configuration-reference.md) |
 | **`INTEGRATION.md` (11 items)** | The contract for concretizing the generic model to your tracker, branches, fixtures, ruleset | [01](01-render-and-integrate.md) |
 | **File-derived state machine** | A bundle's state is *computed from which files exist* — no DB, fully resumable | [02](02-rehearse-offline.md) |
 | **Offline rehearsal** | `pdca flow <id> --rehearse` drives the whole flow with stubs — instant, free | [02](02-rehearse-offline.md) |

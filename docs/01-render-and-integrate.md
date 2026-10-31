@@ -46,7 +46,7 @@ later template releases (wyrd-pdca is at `v0.59.0`):
 | `tracker_url` | Base tracker URL | `https://github.com/getwyrd/wyrd` |
 | `issue_id_example` | ID shape in briefs/commits | `#123` |
 | `default_branch` | Where fixes land unless overridden | `main` |
-| `contribution_model` | `fork` (contribute upstream through a fork) or `own-repo` (this repo is the target) | `own-repo` |
+| `contribution_model` | `fork` (contribute upstream through a fork: branch from `upstream`, push to `origin`) or `own-repo` (this repo is the target); see the [configuration reference](09-configuration-reference.md#publisher-and-the-contribution-model) | `own-repo` |
 | `bundle_root` / `process_dir` | Per-cycle bundle dir / cross-cycle process artifacts | `results` / `process` |
 | `builder_family` | Model family for the Do leaf | `claude` |
 | `reviewer_family` | Model family for the Check reviewer — **should differ from builder** | `codex` |
@@ -165,6 +165,14 @@ PDCA's tier slots onto what Wyrd *already* enforces, and nothing is re-declared:
 | T4 contribution | ADR-0003 §1 (DCO), `require-issue`, `adr-immutability`; commit/PR conventions (§8) | `cargo xtask` gates + GitHub CI | `./engine/xtask.sh ci` (re-gate) + host CI | [built — host-enforced] |
 | T5 judgment | reviewer contract below | Check reviewer + sign-off | (model) | [planned] |
 ```
+
+INTEGRATION is one of six documents the render puts in your tree. The other
+five are template-owned: `docs/principles.md` (how a brief states an invariant
+rather than a mechanism), `docs/fork-discipline.md` (the contribution rules
+under `contribution_model = fork`; Wyrd is own-repo, so its copy says to ignore
+it), and the `CLAUDE.md`, `AGENTS.md` and `CONTRIBUTING.md` that brief the
+agents and the humans working inside the instance. [Step 10](10-upgrading-an-instance.md#the-documents-a-render-ships)
+says who reads which.
 
 The lesson: **the harness doesn't ship gate logic — it ships the *contract* for
 gates.** You write the checkers — or, as here, point at the ones the project
@@ -307,6 +315,13 @@ checks = [
     cmd = "scripts/pdca contribcheck", gating = true, scope = "bundle" },
 ]
 ```
+
+A row may also carry `target`, so that it runs only for bundles of a given
+kind: the brief's `Repo + branch target` and `Surfaces` fields classify the
+bundle through `[gates.target_match]` and `[gates.target_flags]`, and a GUI
+smoke test tagged `target = "frontend"` runs only when a brief says
+`Surfaces: gui` ([configuration reference](09-configuration-reference.md#gates)).
+Wyrd, a server with one surface, uses none of this.
 
 The key design choice you're making here: **what blocks, and what merely
 informs.** Wyrd made the whole-tree `cargo xtask ci` gating — it is the very

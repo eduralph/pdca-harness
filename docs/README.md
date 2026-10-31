@@ -73,6 +73,9 @@ every response the S3 gateway sends.
 | [06](06-act.md) | Act | **A** | The cross-cycle review that turns recurring misses into spec/gate/rule deltas (real: the reviews of 2026-09-20 and 2026-10-14) |
 | [07](07-crosscutting.md) | Cross-cutting | — | Mechanisms that span beats, not owned by one: size & `pdca split` (real: issue 736 split into 778 and 779), iteration/carry-forward + auto-iterate, parallel lanes, waves, sweep & cleanup |
 | [08](08-command-reference.md) | Command reference | — | Getting set up (`copier`, `make install`, `make setup`, `pdca doctor`), then every `pdca` subcommand with its options, exit codes and environment variables |
+| [09](09-configuration-reference.md) | Configuration reference | — | Every `pdca.toml` section and key, including gate routing by surface, the fork contribution model and vendor profiles |
+| [10](10-upgrading-an-instance.md) | Upgrading an instance | — | What the template owns and what is yours, `copier update`, carrying a local change, the documents and templates a render ships |
+| [11](11-troubleshooting.md) | Troubleshooting | — | The driver's messages and gate verdicts, by symptom, with the fix |
 
 ## The whole cycle in one command
 
