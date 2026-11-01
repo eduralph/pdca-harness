@@ -144,7 +144,7 @@ class ThirdRemoteHead(unittest.TestCase):
 
     def _wait(self, pr_url, wait_secs, *, spent=0, expected=()):
         self.waited.append(self.head)
-        return self.verdict
+        return (*self.verdict, spent)
 
     def _merge(self, d: Path) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()

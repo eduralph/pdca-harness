@@ -1207,8 +1207,9 @@ class MergeConfirmRequiresCompleteRollup(unittest.TestCase):
 
         with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
                 mock.patch.object(merge, "_sleep", side_effect=slept.append):
-            verdict, detail = merge._wait_for_green(self.URL, wait_secs, **kw)
+            verdict, detail, waited = merge._wait_for_green(self.URL, wait_secs, **kw)
         self.assertLessEqual(sum(slept), wait_secs)
+        self.assertEqual(waited, sum(slept))    # issue #838: what is left is charged onward
         return verdict, detail, n["read"], slept
 
     def _merge(self, reads: list[SimpleNamespace], cfg: Config) -> tuple[int, list, str]:

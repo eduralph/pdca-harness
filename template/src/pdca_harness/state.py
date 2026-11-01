@@ -50,6 +50,11 @@ CLOSE_MARKER = "close-disposition"
 # here, like CLOSE_MARKER, so `dependency_halt` and the archive list share one spelling.
 DEPENDENCY_ADJUDICATION = "dependency-adjudication.json"
 
+# The review remarks a merge-mode stop named (issue #838): `merge._remarks_block` writes it
+# and `merge._merge_one` removes it when an attempt starts. Named here, like CLOSE_MARKER, so
+# `merge` and the archive list share one spelling.
+MERGE_REMARKS = "merge-remarks.json"
+
 # The sign-off session's live carry-forward (issue #331): the FULL multi-line rationale
 # the session wrote below its decision token, captured by the driver (flow) at the moment
 # the decision is consumed — §9's "Iteration delta" flattens it to one line and the
@@ -145,6 +150,10 @@ DOWNSTREAM_OF_BRIEF = [
     # Archived per round WITH the verdict they explain, so each iteration-v<N>/ keeps the
     # full basis of its own gate run — the state-is-files doctrine applied to evidence.
     GATE_LOGS_DIR,
+    # The review remarks a merge-mode stop named (#838). Written after sign-off rather than
+    # by Do or Check, but it describes THIS attempt's PR: archived with that attempt, so a
+    # rebuild never sits beside remarks its new patch may already answer.
+    MERGE_REMARKS,
 ]
 
 # Cycle artifacts matched by pattern rather than name. ONE definition, read by both

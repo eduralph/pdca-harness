@@ -49,6 +49,24 @@ never resolving green, a failing ``gh pr merge`` — ``_undo_ready`` marks it ba
 (``gh pr ready --undo``) before returning, so a stopped wave never leaves a PR advertising
 a readiness no human granted (``docs/INTEGRATION.md`` §10).
 
+A green rollup can still be blocked by review remarks (issue #838): unresolved review
+threads, or a review that requested changes. That block only shows as a failed ``gh pr
+merge``, under either ``merge_requires`` value, so on that failure ``_remarks_block`` reads
+the PR's ``mergeStateStatus`` (polled while ``UNKNOWN``, on what the update and rollup waits
+left of the one ``merge_wait_secs`` budget) and, for ``BLOCKED``, its unresolved threads
+(``gh api graphql`` on the host in the PR's URL, every page) and reviews. When there are any,
+the run stops naming them, each thread with its path:line, and writes them to
+``merge-remarks.json`` in the bundle, in one step, so a failed write leaves no file rather
+than a torn one; a block with none keeps the generic refusal. Threads that could not be read
+are ``null`` in that file (unknown, not none) and the stop says so. ``BLOCKED`` does not say
+which of the host's rules blocks the merge and the driver does not read those rules, so
+remarks on a blocked PR are named as the block even when, say, a missing approval is what
+blocks it. The stop therefore also shows the PR's ``reviewDecision``, and the file records
+that and the failed merge's own error, for a reader to check the named block against. Each
+attempt to merge the bundle removes the file before anything can stop it, and an iterate
+archives it with its attempt (``state.DOWNSTREAM_OF_BRIEF``), so it never outlives the stop
+it describes.
+
 A green rollup also says nothing about the BASE it was earned against (issue #531). The
 wave's PRs merge one after another, so once an earlier member lands, a later member's head
 — and its rollup — still describe the old base: merging it lands a combination nothing
@@ -111,8 +129,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from . import integrate, merged, publish, state
+from . import integrate, leaves, merged, publish, state
 from .config import Config
 
 # Patchable indirection so a test can drive the wait loop below with no real wall-clock
@@ -224,10 +243,12 @@ def _read_rollup(pr_url: str, expected: tuple[str, ...]) -> tuple[str, str, tupl
 
 
 def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15,
-                    spent: int = 0, expected: tuple[str, ...] = ()) -> tuple[str, str]:
+                    spent: int = 0, expected: tuple[str, ...] = ()) -> tuple[str, str, int]:
     """Re-read ``pr_url``'s check rollup (``_check_rollup``) until it clears ``pending``/
     ``empty`` or ``wait_secs`` of (patchable) wall-clock time is exhausted (issue #462).
-    Returns the final ``(verdict, detail)`` — this never itself decides to merge.
+    Returns the final ``(verdict, detail, waited)`` — this never itself decides to merge.
+    ``waited`` is how much of ``wait_secs`` is used up, ``spent`` included, so a wait after
+    this one can be charged to the same bound (issue #838).
 
     ``spent`` (issue #531, ``0 <= spent <= wait_secs``) is the part of ``wait_secs`` the
     caller already used waiting for ``gh pr update-branch`` to land (``_wait_for_update``).
@@ -261,7 +282,7 @@ def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15,
     """
     verdict, detail, names = _read_rollup(pr_url, expected)
     if wait_secs <= 0:
-        return verdict, detail
+        return verdict, detail, spent
     waited = spent
     while True:
         while verdict in ("pending", "empty") and waited < wait_secs:
@@ -270,20 +291,20 @@ def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15,
             waited += step
             verdict, detail, names = _read_rollup(pr_url, expected)
         if verdict != "green":
-            return verdict, detail
+            return verdict, detail, waited
         # Confirm a full poll interval later or not at all: a re-read squeezed into what is
         # left of the budget is too soon to show a slow job registering, and overrunning
         # the budget would break its bound — so refuse the green as unconfirmed instead.
         left = wait_secs - waited
         if left < poll_interval:
             return "pending", (f"green first seen with {left}s of wait budget left, too "
-                               f"little to confirm it {poll_interval}s later ({detail})")
+                               f"little to confirm it {poll_interval}s later ({detail})"), waited
         _sleep(poll_interval)
         waited += poll_interval
         first = names
         verdict, detail, names = _read_rollup(pr_url, expected)
         if verdict == "green" and names == first:
-            return verdict, detail
+            return verdict, detail, waited
         # A green over a different set of checks confirms nothing (issue #621): it is a new
         # first green, and the loop above confirms it in turn (or refuses for lack of budget).
 
@@ -482,6 +503,181 @@ def _refuse(d: Path, pr_url: str, why: str) -> int:
     return 1
 
 
+# The unresolved review threads of a PR, read generically (any reviewer, human or bot) by
+# its URL: GraphQL `resource(url:)` takes the URL `publish.json` records, so no owner /
+# repo / number has to be parsed out of it (only the host, to send the query there). The
+# first comment of a thread is its remark. The host serves the threads at most 100 a page;
+# `$cursor` asks for the page after one.
+_THREADS_QUERY = """\
+query($url: URI!, $cursor: String) {
+  resource(url: $url) {
+    ... on PullRequest {
+      reviewThreads(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id isResolved isOutdated path line originalLine
+          comments(first: 1) { nodes { body url author { login } } }
+        }
+      }
+    }
+  }
+}"""
+
+
+def _merge_state(pr_url: str, wait_secs: int, *, poll_interval: int = 5) -> dict | None:
+    """``gh pr view --json mergeStateStatus,reviewDecision,latestReviews`` of ``pr_url``
+    (``merged._pr_view``), or None when it cannot be read. GitHub computes
+    ``mergeStateStatus`` in the background, so straight after ``gh pr ready`` it can read
+    ``UNKNOWN``: that read is polled through ``_sleep``, bounded by ``wait_secs`` (what the
+    update and #462 rollup waits left of the ``[driver].merge_wait_secs`` budget they
+    share; with none left it is read once), and a state still ``UNKNOWN`` when that is spent
+    is returned as it is: not blocked by remarks."""
+    waited = 0
+    while True:
+        info = merged._pr_view(pr_url, "mergeStateStatus,reviewDecision,latestReviews")
+        if info is None or info.get("mergeStateStatus") != "UNKNOWN" or waited >= wait_secs:
+            return info
+        step = min(poll_interval, wait_secs - waited)
+        _sleep(step)
+        waited += step
+
+
+def _login(node: dict) -> str:
+    """The login of ``node``'s ``author``, or "" when it has none (a deleted account)."""
+    author = node.get("author")
+    return str(author.get("login") or "") if isinstance(author, dict) else ""
+
+
+def _review_threads(pr_url: str) -> list[dict] | None:
+    """PR ``pr_url``'s UNRESOLVED review threads (``gh api graphql``), one dict per thread
+    — ``id``, ``path``, ``line``, ``outdated``, ``body``, ``author``, ``url`` — or None when
+    a query fails or its answer cannot be read, whatever earlier pages held: None means
+    unknown, and a list always means all of them. It never raises, because it runs while the
+    PR is still marked ready. Every page is read, each one asked for with the end cursor of
+    the page before it: an unresolved thread can sit behind a full page of resolved ones. A
+    next page claimed with no cursor, or with one already followed, cannot be read to the
+    end, so that is None too, never an endless read. An outdated thread has no ``line`` (it
+    is ``null`` once the code under it changed), so its ``originalLine`` is reported; a
+    thread on a whole file has neither.
+
+    Every query goes to the host in ``pr_url``: ``gh pr`` commands take the host from the
+    URL, but ``gh api`` asks ``gh``'s default host unless ``--hostname`` says otherwise, and
+    a PR on another host does not resolve there. A URL with no host to ask is None too."""
+    threads: list[dict] = []
+    cursor = None
+    followed: set[str] = set()
+    try:
+        host = urlsplit(pr_url).hostname
+        if not host:
+            return None
+        while True:
+            cmd = ["gh", "api", "graphql", "--hostname", host,
+                   "-f", f"query={_THREADS_QUERY}", "-f", f"url={pr_url}"]
+            if cursor:
+                cmd += ["-f", f"cursor={cursor}"]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0:
+                return None
+            conn = json.loads(r.stdout or "")["data"]["resource"]["reviewThreads"]
+            for t in conn["nodes"]:
+                if t.get("isResolved"):
+                    continue
+                first = ((t.get("comments") or {}).get("nodes") or [{}])[0] or {}
+                line = t.get("line")
+                threads.append({
+                    "id": t.get("id"),
+                    "path": t.get("path"),
+                    "line": line if line is not None else t.get("originalLine"),
+                    "outdated": bool(t.get("isOutdated")),
+                    "body": first.get("body") or "",
+                    "author": _login(first),
+                    "url": first.get("url") or "",
+                })
+            more, cursor = conn["pageInfo"].get("hasNextPage"), conn["pageInfo"].get("endCursor")
+            if not more:
+                return threads
+            if not isinstance(cursor, str) or not cursor or cursor in followed:
+                return None
+            followed.add(cursor)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        # A URL that cannot be parsed, `gh` missing, or an answer that is not the shape the
+        # query asks for.
+        return None
+
+
+def _remarks_block(d: Path, pr_url: str, wait_secs: int, merge_error: str) -> str:
+    """Why ``pr_url``'s failed ``gh pr merge`` (its error: ``merge_error``) is a block by
+    review remarks, or "" when it is not one this can name (issue #838). Only a ``BLOCKED``
+    merge state is looked into; one that could not be read or stayed ``UNKNOWN`` is reported
+    on stderr, so "not blocked by remarks" and "not checked" can be told apart. A block with
+    no unresolved thread and no CHANGES_REQUESTED review (a required approval still missing,
+    a ruleset) returns "" so the caller keeps its generic refusal. When it is a remarks
+    block, the threads and the reviews requesting changes are written to
+    ``d/merge-remarks.json`` and the reason names each thread's path:line. ``_merge_one``
+    removes that file when an attempt starts, so it only ever names the remarks the attempt
+    that wrote it stopped on.
+
+    The named block is an inference: ``BLOCKED`` does not say which of the host's rules
+    blocks the merge, and this does not read them, so a PR short of an approval that also
+    has an open thread is named as blocked by the thread. The reason therefore shows the
+    PR's ``reviewDecision``, and the file records it as ``reviewDecision`` (``""`` when the
+    host reports none) beside ``merge_error``, for a reader to check the block against.
+
+    In that file ``threads`` is a list when the threads were read (``[]``: there are none)
+    and ``null`` when they could not be, beside a review requesting changes: unknown, so
+    nothing reading the file may take it for none. ``changes_requested_by`` holds the
+    reviewers' logins (``""`` for one with no account any more, as a thread's ``author``
+    does), and is empty when only ``reviewDecision`` says changes were requested. The file
+    appears in one step (``leaves._replace_record``), so a write that fails or dies part-way
+    leaves no file, never a torn one. Whichever way this ends the caller still has the PR to
+    return to draft, so a file that cannot be written is reported in the reason, not raised."""
+    info = _merge_state(pr_url, wait_secs) or {}
+    status = info.get("mergeStateStatus")
+    if status != "BLOCKED":
+        if status in (None, "UNKNOWN"):
+            seen = "still UNKNOWN" if status else "unreadable (`gh pr view`)"
+            print(f"   merge: the merge state of {pr_url} is {seen}, so it was not checked for "
+                  "review remarks", file=sys.stderr)
+        return ""
+    threads = _review_threads(pr_url)
+    decision = info.get("reviewDecision")
+    decision = decision if isinstance(decision, str) else ""
+    reviews = info.get("latestReviews")
+    changes = sorted({_login(r) for r in (reviews if isinstance(reviews, list) else [])
+                      if isinstance(r, dict) and r.get("state") == "CHANGES_REQUESTED"})
+    requested = bool(changes) or decision == "CHANGES_REQUESTED"
+    if not threads and not requested:
+        if threads is None:
+            print(f"   merge: {pr_url} is BLOCKED, and its review threads could not be read "
+                  "(`gh api graphql`)", file=sys.stderr)
+        return ""
+    try:
+        leaves._replace_record(d / state.MERGE_REMARKS, json.dumps({
+            "pr_url": pr_url,
+            "mergeStateStatus": "BLOCKED",
+            "reviewDecision": decision,
+            "merge_error": merge_error,
+            "threads": threads,
+            "changes_requested_by": changes,
+        }, indent=2) + "\n")
+        written = f"The remarks are written to {d / state.MERGE_REMARKS}"
+    except OSError as e:
+        written = f"The remarks could not be written to {d / state.MERGE_REMARKS} ({e})"
+    parts = []
+    if threads:
+        where = "; ".join(f"{t['path']}{'' if t['line'] is None else ':' + str(t['line'])}"
+                          f"{' (outdated)' if t['outdated'] else ''} by {t['author'] or '?'}"
+                          for t in threads)
+        parts.append(f"{len(threads)} unresolved review thread(s) — {where}")
+    if requested:
+        who = ", ".join(login or "?" for login in changes) or "?"
+        parts.append(f"a CHANGES_REQUESTED review by {who}")
+    unread = ("" if threads is not None else " Its review threads could not be read (`gh api "
+              "graphql`), so there may be unresolved ones too.")
+    return (f"the host blocks its merge: it is blocked by {' and by '.join(parts)}. "
+            f"reviewDecision: {decision or 'none'}.{unread} {written}")
+
+
 def _target_base(cfg: Config, d: Path, pr_url: str) -> tuple[str, str]:
     """Put ``d``'s PR on its bundle's own target base before it is readied (issue #500):
     ``(target, "")`` once the host reports the PR on ``target``, or ``("", why)`` to refuse.
@@ -541,6 +737,13 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
     patch = d / "patch.diff"
     if not patch.is_file() or not patch.read_text(encoding="utf-8").strip():
         return 0  # close / no-fix disposition — no contribution to merge
+    # Issue #838: `merge-remarks.json` names the review remarks an attempt stopped on. Each
+    # attempt removes one an earlier run left before anything below can stop it, so a PR
+    # merged since, refused for another reason, or no longer blocked by remarks never leaves
+    # a stale file to act on; only `_remarks_block` writes it, for this attempt's own stop.
+    # A dry run attempts nothing, so it leaves the file alone.
+    if not dry_run:
+        (d / state.MERGE_REMARKS).unlink(missing_ok=True)
     rec = publish._publish_record(d)
     pr_url = rec.get("pr_url") if rec else None
     repo_spec = rec.get("repo") if rec else None
@@ -615,6 +818,11 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
               file=sys.stderr)
         return 1
 
+    # Issue #838: `waited` is what is used of the one merge_wait_secs budget every wait from
+    # here to the merge's outcome shares (the update, the rollup, the merge state after a
+    # failed merge), so the PR stays marked ready no longer than that bound on their account.
+    waited = 0
+
     # Full check-rollup gate (issue #413), read AFTER the ready-mark and immediately before
     # the merge: `gh pr ready` can itself trigger `ready_for_review` CI, so only a rollup
     # read here says anything about green AT MERGE TIME. `gh pr merge` below fails closed
@@ -644,7 +852,6 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
         head, tip, behind, why = _base_read(cfg, repo, pub, str(pr_url), target=target)
         if behind is None:
             return _refuse(d, pr_url, why)
-        waited = 0
         if behind:
             print(f"   head {head[:12]} lacks base commit {tip[:12]} — bringing it up to date")
             print(f"→ gh pr update-branch {pr_url}")
@@ -670,8 +877,8 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
         # [driver].merge_wait_secs, before treating an unresolved rollup as a refusal.
         # Issue #621: the green must also be the complete rollup — every declared check in
         # it, and a confirm read over the same checks.
-        verdict, detail = _wait_for_green(str(pr_url), cfg.merge_wait_secs, spent=waited,
-                                          expected=cfg.expected_checks)
+        verdict, detail, waited = _wait_for_green(str(pr_url), cfg.merge_wait_secs, spent=waited,
+                                                  expected=cfg.expected_checks)
         if verdict != "green":
             why = {
                 "failing": f"a check is FAILING — {detail}",
@@ -714,7 +921,16 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
     print(f"→ {' '.join(cmd)}")
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        print((r.stderr or r.stdout).strip(), file=sys.stderr)
+        merge_error = (r.stderr or r.stdout).strip()
+        print(merge_error, file=sys.stderr)
+        # Issue #838: a green rollup can still be blocked by review remarks (unresolved
+        # threads, a CHANGES_REQUESTED review). Under either merge_requires value that
+        # block shows only here, as a failed merge, so name it and write the remarks, with
+        # the host's own error, into the bundle; any other failure keeps the generic refusal
+        # below.
+        why = _remarks_block(d, str(pr_url), cfg.merge_wait_secs - waited, merge_error)
+        if why:
+            return _refuse(d, pr_url, why)
         print(f"\n!!! merge: {d.name} ({pr_url}) did not merge — a conflict, no merge "
               "rights on the base, a host-required check that failed or started after the "
               "rollup gate above, a head that changed after that gate read it green (the "
