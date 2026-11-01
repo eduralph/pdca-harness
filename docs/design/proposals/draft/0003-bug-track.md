@@ -84,8 +84,9 @@ else.
 4. **Verify.** The verify job for the red leg: `runs` per candidate ref, the
    red / green / flaky rule, the `PDCA-FAILURE-AT:` marker and its parser, `check-gates.json`
    and counts written by the driver (ADR-0020 §9, ADR-0021 §1).
-5. **Candidate refs.** `main` and declared release branches; bisection within one job
-   limit; the target decision (§4).
+5. **Candidate refs.** `main` and declared release branches, plus the validated reported
+   version as a verify-only input; bisection within one job limit; the target decision
+   (§4).
 6. **Links and answers.** Signature links between open tracks; the reporter-answer loop
    with its attempt limit; the taint rule for a batch with an anomaly.
 7. **Summarize moves to the runner.**
@@ -105,12 +106,13 @@ test only (ADR-0020 §7); no fix is built yet.
    the record (description, impact, verdicts, findings, §6 checklist), the required check
    that reads the record and the checklist; `Outcome: accepted` and `rejected` written by
    the driver from the pull request's state at the next batch.
-4. **Publish as code.** Apply the recorded diff to the recorded base, commit with the
-   publisher leaf's text, push `bugfix/<n>`, open the draft pull request on the target;
+4. **Publish as code.** Apply the recorded diff to the recorded base, write the recorded
+   test's bytes at its path (hash checked against the record) so the published tree is the
+   verified one, commit both with the publisher leaf's text, push `bugfix/<n>`, open the draft pull request on the target;
    `pdca try` refused for bug bundles. Publish runs in the driver container or, by
    configuration, only from a maintainer's checkout.
-5. **Backports.** One cycle per supported release branch, with the same test, id
-   `issue_<n>-r<ref>`.
+5. **Backports.** One cycle per supported release branch, with the same test, published
+   with it, id `issue_<n>-r<ref>`.
 6. **Delegation.** `track:needs-plan` on budget exhaustion and on protected paths; the
    bundle pull request with the test only.
 

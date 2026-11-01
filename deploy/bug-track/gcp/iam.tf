@@ -58,6 +58,22 @@ resource "google_storage_bucket_iam_member" "orchestrator_artifacts" {
   member = "serviceAccount:${google_service_account.orchestrator.email}"
 }
 
+# Artifacts: the runner reads job objects under jobs/ and nothing else in the bucket;
+# results go up only through the signed URLs each job carries. The bucket-type clause
+# lets the agent list jobs/<batch-id>/: a list is checked against the bucket, not an
+# object, so a prefix condition alone would deny it. A list shows names, not contents.
+resource "google_storage_bucket_iam_member" "runner_jobs_read" {
+  bucket = google_storage_bucket.artifacts.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.runner.email}"
+
+  condition {
+    title       = "jobs-prefix-only"
+    description = "Read job objects; list the bucket to find them."
+    expression  = "resource.type == \"storage.googleapis.com/Bucket\" || resource.name.startsWith(\"projects/_/buckets/${google_storage_bucket.artifacts.name}/objects/jobs/\")"
+  }
+}
+
 # Cache: runner reads, cache writer writes. Nothing else.
 resource "google_storage_bucket_iam_member" "runner_cache_read" {
   bucket = google_storage_bucket.cache.name

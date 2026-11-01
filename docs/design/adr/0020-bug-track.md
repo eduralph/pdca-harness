@@ -70,8 +70,9 @@ accept, unchanged. ("Track", not "lane": lanes are the parallel worktrees of §8
    re-execute them for bug bundles (ADR-0021 §1).
 7. **Sign-off: the bundle pull request.** The driver opens a draft pull request on the
    pdca repository with the bundle (section 7). Merging it is the accept.
-8. **Publish.** After accept, the regular publish: a `bugfix/<n>` branch and a draft pull
-   request on the target repository, pushed by the driver as code (section 7).
+8. **Publish.** After accept, the regular publish: a `bugfix/<n>` branch with the diff and
+   the recorded test, and a draft pull request on the target repository, pushed by the
+   driver as code (section 7). A backport carries the same test.
 
 Failing tests from an instance's own scheduled runs (a simulation seed sweep, a nightly
 conformance run) enter at stage 4: they are reproduced already and were not written by a
@@ -132,7 +133,11 @@ track fixes against a ref, never a milestone. The candidate refs are:
 Integration lines (§8.8) are run-scoped and rewritten by the next run, so they are not
 candidates; a bug in milestone work not yet on `main` is reproduced when it lands there.
 
-The driver verifies the test on every candidate ref and chooses mechanically:
+The driver verifies the test on every candidate ref and, when the summary names a reported
+version that is not one of them (a tag, a commit, or the branch of a release no longer
+supported), on that version too. The reported version is evidence only: it can give the
+red leg of stage 4 and the answer below, but a fix is never built on it. The driver then
+chooses mechanically:
 
 - **Red on `main`:** the fix is built on `main`. Each supported release branch where the
   test is also red then gets a backport, as its own cycle with the same test as its red
@@ -141,8 +146,9 @@ The driver verifies the test on every candidate ref and chooses mechanically:
   bisects `main` for the commit that turned the test green, within one job limit and
   treating `error` outcomes as unknown, and backports that commit. If bisection does not
   finish, the fix is built on the release branch instead.
-- **Red only on a release that is no longer supported:** no fix is built; the issue is
-  answered with the first supported release in which the test is green.
+- **Red only on the reported version, which is no longer supported, and green on every
+  candidate ref:** no fix is built; the issue is answered with the first supported release
+  in which the test is green.
 
 ### 5. Protected paths
 
@@ -181,8 +187,10 @@ repository and opens a draft pull request:
   `pdca signoff` remains available as the interactive path and ends in the same §9.
 
 **Publish follows accept, unchanged in order and changed in means.** The driver, as code,
-applies the recorded diff to the recorded base commit, commits with the text the publisher
-leaf wrote into the bundle, pushes `bugfix/<n>` and opens the draft pull request on the
+applies the recorded diff to the recorded base commit, writes the recorded test's bytes at
+its path when Reproduce created a new test (checking their SHA-256 against the record), so
+the published tree is the tree that was verified and the target's CI gains the regression
+test, commits both with the text the publisher leaf wrote into the bundle, pushes `bugfix/<n>` and opens the draft pull request on the
 target repository; Codex review and the maintainer's ready-mark and merge follow as for every
 cycle. The target's CI runs the code only after a human accepted those exact bytes. The
 credential that pushes is scoped to `bugfix/*` and lives in the driver container (ADR-0021
