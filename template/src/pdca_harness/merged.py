@@ -26,6 +26,10 @@ for that base (#655): which commit did the merge put on the base, and which head
 merge — so the flow can ask whether the line has either? Only a dependent built on the line
 — one a seam keeps there (#727) — is asked it (#729): one on a base of its own, or on the
 real base, is built from the base as fetched, so :func:`merged_into` is the whole answer.
+The fold and the pre-wave carry ask it too, for a merged PR whose head is on neither the base
+nor the line: a merge commit on the base then means a squash or rebase merge
+(``integrate._squash_merged``, #626). So does the flow's readiness check, for a merge whose
+record does not count (:func:`counts_into`): only a drop of the edge ends that hold.
 """
 
 from __future__ import annotations
@@ -76,11 +80,10 @@ def merged_into(cfg: Config, dep_id: str, repo: str, base: str) -> bool:
     :func:`is_merged` answers "did its PR merge?", into whatever branch the PR targeted. A
     ``"stacked-pr"`` record's PR may target an integration line, and an ``Onto branch``
     record (``"stacked"``) is a commit on another PR's branch, so either can read MERGED
-    while ``base`` lacks the work. Here a merge counts only when the record's ``repo`` and
-    ``base`` are the dependent's and its mode is not ``"stacked"`` — the rule the fold
-    applies to a gone branch (``integrate._gone_branch``). With no target to compare
-    against (``repo`` or ``base`` empty: a dependent with no usable ``Repo + branch
-    target``, which publish skips), any merge counts — :func:`is_merged`'s answer.
+    while ``base`` lacks the work. Here a merge counts only when the record says so
+    (:func:`counts_into`). With no target to compare against (``repo`` or ``base`` empty: a
+    dependent with no usable ``Repo + branch target``, which publish skips), any merge
+    counts — :func:`is_merged`'s answer.
 
     Otherwise as :func:`is_merged`: a close/no-fix prereq (COMPLETE, empty or no patch) ⇒
     ``True``; not COMPLETE, or no recorded PR ⇒ ``False``. Fail-closed: a ``gh`` failure,
@@ -106,14 +109,23 @@ def merged_into(cfg: Config, dep_id: str, repo: str, base: str) -> bool:
         return False
     if st[0] != "MERGED":
         return False
-    if targeted and (rec.get("mode") == "stacked" or rec.get("repo") != repo
-                     or rec.get("base") != base):
+    if targeted and not counts_into(rec, repo, base):
         onto = " (an `Onto branch` commit)" if rec.get("mode") == "stacked" else ""
         print(f"merged: {dep_id}'s PR ({pr_url}) merged, but into "
               f"{rec.get('repo') or '?'} @ {rec.get('base') or '?'}{onto}; "
               f"treating as not merged{into}", file=sys.stderr)
         return False
     return True
+
+
+def counts_into(rec: dict, repo: str, base: str) -> bool:
+    """Whether a merge of the PR on publish record ``rec`` counts as a merge into ``repo`` @
+    ``base`` (#647): the record's ``repo`` and ``base`` are those, and its mode is not
+    ``"stacked"``. The one definition: :func:`merged_into` goes by it, and a squash or rebase
+    merge whose record fails it needs its edge dropped, since no later merge will count
+    (#626: ``integrate.DROP_PREREQ``)."""
+    return (rec.get("mode") != "stacked" and rec.get("repo") == repo
+            and rec.get("base") == base)
 
 
 def merged_head(cfg: Config, dep_id: str) -> str | None:
@@ -159,8 +171,8 @@ def merge_and_head(cfg: Config, dep_id: str) -> tuple[str, str] | None:
     the base only after a merge with a merge commit, but it is on any line a fold carried
     the PR's branch onto. Either is "" when ``gh`` reports none. Fail-closed and silent, as
     :func:`pr_state` is: no recorded PR, a PR not merged, a ``gh`` failure (``gh`` missing
-    included) or output it cannot parse all return ``None``; ``flow._runnable`` names the
-    bundle and the reason."""
+    included) or output it cannot parse all return ``None``; the caller names the bundle and
+    the reason."""
     rec = _publish_record(cfg.find_bundle(dep_id))
     pr_url = rec.get("pr_url") if isinstance(rec, dict) else None
     info = _pr_view(str(pr_url), "state,headRefOid,mergeCommit") if pr_url else None
@@ -188,7 +200,8 @@ def _pr_view(pr_url: str, fields: str) -> dict | None:
     """``gh pr view <pr_url> --json <fields>`` read as a JSON object, or ``None`` when it
     cannot be: ``gh`` missing (``OSError``), ``gh`` failing, or output that is not a JSON
     object. Silent — :func:`pr_state` and :func:`merge_and_head` share it (#655; the latter
-    is asked only for a dependent built on the run's line, #729)."""
+    is asked only for a dependent built on the run's line, #729, and to recognise a squash or
+    rebase merge, #626)."""
     try:
         r = subprocess.run(["gh", "pr", "view", pr_url, "--json", fields],
                            capture_output=True, text=True)

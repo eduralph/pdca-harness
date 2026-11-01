@@ -112,9 +112,12 @@ def _merged_heads(heads: dict[str, str | None]):
     commit its PR merged with (absent / None: not merged). Patches the new
     ``merged.merged_head`` (``create=True``: absent before the fix) and, consistently,
     ``merged.is_merged`` — so a fold that asks only "is it merged?" is judged on the same
-    facts. Yields the ``merged_head`` mock."""
+    facts. The merge commit reads as unknown, so no case here reaches a real ``gh``; a squash
+    merge has its own cases (tests/test_stack_squash_merge.py). Yields the ``merged_head``
+    mock."""
     with mock.patch.object(merged, "merged_head", create=True,
                            side_effect=lambda _cfg, iid: heads.get(iid)) as head, \
+            mock.patch.object(merged, "merge_and_head", return_value=None), \
             mock.patch.object(merged, "is_merged",
                               side_effect=lambda _cfg, iid: bool(heads.get(iid))):
         yield head

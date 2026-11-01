@@ -52,12 +52,13 @@ counts as failed (#695). A branch deleted after its PR merged is judged by
 the head commit the host says the PR merged with (``merged.merged_head``), never by a
 commit message: a line that already has that commit skips it; one that does not (a fixup
 pushed after the fold) takes the base in, once the base is checked to have that commit —
-a PR merged somewhere else (its base edited on the host, a squash or rebase merge) stops
-the run instead, and so does a base that would undo work already on the line (a revert of
-a merged PR, #623). So does a bundle's own branch whose merge would undo it: one cut from,
-or updated from, a base with such a revert brings the revert along (#673). A removal the
-branch's own commits make is its change, never counted. Both checks judge each path
-against where the line leaves the base, so they do not see a partial revert inside a file
+a PR merged somewhere else (its base edited on the host) stops the run instead, and so does
+a squash or rebase merge, named as one when the host's merge commit is on the base (#626:
+stack mode needs merge commits), and a base that would undo work already on the line (a
+revert of a merged PR, #623). So does a bundle's own branch whose merge would undo it: one
+cut from, or updated from, a base with such a revert brings the revert along (#673). A
+removal the branch's own commits make is its change, never counted. Both checks judge each
+path against where the line leaves the base, so they do not see a partial revert inside a file
 the line also changed in other ways, nor a revert of work below that point, which the base
 already has (a later wave's merged PR brings the line commits under it there): an accepted
 limit. A branch that does not merge cleanly (an undeclared cross-wave overlap)
@@ -406,13 +407,13 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     a line that already has that head skips it; otherwise the line takes the base in
     (:func:`_take_in_base`), so the work still reaches the next wave — but only once the
     base is checked to have that head: a PR merged somewhere else (its base edited on the
-    host, a squash or rebase merge) raises, and so does an ``Onto branch`` record, whose
-    PR may have merged into another base. So does a base that would remove work a bundle
-    put on the line (#623): the line is reset to its tip before the base merge, and the
-    bundles of ``accepted`` and ``batch`` are what the message names. A bundle's branch
-    whose merge would remove such work is refused the same way, unless the branch's own
-    commits make the removal (#673, :func:`_keep_merge`): one cut from, or updated from, a
-    base with a revert brings that revert along.
+    host) raises, a squash or rebase merge raises by that name (#626), and so does an ``Onto
+    branch`` record, whose PR may have merged into another base. So does a base that would
+    remove work a bundle put on the line (#623): the line is reset to its tip before the
+    base merge, and the bundles of ``accepted`` and ``batch`` are what the message names. A
+    bundle's branch whose merge would remove such work is refused the same way, unless the
+    branch's own commits make the removal (#673, :func:`_keep_merge`): one cut from, or
+    updated from, a base with a revert brings that revert along.
 
     Dry-run (offline rehearse / CI, where the publisher leaf is stubbed) prints each group's
     git plan and returns the branches with ``None`` worktrees — no worktree, no push — so the
@@ -652,7 +653,7 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                                                        f"re-run")
                     try:
                         _merge_published(cfg, wt, d, refs[d.name], head, branch=branch,
-                                         base=base, owners=tuple(owners.values()))
+                                         base=base, owners=tuple(owners.values()), batch=batch)
                     except IntegrationError as exc:
                         if (held_out is not None and ours and head is not None
                                 and pre is not None and isinstance(exc, _Conflict)):
@@ -883,7 +884,7 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
             head = heads[m.name]
             try:
                 _merge_published(cfg, wt, m, refs[m.name], head, branch=branch, base=base,
-                                 owners=tuple(mine))
+                                 owners=tuple(mine), batch=batch)
             except _Conflict as exc:
                 raise _member_clash(wt, d, branch, base_ref, m.name, refs[m.name][1], head,
                                     merged_in, exc) from exc
@@ -1333,21 +1334,24 @@ def _late_line_rewrite(facts: str, ref: str, took: str, line: str,
 
 def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, bool],
                      head: str | None, *, branch: str, base: str,
-                     owners: Sequence[Path] = ()) -> None:
+                     owners: Sequence[Path] = (),
+                     batch: Collection[str] | None = None) -> None:
     """Merge bundle ``d``'s published branch onto the line checked out in ``wt`` (#593):
     its own commits, joined by a signed-off merge commit — not a re-applied copy. ``head``
     is the branch's tip as :func:`fold` read it — None: it does not resolve (gone). It is
     the CURRENT tip, so commits pushed onto the branch after an earlier fold carried it
     reach the line too; for a branch the run carried, the tip checked to extend what the
     line took from it (:func:`_carried_tips`, #633). ``owners``: the bundles a refusal may
-    name — to take the base in (:func:`_take_in_base`), or to keep this merge.
+    name — to take the base in (:func:`_take_in_base`), or to keep this merge. ``batch``: the
+    run's, for the line a refusal of a squash or rebase merge names (:func:`_gone_branch`).
 
     A merge that would remove work from the line, by a change none of the branch's own
     commits makes (#673: the branch was cut from, or updated from, a base that reverted
     work the line carries), is undone and raises (:func:`_keep_merge`)."""
     _remote, ref, onto = published
     if head is None:
-        _gone_branch(cfg, wt, d, ref, onto, branch=branch, base=base, owners=owners)
+        _gone_branch(cfg, wt, d, ref, onto, branch=branch, base=base, owners=owners,
+                     batch=batch)
         return
     if _in_line(wt, head, f"{d.name}'s branch {ref}", branch):
         return  # already in the line (an earlier fold carried it) — never merged twice
@@ -1404,7 +1408,8 @@ def _keep_merge(cfg: Config, wt: Path, d: Path, ref: str, head: str, before: str
 
 
 def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch: str,
-                 base: str, owners: Sequence[Path] = ()) -> None:
+                 base: str, owners: Sequence[Path] = (),
+                 batch: Collection[str] | None = None) -> None:
     """``d``'s published branch ``ref`` does not resolve after the pruning fetch — a merged
     PR's branch is commonly deleted on merge (#593). Decided by commit, never by message:
 
@@ -1414,15 +1419,22 @@ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch
        skip it and do NOT take the base in — however the base has moved since;
     3. otherwise (the fold never carried that head — a fixup pushed after the fold — or the
        commit is not in this clone at all) the line can get that work only from the base.
-       An ``Onto branch`` record (``onto``) is a commit on another PR, and a legacy ``Stacks
-       on:`` PR targets its parent's branch, so either may have merged elsewhere, and that
-       raises. Any other PR targeted this base, but it may still have merged into another
-       branch (its base edited on the host), so the fold first checks that the base has the
-       head: then the line takes the base in (:func:`_take_in_base`), unless that would
-       remove work a bundle put on the line (#623), which raises. A base without it —
-       or a clone without it, which, having fetched the base, means the same; a squash or
-       rebase merge never puts it on the base either — raises, rather than build the next
-       wave on a line that lacks the PR's work."""
+       A squash or rebase merge never puts the head on the base: it is told apart by the
+       merge commit the host reports being on the base (:func:`_squash_merged`, #626), for
+       any record, as the carry tells it apart (``flow._finished_head``). That raises, saying
+       so and what to do (:data:`SQUASH_STEP`; :data:`DROP_PREREQ` is its last part for a
+       record that never counts, :func:`merged.counts_into`, naming the line of ``batch``
+       without ``d``, :func:`reissue_line`): stack mode needs merge commits,
+       so the line does not take the base in for it. An ``Onto branch`` record (``onto``) is
+       a commit on another PR, and a legacy ``Stacks on:`` PR targets its parent's branch, so
+       either may have merged elsewhere, and that raises. Any other PR targeted this base,
+       but it may still have merged into another branch (its base edited on the host), so
+       the fold first checks that the base has the head: then the line takes the base in
+       (:func:`_take_in_base`), unless that would remove work a bundle put on the line
+       (#623), which raises. A base without it — or a clone without it, which, having fetched
+       the base, means the same — raises, rather than build the next wave on a line that
+       lacks the PR's work. A merge commit the base lacks, or one that cannot be read, names
+       no squash or rebase merge."""
     base_ref = f"{cfg.base_remote}/{base}"
     head = merged.merged_head(cfg, d.name.removeprefix("issue_"))
     if not head:
@@ -1436,6 +1448,18 @@ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch
               file=sys.stderr)
         return
     rec = publish._publish_record(d) or {}
+    on_base = _carries(wt, head, f"{d.name}'s merged head {head}", base_ref, of=base_ref)
+    oid = "" if on_base else _squash_merged(cfg, d, wt, base_ref)
+    if oid:
+        raise IntegrationError(
+            f"{d.name}'s branch {ref} is gone and its PR "
+            f"{rec.get('pr_url') or '(no recorded PR)'} was squash- or rebase-merged: {base_ref} "
+            f"has its merge commit {oid}, but neither {base_ref} nor {branch} has the head it "
+            f"merged ({head}), so a branch built on {d.name} holds commits {base_ref} never "
+            f"got; " + SQUASH_STEP.format(name=d.name, base=base_ref)
+            + ("" if merged.counts_into(rec, *publish._resolve_target(d)[:2])
+               else DROP_PREREQ.format(name=d.name,
+                                       next_line=reissue_line(cfg, base, batch, [d.name]))))
     if onto or rec.get("base") != base:
         what = ("an `Onto branch` commit on another PR" if onto else
                 f"a PR against {rec.get('base') or '(no recorded base)'}, not {base}")
@@ -1444,7 +1468,7 @@ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch
             f"{branch} does not have, but it is {what}, which may have merged into a base "
             f"other than {base_ref} — the fold cannot tell its work reaches {branch}; "
             f"restore the branch, then re-run")
-    if not _carries(wt, head, f"{d.name}'s merged head {head}", base_ref, of=base_ref):
+    if not on_base:
         raise IntegrationError(
             f"{d.name}'s branch {ref} is gone and its PR "
             f"{rec.get('pr_url') or '(no recorded PR)'} merged at {head}, a commit neither "
@@ -1453,6 +1477,52 @@ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch
             f"in would not carry that work to the next wave — restore the branch, or get "
             f"that work into {base_ref}, then re-run")
     _take_in_base(cfg, wt, d, ref, branch, base_ref, head, owners)
+
+
+# The step for a squash- or rebase-merged PR (#626), in one place so that the fold and the carry
+# give the same bundle the same advice. It merged into the base, so no carry of it will ever
+# come: the way out is a run without it, whose line is a line of its own
+# (:func:`integration_branch`).
+SQUASH_STEP = ("stack mode needs merge commits: update each branch built on {name} from {base} "
+               "(GitHub's \"Update branch\") or rebuild it from {base}, then re-issue without "
+               "{name}")
+# That step's last part for a PR whose record never counts as merged into the base
+# (:func:`merged.counts_into`): an ``Onto branch`` record, a legacy ``Stacks on:`` PR, a record
+# for another repo. A run without it still holds a bundle naming it (``flow._uncounted_squash``).
+# Only that edge makes a run check its line for the merge (``flow._runnable``), and a run may
+# continue a line it finds on origin, so with the edge gone the line of the batch to come has to
+# go too, or that run builds there without the merge and says nothing. So the drop is asked of
+# that batch alone: a bundle outside it keeps its edge, and its own run checks its own line.
+# ``{next_line}``: :func:`reissue_line`.
+DROP_PREREQ = (", after dropping {name} from the brief of any bundle of the re-issued batch that "
+               "names it as a prerequisite and deleting any line on origin that batch would "
+               "continue{next_line}: with the edge gone nothing checks that line for the merge")
+
+
+def reissue_line(cfg: Config, base: str, batch: Collection[str] | None,
+                 without: Collection[str]) -> str:
+    """:data:`DROP_PREREQ`'s ``{next_line}`` (#626): the line a re-issue of ``batch`` without
+    the bundles ``without`` would continue on ``base``, said to be that batch's, since any other
+    batch has a line of its own (:func:`integration_branch`). "" when there is none to name: no
+    batch (a direct caller), or none of it left."""
+    rest = [n for n in batch or () if _bundle_name(n) not in without]
+    return (f" (for this batch without {', '.join(without)}: "
+            f"{integration_branch(cfg, base, rest)})" if rest else "")
+
+
+def _squash_merged(cfg: Config, d: Path, wt: Path, base_ref: str) -> str:
+    """The merge commit of bundle ``d``'s merged PR when ``base_ref`` has it but not the PR's
+    head, else "" (#626): the merge put the work there as new commits, a squash or rebase
+    merge. Fail-closed: a merge commit or head that cannot be read or is empty
+    (:func:`merged.merge_and_head`), or a merge commit the base lacks (the PR merged into
+    another branch), is "". Whether the line has the head is the caller's to ask. The host is
+    asked only here, so only for such a PR. A git failure raises."""
+    read = merged.merge_and_head(cfg, d.name.removeprefix("issue_"))
+    oid, head = read or ("", "")
+    if (oid and head and not _carries(wt, head, f"{d.name}'s head {head}", base_ref, of=base_ref)
+            and _carries(wt, oid, f"{d.name}'s merge commit {oid}", base_ref, of=base_ref)):
+        return oid
+    return ""
 
 
 def _carries(wt: Path, commit: str, what: str, branch: str, *, of: str = "HEAD") -> bool:

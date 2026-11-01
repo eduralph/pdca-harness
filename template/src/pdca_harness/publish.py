@@ -31,7 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import brief, gates, leaves, progress, state, worktree
+from . import brief, gates, leaves, progress, state, waves, worktree
 # Aliased: `publish()` builds a local `record = {...}` (its publish.json payload,
 # below) that would shadow the module name at the #317 call-in.
 from . import record as record_mod
@@ -369,8 +369,9 @@ def publish(
         if refusal:
             print(refusal, file=sys.stderr)
             return 1
-    if stack_branch:
-        _warn_if_squash_only(repo_spec)  # a stacked PR must merge-commit, not squash (#123)
+    # A stacked PR, or one others build on, must merge-commit, not squash (#123, #626).
+    if stack_branch or _others_build_on(cfg, d):
+        _warn_if_squash_only(repo_spec)
 
     # Host-only CI parity gate ([gates] host_ci, issue #311): the declared commands must
     # pass against the tree the push would publish, before anything is pushed. The T4
@@ -529,6 +530,10 @@ def _publish_stacked(
               "to push a commit to a branch with no PR. Open the PR first, or drop the "
               "'Onto branch' brief field to use the default new-PR flow.", file=sys.stderr)
         return 1
+
+    # The commit lands on a PR that can be squashed too; others build on it (#626).
+    if _others_build_on(cfg, d):
+        _warn_if_squash_only(repo_spec)
 
     # Host-only CI parity gate (#311) — this path pushes too, so it is gated the same
     # way as the new-PR path: fetch, pin the exact PR-branch commit the push builds on,
@@ -827,13 +832,36 @@ def _batch_branch_producer(cfg: Config, d: Path, repo_spec: str, branch: str) ->
     return ""
 
 
+def _others_build_on(cfg: Config, d: Path) -> bool:
+    """In stack mode (``[driver].wave_mode``), whether another bundle under the results root
+    names ``d`` as a prerequisite, in ``Depends on``, ``Depends on (merged)`` or ``Stacks on``
+    (:func:`waves.declared_deps`, #626). Merge mode picks its own merge method, so never there.
+    Reads the briefs, no network; one that cannot be read names nothing, as this only decides
+    whether to warn."""
+    if cfg.wave_mode != "stack":
+        return False
+    iid = d.name.removeprefix("issue_")
+    for bp in sorted(cfg.bundle_root.glob("issue_*/brief.md")):
+        if bp.parent.name == d.name:
+            continue
+        try:
+            if iid in waves.declared_deps(bp):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
 def _warn_if_squash_only(repo_spec: str) -> None:
-    """Warn if the target repo can't merge a stacked PR with a merge commit (issue #123).
+    """Warn if the target repo can't merge a PR of a stack with a merge commit (#123, #626):
+    one cut from a stack base, or one other bundles build on, an ``Onto branch`` commit's
+    included.
 
     Stacked PRs must be merged bottom-up with a merge commit: a squash or rebase merge puts
     the parent's change on the base as NEW commits, not the ones the child carries, so the
-    child keeps showing the parent's diff until its branch is updated from the base (#593).
-    Best-effort via ``gh repo view``; any failure is silent."""
+    child keeps showing the parent's diff until its branch is updated from the base (#593),
+    and the fold and the re-issue carry can stop on it. Best-effort via ``gh repo view``; any
+    failure is silent."""
     try:
         r = subprocess.run(
             ["gh", "repo", "view", repo_spec, "--json", "mergeCommitAllowed,squashMergeAllowed"],
@@ -847,9 +875,11 @@ def _warn_if_squash_only(repo_spec: str) -> None:
     except ValueError:
         return
     if info.get("mergeCommitAllowed") is False:
-        print(f"publish: ⚠ {repo_spec} does not allow merge commits — a stacked PR must be "
-              "merged bottom-up with a MERGE COMMIT (not squash), or each child re-shows its "
-              "parent's diff until rebased (#123).", file=sys.stderr)
+        print(f"publish: ⚠ {repo_spec} does not allow merge commits — a stacked PR, or one "
+              "others build on, must be merged bottom-up with a MERGE COMMIT (not squash or "
+              "rebase), or each child re-shows its parent's diff until its branch is updated "
+              "from the base, and the next fold or re-issue can stop on it (#123, #626).",
+              file=sys.stderr)
 
 
 def _fork_owner(repo: Path, remote: str = "origin") -> str:

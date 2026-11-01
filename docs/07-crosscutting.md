@@ -691,7 +691,11 @@ wave builds on, via `[driver].wave_mode`:
   no merge rights, and it keeps STOP discipline — the harness never merges
   anything into your target; you merge the PR stack bottom-up with a merge commit
   (never squash or rebase: they put a change on the base as new commits, not the
-  ones its dependents carry). The fold puts every published branch of a target
+  ones its dependents carry). Stack mode does not support those merges. Publish
+  warns when your repository does not allow merge commits, for a PR cut from a
+  stack base and for a bundle another bundle names in `Depends on`,
+  `Depends on (merged)` or `Stacks on`, whether it opens a PR or adds an
+  `Onto branch` commit to one. The fold puts every published branch of a target
   on its line, so a later wave's PR carries every earlier-wave branch on the
   line, not only its prerequisites', and shows their changes until they merge.
   Once they have all merged, its diff is its own change when the line is a
@@ -728,8 +732,16 @@ wave builds on, via `[driver].wave_mode`:
   branch is deleted, the fold looks up the commit the PR merged with: a line
   that has it already carries the PR; one that does not (say a fixup was pushed
   after the fold) merges your base in, after checking that your base has that
-  commit. If it does not (the PR merged into another branch, or was squashed or
-  rebased), the run stops rather than build the next wave without that work. It
+  commit. If it does not, the run stops rather than build the next wave without
+  that work. When your base has the merge commit the host reports for the PR, the
+  PR was squashed or rebased: the stop says so, gives that commit, and tells you
+  to update each branch built on it from your base ("Update branch") or rebuild
+  it from your base, then re-issue without that bundle. When your base does not
+  have it (the PR merged into another branch), or it cannot be read, the stop
+  says the PR merged somewhere other than your base. An `Onto branch` commit or a
+  legacy `Stacks on:` PR never takes your base in, since its PR may have merged
+  into another branch: unless it was squashed or rebased as above, the stop says
+  that and asks you to restore the branch. The run
   also stops, naming the bundle, when merging your base in would undo work a
   bundle put on the line (say your base reverted a merged PR, so a file the
   bundle added would disappear); a base that only edits such a file is merged
@@ -803,7 +815,30 @@ wave builds on, via `[driver].wave_mode`:
   prerequisites built on it (their plain `Depends on` names it, directly or
   through others), since their branches carry its work: none of them is carried
   or accounts for a commit on the line, and the bundles that depend on them are
-  held, each named on one line with the cause. A prerequisite whose merge fails
+  held, each named on one line with the cause. A merged prerequisite whose head
+  is on neither your base nor the line, but whose merge commit your base has, was
+  squash- or rebase-merged, and its line says so. The finished prerequisites built
+  on it stay held, and each line names it as the cause and gives the way out:
+  update that branch from your base ("Update branch") or rebuild it from your
+  base, then re-issue without the merged prerequisite. That run gets its own
+  integration line, since it asks for other ids. It does not check the update: a
+  branch left as it was is carried too, and its PR keeps showing the merged
+  change. An `Onto branch` commit, or a PR whose record names another base (a
+  legacy `Stacks on:` PR) or another repository (say one renamed since), never
+  counts as merged into your base, so for one of those its line, the line of each
+  one held for it and the fold's stop add two steps: drop it from the brief of any
+  bundle of the re-issued batch that names it as a prerequisite, and delete any
+  line on origin that batch would continue. They name that line for the batch
+  without the merged prerequisite, since any other batch has a line of its own.
+  With the edge gone nothing checks that line for the merge, so a re-run that
+  finds it may build the dependent there without that merge; one that does not
+  starts from your base. A bundle still naming it, in that batch or another, is
+  held when it runs and given the steps for its own line, as below. A
+  prerequisite squash- or rebase-merged with its head already on the line (an
+  earlier fold put it there) is clean, as above: the line has its work, so the
+  run carries it and the ones built on it and names no merge, and their PRs keep
+  showing its change until they are updated from your base. A prerequisite
+  whose merge fails
   during the fold (a conflict, a branch that is gone, or any other failed merge)
   also holds every finished prerequisite whose branch has any of its commits,
   with a `Depends on` edge or without, merged before the failed one or after,
@@ -847,12 +882,16 @@ wave builds on, via `[driver].wave_mode`:
   else the one asked for first.
   If the line on origin holds a commit the run cannot account for, nothing is
   carried onto it and those bundles are held: delete that line on origin
-  (unless the run's own fold already replaced it) and re-issue. A line the run
-  did not carry onto is still replaced by its first fold, as above. Known limits,
-  each of which holds the dependents (or the publish) until you act: a
-  prerequisite squash- or rebase-merged with its branch deleted; a closed PR
-  that a newer PR replaced; a prerequisite with no recorded PR URL; a rejected
-  or force-pushed-over commit left on the old line; two finished prerequisites
+  (unless the run's own fold already replaced it) and re-issue. A prerequisite
+  named as squash- or rebase-merged, and the ones held for it, keep that reason
+  and the way out above instead, since a run without it does not use that line.
+  A line the run did not carry onto is still replaced by its first fold, as
+  above. Known limits, each of which holds the dependents (or the publish) until
+  you act: a prerequisite squash- or rebase-merged whose head is on neither your
+  base nor the line (named, with the step, as above, unless its merge commit
+  cannot be read); a closed PR that a newer PR replaced; a prerequisite with no
+  recorded PR URL; a rejected or force-pushed-over commit left on the old line;
+  two finished prerequisites
   that conflict with each other (named, with the step, as above); an old line
   that still holds a prerequisite whose PR was closed since; and an accepted but
   unpublished bundle whose line a later run's fresh fold replaced (publish
@@ -875,10 +914,31 @@ wave builds on, via `[driver].wave_mode`:
   count. The dependent is named on one line with the prerequisite and what to
   do, and the rest of the run goes on: name the prerequisite in the same
   `pdca flow <ids>` command so the run carries it onto its line (as above), or
-  wait for the merge and re-run. Nothing is held for a prerequisite with no
+  wait for the merge and re-run. In stack mode a PR that does not count for its
+  record (an `Onto branch` commit, say), but whose merge commit the dependent's
+  base has without its head, was squash- or rebase-merged there and will never
+  count, so a wait cannot end that hold: its line says so and gives the step
+  instead, to drop the prerequisite from the dependent's brief and re-run. A
+  merge commit that cannot be read, a checkout that cannot be fetched or a dry-run
+  keeps the line above. That step goes by the merge commit, so it cannot see a
+  later revert on the base: after one, dropping the edge builds the dependent
+  without that change. With the edge gone nothing checks the line for that merge
+  either. So when the dependent is cut from a line of the run that lacks it (say
+  a line older than the merge, continued from origin), or that cannot be checked
+  for it, the step also says to delete that line on origin once the run ends: a
+  re-run that still finds it builds the dependent there without the merge, and
+  one that does not starts from the base, which has the merge commit. Dropping
+  the edge before the re-run, as the prerequisite's own line above asks, skips
+  this check, which is why that line gives the delete step too. When no line was
+  judged for the dependent but a re-run may continue one, because it is held for
+  something else too (say the carry or fold that would give it a line failed),
+  the step says that line was not checked and to delete it if it is there. It says
+  the same of the line of a re-run naming another prerequisite the dependent is
+  told to name, which is another line. Nothing is held for a prerequisite with no
   patch or no usable target, for a dependent with no usable target of its own,
   with `--no-publish`, or in a dry-run. `Depends on (merged)` counts a merge the
-  same way: a prerequisite the run does not drive must have merged into the
+  same way, with the same step for such a PR: a prerequisite the run does not
+  drive must have merged into the
   dependent's base (a dependent with no usable target still takes a merge into
   any branch).
 

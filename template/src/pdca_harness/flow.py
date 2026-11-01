@@ -712,9 +712,18 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     on`` prerequisite the run was NOT asked for — not in ``requested`` (bundle dir names;
     ``None``: ``batch_names``) — waits the same way when a line would carry it (a non-empty
     patch and a usable target, ``integrate._fold_candidates``): no line of this run does.
-    Either way the dependent is named on ONE stderr line, with what to do. A dependent with
-    no usable target of its own (publish skips it) has no base to wait for: no #647 hold,
-    and its ``Depends on (merged)`` keeps #186's answer — any merge counts. A finished named
+    Either way the dependent is named on ONE stderr line, with what to do: in stack mode, for
+    a prerequisite squash- or rebase-merged into that base whose record never counts as
+    merged there (:func:`_uncounted_squash`, #626), to drop the edge, since no wait ends that
+    hold, and, when the bundle is cut from a line of this run that lacks the merge
+    (:func:`_line_lacks_merge`), to delete that line too, since with the edge gone nothing
+    checks it. Where no such line was judged but a re-run may continue one, because the bundle
+    is held for something else too (the carry or fold that would give it a line failed, say),
+    it is told that line was not checked, and to delete it if it is there. It is told the same
+    of the line of a re-run naming a prerequisite it is told to name, which is another line.
+    A dependent with no usable target of its own (publish skips it) has no base to
+    wait for: no #647 hold, and its ``Depends on (merged)`` keeps #186's answer — any merge
+    counts. A finished named
     id (an id the run was asked for that an earlier run finished, #646) is carried onto the
     line before wave 0 when it is clean (:func:`_carry_finished`); when it is not, it is
     named in ``held``, and a bundle whose plain ``Depends on`` names it is not ready (a
@@ -784,6 +793,9 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
         off_line: list[tuple[str, str, bool]] = []  # merged, not on d's line (#655)
         off_base: list[tuple[str, str, bool]] = []  # merged, not on the base as fetched (#729)
         carryable: list[str] = []  # … of those, ones a line of d's target would carry
+        squashed: list[tuple[str, str]] = []   # … not those: merged there, never counted (#626)
+        stale: list[tuple[str, str, bool]] = []  # … of those, not on d's line: off_line's shape
+        unjudged = False                         # … of those, no line was judged for d
         for dep in deps:
             p = cfg.find_bundle(dep)
             out_of_batch = p.name not in batch_names
@@ -825,6 +837,22 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                 if not targeted:
                     unmet.append(dep)
                     continue
+                oid = _uncounted_squash(cfg, p, repo, base, views)
+                if oid:
+                    squashed.append((p.name, oid))
+                    # The way out drops this edge, and only an edge makes a run check its
+                    # line for the merge (above), so the line is judged here, once.
+                    line = (lines or {}).get((repo, base))
+                    if line and line[1] and (on_line is None or d.name in on_line):
+                        key = (p.name, repo, base)
+                        if key not in lacks:
+                            lacks[key] = _line_lacks_merge(cfg, dep, repo, line, views)
+                        lack = lacks[key]
+                        if lack is not None:
+                            stale.append((p.name, *lack))
+                    else:
+                        unjudged = True
+                    continue
                 unmerged.append(p.name)
                 if cand and dep not in merged_deps and cand[0][1:3] == (repo, base):
                     carryable.append(p.name)  # named in the run, the carry puts it on (#646)
@@ -839,6 +867,36 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                   f"into {base} ({repo}), and no line of this run carries them; not built "
                   f"on a base missing them. To build it, {todo} until their PR merges into "
                   f"{base}, then re-run.", file=sys.stderr)
+        if squashed:
+            drop = f"drop {', '.join(n for n, _oid in squashed)} from {d.name}'s brief"
+            step = f"{drop}, then re-run"
+            after = (f"and with the edge gone nothing checks that. A re-run that finds the line "
+                     f"on origin may continue it and build {d.name} without that merge, and one "
+                     f"that does not starts from {base}, which has the merge commit")
+            if stale:
+                branch, tip = (lines or {})[(repo, base)]  # stale: only when d has one
+                has = ("does not have" if all(known for _n, _w, known in stale)
+                       else "is not known to have")
+                which = ", ".join(n if known else f"{n} ({why})" for n, why, known in stale)
+                step = (f"{drop} and, once this run ends, delete {branch} on origin, then "
+                        f"re-run: the line {d.name} would build on, {branch} at "
+                        f"{(tip or '')[:12]}, {has} the merge of {which}, {after}")
+            elif (unjudged and unmet) or carryable:
+                branch = integrate.integration_branch(cfg, base, asked | set(carryable))
+                of = (f", the line of a re-run naming {', '.join(carryable)} too,"
+                      if carryable else "")
+                step = (f"{drop} and, once this run ends, delete {branch} on origin if it is "
+                        f"there, then re-run: this run did not check that line{of} for that "
+                        f"merge, {after}")
+            if stale and carryable:
+                also = integrate.integration_branch(cfg, base, asked | set(carryable))
+                step += (f". Naming {', '.join(carryable)} too gives the re-run another line: "
+                         f"delete {also} on origin as well if it is there")
+            print(f"flow: {d.name} held — prerequisite(s) "
+                  f"{', '.join(f'{n} (merge commit {oid[:12]})' for n, oid in squashed)}: their "
+                  f"PR was squash- or rebase-merged into {base} ({repo}), but their publish "
+                  f"record (publish.json) never counts as merged into {base}, so waiting for a "
+                  f"merge will not build it. To build it, {step}.", file=sys.stderr)
         if off_line:
             branch, tip = (lines or {})[(repo, base)]  # off_line: only when d has one
             has = ("does not have" if all(known for _n, _w, known in off_line)
@@ -886,10 +944,36 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                   f"no line or base of this run holds that work; not built on a base missing "
                   f"it. To build it, wait until {p} is built, once what its hold line names is "
                   f"fixed, and its PR merges{into}, then re-run.", file=sys.stderr)
-        if (not unmet and not unmerged and not off_line and not off_base and not partners
-                and not clashed and not unbuilt_partners):
+        if (not unmet and not unmerged and not squashed and not off_line and not off_base
+                and not partners and not clashed and not unbuilt_partners):
             runnable.append(d)
     return runnable
+
+
+def _uncounted_squash(cfg: Config, p: Path, repo_spec: str, base: str,
+                      views: dict[str, Path | str]) -> str:
+    """The merge commit of prerequisite ``p``'s PR when :func:`merged.merged_into` will never
+    count it for ``repo_spec`` @ ``base``, though it merged there (#626): its record does not
+    count there (:func:`merged.counts_into`), and it was squash- or rebase-merged into the
+    base (:func:`integrate._squash_merged`, asked of the checkout ``views`` caches). That shows
+    the merge commit is on the base, not that the base still has the change: it cannot see a
+    later revert. Else "". Stack mode only: merge mode picks its own merge method. Not in a
+    dry-run, which fetches nothing here. The caller asks once :func:`merged.merged_into` has
+    said no, so a record that counts means a PR not merged, which costs no read. Fail-closed:
+    a checkout that cannot be fetched or a git failure is "", and the caller's plain hold
+    stands."""
+    rec = publish._publish_record(p)
+    if (cfg.wave_mode != "stack" or cfg.publisher.mode == "stub" or not isinstance(rec, dict)
+            or merged.counts_into(rec, repo_spec, base)):
+        return ""
+    ref = f"{cfg.base_remote}/{base}"
+    view = _carry_checkout(cfg, repo_spec, ref, views)
+    if isinstance(view, str):
+        return ""
+    try:
+        return integrate._squash_merged(cfg, p, view, ref)
+    except integrate.IntegrationError:
+        return ""
 
 
 def _base_lacks_merge(cfg: Config, dep: str, repo_spec: str, base: str,
@@ -1280,12 +1364,14 @@ def _finished_named(cfg: Config, batch: Collection[str] | None,
     return list(found.values())
 
 
-def _finished_head(d: Path, ref: tuple[str, str, bool] | None, repo: Path, base_ref: str,
-                   tip: str | None) -> str | tuple[str, str]:
+def _finished_head(cfg: Config, d: Path, ref: tuple[str, str, bool] | None, repo: Path,
+                   base_ref: str, tip: str | None) -> str | tuple[str, str]:
     """Finished bundle ``d``'s PR head when it is state-clean (#646): its PR reads OPEN, or
     MERGED with the head already on ``base_ref`` or on the line at ``tip``, and the head
     resolves in ``repo``. Else ``(reason, hint)`` — fail-closed: no recorded PR or branch,
-    or a state that cannot be read, is not clean."""
+    or a state that cannot be read, is not clean. A MERGED PR whose head is on neither, in
+    ``repo`` or not, is named as a squash or rebase merge when ``base_ref`` has its merge
+    commit (:func:`integrate._squash_merged`, #626), which only then is read."""
     rec = publish._publish_record(d) if ref else None
     pr_url = rec.get("pr_url") if isinstance(rec, dict) else None
     if not pr_url:
@@ -1296,10 +1382,19 @@ def _finished_head(d: Path, ref: tuple[str, str, bool] | None, repo: Path, base_
     pr, head = st
     if pr not in ("OPEN", "MERGED"):
         return f"its PR is {pr}", "open"
+    off_both = pr == "MERGED" and bool(head) and not any(
+        integrate._carries(repo, head, f"{d.name}'s head", r, of=r)
+        for r in (base_ref, tip) if r)
+    if off_both:
+        oid = integrate._squash_merged(cfg, d, repo, base_ref)
+        if oid:
+            counts = merged.counts_into(rec, *publish._resolve_target(d)[:2])
+            return (f"its PR was squash- or rebase-merged: {base_ref} has its merge commit "
+                    f"{oid[:12]}, but its head {head[:12]} is on neither {base_ref} nor the "
+                    f"line", "squashed" if counts else "squashed_drop")
     if not head or integrate._rev(repo, head) is None:
         return f"its PR head {head or '(none reported)'} is not in {repo}", "open"
-    if pr == "MERGED" and not any(integrate._carries(repo, head, f"{d.name}'s head", r, of=r)
-                                  for r in (base_ref, tip) if r):
+    if off_both:
         return f"its PR merged at {head[:12]}, which neither {base_ref} nor the line has", "edge"
     return head
 
@@ -1313,6 +1408,14 @@ def _finished_head(d: Path, ref: tuple[str, str, bool] | None, repo: Path, base_
 _CONFLICT_STEP = ("declare `Conflicts with: {ids}` in {name}'s brief, then rebuild {name} "
                   "on a base that holds {partners}")
 
+# A squash- or rebase-merged prerequisite (#626), for one that names it. The hold goes by the
+# edge alone, so this says nothing of what {name}'s branch holds now: it may already have been
+# rebuilt from the base, or merged.
+_BUILT_ON_SQUASHED = ("{cause} was squash- or rebase-merged, so a branch built on it holds "
+                      "commits {base} never got: update {name}'s branch from {base} (GitHub's "
+                      "\"Update branch\") or rebuild {name} from {base} if you have not, then "
+                      "re-issue without {cause}")
+
 _CARRY_HINTS = {
     "open": "get {name}'s PR open with its branch on origin (re-open it, `pdca publish {iid}`, "
             "or re-drive {name}), then re-issue",
@@ -1321,6 +1424,13 @@ _CARRY_HINTS = {
             "re-issue",
     "built_on": "{name} was built on {cause}, which is not carried (see its line): get "
                 "{cause} carried, or re-drive {name} on a base without it, then re-issue",
+    # A squash- or rebase-merged prerequisite (#626) and whatever names it; `_drop`: one whose
+    # record never counts as merged, so a run without it still holds a bundle naming it.
+    "squashed": integrate.SQUASH_STEP,
+    "squashed_drop": integrate.SQUASH_STEP + integrate.DROP_PREREQ,
+    "built_on_squashed": _BUILT_ON_SQUASHED,
+    "built_on_squashed_drop": _BUILT_ON_SQUASHED + integrate.DROP_PREREQ.format(
+        name="{cause}", next_line="{next_line}"),
     # A branch that conflicts with the line (#694, :func:`_clash_why`): with finished ids
     # of the batch the line carries, or ones it does not; the base; or other work on it.
     "conflict": "proposed, for you to confirm: " + _CONFLICT_STEP + ", then re-issue",
@@ -1333,6 +1443,20 @@ _CARRY_HINTS = {
     "line_conflict": "rebuild {name} on a base that holds the work it conflicts with, then "
                      "re-issue",
 }
+# Each hint above that names a squash or rebase merge (#626) → the one its dependents get.
+_SQUASH_HINTS = {"squashed": "built_on_squashed", "squashed_drop": "built_on_squashed_drop",
+                 "built_on_squashed": "built_on_squashed",
+                 "built_on_squashed_drop": "built_on_squashed_drop"}
+
+
+def _hold_all(ids: list[Path], why: Mapping[str, tuple[str, str]], reason: str,
+              hint: str) -> dict[str, tuple[str, str]]:
+    """``why`` once something holds all of ``ids``, an untrusted line or a failed read: each
+    gets ``(reason, hint)``. One squash- or rebase-merged, or held for one, keeps its own
+    (#626): its way out is a run without that id, which is on another line, so this line's
+    state does not change that advice."""
+    kept = {name: w for name, w in why.items() if w[1] in _SQUASH_HINTS}
+    return {d.name: kept.get(d.name, (reason, hint)) for d in ids}
 
 
 def _clash_why(clash: tuple[str, dict[str, list[str]], list[str]], ref: str,
@@ -1402,7 +1526,9 @@ def _cascade_not_clean(cfg: Config, ids: list[Path], why: dict[str, tuple[str, s
     what that id builds on. Each one goes into ``why`` with the ``built_on`` hint. Returns
     name → the not-clean id its ``Depends on`` reaches (the cause its held line gives). An
     edge to an id outside ``ids`` and ``through`` is not followed, and neither is a ``Stacks
-    on`` or ``Depends on (merged)`` edge."""
+    on`` or ``Depends on (merged)`` edge. Where that id was squash- or rebase-merged (#626),
+    directly or further down the chain, the hint is :data:`_SQUASH_HINTS`'s and the cause is
+    the merged id: the way out is the same all along the chain, and it names that id."""
     names = {d.name for d in ids}
     prereqs = {d.name: _reached(cfg, d, names, through or {}) for d in ids}
     causes: dict[str, str] = {}
@@ -1416,8 +1542,9 @@ def _cascade_not_clean(cfg: Config, ids: list[Path], why: dict[str, tuple[str, s
                 how = (f"reaches {cause}, whose work its branch carries, through "
                        f"{', '.join(via)} (finished with no patch)" if via else
                        f"names {cause}, whose work its branch carries")
-                why[d.name] = (f"its `Depends on` {how}", "built_on")
-                causes[d.name] = cause
+                built_on = _SQUASH_HINTS.get(why[cause][1])
+                why[d.name] = (f"its `Depends on` {how}", built_on or "built_on")
+                causes[d.name] = causes.get(cause, cause) if built_on else cause
                 grew = True
     return causes
 
@@ -1444,14 +1571,21 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
     makes every finished id built on it not clean too — its plain ``Depends on`` names it,
     directly or through others, so its branch carries that work (:func:`_cascade_not_clean`,
     #652): none of them is folded or accounts for a commit on origin's line, and their
-    dependents wait too, each named with the cause. One the fold skips — its merge fails
-    DURING the fold, whatever the error — spreads by commit instead (:func:`integrate.fold`,
-    #672): a finished id whose branch holds any of its work, with a ``Depends on`` edge or
-    without, merged before the skip or after, is held for it too (the ``built_on`` hint),
-    and so on through the ids held this way, their dependents with them; the fold takes
-    them off the line before its one push. So the carry adds none of a skipped id's
-    commits to the line; ones an earlier run already put on a line it continues stay
-    there. One skipped because its branch conflicts with the line is named with what it
+    dependents wait too, each named with the cause. One squash- or rebase-merged into the
+    base, with its head on neither the base nor the line, is named as that, and the finished
+    ids held for it say so too, with the way out: update them from the base and re-issue
+    without it, dropping it from the briefs in that batch that name it where its record never
+    counts as merged and deleting the line that re-issue would continue, which with the edge
+    gone nothing checks (#626). An untrusted line does not replace those reasons
+    (:func:`_hold_all`).
+    With its head on the line it is clean, like any other merged PR. One the fold skips —
+    its merge fails DURING the fold, whatever the error — spreads by commit instead
+    (:func:`integrate.fold`, #672): a finished id whose branch holds any of its work, with
+    a ``Depends on`` edge or without, merged before the skip or after, is held for it too
+    (the ``built_on`` hint), and so on through the ids held this way, their dependents with
+    them; the fold takes them off the line before its one push. So the carry adds none of a
+    skipped id's commits to the line; ones an earlier run already put on a line it continues
+    stay there. One skipped because its branch conflicts with the line is named with what it
     conflicts with (:func:`integrate._clash`, #694), judged on the line the fold pushes:
     the finished ids it carries whose own change it conflicts with, each with its files,
     and the step the end of a run gives a same-wave conflict hold (``_CONFLICT_STEP``,
@@ -1504,7 +1638,7 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
                 cands[d.name][2][0] for d in ids if cands[d.name][2]])
             for d in ids:
                 try:
-                    v = _finished_head(d, cands[d.name][2], repo, base_ref, tip)
+                    v = _finished_head(cfg, d, cands[d.name][2], repo, base_ref, tip)
                 except integrate.IntegrationError as exc:
                     v = (str(exc), "open")
                 if isinstance(v, str):
@@ -1518,11 +1652,11 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
             bad = integrate.foreign_commit(repo, tip, base_ref, [
                 h for n, h in heads.items() if n not in why]) if tip else None
         except integrate.IntegrationError as exc:
-            why = {d.name: (str(exc), "open") for d in ids}
+            why = _hold_all(ids, why, str(exc), "open")
         if bad:   # an untrusted line: carry nothing onto it, point nothing at it
-            why = {d.name: (f"origin's {line} holds {bad[:12]}, which neither {base_ref} nor "
-                            f"a clean finished prerequisite's PR accounts for", "line")
-                   for d in ids}
+            why = _hold_all(ids, why, f"origin's {line} holds {bad[:12]}, which neither "
+                            f"{base_ref} nor a clean finished prerequisite's PR accounts for",
+                            "line")
         clean = [d for d in ids if d.name not in why]
         if clean:
             skipped: dict[str, str] = {}
@@ -1563,6 +1697,9 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
                 print(f"flow: carried {', '.join(carried)} (finished in an earlier run) onto "
                       f"{line} at {tips[tgt]} before wave 0 — this run's {tgt[0]} @ {tgt[1]} "
                       f"bundles build on it.", file=sys.stderr)
+        # Every id the lines below ask to re-issue without: their step names the batch left's line.
+        gone = [d.name for d in ids if d.name in why
+                and why[d.name][1] in ("squashed", "squashed_drop")]
         for d in ids:
             if d.name in why:
                 held.add(d.name)
@@ -1571,7 +1708,8 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
                 advice = _CARRY_HINTS[hint].format(
                     name=d.name, line=line, iid=d.name.removeprefix("issue_"),
                     cause=causes.get(d.name, ""), base=base_ref, partners=", ".join(with_),
-                    ids=", ".join(p.removeprefix("issue_") for p in with_))
+                    ids=", ".join(p.removeprefix("issue_") for p in with_),
+                    next_line=integrate.reissue_line(cfg, tgt[1], batch, gone))
                 print(f"flow: {d.name} (finished in an earlier run) is not carried onto "
                       f"{line}: {reason} — holding "
                       f"{', '.join(dependents.get(d.name, [])) or 'no bundle'} this run; "
