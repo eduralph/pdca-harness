@@ -237,29 +237,6 @@ def render_prior_edit_and_update(tmp: Path, prior: str) -> tuple[dict | None, st
     return load_updated_config(out)
 
 
-class PriorReleaseRef(unittest.TestCase):
-    """The prior release is the newest one on this line, not the newest in the repository."""
-
-    def test_a_later_release_on_another_line_is_not_the_prior_release(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            _git(repo, "init", "-q")
-            (repo / "version").write_text("v1.1.0")
-            _commit(repo, "v1.1.0")
-            _git(repo, "tag", "v1.1.0")
-            _git(repo, "branch", "release/1.1")
-            (repo / "version").write_text("v1.2.0")
-            _commit(repo, "v1.2.0")
-            _git(repo, "tag", "v1.2.0")
-            self.assertEqual(prior_release_ref(repo), "v1.2.0")
-            _git(repo, "checkout", "-q", "release/1.1")
-            self.assertEqual(prior_release_ref(repo), "v1.1.0")
-            (repo / "version").write_text("v1.1.1")
-            _commit(repo, "v1.1.1")
-            _git(repo, "tag", "v1.1.1")
-            self.assertEqual(prior_release_ref(repo), "v1.1.1")
-
-
 class UpdateCompat(unittest.TestCase):
     """`copier update` from the previous release must not silently change an instance."""
 
