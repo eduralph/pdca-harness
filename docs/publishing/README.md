@@ -57,6 +57,7 @@ stylesheet and templates live here under `publishing/`. CI overwrites pdca.dev's
         ├── site/
         │   ├── assets/style.css
         │   ├── assets/og.png      ← social card, rendered from brand/og.svg
+        │   ├── assets/fonts/      ← self-hosted woff2 + OFL licences (no Google Fonts requests)
         │   ├── favicon.svg, favicon.ico, apple-touch-icon.png
         │   ├── CNAME      ← pdca.dev
         │   └── .nojekyll
