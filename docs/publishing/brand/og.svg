@@ -5,7 +5,7 @@
     <line x1="96" y1="0" x2="96" y2="630"/><line x1="1104" y1="0" x2="1104" y2="630"/>
   </g>
   <g transform="translate(96,135) scale(7.5)">
-    <g fill="none" stroke="#9a5b3f" stroke-width="4.2">
+    <g fill="none" stroke="#945e40" stroke-width="4.2">
       <path d="M24 7 A17 17 0 0 1 41 24"/>
       <path d="M41 24 A17 17 0 0 1 24 41" stroke-opacity="0.85"/>
       <path d="M24 41 A17 17 0 0 1 7 24" stroke-opacity="0.7"/>
@@ -15,11 +15,11 @@
       <line x1="24" y1="4" x2="24" y2="10"/><line x1="38" y1="24" x2="44" y2="24"/>
       <line x1="24" y1="38" x2="24" y2="44"/><line x1="4" y1="24" x2="10" y2="24"/>
     </g>
-    <polygon points="18.5,2.6 18.5,11.4 26.2,7" fill="#9a5b3f"/>
-    <path d="M16.5 24.5 L22 30 L32 18.5" fill="none" stroke="#f6f4ee" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <polygon points="18.5,2.6 18.5,11.4 26.2,7" fill="#945e40"/>
+    <path d="M16.5 24.5 L22 30 L32 18.5" fill="none" stroke="#6dbba1" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
   </g>
   <!-- quadrant labels around the mark -->
-  <g font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="20" fill="#6f6d66">
+  <g font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="20" fill="#7e776b">
     <text x="276" y="128" text-anchor="middle">plan</text>
     <text x="458" y="322" text-anchor="start">do</text>
     <text x="276" y="520" text-anchor="middle">check</text>
@@ -28,7 +28,7 @@
   <text x="520" y="245" font-family="Bitstream Charter, Charter, Georgia, serif" font-size="80" fill="#f6f4ee" letter-spacing="-1">PDCA Harness</text>
   <text x="524" y="322" font-family="Bitstream Charter, Charter, Georgia, serif" font-size="40" font-style="italic" fill="#e7e3d8">Verified AI contribution,</text>
   <text x="524" y="370" font-family="Bitstream Charter, Charter, Georgia, serif" font-size="40" font-style="italic" fill="#e7e3d8">one quality cycle at a time.</text>
-  <text x="524" y="440" font-family="DejaVu Sans, Liberation Sans, sans-serif" font-size="24" fill="#b7afa2">Plan → Do → Check → Act for AI coding agents.</text>
-  <text x="524" y="474" font-family="DejaVu Sans, Liberation Sans, sans-serif" font-size="24" fill="#b7afa2">Tests gate every change; a human signs off.</text>
-  <text x="1104" y="580" text-anchor="end" font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="24" fill="#9a5b3f">pdca.dev</text>
+  <text x="524" y="440" font-family="DejaVu Sans, Liberation Sans, sans-serif" font-size="24" fill="#cbbfab">Plan → Do → Check → Act for AI coding agents.</text>
+  <text x="524" y="474" font-family="DejaVu Sans, Liberation Sans, sans-serif" font-size="24" fill="#cbbfab">Tests gate every change; a human signs off.</text>
+  <text x="1104" y="580" text-anchor="end" font-family="DejaVu Sans Mono, Liberation Mono, monospace" font-size="24" fill="#c58b69">pdca.dev</text>
 </svg>

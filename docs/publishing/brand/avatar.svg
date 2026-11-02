@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="512" height="512" role="img" aria-label="PDCA Harness">
   <rect width="48" height="48" rx="8" fill="#1a1916"/>
-  <g fill="none" stroke="#9a5b3f" stroke-width="4.2" stroke-linecap="butt">
+  <g fill="none" stroke="#945e40" stroke-width="4.2" stroke-linecap="butt">
     <path d="M24 7 A17 17 0 0 1 41 24"/>
     <path d="M41 24 A17 17 0 0 1 24 41" stroke-opacity="0.85"/>
     <path d="M24 41 A17 17 0 0 1 7 24" stroke-opacity="0.7"/>
@@ -12,7 +12,7 @@
     <line x1="24" y1="38" x2="24" y2="44"/><line x1="4" y1="24" x2="10" y2="24"/>
   </g>
   <!-- arrowhead on the Act→Plan return, top -->
-  <polygon points="18.5,2.6 18.5,11.4 26.2,7" fill="#9a5b3f"/>
+  <polygon points="18.5,2.6 18.5,11.4 26.2,7" fill="#945e40"/>
   <!-- deterministic check gate -->
-  <path d="M16.5 24.5 L22 30 L32 18.5" fill="none" stroke="#f6f4ee" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M16.5 24.5 L22 30 L32 18.5" fill="none" stroke="#6dbba1" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

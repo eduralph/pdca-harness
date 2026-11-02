@@ -1,5 +1,5 @@
 /* ============================================================
-   Wyrd — getwyrd.dev shared stylesheet
+   PDCA Harness — pdca.dev shared stylesheet
    Single source of truth for the landing page and all generated
    documentation pages. Sections:
      1. Design tokens (light + dark)
@@ -9,18 +9,23 @@
      5. Prose          (generated Markdown: doc pages)
    ============================================================ */
 
-/* ---- 1. design tokens ---- */
+/* ---- 1. design tokens ----
+   Soft Autumn palette: Hellbraun #945e40 (thread), Tannengrün #2b8a70 (weave),
+   Türkis #42809a (link), Hellblau #b4c7e7, Dunklere Taupe #7e776b, Helle Taupe
+   #cbbfab. Tannengrün and Türkis fall short of 4.5:1 on paper, so text uses a
+   deeper shade of the same hue; the base colours are kept for marks and rules. */
 :root {
   --ink: #1a1916;
   --ink-soft: #4a4843;
-  --ink-faint: #6f6d66;
+  --ink-faint: #6b6458;
   --paper: #f6f4ee;
   --paper-raised: #fbfaf6;
-  --line: #ddd9cd;
-  --line-soft: #e8e4da;
-  --thread: #9a5b3f;
-  --thread-deep: #7a4329;
-  --weave: #2f4a3f;
+  --line: #d9d1c2;
+  --line-soft: #e8e2d6;
+  --thread: #945e40;
+  --thread-deep: #74482f;
+  --weave: #2b8a70;
+  --link: #34687e;
   --radius: 6px;
   --maxw: 760px;
   --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
@@ -31,14 +36,15 @@
   :root {
     --ink: #e7e3d8;
     --ink-soft: #b3afa3;
-    --ink-faint: #87847b;
+    --ink-faint: #999184;
     --paper: #16150f;
     --paper-raised: #1e1c15;
-    --line: #34322a;
-    --line-soft: #28261f;
-    --thread: #c98563;
-    --thread-deep: #d99877;
-    --weave: #7fa890;
+    --line: #3a362e;
+    --line-soft: #2a2721;
+    --thread: #c58b69;
+    --thread-deep: #d6a283;
+    --weave: #6dbba1;
+    --link: #b4c7e7;
   }
 }
 
@@ -55,7 +61,7 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
-a { color: var(--thread-deep); text-decoration: none; }
+a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; text-underline-offset: 3px; }
 :focus-visible { outline: 2px solid var(--thread); outline-offset: 3px; border-radius: 2px; }
 
@@ -75,7 +81,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .brand a:hover { text-decoration: none; }
 .topnav { font-family: var(--font-mono); font-size: 13px; letter-spacing: 0.02em; }
 .topnav a { color: var(--ink-soft); margin-left: 22px; }
-.topnav a:hover { color: var(--thread-deep); }
+.topnav a:hover { color: var(--link); }
 
 /* ---- 4. landing page: hero ---- */
 .hero { padding: 78px 0 64px; border-bottom: 1px solid var(--line); }
@@ -204,7 +210,7 @@ footer { padding: 40px 0 56px; }
 .foot-meta { font-family: var(--font-mono); font-size: 12px; color: var(--ink-faint); letter-spacing: 0.02em; }
 
 /* a single hairline "thread" flourish under the wordmark in hero */
-.thread-rule { height: 1px; background: linear-gradient(90deg, var(--thread) 0%, var(--line) 60%, transparent 100%); border: none; margin: 0 0 34px; max-width: 260px; }
+.thread-rule { height: 1px; background: linear-gradient(90deg, var(--thread) 0%, var(--weave) 35%, var(--line) 70%, transparent 100%); border: none; margin: 0 0 34px; max-width: 260px; }
 
 /* ============================================================
    5. PROSE — styling for generated Markdown documentation pages.
@@ -257,12 +263,12 @@ footer { padding: 40px 0 56px; }
 
 /* links inside prose carry a subtle underline so they read as references */
 .prose a { text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
-.prose a:hover { text-decoration-color: var(--thread); }
+.prose a:hover { text-decoration-color: var(--link); }
 
 /* blockquote — used for status banners / RFC-2119 callouts */
 .prose blockquote {
   margin: 0 0 22px; padding: 14px 20px;
-  border-left: 3px solid var(--thread);
+  border-left: 3px solid var(--weave);
   background: var(--paper-raised);
   border-radius: 0 var(--radius) var(--radius) 0;
   color: var(--ink-soft);
