@@ -194,6 +194,29 @@ class RecordCommit(unittest.TestCase):
         self.assertFalse(any(c[3] == "push" for c in calls if c[0] == "git"))
         self.assertFalse(any(c[:2] == ["gh", "pr"] for c in calls))
 
+
+    def test_commit_is_signed_off_for_dco_hosts(self) -> None:
+        """#800: the records commit carries -s, as publish's does (#81).
+
+        Records commits land on instances whose hosts gate on the DCO; without the
+        trailer every records commit has to be amended by hand before it can be
+        pushed. `-s` makes git append `Signed-off-by: <committer>` from the identity
+        configured in the instance repo — the same reason publish.py commits with it.
+        """
+        cfg = _cfg(self.tmp, mode="commit")
+        _cycle_bundle(cfg, "1", outcome="accept")
+        calls: list = []
+        with mock.patch.object(record.subprocess, "run", side_effect=self._fake_run(calls)), \
+             redirect_stdout(io.StringIO()):
+            rc = record.record(cfg, today="2026-08-02")
+        self.assertEqual(rc, 0)
+        commits = [c for c in calls if c[3] == "commit"]
+        self.assertEqual(len(commits), 1)
+        commit = commits[0]
+        self.assertEqual(commit[4], "-s")            # signed off, right after the verb
+        self.assertIn("-m", commit)
+        self.assertLess(commit.index("-s"), commit.index("--"))  # before the pathspec
+
     def test_nothing_new_to_commit_is_a_quiet_success(self) -> None:
         cfg = _cfg(self.tmp, mode="commit")
         _cycle_bundle(cfg, "1", outcome="accept")

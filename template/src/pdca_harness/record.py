@@ -114,7 +114,11 @@ def record(cfg: Config, ids: list[str] | None = None, *, dry_run: bool = False,
         # publish stages-then-commits the same way (publish.py:264-268), but there
         # the checkout is dedicated; here it is the instance's own working repo, so
         # the commit must not sweep a human's half-staged work in.
-        git("commit", "-m", subject, "--", *paths),
+        # `-s` appends the Signed-off-by trailer (DCO) from the committer identity, so
+        # a DCO-gated host accepts the records commit by construction — publish commits
+        # the same way for the same reason (publish.py, issue #81). Without it every
+        # records commit has to be amended by hand before it can go up (#800).
+        git("commit", "-s", "-m", subject, "--", *paths),
     ]
     pr_cmd: list[str] | None = None
     if mode == "pr":
