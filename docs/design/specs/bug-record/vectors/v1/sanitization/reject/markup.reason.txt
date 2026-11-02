@@ -1,0 +1,1 @@
+`summary.observed` contains a code span and a URL (§3).

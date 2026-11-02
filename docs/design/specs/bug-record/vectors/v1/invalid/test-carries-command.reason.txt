@@ -1,0 +1,1 @@
+`test` has a `command` member; v1 names no command, the runner command is instance configuration (§4).

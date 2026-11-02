@@ -1,0 +1,1 @@
+`test.path` is `build.rs`, not under a configured test directory (§4); checked against an instance whose test directories are `crates/*/tests/`.

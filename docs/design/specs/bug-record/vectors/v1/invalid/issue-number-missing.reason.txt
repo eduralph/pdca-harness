@@ -1,0 +1,1 @@
+`source.kind` is issue but `source.issue` is null (§2).

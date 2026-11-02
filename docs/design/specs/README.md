@@ -16,6 +16,7 @@ depends on a format.
 |------|-------|--------|
 | The PDCA quality-cycle model (beats, artifacts, automation, gating) | [`template/PCDA/quality-cycle/`](../../../template/PCDA/quality-cycle.md), by reference | Stable; vendored into every rendered project |
 | Bundle document format v1 (`brief.md`, `SUMMARY.md`, the JSON records, the gate marker protocol, the decision tokens) | `bundle-format/v1.md` | Planned — migration step 1, [#712](https://github.com/eduralph/pdca-harness/issues/712) |
+| Bug record v1: the document that carries a bug through the bug track: ownership between leaves and driver, sanitization, integrity (ADR-0020, ADR-0021) | [`bug-record/v1.md`](bug-record/v1.md) | Draft — [#850](https://github.com/eduralph/pdca-harness/issues/850) |
 | Role output schemas | `roles/` | Planned — migration step 3, [#716](https://github.com/eduralph/pdca-harness/issues/716) |
 
 The quality-cycle model stays in `template/PCDA/` so that every rendered project carries the

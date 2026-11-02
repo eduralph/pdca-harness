@@ -1,0 +1,64 @@
+{
+  "format": "pdca.bug-record",
+  "version": 1,
+  "source": {
+    "kind": "scheduled-run",
+    "repository": "getwyrd/wyrd",
+    "issue": null,
+    "run": "nightly-sweep-2026-10-30",
+    "issue_digest": null,
+    "attempt": 1
+  },
+  "summary": {
+    "title": "Concurrent commit to the same inode can report success for both writers",
+    "description": "Two clients saving the same file at the same moment can both be told they succeeded, although only one of their versions is kept.",
+    "impact": "Whoever saved second loses their changes without any error, so data loss goes unnoticed until someone opens the file.",
+    "observed": "When two clients commit new versions of the same file at nearly the same moment, both receive a success response and one version is silently lost.",
+    "expected": "Exactly one commit succeeds; the other receives a version conflict and can retry.",
+    "trigger": "Two writers commit to one file within a short window, after both have read the same prior version.",
+    "areas": [
+      "commit"
+    ],
+    "reported_ref": {
+      "kind": "none",
+      "value": null
+    },
+    "truncated": false
+  },
+  "reproduction": {
+    "status": "reproduced",
+    "test": {
+      "kind": "simulation-seed",
+      "path": "crates/core/tests/commit_conflict.rs",
+      "sha256": "1effffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "seed": "90211"
+    },
+    "signature": null,
+    "results": [
+      {
+        "ref": "main",
+        "commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "runs": 1,
+        "failures": 0,
+        "outcome": "green"
+      },
+      {
+        "ref": "release/0.1",
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "runs": 1,
+        "failures": 1,
+        "outcome": "red"
+      }
+    ],
+    "questions": []
+  },
+  "target": {
+    "decision": "backport-existing",
+    "ref": "release/0.1",
+    "backports": [],
+    "fixing_commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "answered_release": null
+  },
+  "routing": null,
+  "closure": null
+}

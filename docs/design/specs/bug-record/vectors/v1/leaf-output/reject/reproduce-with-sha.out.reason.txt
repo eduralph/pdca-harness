@@ -1,0 +1,1 @@
+Reproduce output carries `test.sha256`; the driver computes it (§7).

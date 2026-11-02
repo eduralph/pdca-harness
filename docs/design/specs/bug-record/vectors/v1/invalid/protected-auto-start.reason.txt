@@ -1,0 +1,1 @@
+`routing.protected` is true but `routing.start` is auto (§6).
