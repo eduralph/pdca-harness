@@ -39,7 +39,7 @@ jobs:
             const pulls = await github.paginate(github.rest.pulls.list, {
               owner, repo, state: 'all', per_page: 100,
             });
-            if (pulls.some(p => p.user?.login === login && p.number !== number)) {
+            if (pulls.some(p => p.user?.login === login && p.number < number)) {
               core.info(`#${number}: ${login} has an earlier PR, not welcoming.`);
               return;
             }
