@@ -150,6 +150,19 @@ chooses mechanically:
   candidate ref:** no fix is built; the issue is answered with the first supported release
   in which the test is green.
 
+A bug red on both `main` and a supported release branch can travel in either direction, and
+the instance sets which one in `pdca.toml`, so no model chooses it:
+
+- **Main first (the default):** as above: the fix is built on `main` and backported.
+- **Release first:** for an instance that must ship a fix before `main` is ready to release.
+  The fix is built on the newest supported release branch where the test is red, then that
+  branch is merged forward to `main`, with the same test as the red leg of the merge's cycle.
+  Older supported release branches where the test is red get backports.
+
+Bundle ids, branches and trailers follow the ref, not the order, so the cycle landing on
+`main` still closes the issue. The merge forward takes the place of the fix on `main` in the
+budget of section 6.
+
 ### 5. Protected paths
 
 Each instance lists in `pdca.toml` the paths whose bugs always need a maintainer's go before
@@ -355,7 +368,7 @@ Verify multiplies runner time by `runs` per candidate ref and adds a container p
 it is the price of evidence that means something.
 
 Follow-on work, sequenced in proposal 0003: the `pdca.toml` keys (test directories, runner
-command, protected paths, supported releases, `runs`, attempts, the poll schedule, the
+command, protected paths, supported releases, the fix direction, `runs`, attempts, the poll schedule, the
 per-batch limit, the job limit, the redaction list), the poll and batch commands, the
 `track:*` labels and the required check for the bundle pull request, the summarize and
 reproduce roles, the verify job and its parser, the `PDCA-FAILURE-AT:` marker, the README

@@ -113,7 +113,9 @@ test only (ADR-0020 §7); no fix is built yet.
    `pdca try` refused for bug bundles. Publish runs in the driver container or, by
    configuration, only from a maintainer's checkout.
 5. **Backports.** One cycle per supported release branch, with the same test, published
-   with it, id `issue_<n>-r<X.Y>` and branch `bugfix/<n>-r<X.Y>` for `release/X.Y`.
+   with it, id `issue_<n>-r<X.Y>` and branch `bugfix/<n>-r<X.Y>` for `release/X.Y`. An
+   instance can set release first instead (ADR-0020 section 4): the release cycle comes first
+   and merges forward to `main`, with the same ids and branches.
 6. **Delegation.** `track:needs-plan` on budget exhaustion and on protected paths; the
    bundle pull request with the test only.
 
