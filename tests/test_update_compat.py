@@ -52,15 +52,17 @@ def _commit(repo: Path, message: str) -> None:
     _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", message)
 
 
-def prior_release_ref() -> str | None:
-    """The newest `vX.Y.Z` tag in this checkout, or None if there are none.
+def prior_release_ref(repo: Path = REPO) -> str | None:
+    """The newest `vX.Y.Z` tag reachable from HEAD, or None if there are none.
 
     DERIVED, never hardcoded: a pinned version would rot at every release. None means the
     caller should skip — a shallow clone has no tags, which is a missing precondition and
-    not a failure.
+    not a failure. Reachable, because a checkout of `release/X.Y` also holds the tags of
+    later releases, and updating from one of those would be a downgrade.
     """
     try:
-        out = _git_out(REPO, "tag", "--list", "v[0-9]*", "--sort=-v:refname")
+        out = _git_out(repo, "tag", "--list", "v[0-9]*", "--merged", "HEAD",
+                       "--sort=-v:refname")
     except subprocess.CalledProcessError:  # pragma: no cover - not a git checkout
         return None
     tags = [t for t in out.split() if re.fullmatch(r"v\d+\.\d+\.\d+", t)]
@@ -233,6 +235,26 @@ def render_prior_edit_and_update(tmp: Path, prior: str) -> tuple[dict | None, st
             "copier update did not advance the instance to v_new; the answers file still "
             f"records:\n{answers}")
     return load_updated_config(out)
+
+
+class PriorReleaseRef(unittest.TestCase):
+    """The prior release is the newest one on this line, not the newest in the repository."""
+
+    def test_a_later_release_on_another_line_is_not_the_prior_release(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            _git(repo, "init", "-q")
+            _commit(repo, "v1.1.0")
+            _git(repo, "tag", "v1.1.0")
+            _git(repo, "branch", "release/1.1")
+            _commit(repo, "v1.2.0")
+            _git(repo, "tag", "v1.2.0")
+            self.assertEqual(prior_release_ref(repo), "v1.2.0")
+            _git(repo, "checkout", "-q", "release/1.1")
+            self.assertEqual(prior_release_ref(repo), "v1.1.0")
+            _commit(repo, "v1.1.1")
+            _git(repo, "tag", "v1.1.1")
+            self.assertEqual(prior_release_ref(repo), "v1.1.1")
 
 
 class UpdateCompat(unittest.TestCase):
