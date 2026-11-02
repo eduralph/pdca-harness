@@ -730,7 +730,14 @@ class Config:
         worktree = bool(driver_cfg.get("worktree", True))  # issue #94; on by default
         overflow = max(0, int(driver_cfg.get("overflow", 0)))  # issue #226; 0 ⇒ heal in place
         lane_preflight = driver_cfg.get("lane_preflight", "")  # issue #213
-        wave_mode = driver_cfg.get("wave_mode", "stack")  # #wave-model: stack | merge
+        # #wave-model: stack | merge. An unknown value is refused, never replaced (issue #842):
+        # the ValueError stops the run before any work, and the CLI prints it as one line and
+        # exits 2. The match is exact on purpose: every check compares with `==`, so folding
+        # case or whitespace would start merging PRs for an instance that does not merge today.
+        # The type comes first so that every TOML value is refused the same way.
+        wave_mode = driver_cfg.get("wave_mode", "stack")
+        if not isinstance(wave_mode, str) or wave_mode not in ("stack", "merge"):
+            raise ValueError(f"[driver].wave_mode {wave_mode!r} is not one of stack | merge")
         merge_method = driver_cfg.get("merge_method", "merge")  # merge | squash | rebase
         # Check-rollup policy for merge mode (issue #413). An unknown value falls back to
         # "all" with a note — the fail-safe direction is the STRICTER reading (verify the
