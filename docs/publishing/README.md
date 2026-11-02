@@ -53,8 +53,11 @@ stylesheet and templates live here under `publishing/`. CI overwrites pdca.dev's
     ├── governance/*.md      ← GOVERNANCE, CODE_OF_CONDUCT          → /governance/…
     ├── index.yml         ← landing page as structured content → /
     └── publishing/       ← build tooling + site inputs (not published)
+        ├── brand/         ← logo sources (avatar.svg, og.svg); not published
         ├── site/
         │   ├── assets/style.css
+        │   ├── assets/og.png      ← social card, rendered from brand/og.svg
+        │   ├── favicon.svg, favicon.ico, apple-touch-icon.png
         │   ├── CNAME      ← pdca.dev
         │   └── .nojekyll
         ├── templates/
