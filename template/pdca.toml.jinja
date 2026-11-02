@@ -128,7 +128,9 @@ overflow = 0
 #       non-final wave's PRs so the next wave builds on the genuinely-merged base. Needs
 #       MERGE RIGHTS on the base remote (a fork contributor lacks them upstream — keep
 #       "stack" there) and relaxes the STOP discipline for the batch. Fail-closed: a
-#       non-mergeable PR stops the run.
+#       non-mergeable PR stops the run. Each PR it tries is marked (`merge_eligible` in
+#       publish.json), and a later merge-mode run merges a marked prerequisite through the
+#       same gates before wave 0; an unmarked one holds its dependent until merged by hand.
 #       A wave's PRs merge one after another, so under merge_requires = "all" a PR found
 #       BEHIND its base (an earlier PR of the wave just merged) is first brought up to date
 #       and its new head verified again before it merges — see merge_requires. Turn on

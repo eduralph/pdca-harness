@@ -71,6 +71,10 @@ it there, not by editing this file (so `copier update` keeps the rules current).
   after an update:** the head that merges is then a merge commit of the reviewed PR branch
   with the newer base. Check reviewed `patch.diff`, not that combination; the combination
   is verified by the PR's own CI (the green rollup the driver reads), not by a reviewer.
+  A non-final wave's PR that did not merge stays marked (`merge_eligible` in its
+  `publish.json`), and a later merge-mode run that drives a bundle waiting for it may
+  merge it before wave 0 through the same sequence; a refusal there holds only that
+  bundle. To keep such a PR for yourself, close it or remove the key.
   `merge_requires = "required"` skips all of this but the target-base check, and trusts
   the host's branch protection, stale base included. A fork keeps the default
   `wave_mode = "stack"`, where nothing is ever readied or merged for you.

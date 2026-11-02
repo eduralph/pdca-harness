@@ -5,7 +5,7 @@ in a database" — so two ``pdca flow`` runs over the same bundle have nothing t
 on: they write the same artifacts with no ordering between them. Act's session lock
 (:func:`act.act_session`) states the rule for Act's one shared resource; this module states
 it for bundles, on every CLI drive path (named ids, the CSV batch's in-flight sweep, split
-adoption):
+adoption) and on merge mode's merge of a prerequisite before wave 0 (#839):
 
 * **A run claims a bundle before it drives it, and keeps the claim for the rest of its
   life.** A claim is an exclusive, NON-blocking advisory lock (the cross-platform
@@ -16,7 +16,8 @@ adoption):
   run claimed and then decided NOT to drive (a named id it skips, a swept bundle the
   scheduler holds, an adopted child the reschedule drops): the run never touches it again,
   and the resume command it prints for that bundle must not be refused by the run that
-  printed it.
+  printed it. Merge mode's pre-wave step (``flow._merge_prereqs``) is the other: it drives no
+  prerequisite, it only judges and merges one, so a claim it took lasts as long as that step.
 * **A claim that cannot be recorded refuses, exactly as a claim another run holds does.**
   A bundle driven without a claim has nothing keeping a second run off it, so a claim file
   that cannot be opened or locked (an unwritable process dir, a filesystem without locks)
@@ -222,6 +223,11 @@ class Run:
                        "`flow` run off it",
                        f"make {path.parent} a writable directory on a filesystem that "
                        "supports file locks")
+
+    def holds(self, d: Path) -> bool:
+        """Whether this run holds the claim on ``d`` already, under any alias of it: a caller
+        that takes a claim for a moment must not let go of one it found here (#839)."""
+        return _claim_file(self.cfg, d) in self._held
 
     def release(self, d: Path) -> None:
         """Give up the claim on ``d`` — a bundle this run claimed and then decided not to

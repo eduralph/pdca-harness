@@ -347,13 +347,25 @@ class OutOfBatchPrereqHold(unittest.TestCase):
         self._built("D", "U")
         self.assertEqual(self.gh_calls, [])
 
-    def test_merge_mode_holds_nothing(self):
+    def test_merge_mode_holds_a_dependent_of_an_unmerged_prereq(self):
+        # #839 reverses #647's merge-mode exemption on purpose: D used to build on a base
+        # without P. An unmarked P is never merged, so `gh` is asked only for its state.
         self.cfg.wave_mode = "merge"
         self._prereq(pr="OPEN")
         self._du()
         self._run("ids", ["D", "U"])
-        self._built("D", "U")
-        self.assertEqual(self.gh_calls, [])
+        self.assertNotIn("issue_D", self.built, self.err)
+        self.assertEqual(self.results["D"], state.PLANNED)
+        self._built("U")
+        line = next(x for x in self.err.splitlines() if "issue_D held" in x)
+        self.assertIn("issue_P", line)
+        self.assertIn("not merged into main", line)
+        self.assertIn("merge the PR by hand", line)
+        self.assertNotIn("line of this run", line)
+        self.assertNotIn("carries them", line)
+        self.assertTrue(self.gh_calls)
+        for call in self.gh_calls:
+            self.assertEqual(call[:3], ["gh", "pr", "view"], call)
 
     def test_a_dry_run_asks_no_host_and_holds_nothing(self):
         self.cfg = _cfg(self.tmp, publisher="stub")
