@@ -108,11 +108,12 @@ test only (ADR-0020 §7); no fix is built yet.
    the driver from the pull request's state at the next batch.
 4. **Publish as code.** Apply the recorded diff to the recorded base, write the recorded
    test's bytes at its path (hash checked against the record) so the published tree is the
-   verified one, commit both with the publisher leaf's text, push `bugfix/<n>`, open the draft pull request on the target;
+   verified one, commit both with the publisher leaf's text, push `bugfix/<n>` (a
+   backport: `bugfix/<n>-r<X.Y>`), open the draft pull request on the target;
    `pdca try` refused for bug bundles. Publish runs in the driver container or, by
    configuration, only from a maintainer's checkout.
 5. **Backports.** One cycle per supported release branch, with the same test, published
-   with it, id `issue_<n>-r<ref>`.
+   with it, id `issue_<n>-r<X.Y>` and branch `bugfix/<n>-r<X.Y>` for `release/X.Y`.
 6. **Delegation.** `track:needs-plan` on budget exhaustion and on protected paths; the
    bundle pull request with the test only.
 

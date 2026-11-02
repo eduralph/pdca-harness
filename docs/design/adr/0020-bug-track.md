@@ -72,7 +72,7 @@ accept, unchanged. ("Track", not "lane": lanes are the parallel worktrees of §8
    pdca repository with the bundle (section 7). Merging it is the accept.
 8. **Publish.** After accept, the regular publish: a `bugfix/<n>` branch with the diff and
    the recorded test, and a draft pull request on the target repository, pushed by the
-   driver as code (section 7). A backport carries the same test.
+   driver as code (section 7). A backport carries the same test and has its own branch.
 
 Failing tests from an instance's own scheduled runs (a simulation seed sweep, a nightly
 conformance run) enter at stage 4: they are reproduced already and were not written by a
@@ -190,9 +190,12 @@ repository and opens a draft pull request:
 applies the recorded diff to the recorded base commit, writes the recorded test's bytes at
 its path when Reproduce created a new test (checking their SHA-256 against the record), so
 the published tree is the tree that was verified and the target's CI gains the regression
-test, commits both with the text the publisher leaf wrote into the bundle, pushes `bugfix/<n>` and opens the draft pull request on the
-target repository; Codex review and the maintainer's ready-mark and merge follow as for every
-cycle. The target's CI runs the code only after a human accepted those exact bytes. The
+test, commits both with the text the publisher leaf wrote into the bundle, pushes the
+bundle's branch and opens the draft pull request on the target repository. The branch is
+`bugfix/<n>` for the fix on `main` and `bugfix/<n>-r<X.Y>` for the backport to
+`release/X.Y`, after the bundle id (section 8), so each cycle's verified tree has its own
+branch and pull request. Codex review and the maintainer's ready-mark and merge follow as
+for every cycle. The target's CI runs the code only after a human accepted those exact bytes. The
 credential that pushes is scoped to `bugfix/*` and lives in the driver container (ADR-0021
 §4), or publish runs from the maintainer's machine if the operator prefers no target
 credential there. `pdca try` is refused for bug bundles; the verify log and the reviewer's
@@ -203,7 +206,7 @@ hand is a NEEDS-HUMAN item.
 
 Bug bundles are ordinary bundles under the grouped layout of #856: `results/<group>/`,
 grouped by the issue's milestone at creation or `unscheduled`, with ids `issue_<n>` for the
-fix on `main` and `issue_<n>-r<ref>` for each backport (whose trailer is `Refs #<n>`, so
+fix on `main` and `issue_<n>-r<X.Y>` for the backport to `release/X.Y` (whose trailer is `Refs #<n>`, so
 only the main fix closes the issue). The bug record, its MAC and a README rendered from the
 record sit in the `issue_<n>` bundle. A track that ends without a fix (not reproduced,
 flaky, duplicate, answered, delegated, withdrawn) needs no decision, so the driver commits

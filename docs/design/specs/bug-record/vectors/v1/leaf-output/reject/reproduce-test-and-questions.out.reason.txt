@@ -1,1 +1,1 @@
-`questions` together with a `test` are rejected, not dropped (§7).
+A non-null `test` together with non-empty `questions` is rejected, not dropped (§7).
