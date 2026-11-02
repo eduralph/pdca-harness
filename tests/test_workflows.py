@@ -10,6 +10,7 @@ into every instance (template/.github/workflows/*.jinja), issue #816:
 - the template uses the same pin as the repo for each action it shares with it.
   Dependabot updates only .github/workflows/*.yml, so its PR fails here until the
   template follows.
+- a `pull_request_target` workflow neither checks out code nor interpolates event data.
 
 Reads files only; no copier, no network.
 Run with: python -m unittest tests.test_workflows
@@ -80,6 +81,15 @@ class Workflows(unittest.TestCase):
         self.assertTrue(template_workflows(REPO), "no template workflow found")
         found = [p for path in files for p in problems(path)]
         self.assertEqual(found, [])
+
+    def test_pull_request_target_never_checks_out(self) -> None:
+        """That trigger runs with write access, so it must not touch the PR's code."""
+        for path in workflows(REPO):
+            text = path.read_text(encoding="utf-8")
+            if re.search(r"^\s*pull_request_target:", text, re.M):
+                with self.subTest(path.name):
+                    self.assertNotIn("actions/checkout", text)
+                    self.assertNotIn("${{ github.event", text)
 
     def test_template_uses_the_repos_pins(self) -> None:
         own = pins(workflows(REPO))
