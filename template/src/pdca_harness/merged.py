@@ -30,10 +30,14 @@ The fold and the pre-wave carry ask it too, for a merged PR whose head is on nei
 nor the line: a merge commit on the base then means a squash or rebase merge
 (``integrate._squash_merged``, #626). So does the flow's readiness check, for a merge whose
 record does not count (:func:`counts_into`): only a drop of the edge ends that hold.
+:func:`has_patch` answers what comes before all of these (#839): does a bundle ship anything
+to merge, and can that even be read? :func:`marked_for_this_patch` answers the one after it:
+is that still the patch a PR's merge marker was written for?
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -41,6 +45,10 @@ from pathlib import Path
 
 from . import state
 from .config import Config
+
+# The record's key beside ``merge_eligible`` (#839): :func:`patch_hash` of the patch that
+# marker was written for.
+MARKED_PATCH = "merge_eligible_patch"
 
 
 def is_merged(cfg: Config, dep_id: str) -> bool:
@@ -88,13 +96,14 @@ def merged_into(cfg: Config, dep_id: str, repo: str, base: str) -> bool:
     Otherwise as :func:`is_merged`: a close/no-fix prereq (COMPLETE, empty or no patch) ⇒
     ``True``; not COMPLETE, or no recorded PR ⇒ ``False``. Fail-closed: a ``gh`` failure,
     ``gh`` missing included (:func:`pr_state` guards it), is "not merged", said on stderr —
-    never a traceback. Only ``flow._runnable`` calls it; :func:`is_merged` and its callers
-    keep their answer."""
+    never a traceback; a ``patch.diff`` that cannot be read is no close/no-fix, so its record
+    decides (:func:`has_patch`, #839). Only ``flow._runnable`` and the pre-wave merge
+    (``flow._merge_prereqs``, #839) call it; :func:`is_merged` and its callers keep their
+    answer."""
     d = cfg.find_bundle(dep_id)  # a merged prereq may be archived to completed/ (#171)
     if state.state(d) != state.COMPLETE:
         return False
-    patch = d / "patch.diff"
-    if not patch.is_file() or not patch.read_text(encoding="utf-8").strip():
+    if has_patch(d) is False:
         return True  # close/no-fix disposition — no contribution to wait on
     rec = _publish_record(d)
     pr_url = rec.get("pr_url") if isinstance(rec, dict) else None
@@ -214,6 +223,38 @@ def _pr_view(pr_url: str, fields: str) -> dict | None:
     except ValueError:
         return None
     return info if isinstance(info, dict) else None
+
+
+def has_patch(d: Path) -> bool | None:
+    """Does bundle ``d`` ship a contribution? ``True``: a non-empty ``patch.diff``. ``False``:
+    none, or an empty one (a close/no-fix). ``None``: one that cannot be read (not text, or a
+    read that failed), which may hold anything, so it is neither: merge mode waits on it and
+    never merges it for a dependent (#839). A bundle file can be in any state, so this never
+    raises, and a run is not lost to one bad bundle."""
+    patch = d / "patch.diff"
+    try:
+        return patch.is_file() and bool(patch.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):   # ValueError covers a bad decode
+        return None
+
+
+def patch_hash(d: Path) -> str | None:
+    """The sha256 of bundle ``d``'s ``patch.diff`` as it is now, every byte counting, or
+    ``None`` when it cannot be read (#839)."""
+    try:
+        return hashlib.sha256((d / "patch.diff").read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def marked_for_this_patch(d: Path, rec: dict) -> bool:
+    """Was the merge marker in ``d``'s record ``rec`` written for the ``patch.diff`` ``d`` holds
+    now (#839)? The record survives an iterate, so after a rebuild that never reached the PR
+    (a publish that failed before its push, or ``--no-publish``) the marker is still there and
+    the PR's head is still the older attempt. A marker with no hash says nothing about that
+    head, so it is not trusted either."""
+    now = patch_hash(d)
+    return now is not None and rec.get(MARKED_PATCH) == now
 
 
 def _publish_record(d: Path) -> dict | None:

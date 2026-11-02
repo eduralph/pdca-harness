@@ -9,12 +9,12 @@ non-final wave's PRs (``gh pr merge``) and fetches the base, so the next wave's 
 (which resets to ``<base_remote>/<base>``) builds on the merged result.
 
 Fail-closed: a PR that does not merge — a conflict, a failing required check, no merge
-rights — returns non-zero so the caller STOPs; the next wave must never build on an
-unmerged base. Idempotent (a resumed run skips an already-merged PR). Merging is
-deterministic ``git``/``gh`` (no model); dry-run (stubbed publisher) prints the plan and
-merges nothing. The harness's own ``gh pr merge`` runs in the orchestrator, outside the
-``builder_guard`` hook that blocks the model leaves from merging — exactly as publish's
-``gh pr create`` does.
+rights — returns non-zero so the caller STOPs (or, before wave 0, holds the PR's dependents:
+issue #839); the next wave must never build on an unmerged base. Idempotent (a resumed run
+skips an already-merged PR). Merging is deterministic ``git``/``gh`` (no model); dry-run
+(stubbed publisher) prints the plan and merges nothing. The harness's own ``gh pr merge``
+runs in the orchestrator, outside the ``builder_guard`` hook that blocks the model leaves
+from merging — exactly as publish's ``gh pr create`` does.
 
 "Never on an unmerged base" is only half the rule: the next wave must never build on a
 base whose verification was not GREEN either, and ``gh pr merge``'s own refusal cannot
@@ -101,12 +101,22 @@ bundle's ``"stacked"`` record names the remote it pushed to, which may be a thir
 not reached from ``_merge_one``, which refuses a ``"stacked"`` record (issue #658) before
 it reads the head.
 
-Merge mode readies and merges only a PR this run opened for the bundle (a ``"new-pr"`` /
-``"stacked-pr"`` record). A ``"stacked"`` record is one commit added to an EXISTING PR —
-possibly someone else's, with other work on it and any base — so ``_merge_one`` refuses it
-(issue #658) before any ``gh`` call for that PR, in a dry run too, and whether or not the
-PR already reads merged, as ``merged.merged_into`` and the fold (``integrate._gone_branch``)
-never trust such a record either.
+Merge mode readies and merges only a PR opened for the bundle (a ``"new-pr"`` /
+``"stacked-pr"`` record) that a merge-mode run opened as a non-final wave: this run's, or one
+an earlier run marked (issue #839). ``merge_wave`` writes ``publish.json["merge_eligible"] =
+true`` on each PR it attempts that this run pushed, with the hash of its ``patch.diff``
+beside it (``merged.MARKED_PATCH``), before the first ``gh pr ready``, and a later merge-mode
+run may ready and merge a marked PR that is still open, and whose bundle still holds that
+patch, once its gates pass (``flow._merge_prereqs``, before wave 0, for a prerequisite of a
+bundle it drives, while it holds that prerequisite's claim). A re-publish writes a fresh
+record without either key. An unmarked PR, a final-wave or single-bundle PR waiting for the
+human among them, is never readied or merged on that path. A refusal on it holds only the
+dependents, so its message says who is held and what clears it (``_next``) instead of "later
+waves are NOT run". A ``"stacked"`` record is one commit added to an EXISTING PR — possibly
+someone else's, with other work on it and any base — so ``_merge_one`` refuses it (issue
+#658) before any ``gh`` call for that PR, in a dry run too, and whether or not the PR already
+reads merged, as ``merged.merged_into`` and the fold (``integrate._gone_branch``) never trust
+such a record either.
 
 A PR merges only into its bundle's own target base (issue #500), the ``Repo + branch
 target`` publish resolves (``publish._resolve_target``), and only when that base exists
@@ -149,12 +159,18 @@ _ROLLUP_PENDING = frozenset({"pending"})
 
 
 def merge_wave(cfg: Config, bundles: list[Path], *, dry_run: bool = False,
-               method: str = "merge") -> int:
+               method: str = "merge", pushed: set[str] | None = None) -> int:
     """Merge each accepted bundle's PR into its base, then fetch the base. Return 0 iff
-    every bundle merged (or had nothing to merge); non-zero (STOP) on the first failure."""
+    every bundle merged (or had nothing to merge); non-zero (STOP) on the first failure.
+    Its only caller runs it for a non-final wave, so each PR it attempts is marked for a
+    later merge-mode run (``mark``, issue #839), unless this run pushed no branch for it
+    (``pushed``: the names of the bundles that did; ``None``: all of them). The record of
+    such a bundle is an earlier attempt's, so the hash marked beside it would name a patch
+    its PR does not hold, and a later run would merge that PR's older head for it."""
     fetched: set[str] = set()
     for d in bundles:
-        rc = _merge_one(cfg, d, dry_run=dry_run, method=method, fetched=fetched)
+        rc = _merge_one(cfg, d, dry_run=dry_run, method=method, fetched=fetched,
+                        mark=pushed is None or d.name in pushed)
         if rc:
             return rc
     return 0
@@ -493,12 +509,27 @@ def _undo_ready(pr_url: str) -> None:
               "— it is left marked ready; a human must re-draft it.", file=sys.stderr)
 
 
-def _refuse(d: Path, pr_url: str, why: str) -> int:
-    """Decline to merge ``d``'s already-readied PR (issue #531): say why, STOP, and undo
-    the ready-mark (``_undo_ready``), as every other refusal in ``_merge_one`` does."""
-    print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. STOP: later waves are "
-          "NOT run; resolve at the PR, then re-run (the run resumes idempotently).\n",
-          file=sys.stderr)
+# What clears a refusal before wave 0 (issue #839): the PR's own problem, or one whose reason
+# may lie elsewhere (a failed fetch, a head missing from the checkout), which the reason names.
+_AT_THE_PR = "resolve at the PR, then re-run"
+_THAT = "resolve that, then re-run"
+
+
+def _next(held: str | None, wave_text: str, todo: str = _AT_THE_PR) -> str:
+    """What a ``_merge_one`` refusal ends with. At a wave boundary (``held`` None) the run
+    stops: ``wave_text``. Before wave 0 (issue #839) the run goes on, so it says who waits
+    for this PR (``held``, "<dependent> is held") and ``todo``, what clears this refusal."""
+    return wave_text if held is None else f"{held}; {todo}."
+
+
+def _refuse(d: Path, pr_url: str, why: str, held: str | None = None,
+            todo: str = _AT_THE_PR) -> int:
+    """Decline to merge ``d``'s already-readied PR (issue #531): say why, STOP (or who is held
+    and what clears it, ``_next``), and undo the ready-mark (``_undo_ready``), as every other
+    refusal in ``_merge_one`` does."""
+    end = _next(held, "STOP: later waves are NOT run; resolve at the PR, then re-run (the run "
+                      "resumes idempotently).", todo)
+    print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. {end}\n", file=sys.stderr)
     _undo_ready(pr_url)
     return 1
 
@@ -729,9 +760,12 @@ def _target_base(cfg: Config, d: Path, pr_url: str) -> tuple[str, str]:
 
 
 def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
-               fetched: set[str]) -> int:
+               fetched: set[str], mark: bool = False, held: str | None = None) -> int:
     """Merge one bundle's recorded PR (idempotent, fail-closed). ``fetched`` dedupes the
-    post-merge base fetch across bundles that share a checkout."""
+    post-merge base fetch across bundles that share a checkout. ``mark`` (``merge_wave``
+    only, issue #839) records that a merge-mode run opened this PR as a non-final wave.
+    ``held`` ("<dependent> is held") is the pre-wave merge of a prerequisite, where the run
+    goes on: each refusal says that and what clears it, in place of its "STOP" (``_next``)."""
     if state.state(d) != state.COMPLETE:
         return 0  # not accepted — nothing of this bundle's to merge
     patch = d / "patch.diff"
@@ -748,24 +782,28 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
     pr_url = rec.get("pr_url") if rec else None
     repo_spec = rec.get("repo") if rec else None
     if not pr_url:
-        print(f"merge: {d.name} is COMPLETE but has no recorded PR — cannot merge a wave "
-              "whose member wasn't published. STOP.", file=sys.stderr)
+        end = _next(held, "cannot merge a wave whose member wasn't published. STOP.",
+                    "publish it, then re-run")
+        print(f"merge: {d.name} is COMPLETE but has no recorded PR — {end}", file=sys.stderr)
         return 1
     # Issue #658: an `Onto branch` bundle's `"stacked"` record is one commit added to an
     # EXISTING PR (`publish._publish_stacked`), which may be someone else's, carry other
-    # work, and target any base. Merge mode readies and merges only the PRs this run
-    # opened, so it refuses such a record here, before any `gh` call for it (nothing to
-    # undo), and above the dry-run plan and the `is_merged` skip: a dry run prints no
-    # merge for it, and a PR that already reads merged is refused all the same, as
+    # work, and target any base. Merge mode readies and merges only the PRs a merge-mode
+    # run opened (issue #839), so it refuses such a record here, before any `gh` call for
+    # it (nothing to undo), and above the dry-run plan and the `is_merged` skip: a dry run
+    # prints no merge for it, and a PR that already reads merged is refused all the same, as
     # `merged.merged_into` never counts a `"stacked"` record merged either.
     if rec.get("mode") == "stacked":
+        end = _next(held, "STOP: later waves are NOT run. Run this batch in the "
+                          "default [driver] wave_mode = \"stack\", or take this bundle out of "
+                          "this merge-mode batch, then re-run. The PR itself stays the human's "
+                          "to ready or merge, but doing so does not let this merge-mode run "
+                          "continue: its record is refused the same way merged or not.",
+                    "merging that PR does not count, so get its work onto the base, remove the "
+                    "edge to it from the dependent's brief, then re-run")
         print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — it is an `Onto branch` "
               "commit added to an existing PR, and merge mode does not ready or merge a PR "
-              "this run did not open. STOP: later waves are NOT run. Run this batch in the "
-              "default [driver] wave_mode = \"stack\", or take this bundle out of this "
-              "merge-mode batch, then re-run. The PR itself stays the human's to ready or "
-              "merge, but doing so does not let this merge-mode run continue: its record "
-              "is refused the same way merged or not.\n", file=sys.stderr)
+              f"this run did not open. {end}\n", file=sys.stderr)
         return 1
 
     cmd = ["gh", "pr", "merge", str(pr_url), f"--{method}"]
@@ -775,14 +813,33 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
     iid = d.name.removeprefix("issue_")
     if merged.is_merged(cfg, iid):
         return 0  # already merged (a resumed run) — idempotent
+    # Issue #839: the marker goes on before anything below can refuse, so a PR stopped at
+    # the settings, its base, the ready-mark, the rollup or the merge is still marked: a
+    # later merge-mode run may try it again. It grants nothing by itself; the gates still
+    # run each time. The hash of patch.diff goes beside it, tying it to the patch this PR
+    # was published from: a later rebuild that never reaches the PR does not inherit it
+    # (`flow._merge_prereqs`), and a record already marked keeps the hash it has. In one
+    # step, so a failed write cannot tear the record the rest of this function and every
+    # later run read; a PR left unmarked by one is the safe default (its dependents hold
+    # until it merges), so it stops nothing.
+    if mark and rec.get("merge_eligible") is not True:
+        rec["merge_eligible"] = True
+        rec[merged.MARKED_PATCH] = merged.patch_hash(d)
+        try:
+            leaves._replace_record(d / "publish.json", json.dumps(rec, indent=2) + "\n")
+        except OSError as e:
+            print(f"   merge: could not mark {d.name} in publish.json ({e}); if it does not "
+                  "merge now, a later run will not merge it for you", file=sys.stderr)
     # Issue #621: a malformed [driver].expected_checks fails closed. Config.load keeps the
     # list empty and records why; merging on that empty list would be the weakest reading
     # of a setting the operator wrote to be stricter. Refused before the ready-mark, so the
     # PR stays a draft with nothing to undo.
     if cfg.expected_checks_error:
+        end = _next(held, "STOP: later waves are NOT run; fix the setting in pdca.toml, then "
+                          "re-run (the run resumes idempotently).",
+                    "fix the setting in pdca.toml, then re-run")
         print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — "
-              f"{cfg.expected_checks_error}. STOP: later waves are NOT run; fix the setting "
-              "in pdca.toml, then re-run (the run resumes idempotently).\n", file=sys.stderr)
+              f"{cfg.expected_checks_error}. {end}\n", file=sys.stderr)
         return 1
     # Issue #500: merge only into the bundle's own target base, and only when that base
     # exists independently of this run (#411) — never into whatever base the PR carries.
@@ -791,9 +848,12 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
     # ready-mark to undo: not `_refuse`, which always undoes one.
     target, why = _target_base(cfg, d, str(pr_url))
     if why:
-        print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. STOP: later waves "
-              "are NOT run, and the PR is left draft or ready, as it was. Re-run once that "
-              "is resolved (the run resumes idempotently).\n", file=sys.stderr)
+        end = _next(held, "STOP: later waves are NOT run, and the PR is left draft or ready, "
+                          "as it was. Re-run once that is resolved (the run resumes "
+                          "idempotently).",
+                    "the PR is left draft or ready, as it was; re-run once that is resolved")
+        print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. {end}\n",
+              file=sys.stderr)
         return 1
     # The host now reports the PR on `target`, so the record must too: `merged.merged_into`
     # compares the record's `base` with a dependent's target, and a record still naming the
@@ -805,16 +865,18 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
 
     # The publisher opens every PR as a draft (STOP discipline), but `gh pr merge` refuses a
     # draft — so in merge mode a non-final wave's PRs must be readied before they can advance
-    # the base (issue #279). `merge_wave` is only called for non-final waves, so this readies
-    # exactly the PRs about to be merged; the final wave never reaches here and keeps its
-    # draft for the human's ready-mark. Idempotent: `gh pr ready` on an already-ready PR is a
-    # no-op. Fail-closed like the merge itself — if it can't be readied, it can't be merged.
+    # the base (issue #279). `merge_wave` is only called for non-final waves, and the pre-wave
+    # merge only for a PR one of those calls marked (issue #839), so this readies exactly the
+    # PRs about to be merged; a final-wave PR never reaches here, in this run or a later one,
+    # and keeps its draft for the human's ready-mark. Idempotent: `gh pr ready` on an
+    # already-ready PR is a no-op. Fail-closed like the merge itself — if it can't be readied,
+    # it can't be merged.
     print(f"→ gh pr ready {pr_url}")
     ready = subprocess.run(["gh", "pr", "ready", str(pr_url)], capture_output=True, text=True)
     if ready.returncode != 0:
         print((ready.stderr or ready.stdout).strip(), file=sys.stderr)
-        print(f"\n!!! merge: {d.name} ({pr_url}) could not be marked ready to merge. "
-              "STOP: later waves are NOT run; resolve at the PR, then re-run.\n",
+        end = _next(held, "STOP: later waves are NOT run; resolve at the PR, then re-run.")
+        print(f"\n!!! merge: {d.name} ({pr_url}) could not be marked ready to merge. {end}\n",
               file=sys.stderr)
         return 1
 
@@ -840,7 +902,7 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
         # rollup of the combination that merges.
         if not repo_spec:
             return _refuse(d, pr_url, "its publish record names no repo, so there is no "
-                                      "checkout to read its base in")
+                                      "checkout to read its base in", held, _THAT)
         repo = publish._checkout_path(cfg, repo_spec)
         # Issue #650: the head is read where publish put the branch, from the record as the
         # fold reads it. A `"stacked"` record (whose remote may be neither the base remote
@@ -851,7 +913,7 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
         # a base edited on the host since is refused before anything is updated against it.
         head, tip, behind, why = _base_read(cfg, repo, pub, str(pr_url), target=target)
         if behind is None:
-            return _refuse(d, pr_url, why)
+            return _refuse(d, pr_url, why, held, _THAT)
         if behind:
             print(f"   head {head[:12]} lacks base commit {tip[:12]} — bringing it up to date")
             print(f"→ gh pr update-branch {pr_url}")
@@ -861,13 +923,13 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
                 print((up.stderr or up.stdout).strip(), file=sys.stderr)
                 return _refuse(d, pr_url, "it is behind its base and could not be brought up "
                                "to date (`gh pr update-branch` failed: a conflict with the "
-                               "base, the update refused, or a `gh` too old for it)")
+                               "base, the update refused, or a `gh` too old for it)", held)
             # GitHub may apply the update after the command returns: poll for it, charged
             # to the same merge_wait_secs budget the rollup wait below then gets.
             head, waited, why = _wait_for_update(cfg, repo, pub, str(pr_url), head, tip,
                                                  cfg.merge_wait_secs)
             if not head:
-                return _refuse(d, pr_url, why)
+                return _refuse(d, pr_url, why, held, _THAT)
             print(f"   updated: head {head[:12]} contains base commit {tip[:12]}")
         else:
             print(f"   head {head[:12]} contains base commit {tip[:12]} — up to date")
@@ -888,13 +950,19 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
                          f"— {detail}; absence of evidence is not green",
                 "unreadable": f"the check rollup could not be read — {detail}",
             }[verdict]
-            print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. The host's "
-                  "required-checks config is not enough: this wave's base must be green "
-                  "before the next wave builds on it. STOP: later waves are NOT run; "
-                  "re-run once the checks are green (the run resumes idempotently), or set "
-                  "[driver] merge_requires = \"required\" to merge on the host's required "
-                  "checks alone, or raise [driver] merge_wait_secs if the checks just take "
-                  "longer than that to report.\n", file=sys.stderr)
+            end = _next(held, "The host's required-checks config is not enough: this wave's "
+                              "base must be green before the next wave builds on it. STOP: "
+                              "later waves are NOT run; re-run once the checks are green (the "
+                              "run resumes idempotently), or set [driver] merge_requires = "
+                              "\"required\" to merge on the host's required checks alone, or "
+                              "raise [driver] merge_wait_secs if the checks just take longer "
+                              "than that to report.",
+                        f"{_AT_THE_PR} once the checks are green, or set [driver] "
+                        "merge_requires = \"required\" to merge on the host's required checks "
+                        "alone, or raise [driver] merge_wait_secs if the checks just take "
+                        "longer than that to report")
+            print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. {end}\n",
+                  file=sys.stderr)
             _undo_ready(pr_url)
             return 1
         # Positive evidence in the run log that this merge was gated, not merged blind.
@@ -907,15 +975,15 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
         # whatever branch the PR was moved to during the wait.
         after, _, behind, why = _base_read(cfg, repo, pub, str(pr_url), target=target)
         if behind is None:
-            return _refuse(d, pr_url, why)
+            return _refuse(d, pr_url, why, held, _THAT)
         if after != head:
             return _refuse(d, pr_url, f"its head changed from {head[:12]} to {after[:12]} "
                            "while its checks were being read, so the green rollup may not "
-                           "be that head's")
+                           "be that head's", held)
         if behind:
             return _refuse(d, pr_url, "its base moved while its checks were being read, so "
                            "the green rollup is not of the combination it would merge; "
-                           "re-run to bring it up to date and verify it again")
+                           "re-run to bring it up to date and verify it again", held)
         cmd += ["--match-head-commit", head]
 
     print(f"→ {' '.join(cmd)}")
@@ -930,13 +998,13 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
         # below.
         why = _remarks_block(d, str(pr_url), cfg.merge_wait_secs - waited, merge_error)
         if why:
-            return _refuse(d, pr_url, why)
+            return _refuse(d, pr_url, why, held)
+        end = _next(held, "STOP: later waves are NOT run; resolve at the PR, then re-run.")
         print(f"\n!!! merge: {d.name} ({pr_url}) did not merge — a conflict, no merge "
               "rights on the base, a host-required check that failed or started after the "
               "rollup gate above, a head that changed after that gate read it green (the "
               "merge is pinned to it), or a base that moved after the last read on a host "
-              "that requires up-to-date branches. STOP: later waves are NOT run; resolve at "
-              "the PR, then re-run.\n", file=sys.stderr)
+              f"that requires up-to-date branches. {end}\n", file=sys.stderr)
         _undo_ready(pr_url)
         return 1
     # Refresh the base so the NEXT wave's worktree resets to the merged result.

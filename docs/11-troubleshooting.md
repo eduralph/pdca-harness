@@ -89,7 +89,11 @@ that run to end, or pin lanes with `PDCA_LANE` for runs that share a workspace
 names a bundle this run is not driving, and its PR has not merged into the
 dependent's base. Name the prerequisite in the same `pdca flow <ids>` so the run
 carries it onto its line, or wait for the merge and re-run
-([07](07-crosscutting.md#waves-in-execution)).
+([07](07-crosscutting.md#waves-in-execution)). In merge mode there is no line, so
+naming it does not help. The hold line gives the way out that fits that PR, and
+it holds for a `Depends on (merged)` edge or a named prerequisite too. When it
+says `not known to be merged`, another live `pdca flow` holds that prerequisite's
+claim, so this run did not read it: let that run finish (or stop it), then re-run.
 
 **`flow: <bundle> held — it `Conflicts with` …`**, **`held out of this run's
 integration line`**, and a run that **exits 3** with every bundle `COMPLETE`.
@@ -110,7 +114,8 @@ and what to do; the common fix is to restore the branch or delete the stale
 red, pending or empty check rollup, the branch update failed, or the PR's base
 was not the bundle's target base. The PR is returned to draft; fix CI or the
 base and re-run. Raise `[driver].merge_wait_secs` if your checks are slow to
-register.
+register. The same refusal of a prerequisite merged before wave 0 says who is
+held instead of `STOP`, and the rest of the run goes on.
 
 ## A gate or review did not say pass or fail
 

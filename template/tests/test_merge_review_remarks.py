@@ -754,7 +754,10 @@ class MergeReviewRemarks(unittest.TestCase):
 
         def dies_part_way(path: Path, text: str, **kw: object) -> int:
             real_write(path, text[:len(text) // 2], **kw)
-            partial.append(path.read_text(encoding="utf-8"))
+            # Only the remarks file: `merge_wave` also marks `publish.json` the same way
+            # (#839), and that write failing here must leave the record whole as well.
+            if "merge-remarks" in path.name:
+                partial.append(path.read_text(encoding="utf-8"))
             raise OSError(errno.ENOSPC, "No space left on device")
 
         faults = {

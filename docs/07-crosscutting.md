@@ -581,10 +581,14 @@ with a lock the OS drops when the run ends, however it ends (a return, an
 exception, `SIGKILL`). It keeps the claim for the rest of the run, except on a
 bundle it then decides not to drive (a named id it skips, a swept bundle held on
 an unresolved dependency, a child the reschedule holds), which it lets go at
-once. A second run whose *named* ids include a bundle a live run holds is
+once. In merge mode it also claims each prerequisite it reaches before wave 0,
+though it drives none of them, and lets those go when that step ends. A second
+run whose *named* ids include a bundle a live run holds is
 refused before it touches anything, naming that bundle; a bundle it would only
 have reached *implicitly* (the sweep, an adopted child) is named and left to the
-run that holds it, and the rest of the run goes on. A claim the run cannot
+run that holds it, and the rest of the run goes on. A prerequisite it would only
+have merged is left alone too, and the bundles waiting for it are held. A claim
+the run cannot
 record at all — an unwritable `process/`, a filesystem without file locks — is
 treated the same way: the bundle is never driven unclaimed. The claim files
 live under `process/.drive-claims/`, outside every bundle, and are gitignored.
@@ -962,6 +966,45 @@ wave builds on, via `[driver].wave_mode`:
   Needs merge rights on the base remote and relaxes STOP discipline for the
   batch; fails closed if a PR turns out non-mergeable. `[driver].merge_method`
   picks the merge strategy (`"merge"` / `"squash"` / `"rebase"`).
+  A merge-mode run marks each PR it pushes and then tries to merge as a
+  non-final wave (`"merge_eligible": true` in the bundle's `publish.json`, with a
+  hash of its `patch.diff` in `"merge_eligible_patch"`, written before the first
+  ready-mark). The mark means a later merge-mode run may ready and merge that PR
+  unattended once its gates pass, as long as the bundle still holds that patch.
+  So before wave 0 the run merges the
+  marked prerequisites the bundles it drives wait for, whether or not the
+  command names them: it walks down from each dependent, merging deepest first,
+  through marked, open PRs that target the dependent's base. It does not go past
+  a prerequisite already merged, a closed PR, or anything else it may not merge.
+  It judges each edge of a dependent on its own, so with two prerequisites one
+  can merge while the dependent stays held for the other. Everything else
+  unmerged holds the dependent, named on one line with its base and the way out,
+  for a plain `Depends on` and a `Depends on (merged)` alike, and the rest of the
+  run goes on. That covers a PR with no mark (a final-wave or single-bundle PR
+  waiting for you, or one published before the mark existed: merge it by hand,
+  then re-run); a closed PR (reopen it and merge it by hand, or, if it is marked,
+  reopen it and let a later run merge it); a marked PR the gates refuse (the
+  `merge:` lines above the hold line give the reason and what clears it, which
+  for a malformed `expected_checks` is `pdca.toml`, not the PR); a marked PR
+  whose own prerequisites are not merged into that base; a marked PR whose bundle
+  has since been rebuilt and not re-published, so its head may be an older attempt
+  (close it, re-publish, and merge the new PR by hand, or merge this PR by hand as
+  it stands); and a bundle
+  the run cannot merge for the dependent, because it has no `brief.md`, a brief
+  that names no target, or a `patch.diff` that cannot be read (merge its PR by
+  hand). A prerequisite that ships nothing (a close or no-fix, with no patch)
+  holds nobody. The run claims each prerequisite before it reads it, so two runs
+  never ready or merge one PR together. One it cannot claim (another live run
+  holds it, or no claim can be recorded) is not judged or merged, even if its PR
+  has merged or it ships nothing, and the dependent is held on its own line,
+  which names who holds it: let that run finish (or stop it), then re-run.
+  A dependent is released only when the prerequisite's publish
+  record says it is merged into the dependent's own target base. So an `Onto
+  branch` commit, or a PR on record for another base, never releases it, even
+  once merged: get that work onto the base and remove the edge from the
+  dependent's brief. A re-publish writes a fresh record without the mark. A
+  refused PR goes back to draft and keeps the mark, so a later run readies it
+  again: to leave a marked PR alone, merge or close it by hand, or remove the key.
   Before each merge the driver reads that PR's **full check rollup** itself —
   after the ready-mark, immediately before merging — and refuses (the run STOPs)
   on any failing check, any still-running one, and on a rollup with nothing in it
@@ -1009,10 +1052,10 @@ wave builds on, via `[driver].wave_mode`:
   it builds no group member the run can see, meaning a bundle in the run whose
   brief declares `Merges with`, or that another brief in the run names there.
   That holds even when the whole group would sit in the final wave, which the
-  driver does not merge: a later merge-mode run can still pick up its open PRs
-  one at a time. `pdca flow <ids>` exits 2 before building anything, naming the
-  group and the two ways out: set `wave_mode = "stack"`, or fold the group into
-  one bundle. The `--from-csv` sweep holds the group and its dependents and
+  driver does not merge: a later merge-mode run can still pick up its marked
+  open PRs one at a time. `pdca flow <ids>` exits 2 before building anything,
+  naming the group and the two ways out: set `wave_mode = "stack"`, or fold the
+  group into one bundle. The `--from-csv` sweep holds the group and its dependents and
   drives the rest. Bare `pdca waves` refuses (`unschedulable:`, exit 1) where
   the sweep holds, as it already does for an unresolved `Depends on`. Two gaps
   remain, both in issue #778: a group declared only in the brief of a bundle
