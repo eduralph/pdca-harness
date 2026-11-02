@@ -44,8 +44,9 @@
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
   --space-6: 24px; --space-8: 32px; --space-12: 48px; --space-16: 64px;
   --radius-sm: 4px; --radius-md: 8px; --radius-lg: 16px; --radius-pill: 999px;
-  --maxw: 760px;
-  --measure: 68ch;
+  /* one column for text and figures alike: wide enough for the cycle diagram
+     (646px) without scrolling, so prose and the diagram share both edges */
+  --maxw: 700px;
   --font-display: "Barlow Semi Condensed", "Arial Narrow", system-ui, sans-serif;
   --font-sans: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
@@ -130,7 +131,6 @@ h1 {
 .lede {
   font-size: 18px; line-height: 28px;
   color: var(--ink-muted);
-  max-width: var(--measure);
   margin: 0 0 var(--space-3);
 }
 .pron {
@@ -166,7 +166,6 @@ h2 {
 }
 p { margin: 0 0 var(--space-4); }
 p:last-child { margin-bottom: 0; }
-section > p { max-width: var(--measure); }
 .muted { color: var(--ink-muted); }
 strong { font-weight: 600; }
 code {
@@ -250,7 +249,6 @@ footer { padding: var(--space-8) 0 var(--space-12); }
 /* the rendered Markdown body */
 .prose { padding: var(--space-6) 0 var(--space-2); }
 .prose > :first-child { margin-top: 0; }
-.prose > p, .prose > ul, .prose > ol { max-width: var(--measure); }
 
 .prose h1 {
   font-size: 40px; line-height: 46px; margin: 0 0 var(--space-6);
@@ -290,7 +288,6 @@ footer { padding: var(--space-8) 0 var(--space-12); }
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   color: var(--ink-muted);
-  max-width: var(--measure);
 }
 .prose blockquote p:last-child { margin-bottom: 0; }
 .prose blockquote strong { color: var(--ink); }
