@@ -52,15 +52,17 @@ def _commit(repo: Path, message: str) -> None:
     _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", message)
 
 
-def prior_release_ref() -> str | None:
-    """The newest `vX.Y.Z` tag in this checkout, or None if there are none.
+def prior_release_ref(repo: Path = REPO) -> str | None:
+    """The newest `vX.Y.Z` tag reachable from HEAD, or None if there are none.
 
     DERIVED, never hardcoded: a pinned version would rot at every release. None means the
     caller should skip — a shallow clone has no tags, which is a missing precondition and
-    not a failure.
+    not a failure. Reachable, because a checkout of `release/X.Y` also holds the tags of
+    later releases, and updating from one of those would be a downgrade.
     """
     try:
-        out = _git_out(REPO, "tag", "--list", "v[0-9]*", "--sort=-v:refname")
+        out = _git_out(repo, "tag", "--list", "v[0-9]*", "--merged", "HEAD",
+                       "--sort=-v:refname")
     except subprocess.CalledProcessError:  # pragma: no cover - not a git checkout
         return None
     tags = [t for t in out.split() if re.fullmatch(r"v\d+\.\d+\.\d+", t)]
