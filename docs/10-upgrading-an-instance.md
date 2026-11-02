@@ -91,8 +91,9 @@ spawns afterward runs mixed-version code.
 
 Releases are tags of the form `vX.Y.0`, one minor per release, each annotated
 with its notes; the next version's work is the one open milestone on the
-template repo. `copier update --vcs-ref vX.Y.0` moves to a specific release
-rather than the newest tag.
+template repo. Bug fixes for the latest release are patch tags, `vX.Y.Z`.
+`copier update --vcs-ref vX.Y.Z` moves to a specific release rather than the
+newest tag.
 
 ## Carrying a local change to a template-owned file
 

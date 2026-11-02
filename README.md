@@ -195,9 +195,10 @@ See `template/PCDA/quality-cycle.md` for the model and the maturity ladder.
 
 ## Releases
 
-Versions are git tags of the form `vX.Y.0` — a minor bump per release (patch stays `0`);
-each tag is annotated with its release notes (`git show vX.Y.0`). The queue for the next
-release is a single open **GitHub milestone**:
+Versions are git tags of the form `vX.Y.0` — a minor bump per release; each tag is
+annotated with its release notes (`git show vX.Y.0`). Bug fixes for the latest release ship
+from its release branch, `release/X.Y`, as patch tags (`vX.Y.Z`); the branch is retired when
+the next `vX.Y.0` ships. The queue for the next release is a single open **GitHub milestone**:
 
 - There is always **one open milestone — the next version to ship** (the highest released
   tag's minor `+ 1`). It is the live "in work" list.
