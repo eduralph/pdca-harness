@@ -3,7 +3,7 @@
 [Index](README.md) · next: [01 Render & integrate →](01-render-and-integrate.md)
 
 Before the step-by-step, this page answers the *why*: the problem the harness
-solves, the benefits it delivers, the features that deliver them, and the
+solves, the benefits it delivers, the features behind them, and the
 vocabulary the rest of the walkthrough assumes. If you just want to run something,
 skip to [step 01](01-render-and-integrate.md) — but five minutes here makes the
 rest land faster.
@@ -70,16 +70,19 @@ decides "can this be accepted?" contains **no LLM at all** — it reads only
 deterministic gate results.
 
 **AI coding best practices, codified — not tribal knowledge.** The harness bakes
-in discipline that's usually left to an individual's habits: implement against a
-written spec, not vibes (the brief); prove correctness with a test that's
-red-before/green-after, not a model's say-so; scope the builder's tools narrowly
-so it can edit and run tests but never merge or open a PR unsupervised
-([step 04](04-do.md)); decorrelate the reviewer from the builder — a different
-model family, no visibility into the builder's notes — so review isn't the same
-blind spot checking itself ([step 05](05-check.md)); and ship every fix as a
-*draft* PR by default, so a human is always the one who makes it live
-([step 05](05-check.md#publishs-stop-discipline-and-batches)). None of it
-depends on a maintainer remembering to ask for it on any given contribution.
+in discipline that's usually left to an individual's habits, so none of it
+depends on a maintainer remembering to ask for it on any given contribution:
+
+- implement against a written spec (the brief), not vibes;
+- prove correctness with a test that's red before the fix and green after, not
+  a model's say-so;
+- scope the builder's tools narrowly — it can edit and run tests but never
+  merge or open a PR unsupervised ([step 04](04-do.md));
+- decorrelate the reviewer from the builder — a different model family, no
+  visibility into the builder's notes — so review isn't the same blind spot
+  checking itself ([step 05](05-check.md));
+- ship every fix as a *draft* PR by default, so a human is always the one who
+  makes it live ([step 05](05-check.md#publishs-stop-discipline-and-batches)).
 
 **The process gets better over time.** The **Act** beat turns recurring
 misses — something a maintainer caught at review that no gate owned — into
@@ -91,7 +94,7 @@ two always-on review leaves and a builder escalation ladder — see
 
 **Scale without losing rigor.** Because state lives in files (not a database), the
 driver is **idempotent and resumable**, and one Plan session can brief *several*
-issues that then build unattended and queue up for a fast, cheap-first sign-off
+issues that then build unattended and queue up for a fast, cheap sign-off
 burn-down. You review many contributions in one focused sitting.
 
 **Cheap to adopt and cheap to learn.** A full cycle can be **rehearsed entirely
@@ -166,8 +169,8 @@ stateDiagram-v2
 ```
 
 The five **halted** states — `UNPLANNED`, `AWAITING_SIGNOFF`, `COMPLETE`,
-`DISCONTINUED`, `RESOLVED` — are where the driver hands control back to a human or
-stops. Everything else it advances through on its own. `RESOLVED` is the newest of
+`DISCONTINUED`, `RESOLVED` — are where the driver stops and hands control back to
+a human. Everything else it advances through on its own. `RESOLVED` is the newest of
 the five: a briefless bundle whose tracker item was closed (duplicate, wontfix,
 fixed elsewhere) *before* anyone authored a brief — so it exits the pending set
 without ever entering a cycle, distinct from `DISCONTINUED` (a human explicitly
