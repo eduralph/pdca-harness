@@ -50,7 +50,7 @@ def _ok_run(cmd, **kw):
     that is NOT refused goes all the way to `gh pr merge`."""
     if cmd[:3] == ["gh", "pr", "view"]:
         return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
-            {"headRefOid": HEAD, "baseRefName": "main"}))
+            {"headRefOid": HEAD, "baseRefName": "main", "isCrossRepository": False}))
     if cmd[:3] == ["gh", "pr", "checks"]:
         return SimpleNamespace(returncode=0, stderr="",
                                stdout=json.dumps([{"name": "ci", "bucket": "pass"}]))
@@ -167,8 +167,10 @@ class OntoBranchRecordInMergeMode(unittest.TestCase):
                 rc, calls, out, err = self._wave(self._bundle(iid, record))
                 self.assertEqual(rc, 0, err)
                 gh = [c for c in calls if c[:2] == ["gh", "pr"]]
-                self.assertEqual(gh[0][:3], ["gh", "pr", "view"])   # issue #500: its base
-                self.assertEqual(gh[1], ["gh", "pr", "ready", PR])
+                self.assertEqual(gh[0], ["gh", "pr", "view", PR,    # issue #806: own repo
+                                         "--json", "isCrossRepository"])
+                self.assertEqual(gh[1][:3], ["gh", "pr", "view"])   # issue #500: its base
+                self.assertEqual(gh[2], ["gh", "pr", "ready", PR])
                 self.assertEqual(gh[-1], ["gh", "pr", "merge", PR, "--merge",
                                           "--match-head-commit", HEAD])
 

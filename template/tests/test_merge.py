@@ -28,6 +28,11 @@ date (`gh pr update-branch`, polled until it lands), waits for that head's rollu
 head and base again, and merges pinned to the head (`--match-head-commit`). The `MergeWave`
 stubs answer that read as "up to date"; `MergeAgainstCurrentBase` drives it against a
 stateful fake host (`_Host`).
+
+Issue #806 confines all of it to the operator's own repository: before anything can write
+to the PR, `_merge_one` asks the host whether the PR is cross-repository, and only the JSON
+boolean `false` lets it go on. Every stub here answers that read as own-repo unless the test
+is about it; `MergeWave.HOST_*` are captured from the real `gh`.
 """
 
 from __future__ import annotations
@@ -83,20 +88,23 @@ def _up_to_date(cmd: list[str]) -> SimpleNamespace | None:
     (up to date). ``None`` for every other command."""
     if cmd[:3] == ["gh", "pr", "view"]:
         return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
-            {"headRefOid": HEAD, "baseRefName": "main"}))
+            {"headRefOid": HEAD, "baseRefName": "main", "isCrossRepository": False}))
     if cmd[:1] == ["git"] and "rev-parse" in cmd:
         return SimpleNamespace(returncode=0, stderr="", stdout=BASE_TIP + "\n")
     return None
 
 
-def _gh(**by_verb: SimpleNamespace):
+def _gh(*, own_repo: SimpleNamespace | None = None, **by_verb: SimpleNamespace):
     """Build a `subprocess.run` stub: every `gh`/`git` call succeeds, except the verbs
     named here (`checks=`, `ready=`, `merge=`) which return the given result. The default
     rollup is green and the PR up to date with its base, so tests that are not about #413
-    or #531 reach `gh pr merge` exactly as they did before them."""
+    or #531 reach `gh pr merge` exactly as they did before them. `own_repo=` answers issue
+    #806's read and no other, so everything but that read stays healthy."""
     default_checks = _rollup(("ci", "pass"))
 
     def run(cmd, **kw):
+        if own_repo is not None and cmd[-1] == "isCrossRepository":
+            return own_repo
         if cmd[:2] == ["gh", "pr"] and cmd[2] in by_verb:
             return by_verb[cmd[2]]
         if cmd[:3] == ["gh", "pr", "checks"]:
@@ -220,9 +228,12 @@ class MergeWave(unittest.TestCase):
             rc = merge.merge_wave(self.cfg, [b], method="merge")
         self.assertEqual(rc, 0)
         gh = [c for c in runs if c[:2] == ["gh", "pr"]]
-        # Issue #500: the PR's base is read against its target base before the ready-mark.
-        self.assertEqual(gh[0][:3], ["gh", "pr", "view"])
-        self.assertEqual(gh[1], ["gh", "pr", "ready", "https://gh/pr/1"])
+        # Issue #806, then issue #500: whether the PR is own-repo, then its base against its
+        # target base, are read before the ready-mark.
+        self.assertEqual(gh[0], ["gh", "pr", "view", "https://gh/pr/1",
+                                 "--json", "isCrossRepository"])
+        self.assertEqual(gh[1][:3], ["gh", "pr", "view"])
+        self.assertEqual(gh[2], ["gh", "pr", "ready", "https://gh/pr/1"])
         self.assertEqual(gh[-1], ["gh", "pr", "merge", "https://gh/pr/1", "--merge",
                                   "--match-head-commit", HEAD])
 
@@ -384,8 +395,10 @@ class MergeWave(unittest.TestCase):
         # Rollup read AFTER ready; issue #582: read twice — the green is confirmed once.
         # Issue #531: the head is read before and after the rollup wait; no update for a
         # PR that is not behind its base. Issue #500: before all that, its base is read
-        # against its target base (the same base here, so no edit).
-        self.assertEqual(gh, [["gh", "pr", "view"], ["gh", "pr", "ready"],
+        # against its target base (the same base here, so no edit). Issue #806: before that,
+        # whether it is own-repo.
+        self.assertEqual(gh, [["gh", "pr", "view"],
+                              ["gh", "pr", "view"], ["gh", "pr", "ready"],
                               ["gh", "pr", "view"],
                               ["gh", "pr", "checks"], ["gh", "pr", "checks"],
                               ["gh", "pr", "view"], ["gh", "pr", "merge"]])
@@ -548,7 +561,8 @@ class MergeWave(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(self._merged(calls))
         gh = [c[:3] for c in calls if c[:2] == ["gh", "pr"]]
-        self.assertEqual(gh, [["gh", "pr", "view"], ["gh", "pr", "ready"],   # #500: base
+        self.assertEqual(gh, [["gh", "pr", "view"],                          # #806: own repo
+                              ["gh", "pr", "view"], ["gh", "pr", "ready"],   # #500: base
                               ["gh", "pr", "view"]]
                          + [["gh", "pr", "checks"]] * 4
                          + [["gh", "pr", "view"], ["gh", "pr", "merge"]])  # after read 4
@@ -723,6 +737,150 @@ class MergeWave(unittest.TestCase):
         self.assertEqual(cfg.merge_wait_secs, 300)     # negative also fails CLOSED
         self.assertIn("merge_wait_secs", err.getvalue())
 
+    # ---- issue #806: merge mode readies and merges only PRs whose head is in the base repo --
+
+    OWN_REPO_READ = ["gh", "pr", "view", "https://gh/pr/1", "--json", "isCrossRepository"]
+
+    # What real `gh` 2.103.3 printed, so these stubs answer as the host does. To read the first
+    # two again, on a fork's PR and on an own-repo PR:
+    #   gh pr view https://github.com/eduralph/pdca-harness/pull/857 --json isCrossRepository
+    #   gh pr view https://github.com/eduralph/pdca-harness/pull/888 --json isCrossRepository
+    HOST_FORK = '{"isCrossRepository":true}\n'
+    HOST_OWN_REPO = '{"isCrossRepository":false}\n'
+    # Its errors: stderr, exit 1, nothing on stdout. The last was captured asking for a field it
+    # does not know, the question a `gh` without this one would get; this field's name is
+    # swapped in and the list of fields cut short.
+    HOST_NO_SUCH_PR = ("GraphQL: Could not resolve to a PullRequest with the number of 999999. "
+                       "(repository.pullRequest)\n")
+    HOST_BAD_TOKEN = ("HTTP 401: Bad credentials (https://api.github.com/graphql)\n"
+                      "Try authenticating with:  gh auth login -h github.com\n")
+    HOST_NO_FIELD = ('Unknown JSON field: "isCrossRepository"\nAvailable fields:\n  additions\n'
+                     "  assignees\n  author\n  autoMergeRequest\n  baseRefName\n  baseRefOid\n"
+                     "  body\n  changedFiles\n  closed\n  closedAt\n  closingIssuesReferences\n"
+                     "  comments\n  commits\n  createdAt\n  deletions\n  files\n"
+                     "  fullDatabaseId\n  headRefName\n  headRefOid\n  headRepository\n"
+                     "  headRepositoryOwner\n  id\n  isDraft\n  labels\n")
+
+    def _refused(self, iid: str, **by_verb: SimpleNamespace) -> str:
+        """Drive bundle ``iid`` and assert it is refused before any write: the one read and
+        nothing after it, so no edit, no ready (nor its undo), no merge. Returns the refusal,
+        which is ONE stderr line naming the bundle, the PR and the rule, and saying STOP."""
+        rc, calls, err = self._drive(iid, **by_verb)
+        self.assertEqual(calls, [self.OWN_REPO_READ])
+        self.assertEqual(rc, 1)
+        line = err.strip()
+        self.assertEqual(len(line.splitlines()), 1, err)
+        for said in ("was NOT merged", f"issue_{iid}", "https://gh/pr/1",
+                     "merge mode readies and merges only PRs whose head is in the base "
+                     "repository", "STOP: later waves are NOT run",
+                     "the PR is left draft or ready, as it was"):
+            self.assertIn(said, line)
+        return line
+
+    def test_cross_repo_pr_is_refused_before_ready(self) -> None:
+        line = self._refused("X1", view=_res(out=json.dumps(
+            {"headRefOid": HEAD, "baseRefName": "main", "isCrossRepository": True})))
+        self.assertIn("its head is on a fork", line)
+        # A fork contributor may hold no merge rights, so the human's merge is not the only way.
+        self.assertIn('Merge the PR by hand, or run this batch in the default [driver] '
+                      'wave_mode = "stack", then re-run', line)
+        self.assertNotIn("stopped the read", line)
+
+    def test_cross_repo_pr_on_another_base_is_not_retargeted(self) -> None:
+        self._refused("X2", view=_res(out=json.dumps(
+            {"headRefOid": HEAD, "baseRefName": "fix/other", "isCrossRepository": True})))
+
+    def test_the_hosts_own_answer_for_a_fork_is_refused(self) -> None:
+        self.assertIn("its head is on a fork",
+                      self._refused("X7", own_repo=_res(out=self.HOST_FORK)))
+
+    def test_failed_own_repo_read_is_refused_quoting_the_error(self) -> None:
+        # Only this read fails, so nothing later would have stopped the merge. What the host
+        # said is quoted on the refusal's one line, whatever lines it said it over.
+        errors = {
+            "no such PR": (
+                self.HOST_NO_SUCH_PR,
+                "GraphQL: Could not resolve to a PullRequest with the number of 999999."),
+            "bad token": (
+                self.HOST_BAD_TOKEN,
+                "HTTP 401: Bad credentials (https://api.github.com/graphql) Try authenticating "
+                "with: gh auth login -h github.com"),
+            "a gh without the field": (
+                self.HOST_NO_FIELD,
+                'Unknown JSON field: "isCrossRepository" Available fields: additions assignees'),
+        }
+        for n, (name, (error, quoted)) in enumerate(errors.items()):
+            with self.subTest(name):
+                line = self._refused(f"F{n}", own_repo=_res(1, err=error))
+                self.assertIn(quoted, line)
+                # Nothing has shown this PR is on a fork, so nothing sends it to a by-hand merge.
+                self.assertIn("Fix what stopped the read, then re-run", line)
+                self.assertNotIn("by hand", line)
+
+    def test_failed_own_repo_read_is_not_believed_whatever_it_printed(self) -> None:
+        line = self._refused("F9", own_repo=_res(1, out=self.HOST_OWN_REPO, err="boom"))
+        self.assertIn("boom", line)
+
+    def test_unusable_own_repo_answer_is_refused(self) -> None:
+        answers = {
+            "empty": "", "not json": "gh: oops", "not an object": "[false]",
+            "key absent": json.dumps({"headRefOid": HEAD, "baseRefName": "main"}),
+            "the string false": json.dumps({"isCrossRepository": "false"}),
+            "zero": json.dumps({"isCrossRepository": 0}),
+            "null": json.dumps({"isCrossRepository": None}),
+        }
+        for n, (name, out) in enumerate(answers.items()):
+            with self.subTest(name):
+                line = self._refused(f"Y{n}", own_repo=_res(out=out))
+                self.assertIn("could not be read", line)
+                self.assertIn(out or "no output", line)   # the answer it could not use, quoted
+                self.assertNotIn("by hand", line)
+
+    def test_own_repo_pr_merges_after_one_read_before_the_base_read(self) -> None:
+        rc, calls, err = self._drive("X4", own_repo=_res(out=self.HOST_OWN_REPO))
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(self._merged(calls))
+        views = [c for c in calls if c[:3] == ["gh", "pr", "view"]]
+        self.assertEqual(views[0], self.OWN_REPO_READ)
+        self.assertEqual(views[1][-1], "headRefOid,baseRefName")
+        self.assertEqual(views.count(self.OWN_REPO_READ), 1)
+
+    def test_refused_fork_pr_keeps_its_marker_and_is_refused_again(self) -> None:
+        # The marker grants nothing by itself: a second attempt on the marked record asks the
+        # host again and is refused again. Nothing else in the record moves: no refusal here
+        # has put the PR on its target base, so the record must not say it has.
+        d = self._bundle("X5")
+        calls: list[list[str]] = []
+        gh = _gh(own_repo=_res(out=self.HOST_FORK))
+
+        def attempt() -> int:
+            def fake_run(cmd, **kw):
+                calls.append(cmd)
+                return gh(cmd, **kw)
+
+            with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
+                    mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
+                    mock.patch.object(merge.merged, "is_merged", return_value=False), \
+                    redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                return merge.merge_wave(self.cfg, [d])
+
+        self.assertEqual(attempt(), 1)
+        rec = json.loads((d / "publish.json").read_text(encoding="utf-8"))
+        self.assertIs(rec["merge_eligible"], True)
+        self.assertEqual(rec[merge.merged.MARKED_PATCH], merge.merged.patch_hash(d))
+        self.assertNotIn("base", rec)
+        self.assertEqual(calls, [self.OWN_REPO_READ])
+        self.assertEqual(attempt(), 1)
+        self.assertEqual(calls, [self.OWN_REPO_READ] * 2)
+        self.assertEqual(json.loads((d / "publish.json").read_text(encoding="utf-8")), rec)
+
+    def test_malformed_setting_is_refused_before_the_own_repo_read(self) -> None:
+        cfg = _cfg(self.tmp, expected_checks_error="[driver].expected_checks is not a list")
+        rc, calls, err = self._drive("X6", cfg=cfg)
+        self.assertEqual(rc, 1)
+        self.assertEqual(calls, [])
+        self.assertIn("expected_checks is not a list", err)
+
 
 # ---- issue #531: merge only a verified head, one that contains the base it merges into --
 
@@ -752,7 +910,9 @@ class _Host:
     logged in `calls` as `["sleep", secs]`; every `gh pr view` / `gh pr checks` read is
     logged in `views` / `checks` with the head it reported or described."""
 
-    def __init__(self, *urls: str, strict: bool = False, base_remote: str = "origin") -> None:
+    def __init__(self, *urls: str, strict: bool = False, base_remote: str = "origin",
+                 cross_repo: bool = False) -> None:
+        self.cross_repo = cross_repo              # what `isCrossRepository` answers (#806)
         self.parents: dict[str, tuple[str, ...]] = {}
         self.main = self._commit()
         self.head = {u: self._commit(self.main) for u in urls}
@@ -807,6 +967,8 @@ class _Host:
         if cmd[0] == "git":
             return self._git(cmd[3:])                    # drop `git -C <checkout>`
         verb, url = cmd[2], cmd[3]
+        if verb == "view" and cmd[-1] == "isCrossRepository":   # no head read: moves no lag
+            return _res(out=json.dumps({"isCrossRepository": self.cross_repo}))
         if verb == "view":
             self._land_update(url)
             self.views.append((url, self.head[url]))
@@ -1006,17 +1168,20 @@ class MergeAgainstCurrentBase(unittest.TestCase):
     def test_merge_requires_required_call_log_is_unchanged(self) -> None:
         # (c): "trust the host's protection" — no behind read, no update, no rollup read, no
         # pin: exactly the call log this setting produced before #531, stale merge included,
-        # but for one read of each PR's base against its target base (issue #500).
+        # but for one read of each PR's base against its target base (issue #500) and one of
+        # whether it is own-repo (issue #806).
         host = _Host(PR_A, PR_B)
         cfg = _cfg(self.tmp, merge_requires="required")
         rc, err = self._run(host, [PR_A, PR_B], cfg)
         self.assertEqual(rc, 0, err)
         repo = str(merge.publish._checkout_path(cfg, "org/repo"))
         self.assertEqual(host.calls, [
+            ["gh", "pr", "view", PR_A, "--json", "isCrossRepository"],
             ["gh", "pr", "view", PR_A, "--json", "headRefOid,baseRefName"],
             ["gh", "pr", "ready", PR_A],
             ["gh", "pr", "merge", PR_A, "--merge"],
             ["git", "-C", repo, "fetch", "origin"],
+            ["gh", "pr", "view", PR_B, "--json", "isCrossRepository"],
             ["gh", "pr", "view", PR_B, "--json", "headRefOid,baseRefName"],
             ["gh", "pr", "ready", PR_B],
             ["gh", "pr", "merge", PR_B, "--merge"],
@@ -1128,7 +1293,21 @@ class MergeAgainstCurrentBase(unittest.TestCase):
         self.assertIn("exited 128", err)
         self.assertIn(["gh", "pr", "ready", PR_A, "--undo"], host.calls)
 
-    def test_fork_checkout_reads_the_base_and_the_head_from_their_remotes(self) -> None:
+    def test_fork_pr_is_refused_before_any_write(self) -> None:
+        # Issue #806: the topology below with the host saying what a real fork says. Dropped
+        # from merge mode: its ready-mark and merge are the human's.
+        cfg = _cfg(self.tmp)
+        cfg.base_remote = "upstream"
+        host = _Host(PR_A, base_remote="upstream", cross_repo=True)
+        rc, err = self._run(host, [PR_A], cfg)
+        self.assertEqual(rc, 1)
+        self.assertEqual(host.merged, [])
+        self.assertEqual(host.calls, [["gh", "pr", "view", PR_A, "--json", "isCrossRepository"]])
+        self.assertIn("only PRs whose head is in the base repository", err)
+
+    def test_two_remote_checkout_reads_the_base_and_the_head_from_their_remotes(self) -> None:
+        """The host reports the PR own-repo: one repository reachable under two remote names,
+        so the two-remote fetch logic is what is tested."""
         # base_remote holds the base; the PR branch (and the update's merge commit) lives on
         # origin, where publish pushed it. Both are fetched.
         cfg = _cfg(self.tmp)
