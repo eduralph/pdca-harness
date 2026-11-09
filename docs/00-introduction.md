@@ -76,8 +76,8 @@ depends on a maintainer remembering to ask for it on any given contribution:
 - implement against a written spec (the brief), not vibes;
 - prove correctness with a test that's red before the fix and green after, not
   a model's say-so;
-- scope the builder's tools narrowly — it can edit and run tests but never
-  merge or open a PR unsupervised ([step 04](04-do.md));
+- scope the builder's tools narrowly — it can edit, run tests and push a draft
+  PR, but never mark a PR ready or merge it ([step 04](04-do.md));
 - decorrelate the reviewer from the builder — a different model family, no
   visibility into the builder's notes — so review isn't the same blind spot
   checking itself ([step 05](05-check.md));
@@ -94,8 +94,8 @@ two always-on review leaves and a builder escalation ladder — see
 
 **Scale without losing rigor.** Because state lives in files (not a database), the
 driver is **idempotent and resumable**, and one Plan session can brief *several*
-issues that then build unattended and queue up for a fast, cheap sign-off
-burn-down. You review many contributions in one focused sitting.
+issues that then build unattended and queue up for a fast sign-off burn-down,
+cheapest reviews first. You review many contributions in one focused sitting.
 
 **Cheap to adopt and cheap to learn.** A full cycle can be **rehearsed entirely
 offline** — stub models, stub gates, no network — so you can prove the plumbing
@@ -169,8 +169,8 @@ stateDiagram-v2
 ```
 
 The five **halted** states — `UNPLANNED`, `AWAITING_SIGNOFF`, `COMPLETE`,
-`DISCONTINUED`, `RESOLVED` — are where the driver stops and hands control back to
-a human. Everything else it advances through on its own. `RESOLVED` is the newest of
+`DISCONTINUED`, `RESOLVED` — are where the driver hands control back to a human or
+stops. Everything else it advances through on its own. `RESOLVED` is the newest of
 the five: a briefless bundle whose tracker item was closed (duplicate, wontfix,
 fixed elsewhere) *before* anyone authored a brief — so it exits the pending set
 without ever entering a cycle, distinct from `DISCONTINUED` (a human explicitly
