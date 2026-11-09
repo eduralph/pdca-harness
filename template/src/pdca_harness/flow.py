@@ -20,7 +20,9 @@ rebuilds; ``iterate-plan`` re-opens Plan) and bounded so a cycle can't spin fore
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import datetime
+import json
 import re
 import sys
 import threading
@@ -131,8 +133,25 @@ def _repair_unsignable(d: Path, *, action: str, today: str, why: str) -> str | N
     return REASSEMBLE if kept else None
 
 
+@dataclasses.dataclass(frozen=True)
+class _SameWave:
+    """What an accept is checked against in a wave the fold runs after (#782,
+    :func:`_same_wave_refused`). :func:`_drive_and_act` builds one for exactly the waves its
+    non-dry ``held_out`` fold follows — not the last wave, publishing on, stack mode, a
+    publisher that is not stubbed — and :func:`_drive_wave` hands it to both accept routes.
+    ``wave``: the bundles that ``_drive_wave`` call drives (its ``runnable``); ``k``: the
+    wave's index; ``folded_tips``: each target's tip this run last pushed (or carried), where
+    the fold after the wave starts that target's line; ``batch``: the ids that name the
+    run's line (:func:`integrate.integration_branch`)."""
+    wave: tuple[Path, ...]
+    k: int
+    folded_tips: Mapping[tuple[str, str], str | None]
+    batch: tuple[str, ...]
+
+
 def _apply_decision(
-    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool
+    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool,
+    same_wave: _SameWave | None = None,
 ) -> str | None:
     """Record the bundle's written sign-off decision under the C6 guard.
 
@@ -141,6 +160,15 @@ def _apply_decision(
     applied, ``None`` if no decision / unrecordable, :data:`REASSEMBLE` if a malformed
     SUMMARY was moved aside so a later beat can rebuild it, or ``"blocked"`` if an accept
     was refused because §6 NEEDS-HUMAN is still open. Pure deterministic code — no leaf.
+
+    ``same_wave`` (#782): the bundle is in a wave the fold runs after. An accept C6 lets
+    through is then refused the same way — ``"blocked"``, the bundle left AWAITING_SIGNOFF
+    with an open §6 row — when its change would conflict with a bundle of its wave already
+    accepted, or when that check cannot complete (:func:`_same_wave_refused`). And an
+    ``iterate-plan`` for a bundle with such a row still open is recorded in §9 but NOT
+    applied in this run (:func:`_park_replan`): re-planned now, it would be rebuilt in this
+    wave beside the bundle it was refused for. ``None`` (the single-issue flow, the last
+    wave, a dry-run, ``--no-publish``, merge mode): C6 alone, as before.
 
     ``apply_now`` advances the bundle immediately (single-issue ``flow``). The batch
     sweep passes ``apply_now=False`` so an ``iterate-do`` does NOT rebuild on the spot —
@@ -177,6 +205,15 @@ def _apply_decision(
     if action == "accept" and accept_blockers(d):
         print(f"flow: {d.name} — cannot accept, §6 NEEDS-HUMAN still open (C6)", file=sys.stderr)
         return "blocked"
+    # After C6, so the rows the human must clear are cleared first; before the record, so an
+    # accept whose change would conflict with an accepted sibling's — or one whose check did
+    # not complete — is refused, never recorded and undone (#782). The decision file stays,
+    # as for a C6 refusal.
+    if action == "accept" and same_wave is not None and _same_wave_refused(cfg, d, same_wave):
+        return "blocked"
+    # Read before anything below changes the bundle: an iterate-plan for a bundle that check
+    # refused, its row still open, is parked to the next run (#782).
+    park = (action == "iterate-plan" and same_wave is not None and _refusal_open(d))
     # The iterate rationale ("why rejected / what to change") rides §9 → the driver
     # folds it into the brief's carry-forward so the next iteration isn't blind.
     # §9's "Iteration delta" is a single line, so flatten a multi-line rationale.
@@ -203,6 +240,11 @@ def _apply_decision(
         if full:
             (d / state.SESSION_CARRY).write_text(full + "\n", encoding="utf-8")
     (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
+    # The one exception to applying an iterate-plan at once (#782): a bundle the same-wave
+    # check refused, its row still open. §9 holds the decision; the next run applies it.
+    if park:
+        _park_replan(d, same_wave)
+        return action
     # Apply now for single-issue flow; in the batch sweep apply an ``iterate-plan`` re-open
     # too — it only archives → UNPLANNED (no rebuild), so it can't interrupt the cheap-first
     # queue review, and the next pass's Plan pre-pass then re-plans it BEFORE the deferred
@@ -238,6 +280,382 @@ def accept_blockers(d: Path) -> list[str]:
     return signoff.open_needs_human(d / "SUMMARY.md")
 
 
+def _same_wave_refused(cfg: Config, d: Path, same_wave: _SameWave) -> bool:
+    """Whether bundle ``d``'s accept is refused because its change would conflict with a
+    bundle of its own wave already accepted, or because that check could not complete (#782)
+    — refused as C6 refuses one: an open §6 row, the bundle left AWAITING_SIGNOFF, so it is
+    not published, and nothing is accepted on a check that did not complete.
+
+    The siblings are the bundles of ``same_wave.wave`` that are COMPLETE now and have a patch
+    on ``d``'s target (:func:`_same_wave_siblings`); with none, nothing is checked and the
+    accept goes on. "Would conflict" is the fold's own rule, in the fold's order, on the
+    commits publish would push, merged onto the line the fold after the wave starts from
+    (:func:`integrate.same_wave_clash`). A sibling publish can never push (its would-be
+    commit cannot be built where publish cuts it) is no partner: that check leaves it out
+    and names it on stderr, and nothing here records it. A row already there and ticked for
+    that same conflict is the human's override, as C6 honours every tick: the accept goes on,
+    and the fold holds one of the two (#674). A check that does not complete — whatever
+    failed but a sibling's own unbuildable commit, the integration worktree left broken
+    included — refuses with a row of its own, whose tick means only "run the check again"
+    (:func:`_refuse_unchecked`). Neither row is a Check artifact: both live in SUMMARY §6
+    alone, so a SUMMARY reassembled later drops them and the next accept checks again."""
+    try:
+        siblings = _same_wave_siblings(d, same_wave)
+        if not siblings:
+            return False
+        target = publish._resolve_target(d)[:2]
+        clash = integrate.same_wave_clash(cfg, d, siblings,
+                                          tip=same_wave.folded_tips.get(target),
+                                          batch=same_wave.batch)
+    except Exception as exc:  # noqa: BLE001 — a check that did not complete never accepts
+        return _refuse_unchecked(d, exc)
+    if clash is None:
+        return False
+    return _refuse_conflict(d, same_wave, *clash)
+
+
+def _same_wave_siblings(d: Path, same_wave: _SameWave) -> list[Path]:
+    """The accepted siblings ``d``'s accept is checked against (#782): each other bundle of
+    the same :func:`_drive_wave` call's wave that is COMPLETE now and has a patch on ``d``'s
+    own ``(repo, base)`` target — what the fold carries (:func:`integrate._fold_candidates`)
+    — in name order. Nothing else: a finished id the pre-wave carry put on the line is part
+    of the line the check merges onto, never a sibling. Empty when ``d`` has no patch or no
+    target: the fold carries nothing of it."""
+    mine = integrate._fold_candidates([d])
+    if not mine:
+        return []
+    target = mine[0][1:3]
+    others = sorted((s for s in same_wave.wave
+                     if s.name != d.name and state.state(s) == state.COMPLETE),
+                    key=lambda p: p.name)
+    return [s for s, repo, base, _slug, _ref in integrate._fold_candidates(others)
+            if (repo, base) == target]
+
+
+def _same_wave_conflict_row(d: Path, partners: list[str], files: list[str]) -> str:
+    """The §6 row of a same-wave conflict (#782): keyed by its kind, the partners and the
+    files alone, so the same conflict found again is the same row."""
+    ids = ", ".join(p.removeprefix("issue_") for p in partners)
+    return (f"same-wave conflict: {d.name}'s change conflicts with "
+            f"{_conflict_partners(partners)}, accepted in its own wave, in {', '.join(files)} "
+            f"— not accepted, so it is not published. Either declare "
+            f"`Conflicts with: {ids}` in its brief and iterate-plan it (`pdca signoff "
+            f"{d.name.removeprefix('issue_')} --iterate-plan`, or in its sign-off session): "
+            f"the next `pdca flow` run re-plans it, so start that run once "
+            f"{_on_your_base(partners)}; or tick this row and accept it again to "
+            f"publish it anyway, and the fold holds one of them out of its line")
+
+
+def _same_wave_unchecked_row(d: Path) -> str:
+    """The §6 row of a same-wave check that could not complete (#782): keyed by its kind
+    alone — never by what failed, which stderr says — so every failure of it is one row."""
+    return (f"same-wave conflict check could not complete for {d.name} — not accepted, as "
+            f"nothing is accepted on a check that did not complete (stderr says what "
+            f"failed). Fix that, then tick this row and accept it again to run the check "
+            f"again: a tick here never accepts it without the check")
+
+
+def _on_your_base(partners: list[str]) -> str:
+    """``issue_10's change is on your base`` / ``the changes of issue_10, issue_12 are on your
+    base`` — when a re-planned bundle can be started (#782). Never a partner's PR: the
+    partner's publish may have failed, so it may have none (the 2026-11-04 ruling)."""
+    if len(partners) == 1:
+        return f"{partners[0]}'s change is on your base"
+    return f"the changes of {', '.join(partners)} are on your base"
+
+
+def _row_state(summary: Path, row: str) -> str:
+    """``"open"`` / ``"ticked"`` / ``""`` (absent) for ``row`` in the §6 C6 reads, matched as
+    :func:`signoff.ensure_needs_human_item` matches a row."""
+    want = " ".join(row.split()).casefold()
+
+    def has(rows: list[str]) -> bool:
+        return any(" ".join(r[len("- [ ]"):].split()).casefold() == want for r in rows)
+
+    if has(signoff.open_needs_human(summary)):
+        return "open"
+    return "ticked" if has(signoff.cleared_needs_human(summary)) else ""
+
+
+def _refuse_conflict(d: Path, same_wave: _SameWave, partners: list[str],
+                     files: list[str]) -> bool:
+    """Refuse bundle ``d``'s accept for a same-wave conflict with ``partners`` in ``files``
+    (#782): add the row saying so to §6, record the refusal for :func:`_drive_wave`, say so
+    on stderr. False — the accept goes on — only when that row is there and ticked: the
+    human's override."""
+    row = _same_wave_conflict_row(d, partners, files)
+    summary = d / "SUMMARY.md"
+    signoff.ensure_needs_human_item(summary, row)
+    why = (f"same-wave conflict: its change conflicts with {_conflict_partners(partners)}, "
+           f"accepted in wave {same_wave.k}, in {', '.join(files)}")
+    if _row_state(summary, row) == "ticked":
+        print(f"flow: {d.name} — {why}; accepted anyway, as its §6 row for that is ticked: "
+              f"the fold after wave {same_wave.k} holds one of them out of its line (#674)",
+              file=sys.stderr)
+        return False
+    ids = ", ".join(p.removeprefix("issue_") for p in partners)
+    step = (f"declare `Conflicts with: {ids}` in {d.name}'s brief and iterate-plan it (`pdca "
+            f"signoff {d.name.removeprefix('issue_')} --iterate-plan`, or in its sign-off "
+            f"session): the next `pdca flow` run re-plans it, so start that run once "
+            f"{_on_your_base(partners)}; or tick its §6 row and accept it again to "
+            f"publish it anyway")
+    _write_refusal(d, {"kind": "conflict", "row": row, "why": why, "step": step,
+                       "partners": partners, "files": files, "offered": 0})
+    print(f"flow: {d.name} — cannot accept: {why}; added that to §6 NEEDS-HUMAN, and it is "
+          f"not published. To go on: {step}.", file=sys.stderr)
+    return True
+
+
+def _refuse_unchecked(d: Path, exc: Exception) -> bool:
+    """Refuse bundle ``d``'s accept because the same-wave check could not complete (#782),
+    whatever failed — a fetch, a would-be commit, the integration worktree left broken. No
+    fallback lets it through: always True. The row is keyed by kind alone
+    (:func:`_same_wave_unchecked_row`), so a second failure with other words is the same
+    row; added if missing, and RE-OPENED if the human had ticked it
+    (:func:`signoff.reopen_needs_human_item`) — that tick asked for this retry, which failed
+    too. What failed goes to stderr only, the first failure of its chain included
+    (:func:`_failure`). A broken tree does not stop the run here, which would leave the
+    accepted siblings unpublished: the fold after the wave stops on it, as before, if it is
+    still broken then."""
+    row = _same_wave_unchecked_row(d)
+    summary = d / "SUMMARY.md"
+    if signoff.ensure_needs_human_item(summary, row):
+        how = "added that to §6 NEEDS-HUMAN"
+    elif signoff.reopen_needs_human_item(summary, row):
+        how = ("re-opened its §6 row: the tick asked for the check again, and it did not "
+               "complete again")
+    else:
+        how = "its §6 row stays open"
+    why = "the same-wave conflict check could not complete"
+    step = (f"fix what failed, then tick its §6 row and accept {d.name} again to run the "
+            f"check again")
+    _write_refusal(d, {"kind": "unchecked", "row": row, "why": why, "step": step,
+                       "partners": [], "files": [], "offered": 0})
+    broken = isinstance(exc, (integrate.IntegrationTreeError, integrate._LineBroken))
+    print(f"flow: {d.name} — cannot accept: {why} ({_failure(exc)}); nothing is accepted on "
+          f"a check that did not complete; {how}."
+          + (" The integration worktree was left in a state it could not put back: the fold "
+             "after this wave stops the run on it if it still is." if broken else "")
+          + f" To go on: {step}.", file=sys.stderr)
+    return True
+
+
+def _failure(exc: BaseException) -> str:
+    """What failed, on one line (#782): ``exc``'s words — an
+    :class:`integrate.IntegrationError`'s message, else the error's type and words — and,
+    when ``exc`` was raised while an earlier error was (a reset that failed after a failed
+    step, at any depth), the error that chain started with (``integrate._first_of``), unless
+    ``exc``'s words already end with it (``integrate._put_back_after`` adds them)."""
+    def words(e: BaseException) -> str:
+        said = " ".join((str(e) or "").split())
+        return said if isinstance(e, integrate.IntegrationError) else (
+            f"{type(e).__name__}: {said}" if said else type(e).__name__)
+
+    text = words(exc)
+    first = integrate._first_of(exc)
+    if first is not exc:
+        key = " ".join(str(getattr(first, "cause", None) or first).split())
+        if not key or key not in text:
+            text += f"; what failed first: {words(first)}"
+    return text
+
+
+def _write_refusal(d: Path, record: dict) -> None:
+    """Write bundle ``d``'s refused-accept record (#782, ``state.SAME_WAVE_REFUSAL``). One
+    that cannot be written is left out: the bundle is then offered a session every pass, as
+    after a plain C6 refusal."""
+    with contextlib.suppress(OSError):
+        (d / state.SAME_WAVE_REFUSAL).write_text(json.dumps(record, indent=2) + "\n",
+                                                 encoding="utf-8")
+
+
+def _refusal(d: Path) -> dict | None:
+    """Bundle ``d``'s refused-accept record (#782), or None: none, or one that does not
+    read as one (a hand-edited file is no record)."""
+    try:
+        rec = json.loads((d / state.SAME_WAVE_REFUSAL).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not (isinstance(rec, dict)
+            and all(isinstance(rec.get(k), str) for k in ("row", "why", "step"))
+            and type(rec.get("offered")) is int):
+        return None
+    return rec
+
+
+def _refusal_open(d: Path) -> bool:
+    """Whether bundle ``d`` has an open §6 row of the same-wave check (#782): its refusal
+    record's row is there, unticked."""
+    rec = _refusal(d)
+    try:
+        return rec is not None and _row_state(d / "SUMMARY.md", rec["row"]) == "open"
+    except Exception:  # noqa: BLE001 — a bundle that cannot be read has no open row here
+        return False
+
+
+def _session_offered(d: Path) -> None:
+    """Count, in ``d``'s refused-accept record, one sign-off session it was offered that ran
+    (#782): :func:`_drive_wave` calls this only once ``run_signoff_batch`` returned, so a
+    session that raised is not counted. No record: nothing to count."""
+    rec = _refusal(d)
+    if rec is not None:
+        _write_refusal(d, {**rec, "offered": rec["offered"] + 1})
+
+
+def _parked(d: Path) -> bool:
+    """Whether the wave offers bundle ``d`` no more sign-off sessions (#782): the same-wave
+    check refused its accept, the wave has offered it a session since, and it is still
+    AWAITING_SIGNOFF with that refusal's row open — the session recorded nothing that
+    settles it. A row the human ticked, or a new refusal (its count back at none), leaves it
+    offered; a plain C6 refusal has no record and is offered every pass, as before."""
+    rec = _refusal(d)
+    if rec is None or rec["offered"] < 1:
+        return False
+    try:
+        return state.state(d) == state.AWAITING_SIGNOFF and _refusal_open(d)
+    except Exception:  # noqa: BLE001 — a bundle that cannot be read is not parked
+        return False
+
+
+def _park_replan(d: Path, same_wave: _SameWave) -> None:
+    """Park bundle ``d``'s iterate-plan to the next run (#782). §9 has recorded it, so the
+    bundle is ITERATE_PLAN; it is not archived or re-planned here: the waves are set when
+    the run starts, so it would be rebuilt in this wave, beside the bundles it was refused
+    for, and checked again. The marker (``state.SAME_WAVE_PARKED``) keeps :func:`_drive_wave`
+    from building it and from waiting on it. The next run that drives it applies the
+    iterate-plan and re-plans it before it sets anything from its brief (:func:`_unpark`),
+    so the new brief sets that run's waves. A marker that cannot be written parks nothing:
+    the bundle is then re-planned in this run, as before."""
+    try:
+        (d / state.SAME_WAVE_PARKED).write_text(f"wave {same_wave.k}\n", encoding="utf-8")
+    except OSError:
+        return
+    print(f"flow: {d.name} — iterate-plan recorded, but not applied in this run: its accept "
+          f"was refused by the same-wave check and that §6 row is still open, so re-planned "
+          f"now it would be rebuilt in wave {same_wave.k} and checked again. The next `pdca "
+          f"flow` run that drives it re-plans it first, so its new brief sets that run's "
+          f"waves.", file=sys.stderr)
+
+
+def _unpark(cfg: Config, d: Path) -> bool:
+    """Apply bundle ``d``'s iterate-plan an earlier run parked (#782, :func:`_park_replan`)
+    as a run takes it on, before that run plans anything: the attempt archived
+    (``driver.run_issue``), so ``d`` is UNPLANNED and the run's Plan step re-plans it before
+    the run reads its brief — for its wave (``waves.compute_waves``), a merged prerequisite
+    it waits for (#647, :func:`_runnable`) and a base of its own (#727,
+    :func:`_bundle_bases`). True iff ``d`` is UNPLANNED now for that reason.
+
+    The marker is removed only once ``d`` is UNPLANNED. A re-open that fails (``run_issue``
+    raised, which :func:`_isolate` reports) leaves ``d`` ITERATE_PLAN with its marker, so it
+    stays parked: this run does not re-plan, build or wait on it (:func:`_replan_parked`), as
+    in the run that parked it, and the next run that drives it tries again. Removed
+    before the re-open, a failed one left ``d`` ITERATE_PLAN with no marker, and the wave's
+    build then re-planned and rebuilt it in a wave its OLD brief had set — what the park
+    exists to prevent. A marker on a bundle that is no longer ITERATE_PLAN when the run takes
+    it on (its iterate-plan applied another way since) is just removed. The caller holds
+    ``d``'s claim (#565)."""
+    marker = d / state.SAME_WAVE_PARKED
+    if not marker.exists():
+        return False
+    if state.state(d) != state.ITERATE_PLAN:
+        with contextlib.suppress(OSError):
+            marker.unlink()
+        return False
+    print(f"flow: {d.name} — applying the iterate-plan an earlier run recorded and parked "
+          f"(its accept was refused by the same-wave check): re-opening it for Plan before "
+          f"this run sets its waves", file=sys.stderr)
+    _isolate(d, "re-opening for Plan", lambda: driver.run_issue(d, cfg))
+    left = state.state(d)
+    if left != state.UNPLANNED:
+        if left == state.ITERATE_PLAN:
+            print(f"flow: {d.name} — not re-opened for Plan, so its iterate-plan stays parked: "
+                  f"this run does not re-plan, build or publish it, and the next `pdca flow` "
+                  f"run that drives it tries again", file=sys.stderr)
+        return False
+    with contextlib.suppress(OSError):
+        marker.unlink()
+    return True
+
+
+def _replan_unparked(cfg: Config, bundles: list[Path], *, csv: str | None,
+                     claims: drive_claim.Run | None) -> list[Path]:
+    """``bundles`` with each iterate-plan an earlier run parked among them applied
+    (:func:`_unpark`) and re-planned in ONE Plan session over those (#782) — for the intake
+    paths with no Plan pre-pass of their own: :func:`flow_batch`'s sweep and a split's
+    adopted children (:func:`_adopt_split_children`). :func:`flow_ids` un-parks its ids
+    before its own pre-pass instead, which re-plans them with the rest. Called once the run
+    holds their claims (#565) and before anything is levelled from their briefs. One the
+    planner leaves UNPLANNED has no brief: named, let go and left out, as an intake path
+    leaves out any bundle with no brief. A Plan session that raises leaves them all so, and
+    never stops the run — adoption can call this after earlier waves have published. One
+    whose re-open fails stays in, parked (:func:`_unpark`): the run neither builds nor waits
+    on it."""
+    reopened = [d for d in bundles if _unpark(cfg, d)]
+    if not reopened:
+        return bundles
+    ids = [d.name.removeprefix("issue_") for d in reopened]
+    try:
+        leaves.do_plan_batch(cfg, csv, ids=ids)
+    except Exception as exc:  # noqa: BLE001 — one failed Plan session never stops the run
+        print(f"flow: the Plan session re-planning {', '.join(d.name for d in reopened)} "
+              f"failed ({type(exc).__name__}: {exc})", file=sys.stderr)
+    left = [d for d in reopened if state.state(d) == state.UNPLANNED]
+    for d in left:
+        print(f"flow: {d.name} — no brief.md after its re-plan, NOT driven (brief it at Plan, "
+              f"then `pdca flow {d.name.removeprefix('issue_')}`)", file=sys.stderr)
+        if claims is not None:
+            claims.release(d)
+    return [d for d in bundles if d not in left]
+
+
+def _replan_parked(d: Path) -> bool:
+    """Whether bundle ``d``'s iterate-plan is parked to the next run (#782,
+    :func:`_park_replan`): the marker is there and it is still ITERATE_PLAN."""
+    try:
+        return (d / state.SAME_WAVE_PARKED).exists() and state.state(d) == state.ITERATE_PLAN
+    except Exception:  # noqa: BLE001 — a bundle that cannot be read is not parked
+        return False
+
+
+def _settled(d: Path) -> bool:
+    """Whether the wave has done all it will for bundle ``d``, which is not terminal (#782):
+    parked after its one more session (:func:`_parked`), or its iterate-plan parked to the
+    next run (:func:`_replan_parked`)."""
+    return _parked(d) or _replan_parked(d)
+
+
+def _same_wave_starts(wave: list[Path]) -> None:
+    """Ready the refused bundles of a wave for this run (#782), before anything is built: a
+    refused-accept record (``state.SAME_WAVE_REFUSAL``) has its count of sessions set back
+    to none, not deleted. So each run offers a refused bundle one session, then names it
+    with its step (:func:`_parked`); deleted, a later run would offer it one every pass. A
+    parked iterate-plan is applied earlier, as the run takes the bundle on (:func:`_unpark`)."""
+    for d in wave:
+        rec = _refusal(d)
+        if rec is not None and rec["offered"]:
+            _write_refusal(d, {**rec, "offered": 0})
+
+
+def _report_same_wave(wave: list[Path]) -> None:
+    """At the end of a wave, one stderr line per bundle of it the wave has done all it will
+    for (#782, :func:`_settled`), and that it is not published — never the pass budget,
+    which is not why it stopped: one parked after its one more session, with why its accept
+    was refused and the step; one whose iterate-plan is parked, with when it is re-planned."""
+    for d in wave:
+        rec = _refusal(d)
+        if _parked(d) and rec is not None:
+            print(f"flow: {d.name} [{state.AWAITING_SIGNOFF}] — not accepted: {rec['why']}; "
+                  f"the sign-off session it was offered since recorded nothing that settled "
+                  f"it, so this run offers it no more and it is NOT published. To go on: "
+                  f"{rec['step']}.", file=sys.stderr)
+        elif _replan_parked(d):
+            why = f": {rec['why']}" if rec is not None else ""
+            print(f"flow: {d.name} [{state.ITERATE_PLAN}] — not accepted{why}; its sign-off "
+                  f"chose iterate-plan, which this run does not apply, so it is NOT "
+                  f"published. The next `pdca flow` run that drives it re-plans it first.",
+                  file=sys.stderr)
+
+
 #: :func:`_apply_recorded_decision` outcome meaning "the bundle carries no decision, so it
 #: still owes a sign-off session". Deliberately distinct from every other outcome, because
 #: only this one may open a session: ``None`` means a decision WAS on disk but could not be
@@ -248,7 +666,8 @@ UNDECIDED = "undecided"
 
 
 def _apply_recorded_decision(
-    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool
+    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool,
+    same_wave: _SameWave | None = None,
 ) -> str | None:
     """Consume the decision the bundle **already carries**, before any session is offered.
 
@@ -276,11 +695,15 @@ def _apply_recorded_decision(
     or the record is dropped / the summary repaired and the bundle goes back to reassemble
     (:func:`_repair_unsignable`). Those paths stay reported — each already prints its own
     line naming this bundle and this action — but they must not be reported as an apply.
+
+    ``same_wave`` is handed to :func:`_apply_decision` (#782): an accept recorded before the
+    session is checked against the bundle's wave exactly as one written in it.
     """
     action = leaves.signoff_decision(d)
     if not action:
         return UNDECIDED
-    outcome = _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now)
+    outcome = _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now,
+                              same_wave=same_wave)
     if outcome == action:
         print(f"flow: {d.name} — applied the '{action}' sign-off decision already recorded "
               f"in the bundle; no new session", file=sys.stderr)
@@ -2736,6 +3159,9 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
             kids = [c for c in kids if not _refused_child(claims, parent, c)]
         # Only now, with the claim held: a child adopted into the run has a brief (#597).
         kids = [c for c in kids if _admit(cfg, c, claims)]
+        # …and one whose iterate-plan an earlier run parked (#782) is re-planned before the
+        # reschedule below levels it, so its new brief sets its wave.
+        kids = _replan_unparked(cfg, kids, csv=None, claims=claims)
         to_examine += onward      # a generation that already closed is walked THROUGH
         if kids:
             taken |= {c.name for c in kids}
@@ -2828,7 +3254,7 @@ def _pass_pool(allowance: int, wave_list: list[list[Path]]) -> int:
 
 
 def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
-                max_passes: int | None = None) -> int:
+                max_passes: int | None = None, same_wave: _SameWave | None = None) -> int:
     """Drive ONE wave's bundles to all-terminal (COMPLETE / DISCONTINUED) with iteration,
     then the cheap-first sign-off restricted to the wave. Publishing and folding are the
     caller's. The pass loop mirrors the prior single-batch driver: build-all
@@ -2849,14 +3275,32 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
     would hand the next (possibly adopted) wave a budget the operator never allowed. Both
     are pinned — ``test_a_wave_that_runs_its_allowance_out_still_charges_the_run_pool``,
     ``test_a_wave_that_stalls_charges_the_run_pool_for_what_it_spent``. Defaults to
-    ``cfg.max_passes`` (``[driver].max_passes``)."""
+    ``cfg.max_passes`` (``[driver].max_passes``).
+
+    ``same_wave`` (#782): this is a wave the fold runs after (:func:`_drive_and_act` builds
+    it). Both accept routes — the pre-apply and the post-session apply — then refuse an
+    accept whose change would conflict with an accepted bundle of the wave, or whose check
+    did not complete (:func:`_same_wave_refused`). Whether or not it is given, a bundle such
+    a refusal left with its row open is offered ONE more session; when that one records
+    nothing that settles it, the wave stops offering it (:func:`_parked`), ends once its
+    other bundles are terminal, and names it with the refusal and its step
+    (:func:`_report_same_wave`) — never with the pass budget, which it would otherwise spin
+    to. A session is counted only once ``run_signoff_batch`` returns, and the count is set
+    back to none as each run's wave starts (:func:`_same_wave_starts`), so each run offers it
+    one. A plain C6 refusal has no such record and is offered a session every pass, as
+    before. An iterate-plan its session records instead is parked to the next run
+    (:func:`_park_replan`): the wave neither builds nor waits on it, and the next run that
+    drives it re-plans it before it sets that run's waves (:func:`_unpark`)."""
     max_passes = cfg.max_passes if max_passes is None else max_passes
     names = {b.name for b in wave}
+    _same_wave_starts(wave)
     used = 0
     for _ in range(max_passes):
         used += 1
         before = [state.state(d) for d in wave]
-        _build_all(cfg, wave)
+        # A bundle whose iterate-plan is parked to the next run is not planned, so not
+        # built, in this one (#782): it would be rebuilt beside the bundles it was refused for.
+        _build_all(cfg, [d for d in wave if not _replan_parked(d)])
         # Before the human sees the queue, take the bundles whose findings are purely
         # implementation-level off it (#264): they become ITERATE_DO, drop out of
         # `awaiting_signoff`, and the next pass's build-all rebuilds them — exactly as a
@@ -2868,7 +3312,10 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
                 if _isolate(d, "auto-iterate", lambda d=d: _maybe_auto_iterate(
                         cfg, d, by=by, today=today, apply_now=False)):
                     auto_iterated = True
-        pending = [e.bundle for e in queue.awaiting_signoff(cfg) if e.bundle.name in names]
+        # A bundle the same-wave check refused that has had its one more session is left
+        # out (#782, `_parked`): nothing it carries can settle it this wave.
+        pending = [e.bundle for e in queue.awaiting_signoff(cfg)
+                   if e.bundle.name in names and not _parked(e.bundle)]
         if not pending:
             # A fired auto-iterate IS progress, even though it leaves the bundle in the state
             # the pass began in (PR #270 review). A bundle already ITERATE_DO gets rebuilt by
@@ -2882,8 +3329,11 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
             # AWAITING_SIGNOFF, and it reaches the human through `pending`.
             if not auto_iterated and [state.state(d) for d in wave] == before:
                 # Genuinely stuck (all terminal / planner declined an UNPLANNED) — but an
-                # ITERATE_* bundle here is progress the driver can no longer make.
-                _warn_abandoned(wave, why="a full pass made no progress")
+                # ITERATE_* bundle here is progress the driver can no longer make. One the
+                # same-wave check settled is named with its own step instead (#782).
+                _warn_abandoned([d for d in wave if not _settled(d)],
+                                why="a full pass made no progress")
+                _report_same_wave(wave)
                 return used
             continue    # progress (e.g. an iterate-plan re-open) — give it another pass
         # Read before asking (issue #453). A pending bundle may already carry a decision from
@@ -2900,7 +3350,8 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
         for d in pending:
             applied = _isolate(d, "applying the recorded sign-off decision",
                                lambda d=d: _apply_recorded_decision(
-                                   cfg, d, by=by, today=today, apply_now=False))
+                                   cfg, d, by=by, today=today, apply_now=False,
+                                   same_wave=same_wave))
             if applied in (UNDECIDED, "blocked"):
                 needing_session.append(d)
         for chunk in _chunks(needing_session, SIGNOFF_BATCH_SIZE):
@@ -2910,19 +3361,29 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
                 print(f"flow: sign-off session over {[b.name for b in chunk]} failed "
                       f"({type(exc).__name__}: {exc}); applying decisions written so far",
                       file=sys.stderr)
+            else:
+                # A session that ran is the one more a same-wave refusal is offered (#782); a
+                # dropped one is not, and is offered again. Counted before the apply below,
+                # so a new refusal it brings gets one more session of its own.
+                for d in chunk:
+                    _session_offered(d)
             for d in chunk:
                 _isolate(d, "sign-off", lambda d=d: _apply_decision(
-                    cfg, d, by=by, today=today, apply_now=False))
-        if all(state.state(d) in _TERMINAL for d in wave):
+                    cfg, d, by=by, today=today, apply_now=False, same_wave=same_wave))
+        if all(state.state(d) in _TERMINAL or _settled(d) for d in wave):
+            _report_same_wave(wave)
             return used
     # Budget spent with work still in flight. An `iterate-do` recorded on the last allowed
     # pass defers its rebuild to "the next pass's build-all" — which never comes. The
     # allowance is named as THIS WAVE's (#469): once a run adopts, a later wave gets what is
     # left of the run's pool, and "exhausted after 1 pass(es); raise [driver].max_passes"
     # while that setting reads 20 is a contradiction to the operator it is addressed to.
-    _warn_abandoned(wave, why=f"pass budget exhausted after {max_passes} pass(es) — this "
-                             f"wave's allowance out of the run's pool; raise "
-                             f"[driver].max_passes / PDCA_MAX_PASSES / --max-passes")
+    # A bundle the same-wave check settled is not waiting on the budget (#782).
+    _warn_abandoned([d for d in wave if not _settled(d)],
+                    why=f"pass budget exhausted after {max_passes} pass(es) — this "
+                        f"wave's allowance out of the run's pool; raise "
+                        f"[driver].max_passes / PDCA_MAX_PASSES / --max-passes")
+    _report_same_wave(wave)
     return used
 
 
@@ -3156,7 +3617,11 @@ def _drive_and_act(
     integration line: ``"unpushed"`` for one that pushed no branch (#593) and ``"conflict"``
     for one whose branch conflicts with a same-wave bundle merged before it (#674), or with
     bundles already on the line that explain the whole clash (#747). Such a bundle is
-    COMPLETE in the returned map, which therefore cannot say it was held.
+    COMPLETE in the returned map, which therefore cannot say it was held. On a wave the
+    fold runs after, the same-wave kind is found at sign-off instead (#782,
+    :func:`_same_wave_refused`): such a bundle is not accepted, so it is AWAITING_SIGNOFF in
+    the map — unfinished, not held — and the fold holds one only when the human overrode
+    that refusal, or a branch changed after its accept.
     ``"base"`` (#738) for one held before it was built, because its own base could not be
     built (:func:`_bundle_bases`): not driven this run — PLANNED in the map, for one not
     built yet — and named on stderr with the cause and the fix. ``cli._flow`` reads this to
@@ -3410,8 +3875,20 @@ def _drive_and_act(
         # is smaller — the second term is the admission rule again, applied to the wave that
         # was let in (#469); with the pool covering the live schedule (#473) it can only bite
         # if a wave came to spend more than it was handed.
+        # On a wave the fold below runs after — its own condition for a non-dry `held_out`:
+        # not the last wave, publishing on, stack mode, a publisher that is not stubbed — an
+        # accept that would add a same-wave hold to that fold, or whose check of that did not
+        # complete, is refused at sign-off (#782), so no accepted bundle of the wave goes
+        # without a PR for that reason. The check merges onto the line as that fold will
+        # find it: `folded_tips` (the carry's, or an earlier wave's fold), else the base.
+        # The fold keeps its own hold (#674) for an override, or a branch that changed after
+        # its accept.
+        same_wave = (_SameWave(wave=tuple(runnable), k=k, folded_tips=dict(folded_tips),
+                               batch=tuple(run_batch))
+                     if (k < len(wave_list) - 1 and do_publish and not merge_mode
+                         and cfg.publisher.mode != "stub") else None)
         spent += _drive_wave(cfg, runnable, by=by, today=today,
-                             max_passes=min(allowance, budget - spent))
+                             max_passes=min(allowance, budget - spent), same_wave=same_wave)
         # A bundle that SPLIT during this wave hands its children back to the run that
         # caused the split (#469), spliced into the waves AFTER this one — instead of
         # ending with the parent terminal, the children PLANNED, and the operator
@@ -3662,7 +4139,9 @@ def flow_batch(
     run holds it, or its claim cannot be recorded — is named and left alone, and the rest of
     the batch is driven. One the scheduler then holds is let go again at once, since this
     run will not drive it. The Plan session itself runs BEFORE any of this, and is not
-    fenced: see :mod:`drive_claim`.
+    fenced: see :mod:`drive_claim`. A swept bundle whose iterate-plan an earlier run parked
+    (#782) is re-planned once it is claimed, in a Plan session of its own, before the sweep
+    is scheduled (:func:`_replan_unparked`).
 
     ``claims`` also holds :func:`drive_claim.sweep_marker` for the SPAN of this call (#566):
     from here until every in-flight bundle has been claimed or excluded, so
@@ -3705,6 +4184,10 @@ def flow_batch(
                 print("flow: nothing to drive — this run could not claim any in-flight "
                       "bundle (each is named above).", file=sys.stderr)
                 return {}
+        # After the claim too (#565), and before anything below reads a brief: an
+        # iterate-plan an earlier run parked (#782) is applied and re-planned now, so the
+        # new brief is the one the run schedules.
+        bundles = _replan_unparked(cfg, bundles, csv=csv, claims=claims)
         # After the claim, never in the state filter above (#565): a briefless bundle past Do
         # is given its brief or named and left out — never written while another run holds
         # it, and never driven without one (#597).
@@ -3784,7 +4267,10 @@ def flow_ids(
     (planner skipped them) and terminal ids (COMPLETE / DISCONTINUED) are left alone —
     except that an id terminal on a ``split`` is ALSO handed to :func:`_drive_and_act` as an
     **adoption seed** (#473), so a run named after a parent whose children an earlier run
-    stranded drives those children instead of only re-printing the hint at them.
+    stranded drives those children instead of only re-printing the hint at them. An id
+    whose iterate-plan an earlier run parked (#782) is re-opened for Plan just before the
+    pre-pass (:func:`_unpark`), so the pre-pass re-plans it with the rest and its new brief
+    sets the run.
 
     Returns ``{issue_id: state}`` for **every id it was given** (issue #468), driven or
     skipped — a skipped id's disposition is its state on disk, the same value
@@ -3826,6 +4312,11 @@ def flow_ids(
             # the bundle stays RESOLVED and the drive-set filter below skips it with
             # its own terminal note — loud, never a silent "planned" claim.
 
+    # An iterate-plan an earlier run parked (#782) is applied first: the bundle is then
+    # UNPLANNED, so the pre-pass below re-plans it with the rest, and its new brief is the one
+    # `_drive_and_act` sets the run's waves, merge waits (#647) and own bases (#727) from.
+    for iid in ids:
+        _unpark(cfg, cfg.bundle(iid))
     # Optional Plan pre-pass (#65): brief the UNPLANNED ids in one shared session, before
     # the drive set is filtered, so the un-briefed ones become drivable. A csv enables it too.
     if plan_missing or csv:
