@@ -1138,7 +1138,8 @@ pdca cleanup --apply    # execute the matched actions below
 | not `COMPLETE` | PR MERGED | **report only, always** — never auto-writes an accept past the C6 guard |
 | `COMPLETE` split parent (`close-disposition` = `split`) | issue OPEN | checked **first**, ahead of the PR rows: **report only** while any child issue is open or its state can't be read (or the lineage record's `children` list is missing, empty, or has an entry that is not an issue number — close it by hand); once every child issue is closed, comments (naming every child) + closes as `completed` if at least one child was completed, else `not planned` |
 | `COMPLETE` with a merged PR | issue OPEN | comments + closes the issue |
-| `COMPLETE` (close/no-fix) or `DISCONTINUED` | issue OPEN | comments + closes the issue |
+| `COMPLETE` (close/no-fix) duplicate (brief has `Duplicate of: #N`, or `close-disposition` = `duplicate`) | issue OPEN | comments (naming `#N`) + closes as `duplicate`, only once the brief's `Close when` holds: `now`, `PR #M merged`, or `#M closed` (closed as completed). **Report only** while it does not yet hold, and when the target or the condition is missing, unrecognized, unreadable, or can no longer be met (PR closed unmerged, issue closed not as completed), or names the issue itself |
+| `COMPLETE` (close/no-fix, not a duplicate) or `DISCONTINUED` | issue OPEN | comments + closes the issue as `not planned` |
 | `COMPLETE` with an unmerged PR | issue OPEN | **report only** — stays open until the PR actually merges |
 
 This is where the `RESOLVED` state from [step 00](00-introduction.md) actually
