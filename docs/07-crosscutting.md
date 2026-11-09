@@ -684,7 +684,10 @@ wave builds on, via `[driver].wave_mode`:
   it. It continues the line already on origin, without force, when every commit
   on it is accounted for by your base or a finished prerequisite's PR head, and
   starts the line when origin has none. Only a clean prerequisite is carried:
-  its PR is open (or merged, with its head already on your base or the line), it
+  its PR is open (or merged, with its head already on your base or the line),
+  its branch is still at that PR head (any commit pushed onto it after the PR
+  was read or merged, even GitHub's "Update branch", is unreviewed: reset or
+  delete the branch to that head, or open a PR for the rest, and re-issue), it
   merges onto the line without error, and, with `[driver].regate_between_waves`,
   the carried line's re-gate is not red. A finished prerequisite that is not
   clean holds only the bundles whose plain `Depends on` names it, and is named

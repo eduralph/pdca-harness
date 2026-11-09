@@ -837,8 +837,11 @@ def _finished_head(d: Path, ref: tuple[str, str, bool] | None, repo: Path, base_
                    tip: str | None) -> str | tuple[str, str]:
     """Finished bundle ``d``'s PR head when it is state-clean (#646): its PR reads OPEN, or
     MERGED with the head already on ``base_ref`` or on the line at ``tip``, and the head
-    resolves in ``repo``. Else ``(reason, hint)`` — fail-closed: no recorded PR or branch,
-    or a state that cannot be read, is not clean."""
+    resolves in ``repo``, and its published branch (``ref``), where it still resolves in
+    ``repo``, is at that head (#653): the fold merges the branch's tip, so a tip past the
+    judged head would carry commits nobody reviewed. Else ``(reason, hint)`` — fail-closed:
+    no recorded PR or branch, a state that cannot be read, or a branch tip other than the
+    head is not clean. A ``tip:<head>`` hint names the judged head for the advice."""
     rec = publish._publish_record(d) if ref else None
     pr_url = rec.get("pr_url") if isinstance(rec, dict) else None
     if not pr_url:
@@ -854,6 +857,10 @@ def _finished_head(d: Path, ref: tuple[str, str, bool] | None, repo: Path, base_
     if pr == "MERGED" and not any(integrate._carries(repo, head, f"{d.name}'s head", r, of=r)
                                   for r in (base_ref, tip) if r):
         return f"its PR merged at {head[:12]}, which neither {base_ref} nor the line has", "edge"
+    branch_tip = integrate._rev(repo, ref[1]) if ref else None   # what the fold would merge
+    if branch_tip is not None and branch_tip != head:
+        return (f"its branch {ref[1]} is at {branch_tip[:12]}, which is not the PR head that "
+                f"was judged ({head[:12]})", f"tip:{head[:12]}")
     return head
 
 
@@ -863,6 +870,8 @@ _CARRY_HINTS = {
     "edge": "remove the `Depends on: {iid}` edge from the dependent's brief, then re-issue",
     "line": "delete {line} on origin unless this run's own fold already replaced it, then "
             "re-issue",
+    "tip": "reset or delete {name}'s branch to {head} (the PR head that was judged), or open "
+           "a PR for the commit(s) after it, then re-issue",
 }
 
 
@@ -948,7 +957,8 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
             if d.name in why:
                 held.add(d.name)
                 reason, hint = why[d.name]
-                advice = _CARRY_HINTS[hint].format(name=d.name, line=line,
+                hint, _, head = hint.partition(":")     # "tip:<judged head>" carries it
+                advice = _CARRY_HINTS[hint].format(name=d.name, line=line, head=head,
                                                    iid=d.name.removeprefix("issue_"))
                 print(f"flow: {d.name} (finished in an earlier run) is not carried onto "
                       f"{line}: {reason} — holding "
