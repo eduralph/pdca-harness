@@ -48,7 +48,7 @@ sections:
       ◆  a beat with a human touch point — everything else is automated
     props:
       - { term: "Plan",  desc: "**Author the brief.** A precise, field-structured spec every later beat is measured against. Human touch point #1." }
-      - { term: "Do",    desc: "**Build against the spec.** A headless builder writes the patch, a shipped test, and its rationale — and can't open a PR." }
+      - { term: "Do",    desc: "**Build against the spec.** A headless builder writes the patch, a shipped test, and its rationale — and can't mark a PR ready or merge it." }
       - { term: "Check", desc: "**Verify it, then decide.** Deterministic gates (red→green), a decorrelated reviewer, and the irreducibly human judgments — folded into one SUMMARY with an explicit NEEDS-HUMAN checklist. The human completes Check at sign-off: accept, iterate (rebuild or re-spec), or discontinue — and accept is refused while anything is unresolved. An accepted bundle publishes as a *draft* PR the harness never marks ready. Human touch point #2." }
       - { term: "Act",   desc: "**Improve the process.** Across cycles, recurring misses become new gates, brief fields, and rules — a better baseline every time. Human touch point #3." }
 
@@ -57,10 +57,10 @@ sections:
     body:
       - "The one thing allowed to block a sign-off is a deterministic, LLM-free check: a test that is red before the fix and green after it. Everything a gate can't adjudicate — an ambiguous-scope lint, an environmental failure, the irreducibly human judgments — surfaces as an explicit checklist for a person, never silently passed or silently blocked."
     props:
-      - { term: "No LLM in the gating path", desc: "Blocking a sign-off requires a deterministic red→green proof — not a model's say-so. The reviewer's opinion informs the verdict; it can never block it." }
-      - { term: "The builder can't ship", desc: "The Do leaf is scoped to editing code and running tests — it can't merge or open a PR unattended." }
+      - { term: "No LLM in the gating path", desc: "Blocking a sign-off requires a deterministic red→green proof — not a model's say-so. The reviewer can't block on its own: what it can't settle goes on the human's NEEDS-HUMAN checklist." }
+      - { term: "The builder can't ship", desc: "The Do leaf edits code, runs tests, and may push a draft PR — but it can never mark a PR ready or merge it." }
       - { term: "Draft PR by default", desc: "An accepted fix publishes as a *draft* — a human is always the one who marks it ready." }
-      - { term: "Resumable by construction", desc: "State lives in files, not a database. A cycle pauses at a human touch point and resumes later, and one planning session can brief several issues that build unattended and queue for a fast sign-off burn-down." }
+      - { term: "Resumable by construction", desc: "State lives in files, not a database. A cycle pauses at a human touch point and resumes later, and one planning session can brief several issues that build unattended and queue for sign-off, cheapest reviews first." }
       - { term: "Provable before you spend", desc: "A full cycle rehearses entirely offline — stub models, stub gates, no network — so you can learn the state machine and prove the plumbing before a single token." }
 
   - eyebrow: "Key features"
@@ -80,7 +80,6 @@ sections:
       - { term: "The instance", desc: "[wyrd-pdca](https://github.com/getwyrd/wyrd-pdca) — a project rendered from this template that contributes to Wyrd through its own `cargo xtask` gates." }
       - { term: "The shipped PR", desc: "[wyrd#886](https://github.com/getwyrd/wyrd/pull/886) — the contribution above, published as a draft the harness never marked ready." }
       - { term: "The artifacts", desc: "The brief, patch, gate results, and signed SUMMARY for that cycle sit in the instance repo's `results/` — one folder per contribution." }
-    note: "Every page of the guide was produced the same way."
     quote: "Plan → Do → Check → Act, on a live codebase."
 
   - eyebrow: "How it is built"
@@ -93,7 +92,7 @@ sections:
     diagram: |
       copier copy gh:eduralph/pdca-harness my-pdca   # render the harness
       cd my-pdca && make install                      # bootstrap the tools
-      pdca flow TOY --rehearse                        # one full cycle — offline, zero tokens
+      .venv/bin/pdca flow TOY --rehearse              # one full cycle — offline, zero tokens
     body:
-      - "The rehearsal runs stub models and stub gates — no network, no tokens — so you can learn the state machine before a single real beat. When it feels solid, [step 01](/guide/01-render-and-integrate.html) wires it to your tracker, branches, and gates."
+      - "The rehearsal runs stub models and stub gates — no network, no tokens — so you can learn the state machine before a single real beat. If `make install` linked `pdca` onto your PATH, plain `pdca` works too. When it feels solid, [step 01](/guide/01-render-and-integrate.html) wires it to your tracker, branches, and gates."
     note: "Prefer to read first? [Start the walkthrough](/guide/)."
