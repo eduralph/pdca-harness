@@ -95,6 +95,10 @@ template repo. Bug fixes for the latest release are patch tags, `vX.Y.Z`.
 `copier update --vcs-ref vX.Y.Z` moves to a specific release rather than the
 newest tag.
 
+**Merge mode refuses fork PRs (issue #806).** An operator who used
+`wave_mode = "merge"` to merge fork PRs into an upstream they hold merge rights on
+is now refused, and merges those PRs by hand.
+
 ## Carrying a local change to a template-owned file
 
 Sometimes an instance cannot wait: a gate script the template ships has a hole,
