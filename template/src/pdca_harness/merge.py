@@ -166,7 +166,11 @@ def merge_wave(cfg: Config, bundles: list[Path], *, dry_run: bool = False,
     later merge-mode run (``mark``, issue #839), unless this run pushed no branch for it
     (``pushed``: the names of the bundles that did; ``None``: all of them). The record of
     such a bundle is an earlier attempt's, so the hash marked beside it would name a patch
-    its PR does not hold, and a later run would merge that PR's older head for it."""
+    its PR does not hold, and a later run would merge that PR's older head for it. That
+    caller never hands it such a patched bundle outside a dry-run (#864): ``flow`` holds it
+    out of the wave boundary, so this never readies or merges an earlier attempt's PR for
+    it. The unmarked attempt is left for a dry-run's plan, which pushes nothing, and for a
+    caller that passes a ``pushed`` of its own."""
     fetched: set[str] = set()
     for d in bundles:
         rc = _merge_one(cfg, d, dry_run=dry_run, method=method, fetched=fetched,
