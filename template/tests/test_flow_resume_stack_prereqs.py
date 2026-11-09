@@ -51,6 +51,7 @@ class ResumeStackPrereqs(unittest.TestCase):
         self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="command")
         self.gh: dict[str, str] | None = {}   # PR state by id; None: `gh` is not installed
         self.gh_calls: list[list[str]] = []
+        self.heads: dict[str, str] = {}       # PR head by id, overriding the branch's tip
         self.events: list[str] = []
         # bundle → (stack base, recorded tip, origin's line tip) when its wave was driven
         self.seen: dict[str, tuple[str, str, str | None]] = {}
@@ -89,14 +90,16 @@ class ResumeStackPrereqs(unittest.TestCase):
 
     def _gh_stub(self, args, *a, **kw):
         """``gh pr view <url> --json state,headRefOid`` answered from ``self.gh``; the PR head
-        is the branch's tip on origin. Everything else runs for real."""
+        is ``self.heads[id]`` when set, else the branch's tip on origin. Everything else runs
+        for real."""
         if not (isinstance(args, list) and args[:1] == ["gh"]):
             return self._real_run(args, *a, **kw)
         self.gh_calls.append(list(args))
         if self.gh is None:
             raise FileNotFoundError(2, "No such file or directory", "gh")
         iid = str(args[3]).rsplit("/", 1)[-1]
-        head = self.fx._tip(f"fix/{iid}") if self.fx._has(f"fix/{iid}") else ""
+        head = self.heads.get(iid) or (self.fx._tip(f"fix/{iid}")
+                                       if self.fx._has(f"fix/{iid}") else "")
         out = json.dumps({"state": self.gh.get(iid, "OPEN"), "headRefOid": head})
         return subprocess.CompletedProcess(args, 0, out, "")
 
@@ -367,6 +370,38 @@ class ResumeStackPrereqs(unittest.TestCase):
                 self.cfg, [s], folded_this_run={}, batch=["Y"], skipped=skipped), {}))
         self.assertEqual((list(skipped), pushes), (["issue_S"], []))
         self.assertFalse(self.fx._has(self._line(["Y"])))
+
+    # -- (9): a branch tip that is not the judged PR head is not carried (#653) -------------
+
+    def _lines_with(self, commit: str) -> list[str]:
+        """Every branch on origin, other than a PR branch ``fix/*``, that holds ``commit``."""
+        refs = sb._git(self.fx.origin, "for-each-ref", "--format=%(refname:short)",
+                       "--contains", commit, "refs/heads").split()
+        return [r for r in refs if not r.startswith("fix/")]
+
+    def _tip_held(self, head: str, extra: str) -> None:
+        held = self._held("P", "D", "not the PR head that was judged", head[:12],
+                          extra[:12], "reset", "delete")
+        self.assertIn("re-issue", held)
+        self.assertEqual(self._lines_with(extra), [], self.err)
+        self._on_base("U")
+
+    def test_a_merged_prerequisite_pushed_to_after_the_merge_is_not_carried(self):
+        self._finished("P", {"p.txt": "p\n"}, pr="MERGED")
+        self.fx._merge_pr("P")
+        head = self.heads["P"] = self.fx._tip("fix/P")
+        extra = self.fx._push_from_human({"extra.txt": "x\n"}, to="fix/P", off="origin/fix/P")
+        d, u = self._planned("D", "P"), self._planned("U")
+        self._run([d, u], ["P", "D", "U"])
+        self._tip_held(head, extra)
+
+    def test_an_open_prerequisite_whose_head_moved_since_the_read_is_not_carried(self):
+        self._finished("P", {"p.txt": "p\n"})
+        head = self.heads["P"] = self.fx._tip("fix/P")      # what the PR read still reports
+        extra = self.fx._push_from_human({"extra.txt": "x\n"}, to="fix/P", off="origin/fix/P")
+        d, u = self._planned("D", "P"), self._planned("U")
+        self._run([d, u], ["P", "D", "U"])
+        self._tip_held(head, extra)
 
 
 if __name__ == "__main__":
