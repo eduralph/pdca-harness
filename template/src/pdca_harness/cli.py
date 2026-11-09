@@ -719,7 +719,8 @@ def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
       (``"unchecked"``: the line may). This wins over 3.
     - **3** — every bundle did, or was held before it was built, but ``holds`` is not empty
       (#693): the run held a bundle. A fold held an accepted bundle out of the integration
-      line — it pushed no branch (#593, ``"unpushed"``) or its branch conflicts with a
+      line — it pushed no branch (#593, ``"unpushed"``; in merge mode a wave boundary held
+      it out of the merge for that, #864) — or its branch conflicts with a
       same-wave bundle merged before it (#674, ``"conflict"``). Such a bundle is COMPLETE
       in the map, so the map alone read it as success while its work is on no line of the
       run. Or a bundle was held before it was built, because its own base could not be

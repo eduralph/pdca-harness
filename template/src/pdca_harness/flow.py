@@ -700,7 +700,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     earlier wave), so COMPLETE is the bar. An in-batch prerequisite named in ``held``
     (bundle dir names, #593) is not ready either: it is COMPLETE, but this run pushed no
     branch of it (its texts or its publish failed before the push), so the fold has nothing
-    of it to carry, or a fold held its branch out of the line for a conflict with a bundle
+    of it to carry — or, in merge mode, a wave boundary held it out of the merge for the same
+    reason (#864) — or a fold held its branch out of the line for a conflict with a bundle
     of its own wave (#674) — its dependents are held while the rest of the run goes on. A
     prerequisite **outside this batch** (a prior run's) is gated on its COMPLETE state —
     **except** an out-of-batch ``Depends on (merged)`` prereq, which keeps its stricter #107
@@ -955,11 +956,18 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
         if partners:
             ids = " ".join(p.removeprefix("issue_") for p in partners)
             into = f" into {base} ({repo})" if repo and base else ""
-            print(f"flow: {d.name} held — it `Conflicts with` {', '.join(partners)}, which "
-                  f"pushed no branch this run, so no line of this run holds that work; not "
-                  f"built on a base missing it. To build it, publish them (`pdca publish "
-                  f"<id>` for {ids}) and wait until their PR merges{into}, then re-run.",
-                  file=sys.stderr)
+            if in_merge_mode:   # merge mode has no line (#864): a wave boundary held them
+                print(f"flow: {d.name} held — it `Conflicts with` {', '.join(partners)}, "
+                      f"which pushed no branch this run, so no PR of this run carries that "
+                      f"work; not built on a base missing it. To build it, publish them "
+                      f"(`pdca publish <id>` for {ids}) and let a merge-mode run merge them, "
+                      f"or merge by hand{into}, then re-run.", file=sys.stderr)
+            else:
+                print(f"flow: {d.name} held — it `Conflicts with` {', '.join(partners)}, "
+                      f"which pushed no branch this run, so no line of this run holds that "
+                      f"work; not built on a base missing it. To build it, publish them "
+                      f"(`pdca publish <id>` for {ids}) and wait until their PR "
+                      f"merges{into}, then re-run.", file=sys.stderr)
         for p in clashed:
             into = f" into {base} ({repo})" if repo and base else ""
             print(f"flow: {d.name} held — it `Conflicts with` {p}, which this run's fold held "
@@ -1650,6 +1658,26 @@ def _merge_way_out(cfg: Config, name: str, dependent: str, repo: str, base: str)
                 f"(`pdca publish {iid}`) and merge the new PR by hand, or merge this PR by hand "
                 f"as it stands, then re-run")
     return f"let a merge-mode run merge it (it is marked), or {by_hand}"
+
+
+def _unpushed_way_out(d: Path) -> str:
+    """The way out for merge-mode bundle ``d``, held out of a wave boundary because this run
+    pushed no branch of it (#864), worded as :func:`_merge_way_out` words the same records. A
+    brief with no usable target comes first: publish skips it, so no record will ever name a
+    PR. A record with a PR is an earlier attempt's, and ``gh pr create`` fails while that PR is
+    open (the record would then name no PR at all), so it is closed before the re-publish."""
+    iid = d.name.removeprefix("issue_")
+    repo, base = publish._resolve_target(d)[:2]
+    if not (repo and base):
+        return (f"its brief names no usable `Repo + branch target`; fix the "
+                f"brief, publish it (`pdca publish {iid}`), merge the PR by hand, then re-run")
+    rec = publish._publish_record(d)
+    if not (isinstance(rec, dict) and rec.get("pr_url")):
+        return (f"it has no PR on record; publish it (`pdca publish {iid}`), "
+                f"merge the PR by hand, then re-run")
+    return (f"its PR on record is an earlier attempt's, so its head may not hold "
+            f"this patch; close it, re-publish (`pdca publish {iid}`) and merge the new PR by "
+            f"hand, or merge that PR by hand as it stands, then re-run")
 
 
 def _merge_prereqs(cfg: Config, bundles: list[Path], claims: drive_claim.Run | None = None
@@ -3153,7 +3181,8 @@ def _drive_and_act(
 
     ``holds`` (#693) is the caller's collector for the bundles this run held: filled at the
     end of the run with ``{id: reason}``. A fold held an accepted bundle out of the
-    integration line: ``"unpushed"`` for one that pushed no branch (#593) and ``"conflict"``
+    integration line: ``"unpushed"`` for one that pushed no branch (#593) — or a merge-mode
+    wave boundary held it out of the merge for that (#864) — and ``"conflict"``
     for one whose branch conflicts with a same-wave bundle merged before it (#674), or with
     bundles already on the line that explain the whole clash (#747). Such a bundle is
     COMPLETE in the returned map, which therefore cannot say it was held.
@@ -3470,7 +3499,28 @@ def _drive_and_act(
         if k < len(wave_list) - 1 and do_publish:
             dry = cfg.publisher.mode == "stub"
             if cfg.wave_mode == "merge":
-                if merge.merge_wave(cfg, complete, dry_run=dry, method=cfg.merge_method,
+                # A patched member whose branch this run did not push (#864) — its re-publish
+                # failed before the push, its texts failed draft/T4, or publish skipped it for
+                # want of a target — is held out of the boundary, as stack mode holds it out of
+                # the fold (#593): its record, if any, is an earlier attempt's, whose PR may hold
+                # an older head. Never readied nor merged here; its dependents and partners are
+                # held via `_runnable`, and the run goes on. A patch.diff that cannot be read
+                # counts as patched (fail closed). Not in a dry-run: the stub pushes nothing.
+                attempt = complete
+                if not dry:
+                    attempt = []
+                    for d in complete:
+                        if d.name in pushed or merged.has_patch(d) is False:
+                            attempt.append(d)
+                            continue
+                        if d.name not in held_unpushed:
+                            held_unpushed.add(d.name)
+                            print(f"flow: {d.name} pushed no branch this run, so this wave "
+                                  f"boundary did not ready or merge it and its PR (if any) is "
+                                  f"left as it is; bundles that depend on it or are its "
+                                  f"`Conflicts with` partners are held this run; "
+                                  f"{_unpushed_way_out(d)}.", file=sys.stderr)
+                if merge.merge_wave(cfg, attempt, dry_run=dry, method=cfg.merge_method,
                                     pushed=pushed):
                     print(f"flow: wave {k} did not merge; STOPPING — later waves not run.",
                           file=sys.stderr)
