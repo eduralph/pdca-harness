@@ -9,6 +9,14 @@ with no usable target of its own is not held, and its ``Depends on (merged)`` ke
 answer (any merge counts); a ``Depends on (merged)`` prerequisite that is not COMPLETE is
 "not ready", as before — there is no PR to wait for.
 
+A merge counts only when the prerequisite's record shows its PR was published from the
+``patch.diff`` it holds now (#865). A record carrying a digest of another patch is an older
+attempt, open, closed or merged: the dependent is held with the step that can release it, to
+re-publish the prerequisite, never to name it in the run (a carry would fold that older head)
+or to wait for that PR. A record with no digest (written before #865) counts as before, noted
+once per run. So does an ``Onto branch`` record for a dependent with no target, the one it
+releases, with a note of its own: publish never writes a digest for one.
+
 Offline: bundles on disk with ``publish.json`` records, the build / sign-off leaves and
 publishing stubbed, and ``gh pr view`` answered by a stub in front of ``subprocess.run``.
 The publisher is NOT a stub (a stub publisher is a dry-run, which holds nothing), except in
@@ -22,6 +30,7 @@ reverted these cases still load and run — and fail on their assertions.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import shutil
@@ -446,6 +455,183 @@ class OutOfBatchPrereqHold(unittest.TestCase):
         d = self._brief("D", "- **Depends on (merged):** P\n")
         self.assertEqual(self._runnable(d), [])
         self._not_ready()
+        self.assertEqual(self.gh_calls, [])
+
+    # -- (7) the PR on record is another patch.diff's: an older attempt (#865) -----------------
+    # The release decision is what this observes: whether D is built or held, and what its
+    # line says. What D's base holds is the real-git merge-mode module's to show.
+
+    def _digest(self, d: Path, value: str | None = None, key: str = "patch_digest") -> None:
+        """``d``'s record carries ``value`` under ``key`` — by default the digest publish writes
+        (#865), of the patch ``d`` holds now. Spelled out, not read from the fix."""
+        rec = json.loads((d / "publish.json").read_text(encoding="utf-8"))
+        rec[key] = value or hashlib.sha256((d / "patch.diff").read_bytes()).hexdigest()
+        (d / "publish.json").write_text(json.dumps(rec), encoding="utf-8")
+
+    def _older(self, pr: str, key: str = "patch_digest") -> Path:
+        """P as an earlier run left it, then rebuilt and accepted with no re-publish: its record
+        carries the digest of the patch its PR was published from, not of the one it holds."""
+        d = self._prereq(pr=pr)
+        self._digest(d, hashlib.sha256(b"the attempt the PR was published from").hexdigest(),
+                      key)
+        return d
+
+    def _older_held(self, dependent: str = "D", prereq: str = "P") -> str:
+        """``dependent`` was not built and stays PLANNED; ONE line names it and the prerequisite
+        as an older attempt, with the re-publish step. Not the carry advice (a carry folds the
+        recorded branch, the older head), not a wait for that PR (its merge counts for nothing),
+        not the squash path's "drop the edge" (that would build on the older attempt). U built."""
+        self.assertNotIn(f"issue_{dependent}", self.built, self.err)
+        self.assertEqual(self.results[dependent], state.PLANNED)
+        lines = [x for x in self.err.splitlines()
+                 if f"issue_{dependent}" in x and f"issue_{prereq}" in x]
+        self.assertEqual(len(lines), 1, self.err)
+        line = lines[0]
+        self.assertTrue(line.startswith(f"flow: issue_{dependent} held — prerequisite(s) "
+                                        f"issue_{prereq} not merged into main (org/repo)"), line)
+        self.assertIn(f"issue_{prereq}: its PR was published for a different patch.diff", line)
+        self.assertIn("older attempt", line)
+        self.assertIn("the accepted patch.diff has no PR", line)
+        self.assertIn(f"re-publish (`pdca publish {prereq}`)", line)
+        self.assertIn("re-run once the new PR has merged into main", line)
+        for wrong in ("in the same `pdca flow <ids>` command", "until their PR merges", "wait",
+                      f"drop issue_{prereq}"):
+            self.assertNotIn(wrong, line)
+        self.assertIn("issue_U", self.built, self.err)
+        return line
+
+    def test_a_merged_pr_for_another_patch_holds_the_dependent(self):
+        # (b): it has merged, so neither naming P nor waiting can release D.
+        self._older("MERGED")
+        self._du()
+        self._run("ids", ["D", "U"])
+        line = self._older_held()
+        self.assertIn("so its merge put an older attempt on main, which does not count", line)
+        self.assertIn("so the accepted patch lands on main as well", line)
+        # The older attempt is on main for good, and a revised fix of the same lines no longer
+        # applies on top of it: the line says what to do then, before publish refuses it.
+        self.assertIn("If the accepted patch no longer applies to main (it changes what the older "
+                      "attempt changed), publish refuses it: rebuild issue_P on main first "
+                      "(`pdca signoff P --iterate-do`), then accept and publish the rebuild", line)
+        self.assertNotIn("close it", line)
+        self.assertIn("merged: P's PR (https://github.com/org/repo/pull/P) merged, but it was "
+                      "published for a different patch.diff", self.err)
+
+    def test_a_merged_pr_marked_for_another_patch_holds_the_dependent_in_the_sweep(self):
+        # A merge-mode mark's hash is a digest too.
+        self._older("MERGED", key="merge_eligible_patch")
+        self._du()
+        self._run("batch")
+        self._older_held()
+
+    def test_a_merged_pr_for_another_patch_holds_a_depends_on_merged_edge(self):
+        self._older("MERGED")
+        self._du("Depends on (merged)")
+        self._run("ids", ["D", "U"])
+        self._older_held()
+
+    def test_an_open_pr_for_another_patch_is_closed_and_re_published(self):
+        # (b2): today's line would name P in the run (a carry of the older head) or wait for a
+        # merge that would not release D.
+        self._older("OPEN")
+        self._du()
+        self._run("ids", ["D", "U"])
+        line = self._older_held()
+        self.assertIn("so its head is an older attempt, whose merge would not count", line)
+        self.assertIn("close it, re-publish (`pdca publish P`) and re-run once the new PR has "
+                      "merged into main", line)
+        self.assertNotIn("--iterate-do", line)   # never merged, so main has none of it
+
+    def test_a_closed_pr_for_another_patch_is_re_published(self):
+        self._older("CLOSED")
+        self._du()
+        self._run("batch")
+        line = self._older_held()
+        self.assertIn("and is closed, so it is an older attempt", line)
+        self.assertNotIn("close it", line)
+        self.assertNotIn("reopen", line)
+        self.assertNotIn("--iterate-do", line)
+
+    def test_a_pr_for_another_patch_whose_state_cannot_be_read_holds_with_the_same_step(self):
+        self._older("FAIL")
+        self._du()
+        self._run("ids", ["D", "U"])
+        line = self._older_held()
+        self.assertIn("close it if it is open, re-publish (`pdca publish P`)", line)
+        self.assertIn("If it has merged and the accepted patch no longer applies to main", line)
+        self.assertIn("rebuild issue_P on main first (`pdca signoff P --iterate-do`)", line)
+
+    def test_a_merged_pr_for_this_patch_lets_the_dependent_build(self):
+        # (c): the digest is the patch's now — as before.
+        self._digest(self._prereq(pr="MERGED"))
+        self._du()
+        self._run("ids", ["D", "U"])
+        self._built("D", "U")
+        self.assertNotIn("treating as not merged", self.err)
+        self.assertNotIn("carries no patch digest", self.err)
+
+    def test_an_open_pr_for_this_patch_keeps_the_carry_advice(self):
+        self._digest(self._prereq(pr="OPEN"))
+        self._du()
+        self._run("ids", ["D", "U"])
+        self._held()
+
+    def test_a_record_with_no_digest_counts_with_one_note_per_run(self):
+        # (e): trusted as before; one note per prerequisite, its own prefix, not per dependent.
+        self._prereq(pr="MERGED")
+        self._du()
+        self._brief("E", "- **Depends on:** P\n")
+        self._run("ids", ["D", "E", "U"])
+        self._built("D", "E", "U")
+        notes = [x for x in self.err.splitlines() if "carries no patch digest" in x]
+        self.assertEqual(len(notes), 1, self.err)
+        self.assertTrue(notes[0].startswith("flow: note — issue_P's publish record"), notes[0])
+        self.assertIn("(`pdca publish P`)", notes[0])
+        # A rebuild of what that PR changed no longer applies on top of its merge: the note says
+        # what to do when publish refuses it, as the older-attempt hold does.
+        self.assertIn("if publish refuses it (the accepted patch changes what that PR changed, or "
+                      "its patch.diff cannot be read), rebuild issue_P on its base (`pdca signoff "
+                      "P --iterate-do`), then accept and publish the rebuild", notes[0])
+        self.assertNotIn("issue_D", notes[0])
+
+    def test_an_onto_branch_record_gets_its_own_note_not_the_one_for_a_record_before_865(self):
+        # A dependent with no target of its own takes any merge (#186), an `Onto branch` commit's
+        # too. Publish writes no digest for that commit, so the record does not predate #865,
+        # and `pdca publish` cannot add a commit to a merged PR: the note says neither.
+        self._prereq(pr="MERGED", mode="stacked", base="origin/fix/P")
+        self._du("Depends on (merged)", target=None)
+        self._brief("E", "- **Depends on (merged):** P\n", target=None)
+        self._run("ids", ["D", "E", "U"])
+        self._built("D", "E", "U")
+        notes = [x for x in self.err.splitlines() if x.startswith("flow: note")]
+        self.assertEqual(len(notes), 1, self.err)     # once per prerequisite, as for any record
+        self.assertTrue(notes[0].startswith(
+            "flow: note — issue_P's publish record is an `Onto branch` commit on another PR's "
+            "branch (fix/P)"), notes[0])
+        self.assertIn("so whether that merged PR (https://github.com/org/repo/pull/P) holds the "
+                      "accepted patch.diff is not checked", notes[0])
+        self.assertIn("it counts as merged only for a dependent with no target of its own",
+                      notes[0])
+        for wrong in ("predates", "pdca publish", "re-publish", "issue_D", "issue_E"):
+            self.assertNotIn(wrong, notes[0])
+
+    def test_a_dependent_with_no_target_does_not_count_an_older_attempt(self):
+        # #186: any merge counts for it, but not the merge of another patch's PR.
+        self._older("MERGED")
+        self._du("Depends on (merged)", target=None)
+        self._run("ids", ["D", "U"])
+        self.assertNotIn("issue_D", self.built, self.err)
+        self._not_ready()
+        self.assertIn("merged: P's PR (https://github.com/org/repo/pull/P) merged, but it was "
+                      "published for a different patch.diff", self.err)
+        self._built("U")
+
+    def test_a_dry_run_still_asks_no_host_about_an_older_attempt(self):
+        self.cfg = _cfg(self.tmp, publisher="stub")
+        self._older("OPEN")
+        self._du()
+        self._run("batch")
+        self._built("D", "U")
         self.assertEqual(self.gh_calls, [])
 
 

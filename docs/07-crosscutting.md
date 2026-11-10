@@ -974,7 +974,27 @@ wave builds on, via `[driver].wave_mode`:
   count. The dependent is named on one line with the prerequisite and what to
   do, and the rest of the run goes on: name the prerequisite in the same
   `pdca flow <ids>` command so the run carries it onto its line (as above), or
-  wait for the merge and re-run. In stack mode a PR that does not count for its
+  wait for the merge and re-run. A merge counts only for the `patch.diff` the
+  prerequisite holds now. Publish records a digest of the patch it pushed for a
+  PR (`"patch_digest"` in `publish.json`), so a PR whose record carries a digest
+  of another patch (the bundle was rebuilt and accepted, and never re-published)
+  is an older attempt, open, closed or merged. Its merge does not count, and
+  naming it in the command would carry that older head onto the line, so its line
+  says so and gives the step that can release the dependent instead: re-publish
+  it (`pdca publish <id>`, closing its PR first if it is still open), then re-run
+  once the new PR has merged. An older attempt that already merged stays on the
+  base, so the re-publish has to apply the accepted patch on top of it. That
+  patch was made on a base without the older attempt, so when the two change the
+  same lines, as a revised fix usually does, it no longer applies and publish
+  refuses it. Then rebuild the prerequisite on the base first
+  (`pdca signoff <id> --iterate-do`: its Do starts from the base as it is now),
+  accept and publish the rebuild, and re-run once its PR has merged; the hold
+  line says so too. A `patch.diff` that cannot be read holds the same way, since
+  nothing can show which patch the PR holds, and publish could not push it
+  either: restore the file and re-run, or, if it is lost, rebuild the
+  prerequisite the same way. A record with no digest, written before publish
+  recorded one, counts as before, and the run notes once per prerequisite that
+  it did not check it. In stack mode a PR that does not count for its
   record (an `Onto branch` commit, say), but whose merge commit the dependent's
   base has without its head, was squash- or rebase-merged there and will never
   count, so a wait cannot end that hold: its line says so and gives the step
@@ -1000,7 +1020,9 @@ wave builds on, via `[driver].wave_mode`:
   same way, with the same step for such a PR: a prerequisite the run does not
   drive must have merged into the
   dependent's base (a dependent with no usable target still takes a merge into
-  any branch).
+  any branch, an `Onto branch` commit's too, but not one of an older attempt;
+  publish records no digest for an `Onto branch` commit, so the run notes, as
+  above, that nothing checked which patch that merge holds).
 
   Once the run has a line for the dependent's target (its first fold, or the
   carry above), the dependent is cut from that line, not from the base, and the
@@ -1042,13 +1064,21 @@ wave builds on, via `[driver].wave_mode`:
   reopen it and let a later run merge it); a marked PR the gates refuse (the
   `merge:` lines above the hold line give the reason and what clears it, which
   for a malformed `expected_checks` is `pdca.toml`, not the PR); a marked PR
-  whose own prerequisites are not merged into that base; a marked PR whose bundle
-  has since been rebuilt and not re-published, so its head may be an older attempt
-  (close it, re-publish, and merge the new PR by hand, or merge this PR by hand as
-  it stands); and a bundle
-  the run cannot merge for the dependent, because it has no `brief.md`, a brief
-  that names no target, or a `patch.diff` that cannot be read (merge its PR by
-  hand). A prerequisite that ships nothing (a close or no-fix, with no patch)
+  whose own prerequisites are not merged into that base; a PR, marked or not,
+  whose bundle has since been rebuilt and not re-published, so its head is an
+  older attempt (close it, re-publish, and merge the new PR by hand: a merge of
+  the old PR does not release the dependent, see below); a bundle the run cannot
+  merge for the dependent, because it has no `brief.md` or a brief that names no
+  target (merge its PR by hand); and a bundle whose `patch.diff` cannot be read.
+  For that last one a merge by hand releases the dependent only when its record
+  carries no patch digest to check (one written before publish recorded one, see
+  below) or one the file's bytes still match; that is the only case where its
+  line says to merge by hand. Otherwise nothing can show which patch its PR
+  holds, and publish could not push that file, so its line says to restore the
+  file and re-run, or, if it is lost, to close its PR if it is open, rebuild the
+  bundle on the base (`pdca signoff <id> --iterate-do`), accept and publish the
+  rebuild, and merge the new PR by hand. A prerequisite that ships nothing (a
+  close or no-fix, with no patch)
   holds nobody. The run claims each prerequisite before it reads it, so two runs
   never ready or merge one PR together. One it cannot claim (another live run
   holds it, or no claim can be recorded) is not judged or merged, even if its PR
@@ -1058,7 +1088,23 @@ wave builds on, via `[driver].wave_mode`:
   record says it is merged into the dependent's own target base. So an `Onto
   branch` commit, or a PR on record for another base, never releases it, even
   once merged: get that work onto the base and remove the edge from the
-  dependent's brief. A re-publish writes a fresh record without the mark. A
+  dependent's brief. It is released, in both modes, only by a merge of the PR
+  published for the `patch.diff` the prerequisite holds now: a record that
+  carries a digest of another patch (`"patch_digest"`, which publish writes for
+  every PR, or the mark's `"merge_eligible_patch"`) is an older attempt even once
+  merged, by a run or by hand, and so is one whose `patch.diff` cannot be read.
+  The dependent then stays held, named with the step: re-publish, then merge the
+  new PR. A merged older attempt stays on the base, and the re-publish has to
+  apply the accepted patch on top of it. When the two change the same lines, as
+  a revised fix usually does, the accepted patch no longer applies there and
+  publish refuses it. The step then is to rebuild the prerequisite on the base
+  first (`pdca signoff <id> --iterate-do`), accept and publish the rebuild, and
+  merge its PR; the hold line says so. For a `patch.diff` that cannot be read
+  the step is to restore that file, or, if it is lost, to rebuild the same way.
+  A record with no digest at all (written before publish recorded one) is
+  counted as before, with one note per prerequisite per run that nothing checked
+  which patch the merged PR holds. A re-publish writes a fresh record, with the
+  new digest and without the mark. A
   refused PR goes back to draft and keeps the mark, so a later run readies it
   again: to leave a marked PR alone, merge or close it by hand, or remove the key.
   Before each merge the driver reads that PR's **full check rollup** itself —

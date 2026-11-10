@@ -1112,7 +1112,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
               on_line: Collection[str] | None = None,
               unbuilt: Collection[str] = frozenset(),
               merge_notes: Mapping[tuple[str, str, str], str] | None = None,
-              merge_busy: Collection[tuple[str, str, str]] = frozenset()
+              merge_busy: Collection[tuple[str, str, str]] = frozenset(),
+              noted: set[str] | None = None
               ) -> list[Path]:
     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
 
@@ -1154,10 +1155,19 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     line's. ``merge_busy`` is those of its keys whose prerequisite that step could not claim
     (another live run holds it, or no claim can be recorded): nothing has judged it, so
     whatever its record says it holds the dependent on a line of its own, with no ``gh`` read
-    and no way out read off the record. A dependent with no usable target of its own (publish
-    skips it) has no base to
+    and no way out read off the record. A merge counts only when the prerequisite's record
+    shows its PR was published from the ``patch.diff`` it holds now (``merged.merged_into``,
+    #865). One whose record counts for d's base but carries a digest of another patch (or a
+    patch that cannot be read) is an older attempt, whatever its PR's state: no merge of that PR
+    and no carry of its branch puts the accepted patch under d. In stack mode d is then named on
+    its own line with the step that can release it, to re-publish that prerequisite (closing an
+    open PR first, or rebuilding it on the base first when a merged older attempt changed the
+    same lines), never to name it in the run or to wait for that PR; in merge mode
+    :func:`_merge_way_out` gives the same step. A record with no digest at all is counted as
+    before, noted once per prerequisite in ``noted`` (:func:`_note_no_digest`; ``None``: each
+    time). A dependent with no usable target of its own (publish skips it) has no base to
     wait for: no #647 hold, and its ``Depends on (merged)`` keeps #186's answer — any merge
-    counts. A finished named
+    counts, but not one of an older attempt. A finished named
     id (an id the run was asked for that an earlier run finished, #646) is carried onto the
     line before wave 0 when it is clean (:func:`_carry_finished`); when it is not, it is
     named in ``held``, and a bundle whose plain ``Depends on`` names it is not ready (a
@@ -1231,6 +1241,7 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
         squashed: list[tuple[str, str]] = []   # … not those: merged there, never counted (#626)
         stale: list[tuple[str, str, bool]] = []  # … of those, not on d's line: off_line's shape
         unjudged = False                         # … of those, no line was judged for d
+        older: list[tuple[str, str]] = []  # … not those: their PR is another patch's (#865)
         busy: list[str] = []       # could not be claimed before wave 0, so not judged (#839)
         for dep in deps:
             p = cfg.find_bundle(dep)
@@ -1251,9 +1262,9 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                     busy.append(p.name)
                     continue
                 # Only a merge INTO d's base puts it there (#186 for `Depends on (merged)`,
-                # #647 for the plain edge above). With no target of d's own, #186's answer
-                # and its "not ready" line stand.
-                if merged.merged_into(cfg, dep, repo, base):
+                # #647 for the plain edge above), and only of the patch it holds now (#865).
+                # With no target of d's own, #186's answer and its "not ready" line stand.
+                if _released(cfg, dep, repo, base, noted):
                     # … and when d is cut from this run's line, that line must have it too
                     # (#655); a d on a base of its own, or on the real base, is built from
                     # the base as fetched, which must have it (#729). A close/no-fix prereq
@@ -1295,6 +1306,14 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                     else:
                         unjudged = True
                     continue
+                # Its PR is another patch's (#865): a carry would fold that older head, and a
+                # wait ends with a merge that does not count. Merge mode names it in the way
+                # out (`_merge_way_out`), on the plain line below.
+                way = "" if in_merge_mode else _older_attempt(
+                    p, repo, base, then=f"re-run once the new PR has merged into {base}")
+                if way:
+                    older.append((p.name, way))
+                    continue
                 unmerged.append(p.name)
                 if cand and dep not in merged_deps and cand[0][1:3] == (repo, base):
                     carryable.append(p.name)  # named in the run, the carry puts it on (#646)
@@ -1316,6 +1335,11 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                   f"into {base} ({repo}), and no line of this run carries them; not built "
                   f"on a base missing them. To build it, {todo} until their PR merges into "
                   f"{base}, then re-run.", file=sys.stderr)
+        if older:
+            ways = "; ".join(f"{n}: {way}" for n, way in older)
+            print(f"flow: {d.name} held — prerequisite(s) {', '.join(n for n, _w in older)} not "
+                  f"merged into {base} ({repo}); not built on a base missing them. {ways}.",
+                  file=sys.stderr)
         if busy:
             ways = "; ".join(f"{n}: {(merge_notes or {})[n, repo, base]}" for n in busy)
             print(f"flow: {d.name} held — prerequisite(s) {', '.join(busy)} not known to be "
@@ -1398,10 +1422,110 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                   f"no line or base of this run holds that work; not built on a base missing "
                   f"it. To build it, wait until {p} is built, once what its hold line names is "
                   f"fixed, and its PR merges{into}, then re-run.", file=sys.stderr)
-        if (not unmet and not unmerged and not busy and not squashed and not off_line
-                and not off_base and not partners and not clashed and not unbuilt_partners):
+        if (not unmet and not unmerged and not older and not busy and not squashed
+                and not off_line and not off_base and not partners and not clashed
+                and not unbuilt_partners):
             runnable.append(d)
     return runnable
+
+
+def _released(cfg: Config, dep: str, repo: str, base: str, noted: set[str] | None) -> bool:
+    """``merged.merged_into``'s answer for prerequisite ``dep`` on ``repo`` @ ``base``, the one
+    release rule; on a yes, :func:`_note_no_digest` (#865)."""
+    if not merged.merged_into(cfg, dep, repo, base):
+        return False
+    _note_no_digest(cfg.find_bundle(dep), noted)
+    return True
+
+
+def _note_no_digest(p: Path, noted: set[str] | None) -> None:
+    """Note on stderr that prerequisite ``p``'s merged PR was counted without checking which
+    patch it holds, when its record carries no patch digest at all (``merged.for_this_patch``
+    ``None``) — once per prerequisite in ``noted`` (the names noted this run; ``None``: every
+    time). Asked only after a yes: a prerequisite that ships nothing merged nothing, so it gets
+    no note. Its own prefix, so a dependent's ``held`` line count is the same with it or
+    without it. A record written before #865 also gets the step for a ``p`` rebuilt after its
+    PR was published: re-publish it, or, when publish refuses that patch (it changes what the
+    merged PR changed, or cannot be read), rebuild ``p`` on its base, as :func:`_older_attempt`
+    words it for a hold. An ``Onto branch`` record (``"stacked"``) never has a digest, as
+    publish writes none for it, and counts only for a dependent with no target of its own
+    (``merged.merged_into``), so its note says that instead, with no step: publish adds a
+    commit only to a PR that is still open (``publish._publish_stacked``)."""
+    if noted is not None and p.name in noted:
+        return
+    rec = publish._publish_record(p)
+    if (merged.has_patch(p) is False or not isinstance(rec, dict) or not rec.get("pr_url")
+            or merged.for_this_patch(p, rec) is not None):
+        return
+    if noted is not None:
+        noted.add(p.name)
+    iid = p.name.removeprefix("issue_")
+    if rec.get("mode") == "stacked":
+        print(f"flow: note — {p.name}'s publish record is an `Onto branch` commit on another "
+              f"PR's branch ({rec.get('branch') or '?'}), and publish records no patch digest for "
+              f"one, so whether that merged PR ({rec['pr_url']}) holds the accepted patch.diff is "
+              f"not checked; it counts as merged only for a dependent with no target of its own. "
+              f"If {p.name} was rebuilt after that commit was pushed, that PR holds an older "
+              f"attempt.", file=sys.stderr)
+        return
+    print(f"flow: note — {p.name}'s publish record carries no patch digest (it predates #865), "
+          f"so whether its merged PR ({rec['pr_url']}) holds the accepted patch.diff is not "
+          f"checked, and it counts as merged. If {p.name} was rebuilt after that PR was "
+          f"published, re-publish it (`pdca publish {iid}`); if publish refuses it (the accepted "
+          f"patch changes what that PR changed, or its patch.diff cannot be read), rebuild "
+          f"{p.name} on its base (`pdca signoff {iid} --iterate-do`), then accept and publish "
+          f"the rebuild.", file=sys.stderr)
+
+
+def _older_attempt(p: Path, repo: str, base: str, *, then: str) -> str:
+    """The way out for a dependent of prerequisite ``p`` whose PR is not known to hold the
+    ``patch.diff`` ``p`` holds now (#865), or "" when that is not why it is not merged: its
+    record counts for ``repo`` @ ``base`` (``merged.counts_into``) and carries a patch digest
+    that ``merged.for_this_patch`` rejects. Such a PR is an older attempt, whatever its state:
+    merging it does not release the dependent, so the step is to re-publish ``p`` and then
+    ``then`` (what releases the dependent once the new PR is up: a hand merge in merge mode,
+    the merge in stack mode). One ``gh`` read of the PR's state, made only for such a record,
+    words the step. An open one is closed first, as ``gh pr create`` fails while it is open. A
+    merged one stays on the base, so the re-publish adds the accepted patch on top of it, never
+    in its place; that patch was made on a base without it, so where the two change the same
+    lines, as a revised fix usually does, it no longer applies and publish refuses it. So the
+    step also says to rebuild ``p`` on the base first then (an iterate, whose Do is cut from
+    the base as it is now), and accept and publish that. A state that cannot be read may be
+    either, and gets both. A ``patch.diff`` that cannot be read (``merged.has_patch`` ``None``,
+    or no hash) is named as that, with no read. Publish could not push that file, so the step
+    is to restore it, which may be all it takes, or, if it is lost, to rebuild ``p`` the same
+    way."""
+    rec = publish._publish_record(p)
+    if (not isinstance(rec, dict) or not rec.get("pr_url")
+            or not merged.counts_into(rec, repo, base)
+            or merged.for_this_patch(p, rec) is not False):
+        return ""
+    iid = p.name.removeprefix("issue_")
+    again = f"re-publish (`pdca publish {iid}`)"
+    rebuild = f"(`pdca signoff {iid} --iterate-do`), then accept and publish the rebuild"
+    if merged.has_patch(p) is None or merged.patch_hash(p) is None:
+        return (f"its patch.diff cannot be read, so its PR is not known to hold the accepted "
+                f"patch and does not count as merged; restore that file, then re-run, or, if it "
+                f"is lost, close the PR if it is open, rebuild {p.name} on {base} {rebuild}, and "
+                f"{then}")
+    pr = merged.pr_state(str(rec["pr_url"]))
+    st = pr[0] if pr is not None else None
+    other = "its PR was published for a different patch.diff"
+    none = "and the accepted patch.diff has no PR"
+    applies = (f"the accepted patch no longer applies to {base} (it changes what the older "
+               f"attempt changed), publish refuses it: rebuild {p.name} on {base} first "
+               f"{rebuild}")
+    if st == "MERGED":
+        return (f"{other}, so its merge put an older attempt on {base}, which does not count, "
+                f"{none}; {again} so the accepted patch lands on {base} as well, and {then}. "
+                f"If {applies}")
+    if st == "OPEN":
+        return (f"{other}, so its head is an older attempt, whose merge would not count, {none}; "
+                f"close it, {again} and {then}")
+    if st == "CLOSED":
+        return f"{other} and is closed, so it is an older attempt, {none}; {again} and {then}"
+    return (f"{other}, so it is an older attempt, whose merge would not count, {none}; close it "
+            f"if it is open, {again} and {then}. If it has merged and {applies}")
 
 
 def _uncounted_squash(cfg: Config, p: Path, repo_spec: str, base: str,
@@ -1413,9 +1537,11 @@ def _uncounted_squash(cfg: Config, p: Path, repo_spec: str, base: str,
     the merge commit is on the base, not that the base still has the change: it cannot see a
     later revert. Else "". Stack mode only: merge mode picks its own merge method. Not in a
     dry-run, which fetches nothing here. The caller asks once :func:`merged.merged_into` has
-    said no, so a record that counts means a PR not merged, which costs no read. Fail-closed:
-    a checkout that cannot be fetched or a git failure is "", and the caller's plain hold
-    stands."""
+    said no, so a record that counts means a PR not merged, or one merged but published for
+    another patch.diff (#865), and either costs no read: "" leaves the second to the caller's
+    older-attempt hold (:func:`_older_attempt`), since dropping the edge would build the
+    dependent on that older attempt. Fail-closed: a checkout that cannot be fetched or a git
+    failure is "", and the caller's plain hold stands."""
     rec = publish._publish_record(p)
     if (cfg.wave_mode != "stack" or cfg.publisher.mode == "stub" or not isinstance(rec, dict)
             or merged.counts_into(rec, repo_spec, base)):
@@ -2021,14 +2147,21 @@ def _merge_way_out(cfg: Config, name: str, dependent: str, repo: str, base: str)
     ``merged.merged_into`` judges the record, so the advice follows what it will answer. An
     ``Onto branch`` record never counts as merged, and a record for another base or repo does
     not count on this one, whatever becomes of the PR: merging by hand cannot release the
-    dependent, so the way out is to land the work and drop the edge. Only a PR on record for
+    dependent, so the way out is to land the work and drop the edge. A PR on record for this
+    base that was published for another patch.diff (#865) is an older attempt: its merge never
+    counts either, open, closed or merged, so the way out is to re-publish and merge the new PR
+    by hand (:func:`_older_attempt`: the old one closed first, since ``gh pr create`` fails
+    while it is open and the record would then name no PR at all; a merged one rebuilt on the
+    base first when the accepted patch no longer applies on top of it), never to merge or
+    reopen this one, and re-publishing writes a record with no marker. So is a record with a
+    digest whose ``patch.diff`` cannot be read: the step there is to restore that file, or
+    rebuild. For such a patch only a record with no digest (or one whose digest is the file's
+    bytes, which are just not text) reaches the hand merge below, since
+    ``merged.merged_into`` counts that merge. Only another PR on record for
     this base can be merged out of the hold, a closed one once it is reopened, and only a
     marked, open one the walk would take (:func:`_merge_prereqs`) can be left to a later run.
-    One published for another patch is not that, and re-publishing writes a record with no
-    marker, so a human merges either way: the new PR (the old one closed first, since ``gh pr
-    create`` fails while it is open and the record would then name no PR at all), or this one
-    as it stands. A prerequisite of a prerequisite may not have finished its own cycle at all,
-    so that comes first."""
+    A prerequisite of a prerequisite may not have finished its own cycle at all, so that comes
+    first."""
     iid = name.removeprefix("issue_")
     p = cfg.find_bundle(iid)
     st = state.state(p)
@@ -2054,6 +2187,9 @@ def _merge_way_out(cfg: Config, name: str, dependent: str, repo: str, base: str)
     if not merged.counts_into(rec, repo, base):
         return (f"its PR is on record for {rec.get('base') or '?'} ({rec.get('repo') or '?'}), "
                 f"so its merge does not count as one into {base}; {land}")
+    older = _older_attempt(p, repo, base, then="merge the new PR by hand, then re-run")
+    if older:
+        return older
     pr = merged.pr_state(str(rec["pr_url"]))
     if pr is not None and pr[0] == "CLOSED":
         return (f"its PR is closed, so no merge-mode run merges it; reopen it and merge it by "
@@ -2065,17 +2201,20 @@ def _merge_way_out(cfg: Config, name: str, dependent: str, repo: str, base: str)
         why = "it has no readable brief.md" if own is None else f"its brief does not target {base}"
         return f"no merge-mode run merges it for {dependent} ({why}), so {by_hand}"
     if merged.has_patch(p) is None:
+        # A record with no digest, or with the digest of these very bytes (not text, but what
+        # its PR was published from): a hand merge counts for it (#865). Any other digest is
+        # an older attempt, above, which a hand merge does not release.
         return (f"no merge-mode run merges it for {dependent} (its patch.diff cannot be read), "
                 f"so {by_hand}")
     if not merged.marked_for_this_patch(p, rec):
-        return (f"its PR was published for a different patch.diff, so its head may be an older "
-                f"attempt and no merge-mode run merges it; close it, re-publish "
-                f"(`pdca publish {iid}`) and merge the new PR by hand, or merge this PR by hand "
-                f"as it stands, then re-run")
+        # A marker with no hash: a hash for another patch is an older attempt, above.
+        return (f"no merge-mode run merges it for {dependent} (its mark names no patch.diff), "
+                f"so {by_hand}")
     return f"let a merge-mode run merge it (it is marked), or {by_hand}"
 
 
-def _merge_prereqs(cfg: Config, bundles: list[Path], claims: drive_claim.Run | None = None
+def _merge_prereqs(cfg: Config, bundles: list[Path], claims: drive_claim.Run | None = None,
+                   noted: set[str] | None = None
                    ) -> tuple[dict[tuple[str, str, str], str], set[tuple[str, str, str]]]:
     """Before wave 0 of a publishing merge-mode run, merge the marked prerequisites the drive
     set waits for (#839) — the merge-mode analogue of :func:`_carry_finished`. Returns what
@@ -2118,7 +2257,12 @@ def _merge_prereqs(cfg: Config, bundles: list[Path], claims: drive_claim.Run | N
     and all the hold costs is a re-run. Claims the walk took are let go when it ends, because
     this run writes nothing to those bundles again and must not hold up another run's
     dependents of them for the rest of its life. A bundle this run already held (the drive
-    set) stays held. ``None`` — a library call — claims nothing."""
+    set) stays held. ``None`` — a library call — claims nothing.
+
+    A prerequisite's own prerequisite counts as merged by the same rule as a dependent's
+    (:func:`_released`, #865): the merge of an older attempt does not, and the note names it
+    with the re-publish step (:func:`_merge_way_out`). ``noted`` is the run's, as
+    :func:`_runnable` takes it."""
     order: dict[str, tuple[Path, tuple[str, str]]] = {}     # deepest first: name → …
     reach: dict[str, list[str]] = {}    # prerequisite name → the drive-set bundles waiting
     taken: dict[tuple[str, tuple[str, str]], bool] = {}     # (name, target) → takes()'s answer
@@ -2183,7 +2327,7 @@ def _merge_prereqs(cfg: Config, bundles: list[Path], claims: drive_claim.Run | N
         blockers = list(dict.fromkeys(
             cfg.find_bundle(dep).name for dep in waves.declared_deps(p / "brief.md")
             if (cfg.find_bundle(dep).name, repo, base) in busy
-            or not merged.merged_into(cfg, dep, repo, base)))
+            or not _released(cfg, dep, repo, base, noted)))
         if blockers:
             ways = "; ".join(f"{q}: " + (notes.get((q, repo, base))
                                          or _merge_way_out(cfg, q, name, repo, base))
@@ -3756,8 +3900,11 @@ def _drive_and_act(
     # only reads state: a merge can wait `merge_wait_secs` and changes the host.
     merge_notes: dict[tuple[str, str, str], str] | None = None
     merge_busy: set[tuple[str, str, str]] = set()
+    # Prerequisites whose merge this run counted with no patch digest to check, each noted
+    # once however many dependents it releases (#865, `_note_no_digest`).
+    noted: set[str] = set()
     if merge_mode:
-        merge_notes, merge_busy = (_merge_prereqs(cfg, bundles, claims) if hold_unmerged
+        merge_notes, merge_busy = (_merge_prereqs(cfg, bundles, claims, noted) if hold_unmerged
                                    else ({}, set()))
     requested = set(named) | {cfg.bundle(str(i).removeprefix("issue_")).name
                               for i in (batch or ())}
@@ -3798,7 +3945,7 @@ def _drive_and_act(
                              # and the bundles cut from it (#729).
                              lines={tgt: (branch, folded_tips.get(tgt))
                                     for tgt, branch in integ.items()},
-                             on_line=on_line, unbuilt=held_base)
+                             on_line=on_line, unbuilt=held_base, noted=noted)
         if not runnable:
             continue
         # The pool, read off the schedule as it stands NOW — so a splice below has already
