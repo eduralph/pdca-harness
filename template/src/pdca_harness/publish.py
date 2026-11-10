@@ -31,7 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import brief, gates, leaves, progress, state, waves, worktree
+from . import brief, gates, leaves, merged, progress, state, waves, worktree
 # Aliased: `publish()` builds a local `record = {...}` (its publish.json payload,
 # below) that would shadow the module name at the #317 call-in.
 from . import record as record_mod
@@ -387,6 +387,10 @@ def publish(
     if ci_base:
         steps = _pin_checkout(steps, git, branch, ci_base)
 
+    # The patch `git apply` below pushes, as a digest on the record (#865): the record outlives
+    # an iterate, so a rebuild that never reaches this PR has another digest, and a merge of
+    # this PR is not counted as that rebuild's work (`merged.merged_into`).
+    digest = merged.patch_hash(d)
     orig_ref = _current_ref(repo)
     stashed = _stash_worktree(repo)
     try:
@@ -436,7 +440,7 @@ def publish(
         "mode": "stacked-pr" if stack_branch else "new-pr",
         "branch": branch, "pr_url": pr_url, "base": pr_base, "repo": repo_spec,
         "by": by or _signoff_by(d) or cfg.author or "unknown", "date": today,
-        "id_pending": pending_id,
+        "id_pending": pending_id, merged.PATCH_DIGEST: digest,
     }
     if ci_base:
         # The base commit the host-CI gate certified — and, via _pin_checkout, the exact
