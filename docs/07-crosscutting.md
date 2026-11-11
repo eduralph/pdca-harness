@@ -1009,10 +1009,13 @@ wave builds on, via `[driver].wave_mode`:
   re-run that still finds it builds the dependent there without the merge, and
   one that does not starts from the base, which has the merge commit. Dropping
   the edge before the re-run, as the prerequisite's own line above asks, skips
-  this check, which is why that line gives the delete step too. When no line was
-  judged for the dependent but a re-run may continue one, because it is held for
-  something else too (say the carry or fold that would give it a line failed),
-  the step says that line was not checked and to delete it if it is there. It says
+  this check, which is why that line gives the delete step too. When the run did
+  not check that line for the merge (it has no recorded tip, the carry or fold
+  failed, the line was not trusted, or a re-gate was red), the step says that line
+  was not checked and to delete it if it is there. It does so for a dependent that
+  is on the run's line, by any seam (a `Conflicts with` edge to a finished id the
+  run names is one), whether or not it is held for anything else, and for one kept
+  off the line only this run because a prerequisite it names was left unbuilt. It says
   the same of the line of a re-run naming another prerequisite the dependent is
   told to name, which is another line. Nothing is held for a prerequisite with no
   patch or no usable target, for a dependent with no usable target of its own,
