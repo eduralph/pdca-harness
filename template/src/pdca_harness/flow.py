@@ -1143,9 +1143,11 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     as merged there (:func:`_uncounted_squash`, #626), to drop the edge, since no wait ends
     that hold, and, when the bundle is cut from a line of this run that lacks the merge
     (:func:`_line_lacks_merge`), to delete that line too, since with the edge gone nothing
-    checks it. Where no such line was judged but a re-run may continue one, because the bundle
-    is held for something else too (the carry or fold that would give it a line failed, say),
-    it is told that line was not checked, and to delete it if it is there. It is told the same
+    checks it. Where no such line was judged (no recorded tip, the carry or fold failed, the
+    line was not trusted, a red re-gate) but a re-run may continue one — the bundle is on the
+    run's line by any seam, or held for a prerequisite this run left unbuilt — it is told that
+    line was not checked, and to delete it if it is there, held for anything else or not (#911).
+    "Not judged" and "not on the line" are separate facts. It is told the same
     of the line of a re-run naming a prerequisite it is told to name, which is another line.
     ``merge_notes`` is not ``None`` in merge mode (#839), where the run has no line at all, so
     no prerequisite is on one: a plain ``Depends on`` one waits whether or not the run was
@@ -1241,6 +1243,7 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
         squashed: list[tuple[str, str]] = []   # … not those: merged there, never counted (#626)
         stale: list[tuple[str, str, bool]] = []  # … of those, not on d's line: off_line's shape
         unjudged = False                         # … of those, no line was judged for d
+        unchecked = False                        # … d is on a line now, and it was not judged
         older: list[tuple[str, str]] = []  # … not those: their PR is another patch's (#865)
         busy: list[str] = []       # could not be claimed before wave 0, so not judged (#839)
         for dep in deps:
@@ -1296,7 +1299,10 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                     # The way out drops this edge, and only an edge makes a run check its
                     # line for the merge (above), so the line is judged here, once.
                     line = (lines or {}).get((repo, base))
-                    if line and line[1] and (on_line is None or d.name in on_line):
+                    # On a line now: one a seam keeps there (`on_line`), or, where none gets a
+                    # base of its own, every one once the target has a line.
+                    here = d.name in on_line if on_line is not None else line is not None
+                    if line and line[1] and here:
                         key = (p.name, repo, base)
                         if key not in lacks:
                             lacks[key] = _line_lacks_merge(cfg, dep, repo, line, views)
@@ -1305,6 +1311,9 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                             stale.append((p.name, *lack))
                     else:
                         unjudged = True
+                        # No recorded tip, a failed carry or fold, an untrusted line, a red
+                        # re-gate: d is on a line this run did not check (#911).
+                        unchecked = unchecked or here
                     continue
                 # Its PR is another patch's (#865): a carry would fold that older head, and a
                 # wait ends with a merge that does not count. Merge mode names it in the way
@@ -1359,7 +1368,7 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                 step = (f"{drop} and, once this run ends, delete {branch} on origin, then "
                         f"re-run: the line {d.name} would build on, {branch} at "
                         f"{(tip or '')[:12]}, {has} the merge of {which}, {after}")
-            elif (unjudged and unmet) or carryable:
+            elif (unjudged and unmet) or carryable or unchecked:
                 branch = integrate.integration_branch(cfg, base, asked | set(carryable))
                 of = (f", the line of a re-run naming {', '.join(carryable)} too,"
                       if carryable else "")

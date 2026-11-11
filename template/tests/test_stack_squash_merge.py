@@ -1544,6 +1544,68 @@ class ReissueCarry(_Git):
         self.assertEqual(self.seen["issue_D"][0], line)
         self.assertFalse(self.fx._ancestor(oid, self.seen["issue_D"][1]))   # hence the step
 
+    def _conflicts_with_r(self) -> Path:
+        """D names P only, and `Conflicts with` R, finished and named in the run: a seam that
+        keeps D on the run's line, with no other edge to hold it (#911)."""
+        d = self.cfg.bundle("D")
+        sb._brief(d, extra="- **Depends on:** P\n- **Conflicts with:** R\n")
+        return d
+
+    def test_a_seam_with_no_other_hold_is_told_the_line_was_not_checked(self):
+        # D is on the line by its `Conflicts with` edge to R, and held for nothing but P. The
+        # fold fails, so the run records no line for main and judges none for D. Before: only
+        # "drop issue_P from issue_D's brief, then re-run", and that re-run continued the older
+        # line, so D was COMPLETE on a tip without P's merge commit, with no word of it. Every
+        # step D's line prints is followed, and no other: D is built on a tip that has the
+        # merge.
+        line, oid = self._line_older_than_the_merge(_onto_record("P"))
+        d = self._conflicts_with_r()
+        with mock.patch.object(integrate, "fold",
+                               side_effect=integrate.IntegrationError("the fold failed")):
+            self._run([d], ["R", "D"])
+        self.assertEqual(self.line, line)
+        self._assert_never_built("D")
+        self.assertTrue(self.fx._has(line))
+        said = self._d_held()
+        self.assertIn("drop issue_P from issue_D's brief", said)
+        sb._brief(d, extra="- **Conflicts with:** R\n")     # drop P from D's brief
+        if f"delete {line} on origin" in said and self.fx._has(line):
+            self.fx._delete(line)                            # delete the line it names
+        self._run([d], ["R", "D"])                           # re-run R, D
+        self.assertEqual(self.results["D"], state.COMPLETE)
+        # D's published branch is what it was built on plus its own commit.
+        self.assertTrue(self.fx._ancestor(oid, "fix/D"), "D built without P's merge commit")
+        self.err = said
+        self._assert_told_line_not_checked(oid, line)
+
+    def test_a_seam_whose_line_a_re_run_continues_is_built_on_the_merge(self):
+        # As above, with E in the batch naming R in its plain `Depends on`, so the re-run's
+        # carry does continue the older line, and D's seam keeps D on it. Before: the drop step
+        # alone, and once it was followed D was COMPLETE on that line's tip, without P's merge
+        # commit, with no word of it. Every step D's line prints is followed, and no other.
+        batch = ["R", "E", "D"]
+        line, oid = self._line_older_than_the_merge(_onto_record("P"), batch=tuple(batch))
+        e, d = self._planned("E", "R"), self._conflicts_with_r()
+        with mock.patch.object(integrate, "fold",
+                               side_effect=integrate.IntegrationError("the fold failed")):
+            self._run([e, d], batch)
+        self.assertEqual(self.line, line)
+        self.assertIn("the fold failed", self._not_carried("R"))
+        self._assert_never_built("D")
+        said = self._d_held()
+        self.assertIn("drop issue_P from issue_D's brief", said)
+        sb._brief(d, extra="- **Conflicts with:** R\n")     # drop P from D's brief
+        if f"delete {line} on origin" in said and self.fx._has(line):
+            self.fx._delete(line)                            # delete the line it names
+        self._run([e, d], batch)                             # re-run R, E, D
+        self.assertIn("carried issue_R", self.err)
+        self.assertEqual(self.results["D"], state.COMPLETE)
+        self.assertEqual(self.seen["issue_D"][0], line)
+        self.assertTrue(self.fx._ancestor(oid, self.seen["issue_D"][1]),
+                        "D built on a line without P's merge commit")
+        self.err = said
+        self._assert_told_line_not_checked(oid, line)
+
     def test_a_prerequisite_to_name_in_the_re_run_brings_that_lines_step(self):
         # A run of O and D left O on its line. A run of D alone is told to name O and to drop P:
         # that re-run continues the older line, which this run's line is not.
@@ -1729,16 +1791,23 @@ class ReissueCarry(_Git):
         self.assertIn("drop issue_O, issue_P from issue_D's brief and", said)
         self.assertIn(f"the-line at {tip[:12]}, does not have the merge of issue_P,", said)
 
-    def test_a_target_with_no_line_or_no_recorded_tip_has_none_to_delete(self):
-        # Judged as before, as for a record that counts (a dry-run records no tip), and so is a
-        # line of another target.
+    def test_a_target_with_no_line_has_none_to_delete_and_one_with_no_tip_is_not_checked(self):
+        # Judged as before, as for a record that counts, and so is a line of another target:
+        # D is on no line this run.
         d, oid = self._left_naming_p(_onto_record("P"))
-        for lines in ({}, {TARGET: (sb.LINE, None)}, {("org/other", "main"): (sb.LINE, ABSENT)}):
+        for lines in ({}, {("org/other", "main"): (sb.LINE, ABSENT)}):
             with self.subTest(lines=lines):
                 self.merge_commit_reads.clear()
                 self.assertEqual(self._judge(d, lines=lines), [])
                 self._assert_told_to_drop(oid)
                 self.assertEqual(self.merge_commit_reads, ["P"])
+        # A line with no recorded tip, every bundle on it (`on_line` None): D is on a line the
+        # run did not check (#911). Before: the drop step alone, as for no line at all.
+        self.merge_commit_reads.clear()
+        self.assertEqual(self._judge(d, lines={TARGET: (sb.LINE, None)}), [])
+        self._assert_told_line_not_checked(
+            oid, integrate.integration_branch(self.cfg, "main", [d.name]))
+        self.assertEqual(self.merge_commit_reads, ["P"])
 
     def test_a_bundle_not_on_the_line_is_not_told_to_delete_it(self):
         d, oid = self._left_naming_p(_onto_record("P"))
