@@ -28,8 +28,15 @@ Reconciliation matrix (local state × remote state):
   issue number → report only; close it by hand.
 * issue OPEN, bundle COMPLETE with a merged PR → comment (the bundle's
   ``tracker-comment.md`` if present) + ``gh issue close --reason completed``.
-* issue OPEN, bundle COMPLETE close/no-fix (empty patch) or DISCONTINUED →
-  comment + ``gh issue close --reason "not planned"``.
+* issue OPEN, bundle COMPLETE close/no-fix (empty patch) that is a DUPLICATE (its brief
+  has a ``Duplicate of: #N`` field, or its ``close-disposition`` marker is ``duplicate``)
+  → closed as ``duplicate`` with a comment naming ``#N`` only once the brief's
+  ``Close when`` condition holds (``now``, ``PR #M merged``, ``#M closed`` as completed).
+  Report only while the condition is not yet met; also report only when the target or the
+  condition is missing, is not one of those forms, names the issue itself, cannot be read,
+  or can no longer be met (PR closed unmerged, issue closed not as completed).
+* issue OPEN, bundle COMPLETE close/no-fix (empty patch, not a duplicate) or
+  DISCONTINUED → comment + ``gh issue close --reason "not planned"``.
 * issue OPEN, bundle COMPLETE with an unmerged PR → report only (the issue stays
   open until the PR merges).
 
@@ -48,6 +55,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -92,13 +100,17 @@ def _issue_state(number: str, repo: str) -> dict | None:
     return data if isinstance(data, dict) and data.get("state") else None
 
 
-def _pr_state(url: str) -> str:
+def _pr_state(url: str, repo: str = "") -> str:
     """``MERGED`` / ``OPEN`` / ``CLOSED`` for a recorded PR url, or ``""`` (unknown).
     The same probe revert.py uses; fail-closed — including a successful ``gh`` (or
     shim) emitting valid NON-OBJECT JSON (``null``, ``[]``), which must read as
     unknown instead of an AttributeError aborting the whole sweep mid-plan
-    (#300 review round 8; mirrors ``_issue_state``'s shape check)."""
-    proc = _gh(["pr", "view", url, "--json", "state"])
+    (#300 review round 8; mirrors ``_issue_state``'s shape check). ``repo`` is for a
+    bare PR number (a ``Close when: PR #M merged`` condition, #671); a url needs none."""
+    args = ["pr", "view", url, "--json", "state"]
+    if repo:
+        args += ["--repo", repo]
+    proc = _gh(args)
     if proc.returncode != 0:
         return ""
     try:
@@ -308,6 +320,123 @@ def _split_parent_row(d: Path, st: str, number: str, repo: str) -> _Row:
                                             prefer_bundle_comment=False)])
 
 
+# The `Close when` forms a duplicate bundle may record (#671). Anything else is report-only.
+_COND_NOW = re.compile(r"^now$", re.IGNORECASE)
+_COND_PR = re.compile(r"^PR\s+#?(\d+)\s+merged$", re.IGNORECASE)
+_COND_ISSUE = re.compile(r"^#?(\d+)\s+closed$", re.IGNORECASE)
+_DUP_TARGET = re.compile(r"^#?(\d+)$")
+
+
+def _close_condition(cond: str, number: str, repo: str) -> tuple[str, str]:
+    """``(verdict, text)`` for a ``Close when`` value on issue ``number`` (#671): verdict
+    is ``met``, ``wait`` (not yet met), ``never`` (can no longer be met) or ``unknown``
+    (unreadable state, or a value that is none of the three forms). Only ``met`` may close.
+
+    A condition on ``number`` itself is ``never``, without asking gh: this row runs only
+    while that issue is open, and no PR can carry its number (GitHub numbers issues and
+    PRs in one sequence)."""
+    if _COND_NOW.match(cond):
+        return "met", "`Close when: now`"
+    pr_m, issue_m = _COND_PR.match(cond), _COND_ISSUE.match(cond)
+    m = pr_m or issue_m
+    if not m:
+        return "unknown", (f"`Close when: {cond}` is not one of `now`, `PR #M merged`, "
+                           "`#M closed`")
+    num = int(m.group(1))                    # `#053` is #53
+    if num == int(number):
+        return "never", f"`Close when: {cond}` names this issue itself, so it can never be met"
+    if pr_m:
+        st = _pr_state(str(num), repo)
+        if st == "MERGED":
+            return "met", f"PR #{num} merged"
+        if st == "OPEN":
+            return "wait", f"waiting on PR #{num} to merge (still open)"
+        if st == "CLOSED":
+            return "never", (f"PR #{num} was closed without merging, so `Close when: {cond}` "
+                             "can no longer be met")
+        return "unknown", (f"the state of PR #{num} could not be read (gh failed or gave no "
+                           "usable state; a later run retries)")
+    remote = _issue_state(str(num), repo)
+    st = str((remote or {}).get("state", "") or "")
+    if st == "OPEN":
+        return "wait", f"waiting on #{num} to close (still open)"
+    if st == "CLOSED":
+        # The real gh prints `COMPLETED` / `NOT_PLANNED`; compare without case.
+        reason = str(remote.get("stateReason", "") or "").upper()
+        if reason == "COMPLETED":
+            return "met", f"#{num} closed as completed"
+        return "never", (f"#{num} was closed as {reason.replace('_', ' ').lower() or 'closed'}"
+                         f", not completed, so `Close when: {cond}` can no longer be met")
+    return "unknown", (f"the state of #{num} could not be read (gh failed or gave no "
+                       "usable state; a later run retries)")
+
+
+def _duplicate_row(d: Path, st: str, number: str, repo: str) -> _Row | None:
+    """The row for a COMPLETE close/no-fix bundle that is a duplicate (#671), or None
+    when it is not one (it then closes as ``not planned``, as before).
+
+    A duplicate is a bundle whose brief records ``Duplicate of`` (whatever its
+    ``close-disposition`` marker says: ``likely-close — duplicate of #463`` writes
+    ``likely-close``) or whose marker reads ``duplicate``. It closes as ``duplicate``,
+    naming the target, only once the brief's ``Close when`` condition holds. Unknown
+    never acts: a missing or non-numeric target, a missing or unrecognized condition, a
+    target or condition that names the issue itself, a state gh cannot read, or a
+    condition that can no longer be met is report-only."""
+    bp = d / "brief.md"
+    raw_target = brief.field(bp, "duplicate of") if bp.is_file() else ""
+    marker_path = d / state.CLOSE_MARKER
+    marker = (marker_path.read_text(encoding="utf-8").strip().lower()
+              if marker_path.is_file() else "")
+    if not raw_target and marker != "duplicate":
+        return None
+    m = _DUP_TARGET.match(raw_target.strip())
+    if not m:
+        what = (f"`Duplicate of: {raw_target}` is not an issue number" if raw_target
+                else "the duplicate target is not recorded")
+        return _Row(d.name, st, "OPEN",
+                    f"duplicate — {what} — no action; record it in brief.md as "
+                    "`- **Duplicate of:** #N` plus a `- **Close when:**` condition "
+                    "(`now`, `PR #M merged` or `#M closed`), then re-run")
+    target = int(m.group(1))                 # `#041` is #41
+    if target == int(number):
+        # A copy-paste slip; closing would post "a duplicate of #40" on #40 itself.
+        return _Row(d.name, st, "OPEN",
+                    f"duplicate — `Duplicate of: {raw_target}` names this issue itself — "
+                    "no action; record the issue it duplicates as `- **Duplicate of:** #N`, "
+                    "then re-run")
+    cond = brief.field(bp, "close when").strip()
+    if not cond:
+        return _Row(d.name, st, "OPEN",
+                    f"duplicate of #{target} — no close condition recorded — no action; "
+                    "add `- **Close when:** now` (or `PR #M merged` / `#M closed`) to "
+                    "brief.md to close it")
+    verdict, text = _close_condition(cond, number, repo)
+    if verdict == "wait":
+        return _Row(d.name, st, "OPEN",
+                    f"duplicate of #{target} — close condition not yet met: {text} — "
+                    "no action; a later run closes it once it holds")
+    if verdict == "never":
+        return _Row(d.name, st, "OPEN",
+                    f"duplicate of #{target} — {text} — no action; needs a human "
+                    "decision (record a new `Close when`, or close it by hand)")
+    if verdict != "met":
+        return _Row(d.name, st, "OPEN",
+                    f"duplicate of #{target} — {text} — no action")
+    dup_text = f"Closed as a duplicate of #{target}."
+    if not _COND_NOW.match(cond):
+        dup_text += f" Close condition met: {text}."
+    hand = _bundle_comment(d)
+    body = f"{hand}\n\n{dup_text}" if hand else dup_text
+    # `--reason duplicate` with no `--duplicate-of`: gh posts the comment, then closes with
+    # stateReason DUPLICATE and no duplicateIssueId (optional in GitHub's GraphQL schema),
+    # so the comment is what names the target.
+    return _Row(d.name, st, "OPEN",
+                f"close as duplicate of #{target} ({text})",
+                apply=[lambda: _close_issue(d, number, repo, reason="duplicate",
+                                            fallback_body=body,
+                                            prefer_bundle_comment=False)])
+
+
 def _plan_bundle(cfg: Config, d: Path, *, issue_side: bool, repo: str,
                  by: str, today: str) -> _Row | None:
     """The reconciliation row for one bundle, or None when local and remote agree."""
@@ -423,6 +552,11 @@ def _plan_bundle(cfg: Config, d: Path, *, issue_side: bool, repo: str,
                             "retry (a merged PR closes as completed, never "
                             "'not planned')")
             if _empty_patch(d):
+                # A duplicate closes as a duplicate of a named issue, and only once its
+                # recorded condition holds (#671) — never as "not planned" at once.
+                dup = _duplicate_row(d, st, number, repo)
+                if dup is not None:
+                    return dup
                 return _Row(d.name, st, "OPEN",
                             "close as not planned (accepted close/no-fix disposition)",
                             apply=[lambda: _close_issue(

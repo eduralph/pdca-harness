@@ -789,6 +789,57 @@ wave builds on, via `[driver].wave_mode`:
   so does one that conflicts only with a newer base the fold merged in during
   the wave (a PR of the wave merged and its branch was deleted meanwhile).
 
+  In a wave the fold runs after (not the last wave, publishing on, stack mode,
+  not a dry run), such a conflict is found at sign-off instead, before any PR
+  is opened. When you accept a bundle, the run checks it against the bundles of
+  its wave you already accepted for the same target, with the fold's own rule
+  and in the fold's order, on the commits publish would push, merged onto the
+  line as the fold will find it (the run's line for that target, or your base
+  when the run has none yet). If accepting it would make the fold hold one more
+  bundle of the wave, it is not accepted: it stays at `AWAITING_SIGNOFF` with an
+  open §6 row naming those bundles and the files, and no PR of it is opened.
+  To publish it anyway, tick that row and accept it again: it is published, and
+  the fold holds one of the two as above. Or declare `Conflicts with` in its
+  brief and iterate-plan it (`pdca signoff <id> --iterate-plan`, or in its
+  sign-off session); start that run once the other bundle's change is on your
+  base. The bundle accepted first is kept, whichever name sorts first, unless
+  an earlier override already has the fold holding a bundle of the wave: the
+  check counts the bundles the fold would hold, so once a ticked row has let
+  one through, an accept that only trades that hold for another goes through,
+  and the fold may then hold the bundle accepted first. A bundle of the wave you
+  accepted that publish cannot push is left out of the check, and stderr names
+  it: its patch no longer applies where publish would cut its branch (your base
+  moved since it was built), or publish cannot cut that branch at all (the
+  branch or commit it is cut from is gone, or a `Stacks on` prerequisite has no
+  published branch). The fold holds it as a bundle that pushed no branch, as
+  above. When the check cannot complete (a fetch fails, the commit publish
+  would push for the bundle you accept cannot be built, another step of
+  building those commits fails, or the shared integration worktree is left in
+  a state it cannot be put back to), the accept is refused too, with a row of
+  its own that names no cause (stderr does). A tick on that row only asks the
+  next accept to run the check again, never to accept without it: if the check
+  fails again, the row is opened again. A broken worktree does not stop the run
+  at sign-off, which would leave the bundles already accepted unpublished; the
+  fold after the wave stops on it, as above, if it is still broken. A refused
+  bundle is offered one more sign-off session; if that session records nothing
+  that settles it, the run offers it no more and names it at the end of the wave
+  with the conflict and the step, not with the pass budget. Each run offers it
+  one session again. An iterate-plan recorded for it while its row is open is
+  not applied in that run, where it would be rebuilt beside the same bundles:
+  the next `pdca flow` run that drives it archives and re-plans it before it
+  sets its waves, so a `Conflicts with` or `Depends on` the new brief declares
+  orders it in that run (`pdca flow <ids>` re-plans it in its Plan step with the
+  other ids; a `--from-csv` sweep, in a Plan session of its own after the
+  sweep's). If that archive fails, the bundle stays parked in that run too, and
+  the run after it tries again. An iterate-do is rebuilt in the same run, as
+  usual. The row lives only in SUMMARY §6, so a SUMMARY assembled again drops
+  it, and the next accept checks again. A conflict with work already on the line
+  — an earlier wave's, or a finished bundle the run carried onto it — is not a
+  conflict with the wave, so it is still found only at the fold, alone or
+  together with a bundle of the wave. The last wave, a run with one wave,
+  `--no-publish`, merge mode, a dry run and `pdca signoff --accept` do not
+  check.
+
   A held bundle is still COMPLETE, so the results `pdca flow` prints list it as
   COMPLETE. The exit code tells the two runs apart: a run in which every bundle
   finished, but a fold held one or more of them out of the line for either
@@ -800,7 +851,12 @@ wave builds on, via `[driver].wave_mode`:
   hold with a dependent in the run exits 1). So 0 means every bundle finished
   and none was held out of a fold the run performed. An accepted bundle of the
   last wave that pushed no branch is not covered: no fold runs after it, so the
-  run holds nothing.
+  run holds nothing. A bundle whose accept was refused at sign-off for a
+  conflict with its wave, or for a check that could not complete, is not
+  finished: it is `AWAITING_SIGNOFF`, so a run over several ids exits 1. In a
+  run over one id that adopts a split parent's children, `AWAITING_SIGNOFF`
+  counts as finished, so that run exits 0 or 3, and the §6 row and the stderr
+  line are the signal.
 
   To recover a run that stopped part-way (an integrity stop, the pass budget, a
   crash, Ctrl-C), re-issue the same `pdca flow <ids>`. The ids the earlier run
@@ -918,7 +974,27 @@ wave builds on, via `[driver].wave_mode`:
   count. The dependent is named on one line with the prerequisite and what to
   do, and the rest of the run goes on: name the prerequisite in the same
   `pdca flow <ids>` command so the run carries it onto its line (as above), or
-  wait for the merge and re-run. In stack mode a PR that does not count for its
+  wait for the merge and re-run. A merge counts only for the `patch.diff` the
+  prerequisite holds now. Publish records a digest of the patch it pushed for a
+  PR (`"patch_digest"` in `publish.json`), so a PR whose record carries a digest
+  of another patch (the bundle was rebuilt and accepted, and never re-published)
+  is an older attempt, open, closed or merged. Its merge does not count, and
+  naming it in the command would carry that older head onto the line, so its line
+  says so and gives the step that can release the dependent instead: re-publish
+  it (`pdca publish <id>`, closing its PR first if it is still open), then re-run
+  once the new PR has merged. An older attempt that already merged stays on the
+  base, so the re-publish has to apply the accepted patch on top of it. That
+  patch was made on a base without the older attempt, so when the two change the
+  same lines, as a revised fix usually does, it no longer applies and publish
+  refuses it. Then rebuild the prerequisite on the base first
+  (`pdca signoff <id> --iterate-do`: its Do starts from the base as it is now),
+  accept and publish the rebuild, and re-run once its PR has merged; the hold
+  line says so too. A `patch.diff` that cannot be read holds the same way, since
+  nothing can show which patch the PR holds, and publish could not push it
+  either: restore the file and re-run, or, if it is lost, rebuild the
+  prerequisite the same way. A record with no digest, written before publish
+  recorded one, counts as before, and the run notes once per prerequisite that
+  it did not check it. In stack mode a PR that does not count for its
   record (an `Onto branch` commit, say), but whose merge commit the dependent's
   base has without its head, was squash- or rebase-merged there and will never
   count, so a wait cannot end that hold: its line says so and gives the step
@@ -933,10 +1009,13 @@ wave builds on, via `[driver].wave_mode`:
   re-run that still finds it builds the dependent there without the merge, and
   one that does not starts from the base, which has the merge commit. Dropping
   the edge before the re-run, as the prerequisite's own line above asks, skips
-  this check, which is why that line gives the delete step too. When no line was
-  judged for the dependent but a re-run may continue one, because it is held for
-  something else too (say the carry or fold that would give it a line failed),
-  the step says that line was not checked and to delete it if it is there. It says
+  this check, which is why that line gives the delete step too. When the run did
+  not check that line for the merge (it has no recorded tip, the carry or fold
+  failed, the line was not trusted, or a re-gate was red), the step says that line
+  was not checked and to delete it if it is there. It does so for a dependent that
+  is on the run's line, by any seam (a `Conflicts with` edge to a finished id the
+  run names is one), whether or not it is held for anything else, and for one kept
+  off the line only this run because a prerequisite it names was left unbuilt. It says
   the same of the line of a re-run naming another prerequisite the dependent is
   told to name, which is another line. Nothing is held for a prerequisite with no
   patch or no usable target, for a dependent with no usable target of its own,
@@ -944,7 +1023,9 @@ wave builds on, via `[driver].wave_mode`:
   same way, with the same step for such a PR: a prerequisite the run does not
   drive must have merged into the
   dependent's base (a dependent with no usable target still takes a merge into
-  any branch).
+  any branch, an `Onto branch` commit's too, but not one of an older attempt;
+  publish records no digest for an `Onto branch` commit, so the run notes, as
+  above, that nothing checked which patch that merge holds).
 
   Once the run has a line for the dependent's target (its first fold, or the
   carry above), the dependent is cut from that line, not from the base, and the
@@ -986,13 +1067,21 @@ wave builds on, via `[driver].wave_mode`:
   reopen it and let a later run merge it); a marked PR the gates refuse (the
   `merge:` lines above the hold line give the reason and what clears it, which
   for a malformed `expected_checks` is `pdca.toml`, not the PR); a marked PR
-  whose own prerequisites are not merged into that base; a marked PR whose bundle
-  has since been rebuilt and not re-published, so its head may be an older attempt
-  (close it, re-publish, and merge the new PR by hand, or merge this PR by hand as
-  it stands); and a bundle
-  the run cannot merge for the dependent, because it has no `brief.md`, a brief
-  that names no target, or a `patch.diff` that cannot be read (merge its PR by
-  hand). A prerequisite that ships nothing (a close or no-fix, with no patch)
+  whose own prerequisites are not merged into that base; a PR, marked or not,
+  whose bundle has since been rebuilt and not re-published, so its head is an
+  older attempt (close it, re-publish, and merge the new PR by hand: a merge of
+  the old PR does not release the dependent, see below); a bundle the run cannot
+  merge for the dependent, because it has no `brief.md` or a brief that names no
+  target (merge its PR by hand); and a bundle whose `patch.diff` cannot be read.
+  For that last one a merge by hand releases the dependent only when its record
+  carries no patch digest to check (one written before publish recorded one, see
+  below) or one the file's bytes still match; that is the only case where its
+  line says to merge by hand. Otherwise nothing can show which patch its PR
+  holds, and publish could not push that file, so its line says to restore the
+  file and re-run, or, if it is lost, to close its PR if it is open, rebuild the
+  bundle on the base (`pdca signoff <id> --iterate-do`), accept and publish the
+  rebuild, and merge the new PR by hand. A prerequisite that ships nothing (a
+  close or no-fix, with no patch)
   holds nobody. The run claims each prerequisite before it reads it, so two runs
   never ready or merge one PR together. One it cannot claim (another live run
   holds it, or no claim can be recorded) is not judged or merged, even if its PR
@@ -1002,7 +1091,23 @@ wave builds on, via `[driver].wave_mode`:
   record says it is merged into the dependent's own target base. So an `Onto
   branch` commit, or a PR on record for another base, never releases it, even
   once merged: get that work onto the base and remove the edge from the
-  dependent's brief. A re-publish writes a fresh record without the mark. A
+  dependent's brief. It is released, in both modes, only by a merge of the PR
+  published for the `patch.diff` the prerequisite holds now: a record that
+  carries a digest of another patch (`"patch_digest"`, which publish writes for
+  every PR, or the mark's `"merge_eligible_patch"`) is an older attempt even once
+  merged, by a run or by hand, and so is one whose `patch.diff` cannot be read.
+  The dependent then stays held, named with the step: re-publish, then merge the
+  new PR. A merged older attempt stays on the base, and the re-publish has to
+  apply the accepted patch on top of it. When the two change the same lines, as
+  a revised fix usually does, the accepted patch no longer applies there and
+  publish refuses it. The step then is to rebuild the prerequisite on the base
+  first (`pdca signoff <id> --iterate-do`), accept and publish the rebuild, and
+  merge its PR; the hold line says so. For a `patch.diff` that cannot be read
+  the step is to restore that file, or, if it is lost, to rebuild the same way.
+  A record with no digest at all (written before publish recorded one) is
+  counted as before, with one note per prerequisite per run that nothing checked
+  which patch the merged PR holds. A re-publish writes a fresh record, with the
+  new digest and without the mark. A
   refused PR goes back to draft and keeps the mark, so a later run readies it
   again: to leave a marked PR alone, merge or close it by hand, or remove the key.
   Before each merge the driver reads that PR's **full check rollup** itself —
@@ -1138,7 +1243,8 @@ pdca cleanup --apply    # execute the matched actions below
 | not `COMPLETE` | PR MERGED | **report only, always** — never auto-writes an accept past the C6 guard |
 | `COMPLETE` split parent (`close-disposition` = `split`) | issue OPEN | checked **first**, ahead of the PR rows: **report only** while any child issue is open or its state can't be read (or the lineage record's `children` list is missing, empty, or has an entry that is not an issue number — close it by hand); once every child issue is closed, comments (naming every child) + closes as `completed` if at least one child was completed, else `not planned` |
 | `COMPLETE` with a merged PR | issue OPEN | comments + closes the issue |
-| `COMPLETE` (close/no-fix) or `DISCONTINUED` | issue OPEN | comments + closes the issue |
+| `COMPLETE` (close/no-fix) duplicate (brief has `Duplicate of: #N`, or `close-disposition` = `duplicate`) | issue OPEN | comments (naming `#N`) + closes as `duplicate`, only once the brief's `Close when` holds: `now`, `PR #M merged`, or `#M closed` (closed as completed). **Report only** while it does not yet hold, and when the target or the condition is missing, unrecognized, unreadable, or can no longer be met (PR closed unmerged, issue closed not as completed), or names the issue itself |
+| `COMPLETE` (close/no-fix, not a duplicate) or `DISCONTINUED` | issue OPEN | comments + closes the issue as `not planned` |
 | `COMPLETE` with an unmerged PR | issue OPEN | **report only** — stays open until the PR actually merges |
 
 This is where the `RESOLVED` state from [step 00](00-introduction.md) actually

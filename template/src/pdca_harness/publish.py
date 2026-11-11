@@ -31,7 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import brief, gates, leaves, progress, state, waves, worktree
+from . import brief, gates, leaves, merged, progress, state, waves, worktree
 # Aliased: `publish()` builds a local `record = {...}` (its publish.json payload,
 # below) that would shadow the module name at the #317 call-in.
 from . import record as record_mod
@@ -257,12 +257,10 @@ def publish(
     # `checkout_base`, so the host-CI gate below fetches, pins and certifies the same commit
     # (its `host_ci_base` is the recorded tip), and `_line_tip_refusal` first checks the line
     # still holds it. pr_base is what `gh --base` gets — and it MUST be a branch in the
-    # upstream (`--repo`) repo.
-    cut_from_tip = wave_stacked and bool(wave_tip)
-    if cut_from_tip:
-        checkout_base = wave_tip
-    else:
-        checkout_base = f"origin/{stack_branch}" if stack_branch else f"{base_remote}/{base}"
+    # upstream (`--repo`) repo. The rule is `_checkout_base`, which the flow's accept-time
+    # same-wave check builds a bundle's would-be commit on too (#782, `cut_base`).
+    checkout_base, cut_from_tip = _checkout_base(cfg, base, wave_base=wave_base,
+                                                 wave_tip=wave_tip, stack_branch=stack_branch)
     # A wave>0 bundle (a recorded `stack-base`) opens its PR against its REAL target base, on
     # the own-repo and fork paths alike (#593): the integration branch is a run-scoped
     # staging line, and a PR merged into it never reaches the target. The PR carries every
@@ -389,6 +387,10 @@ def publish(
     if ci_base:
         steps = _pin_checkout(steps, git, branch, ci_base)
 
+    # The patch `git apply` below pushes, as a digest on the record (#865): the record outlives
+    # an iterate, so a rebuild that never reaches this PR has another digest, and a merge of
+    # this PR is not counted as that rebuild's work (`merged.merged_into`).
+    digest = merged.patch_hash(d)
     orig_ref = _current_ref(repo)
     stashed = _stash_worktree(repo)
     try:
@@ -438,7 +440,7 @@ def publish(
         "mode": "stacked-pr" if stack_branch else "new-pr",
         "branch": branch, "pr_url": pr_url, "base": pr_base, "repo": repo_spec,
         "by": by or _signoff_by(d) or cfg.author or "unknown", "date": today,
-        "id_pending": pending_id,
+        "id_pending": pending_id, merged.PATCH_DIGEST: digest,
     }
     if ci_base:
         # The base commit the host-CI gate certified — and, via _pin_checkout, the exact
@@ -762,6 +764,40 @@ def _stack_base_branch(cfg: Config, d: Path) -> str | None:
     brief that still hand-declares a stack (also its own-repo ``gh --base``). None when
     neither applies (or the legacy prereq hasn't published yet)."""
     return _read_stack_base(d) or _stacks_on_branch(cfg, d)
+
+
+def _checkout_base(cfg: Config, base: str, *, wave_base: str, wave_tip: str,
+                   stack_branch: str | None) -> tuple[str, bool]:
+    """``(checkout_base, cut_from_tip)``: what :func:`publish` cuts a new PR's branch from,
+    and whether that is a recorded line commit. In stack mode a bundle with a recorded stack
+    base and line tip is cut from that tip (#593); else from the stack branch on origin,
+    else from the target base on the base remote. The one rule :func:`publish` and
+    :func:`cut_base` share (#782)."""
+    if cfg.wave_mode != "merge" and wave_base and wave_tip:
+        return wave_tip, True
+    return (f"origin/{stack_branch}" if stack_branch else f"{cfg.base_remote}/{base}"), False
+
+
+def cut_base(cfg: Config, d: Path) -> tuple[str, str] | None:
+    """``(remote, ref)`` for bundle ``d``: the remote :func:`publish` fetches, and the ref or
+    commit it puts ``d``'s ``patch.diff`` on — so the flow can build the commit publish would
+    push without pushing it (#782, ``integrate.same_wave_clash``). An ``Onto branch`` (#54)
+    gets that PR branch, as :func:`_publish_stacked` does; any other bundle
+    :func:`_checkout_base`. None where publish cuts nothing: no usable target, or a ``Stacks
+    on`` prerequisite with no published branch yet (publish refuses both)."""
+    repo_spec, base, _slug = _resolve_target(d)
+    if not repo_spec or not base:
+        return None
+    onto = brief.onto_branch(d / "brief.md")
+    if onto is not None:
+        return onto[0], f"{onto[0]}/{onto[1]}"
+    wave_base = _read_stack_base(d)
+    stack_branch = wave_base or _stacks_on_branch(cfg, d)
+    if brief.stacks_on(d / "brief.md") and not stack_branch:
+        return None
+    ref, _tip = _checkout_base(cfg, base, wave_base=wave_base,
+                               wave_tip=read_stack_base_tip(d), stack_branch=stack_branch)
+    return ("origin" if stack_branch else cfg.base_remote), ref
 
 
 def _stacks_on_branch(cfg: Config, d: Path) -> str | None:
