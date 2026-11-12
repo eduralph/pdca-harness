@@ -101,7 +101,44 @@ A fold left a bundle off the line: its publish pushed no branch, or its branch
 conflicts with a same-wave bundle that merged before it. The run names the pair
 and the files, and the step: declare `Conflicts with: <the other id>` in the held
 bundle's brief and rebuild it on a base that holds the other one, once that PR
-has merged. Exit 3 is the signal that this happened with nothing else wrong.
+has merged. Exit 3 is the signal that a hold happened with nothing else wrong.
+
+**`flow: <bundle> held — its accepted patch is on no PR against its target`**,
+and a run that **exits 3** with every bundle `COMPLETE`, or a re-run of the same
+`pdca flow <ids>` that exits 3 again. The bundle was accepted, but no PR holds
+the patch you accepted: its branch was pushed and `gh pr create` failed, it was
+not pushed at all (its texts failed T4), or its `publish.json` names no PR, was
+written for an earlier attempt's patch, or names another repo or base than its
+brief targets now. The line gives the cause and the step. Most often that is to
+publish the bundle with `pdca publish <id>`, then re-run.
+
+`gh pr create` opens no second PR from a branch into the same base. So while a
+PR for the bundle's branch is open (one you opened by hand, or an earlier
+attempt's PR still in review), `pdca publish <id>` pushes the accepted patch to
+that branch and then fails, every time. That open PR then holds the patch: put
+its URL in the bundle's `publish.json` as `pr_url`, then re-run (or close that
+PR and publish again, for a new one). The line says this whenever the record
+names no PR, or an earlier attempt's PR.
+
+When publish would refuse the bundle as it stands, the line says what to do
+first. A `Stacks on` parent archived in `completed/`: the bundle is judged
+against the branch that parent published, but publish chains a PR only onto an
+active parent's branch, so move the parent back out of `completed/` (or drop
+that `Stacks on`). Merge mode opens no PR against another bundle's branch: for a
+`Stacks on` bundle, set `[driver].wave_mode = "stack"` or drop the `Stacks on`;
+for a target base another bundle published, point the target at the shared
+base, or use stack mode. An `Onto branch` bundle needs an open PR on that
+branch: open it first, or drop the `Onto branch`. A bundle that `Stacks on` a
+parent with no branch on record cannot be published until that branch is known:
+publish the parent (or restore its `publish.json`), or drop that `Stacks on`,
+then re-run. A `patch.diff` that cannot be read is held too: restore that file,
+then re-run.
+
+Do not delete the bundle: it holds the accepted work. A re-run that names the
+bundle checks it again, as does `pdca flow <split parent>` for its COMPLETE
+children; a `--from-csv` sweep does not, since it skips COMPLETE bundles
+([07](07-crosscutting.md#waves-in-execution)). A `flow: note` saying a record
+has no patch digest is not a hold: the record predates digests and is trusted.
 
 **`flow: wave k did not integrate … STOPPING`.** The integration line could not
 be advanced: a carried PR branch was rewritten (force-pushed, re-published, or
