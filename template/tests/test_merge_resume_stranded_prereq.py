@@ -16,8 +16,14 @@ any state a bundle can be left in (no ``brief.md``, a brief with no target, a ``
 that cannot be read) holds that dependent instead of ending the run or building without it.
 The marker survives an iterate but is tied to the patch its PR was published from, so a
 rebuilt attempt that never reached the PR holds the dependent instead of merging the old head.
-The walk claims each prerequisite before it reads it (#565): one another live run holds is
-neither judged nor merged, and holds its dependents.
+The release goes by the same rule (#865): publish records a digest of the patch it pushed, and
+a PR whose record carries a digest of another patch — or of a patch that can no longer be
+read — is an older attempt, so a human's merge of it releases nothing. The way out is to
+re-publish — after a rebuild on main when the accepted patch changes what a merged older
+attempt changed, so no longer applies there, or restoring a patch that cannot be read — and
+following it works; a record with no digest at all (written before #865) is trusted as before,
+with one note per run. The walk claims each prerequisite before it reads it (#565): one
+another live run holds is neither judged nor merged, and holds its dependents.
 
 Real git (the ``StackFoldGit`` fixture of tests/test_integrate_stack_bases.py: a bare
 ``origin`` and a primary checkout), the real ``_merge_one`` and ``_runnable``, and the real
@@ -87,10 +93,13 @@ class MergeResume(unittest.TestCase):
         self.built: list[str] = []
         self.published: list[str] = []
         self.base_files: dict[str, set[str]] = {}    # what each build's worktree held
+        self.base_text: dict[str, dict[str, str]] = {}  # … and what its .txt files said
         self.marked_at_ready: dict[str, bool] = {}   # id → marker on disk at its first ready
         self.finish: dict[str, dict[str, str]] = {}  # id → what its build publishes (files)
+        self.edits: dict[str, dict[str, str]] = {}   # id → files its build writes on its base
         self.failing: set[str] = set()               # `gh pr` verbs that fail (or BASE_READ)
         self.queued: set[str] = set()                # ids whose merge the host only queues
+        self.unbroken: dict[str, bytes] = {}         # bundle → its patch.diff before _bad_patch
         self._real_run = subprocess.run
 
     # -- fixture ---------------------------------------------------------------------------
@@ -124,6 +133,7 @@ class MergeResume(unittest.TestCase):
 
     def _bad_patch(self, d: Path) -> None:
         """``d``'s ``patch.diff`` is not text, and nothing past Do reads it for its state."""
+        self.unbroken[d.name] = (d / "patch.diff").read_bytes()
         (d / "patch.diff").write_bytes(NOT_TEXT)
         self.assertEqual(state.state(d), state.COMPLETE)
 
@@ -230,12 +240,20 @@ class MergeResume(unittest.TestCase):
             # What Do would actually be cut from: the real worktree off the real base.
             wt = worktree.ensure(d, cfg)
             self.base_files[d.name] = {p.name for p in wt.iterdir()} if wt else set()
+            self.base_text[d.name] = ({p.name: p.read_text(encoding="utf-8")
+                                       for p in wt.glob("*.txt")} if wt else {})
             iid = d.name.removeprefix("issue_")
             brief_text = (d / "brief.md").read_text(encoding="utf-8")
             if iid in self.finish:      # really published, as a later wave's merge needs
                 self.fx._publish(iid, self.finish[iid])
                 self.pr[iid] = {"state": "OPEN", "draft": True,
                                 "rollup": self.pr.get(iid, {}).get("rollup", "pass")}
+            elif iid in self.edits:     # Do's change, made in the worktree cut from the base
+                self.assertIsNotNone(wt)
+                for name, text in self.edits[iid].items():
+                    (wt / name).write_text(text, encoding="utf-8")
+                sb._git(wt, "add", "--all")
+                (d / "patch.diff").write_text(sb._git(wt, "diff", "--cached"), encoding="utf-8")
             else:
                 (d / "patch.diff").write_text(sb._new_file_patch(f"{iid}.txt", iid),
                                               encoding="utf-8")
@@ -908,10 +926,21 @@ class MergeResume(unittest.TestCase):
         return line
 
     def test_a_prereq_whose_patch_cannot_be_read_holds_only_its_dependent(self):
-        self.assertIn("no merge-mode run merges it for issue_D (its patch.diff cannot be read), "
-                      "so merge the PR by hand", self._bad_patch_held())
-        # Following it works: the PR's merge says what the file cannot.
+        line = self._bad_patch_held()
+        self.assertIn("issue_P: its patch.diff cannot be read, so its PR is not known to hold the "
+                      "accepted patch", line)
+        self.assertIn("restore that file, then re-run", line)
+        self.assertIn("rebuild issue_P on main (`pdca signoff P --iterate-do`)", line)
+        self.assertNotIn("so merge the PR by hand", line)
+        self.assertNotIn("re-publish", line)    # publish could not push this file
+        # Its mark's hash is of the patch the PR was published from, and only the file can say
+        # it still holds that one (#865): a hand merge of the PR releases nothing.
         self._merged_by_hand("P")
+        self._run(["D"])
+        self.assertIn("issue_P: its patch.diff cannot be read", self._held_line())
+        # Following the step works: restored, the file matches the hash, and the merge counts.
+        d = self.cfg.find_bundle("P")
+        (d / "patch.diff").write_bytes(self.unbroken[d.name])
         self._run(["D"])
         self.assertEqual(self.results["D"], state.COMPLETE, self.err)
         self.assertIn("P.txt", self.base_files["issue_D"], self.err)
@@ -922,6 +951,13 @@ class MergeResume(unittest.TestCase):
     def test_an_unmarked_prereq_whose_patch_cannot_be_read_holds_too(self):
         self.assertIn("(it is not marked), so merge the PR by hand",
                       self._bad_patch_held(marked=False))
+        # Its record carries no digest (written before #865), the one record the hand merge is
+        # still given to for a patch that cannot be read: following it releases D, as before,
+        # with the note that nothing checked which patch the PR holds.
+        self._merged_by_hand("P")
+        self._run(["D"])
+        self.assertEqual(self.results["D"], state.COMPLETE, self.err)
+        self.assertIn("flow: note — issue_P's publish record carries no patch digest", self.err)
 
     def test_a_named_prereq_whose_patch_cannot_be_read_holds_too(self):
         self._bad_patch_held(ids=("P", "D", "U"))
@@ -1277,11 +1313,14 @@ class MergeResume(unittest.TestCase):
         self.assertEqual(state.state(d), state.COMPLETE)
 
     def _old_head_held(self) -> None:
-        """D is held naming P, with the way out, and P's PR was asked for nothing but its state."""
+        """D is held naming P, with the way out, and P's PR was asked for nothing but its state.
+        The way out re-publishes: a merge of this PR as it stands would not release D (#865)."""
         line = self._held_line()
         self.assertIn("issue_P: its PR was published for a different patch.diff", line)
+        self.assertIn("older attempt", line)
         self.assertIn("close it, re-publish (`pdca publish P`) and merge the new PR by hand", line)
-        self.assertIn("merge this PR by hand as it stands", line)
+        self.assertNotIn("as it stands", line)
+        self.assertNotIn("merge the PR by hand", line)
         self.assertNotIn("let a merge-mode run", line)
         self.assertNotIn("merge gates", line)
         self._no_merge_attempt()
@@ -1492,16 +1531,16 @@ class MergeResume(unittest.TestCase):
         self.assertIn("P2.txt", self.base_files["issue_D"], self.err)
         self.assertNotIn("P.txt", self.base_files["issue_D"], self.err)
 
-    def test_merging_a_pr_for_another_patch_by_hand_releases_the_dependent(self):
-        # The way out, as it stands: the human takes the old head knowingly.
+    def test_merging_a_pr_for_another_patch_by_hand_does_not_release_the_dependent(self):
+        # #839 let the human take the old head "as it stands"; #865 reverses that: D would be
+        # built on the older attempt while the accepted patch has no PR, and nothing said so.
         self._rebuilt_patch(self._opened("P", marked=True))
         self._du()
         self._run(["D", "U"])
         self._old_head_held()
         self._merged_by_hand("P")
         self._run(["D"])
-        self.assertEqual(self.results["D"], state.COMPLETE, self.err)
-        self.assertIn("P.txt", self.base_files["issue_D"], self.err)
+        self._older_merge_held()
 
     def test_closing_re_publishing_and_merging_by_hand_releases_the_dependent(self):
         # The way out, for the new patch. The real publish pushes to the same branch, as a real
@@ -1538,6 +1577,295 @@ class MergeResume(unittest.TestCase):
         with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("denied")):
             self.assertIsNone(merged.patch_hash(d))
             self.assertFalse(merged.marked_for_this_patch(d, {}))
+
+    # -- #865: a merge counts only for the patch the bundle holds now -------------------------
+    # The record publish writes carries `patch_digest`; a merge-mode mark carries its own hash.
+    # Either one for another patch makes the PR an older attempt, merged or not.
+
+    def _digest(self, d: Path) -> None:
+        """``d``'s record carries the digest publish writes, of the patch ``d`` holds now. The
+        key is spelled out: it is the format a later run reads back off an earlier one."""
+        self._record(d, patch_digest=_patch_sha(d))
+
+    def _older_merge_held(self, prereq: str = "P") -> str:
+        """D is held, not built, naming ``prereq``'s merged PR as an older attempt: the accepted
+        patch has no PR, and the step re-publishes it — or, when that patch no longer applies on
+        top of the older attempt, rebuilds it on main first. Never to merge, reopen or close
+        that PR, and never a hint that re-publishing takes the older attempt off main."""
+        line = self._held_line()
+        self.assertIn(f"issue_{prereq}: its PR was published for a different patch.diff, so its "
+                      f"merge put an older attempt on main, which does not count", line)
+        self.assertIn("the accepted patch.diff has no PR", line)
+        self.assertIn(f"re-publish (`pdca publish {prereq}`) so the accepted patch lands on main "
+                      f"as well, and merge the new PR by hand, then re-run", line)
+        self.assertIn(f"If the accepted patch no longer applies to main (it changes what the "
+                      f"older attempt changed), publish refuses it: rebuild issue_{prereq} on main "
+                      f"first (`pdca signoff {prereq} --iterate-do`), then accept and publish the "
+                      f"rebuild", line)
+        for wrong in ("as it stands", "merge the PR by hand", "reopen", "close it"):
+            self.assertNotIn(wrong, line)
+        self.assertIn(f"merged: {prereq}'s PR (https://example.test/pr/{prereq}) merged, but it "
+                      f"was published for a different patch.diff", self.err)
+        return line
+
+    def test_a_hand_merged_unmarked_pr_for_another_patch_holds_the_dependent(self):
+        # (a), the common shape: a final-wave or single-bundle PR has no mark, so only the digest
+        # publish wrote can tell its merged head is the older attempt.
+        d = self._opened("P")
+        self._digest(d)
+        self._rebuilt_patch(d)
+        self._merged_by_hand("P")
+        self._du()
+        self._run(["D", "U"])
+        self._older_merge_held()
+        self.assertIn("issue_U", self.built, self.err)
+        self.assertNotIn("carries no patch digest", self.err)
+
+    def test_a_hand_merged_pr_for_another_patch_holds_on_a_merged_edge_too(self):
+        d = self._opened("P")
+        self._digest(d)
+        self._rebuilt_patch(d)
+        self._merged_by_hand("P")
+        self._du(ON_MERGED)
+        self._run(["D", "U"])
+        self._older_merge_held()
+
+    def test_a_hand_merged_pr_for_this_patch_releases_the_dependent(self):
+        # (c): the digest is the patch's now, so the merge is the accepted work, as before.
+        d = self._opened("P")
+        self._digest(d)
+        self._merged_by_hand("P")
+        self._du()
+        self._run(["D", "U"])
+        self.assertEqual(self.results["D"], state.COMPLETE, self.err)
+        self.assertIn("P.txt", self.base_files["issue_D"], self.err)
+        self.assertNotIn("treating as not merged", self.err)
+        self.assertNotIn("carries no patch digest", self.err)
+
+    def test_a_hand_merged_marked_pr_for_this_patch_releases_the_dependent(self):
+        d = self._opened("P", marked=True)
+        self._digest(d)
+        self._merged_by_hand("P")
+        self._du()
+        self._run(["D", "U"])
+        self.assertEqual(self.results["D"], state.COMPLETE, self.err)
+        self.assertIn("P.txt", self.base_files["issue_D"], self.err)
+
+    def test_an_open_unmarked_pr_for_another_patch_is_closed_and_re_published(self):
+        # (d): merging it by hand, the old advice for an unmarked PR, would release nothing.
+        d = self._opened("P")
+        self._digest(d)
+        self._rebuilt_patch(d)
+        self._du()
+        self._run(["D", "U"])
+        line = self._held_line()
+        self.assertIn("issue_P: its PR was published for a different patch.diff, so its head is "
+                      "an older attempt", line)
+        self.assertIn("close it, re-publish (`pdca publish P`) and merge the new PR by hand", line)
+        self.assertNotIn("merge the PR by hand", line)
+        self.assertNotIn("it is not marked", line)
+        self._no_merge_attempt()
+        self.assertFalse(self._on_main("P"))
+
+    def test_a_closed_pr_for_another_patch_is_re_published_not_reopened(self):
+        d = self._opened("P")
+        self._digest(d)
+        self._rebuilt_patch(d)
+        self.pr["P"]["state"] = "CLOSED"
+        self._du()
+        self._run(["D", "U"])
+        line = self._held_line()
+        self.assertIn("issue_P: its PR was published for a different patch.diff and is closed, "
+                      "so it is an older attempt", line)
+        self.assertIn("re-publish (`pdca publish P`) and merge the new PR by hand", line)
+        self.assertNotIn("reopen", line)
+        self._no_merge_attempt()
+
+    def test_a_record_with_no_digest_releases_as_before_with_one_note(self):
+        # (e), the sign-off's call: every record on disk before #865 has no digest, so it is
+        # trusted, and said once per prerequisite however many dependents it releases.
+        self._opened("P")
+        self._merged_by_hand("P")
+        self._du()
+        self._planned("E", f"- **{PLAIN}:** P\n")
+        self._run(["D", "E", "U"])
+        self.assertEqual(self.results["D"], state.COMPLETE, self.err)
+        self.assertEqual(self.results["E"], state.COMPLETE, self.err)
+        notes = [x for x in self.err.splitlines() if "carries no patch digest" in x]
+        self.assertEqual(len(notes), 1, self.err)
+        self.assertTrue(notes[0].startswith("flow: note — issue_P's publish record"), notes[0])
+        self.assertIn("so whether its merged PR (https://example.test/pr/P) holds the accepted "
+                      "patch.diff is not checked", notes[0])
+        self.assertNotIn("held", notes[0])
+        # Once per run: the next run says it again.
+        self._planned("F", f"- **{PLAIN}:** P\n")
+        self._run(["F"])
+        self.assertEqual(self.results["F"], state.COMPLETE, self.err)
+        self.assertEqual(self.err.count("carries no patch digest"), 1, self.err)
+
+    def test_a_record_with_no_digest_that_releases_nothing_gets_no_note(self):
+        self._opened("P")
+        self._du()
+        self._run(["D", "U"])
+        self.assertIn("issue_P", self._held_line())
+        self.assertNotIn("carries no patch digest", self.err)
+
+    def test_publish_records_the_digest_of_the_patch_it_pushed(self):
+        # (f): what the release reads, written by the real PR writer — and a re-publish of
+        # another rebuild writes that one's.
+        d = self._opened("P")
+        (d / "patch.diff").write_text(sb._new_file_patch("P2.txt", "rebuilt"), encoding="utf-8")
+        rc, err = self._real_publish(d)
+        self.assertEqual(rc, 0, err)
+        first = self._rec(d).get("patch_digest")
+        self.assertEqual(first, _patch_sha(d))
+        (d / "patch.diff").write_text(sb._new_file_patch("P3.txt", "again"), encoding="utf-8")
+        rc, err = self._real_publish(d)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self._rec(d).get("patch_digest"), _patch_sha(d))
+        self.assertNotEqual(_patch_sha(d), first)
+
+    def test_closing_and_re_publishing_an_open_older_attempt_releases_the_dependent(self):
+        # (g): the way out of (d), with the real publish. The new record's digest is the rebuild's,
+        # so the merge of the new PR counts, and D has the rebuild and not the older attempt.
+        self.cfg.fix_branch_pattern = "fix/{id}"
+        d = self._opened("P")
+        self._digest(d)
+        self._rebuilt_patch(d)
+        self._du()
+        self._run(["D"])
+        self.assertIn("close it, re-publish (`pdca publish P`)", self._held_line())
+        self.pr["P"]["state"] = "CLOSED"
+        rc, err = self._real_publish(d)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self._rec(d)["patch_digest"], _patch_sha(d))
+        self.pr["P"] = {"state": "OPEN", "draft": True, "rollup": "pass"}
+        self._run(["D"])
+        self.assertIn("issue_P: no merge-mode run may merge it (it is not marked), so merge the "
+                      "PR by hand", self._held_line())
+        self._merged_by_hand("P")
+        self._run(["D"])
+        self.assertEqual(self.results["D"], state.COMPLETE, self.err)
+        self.assertIn("P2.txt", self.base_files["issue_D"], self.err)
+        self.assertNotIn("P.txt", self.base_files["issue_D"], self.err)
+        self.assertNotIn("treating as not merged", self.err)
+
+    def test_re_publishing_after_an_older_attempt_merged_lands_the_rebuild_too(self):
+        # (g2): the way out of (a). The older attempt is on main for good; the re-publish cuts
+        # from main and adds the rebuild, and its merge is what releases D.
+        self.cfg.fix_branch_pattern = "fix/{id}"
+        d = self._opened("P")
+        self._digest(d)
+        self._rebuilt_patch(d)
+        self._merged_by_hand("P")
+        self._du()
+        self._run(["D"])
+        self._older_merge_held()
+        rc, err = self._real_publish(d)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self._rec(d)["patch_digest"], _patch_sha(d))
+        self.pr["P"] = {"state": "OPEN", "draft": True, "rollup": "pass"}
+        self._run(["D"])
+        self.assertIn("issue_P: no merge-mode run may merge it", self._held_line())
+        self._merged_by_hand("P")
+        self._run(["D"])
+        self.assertEqual(self.results["D"], state.COMPLETE, self.err)
+        self.assertIn("P2.txt", self.base_files["issue_D"], self.err)
+
+    def test_a_rebuild_of_the_same_lines_is_rebuilt_on_main_and_then_releases_the_dependent(self):
+        # (g2) as a revised fix usually is: both attempts change P.txt. The accepted patch was
+        # made on main without the older attempt, so once that merged it no longer applies.
+        # The plain re-publish then fails, as the line warns, and changes nothing; the step the
+        # line gives for that — rebuild on main (the real iterate; its Do is cut from main as it
+        # is now), accept, publish — does publish, and that PR's merge releases D onto the
+        # rebuild.
+        self.cfg.fix_branch_pattern = "fix/{id}"
+        d = self._opened("P")
+        self._digest(d)
+        (d / "patch.diff").write_text(sb._new_file_patch("P.txt", "rebuilt"), encoding="utf-8")
+        self._merged_by_hand("P")
+        self._du()
+        self._run(["D"])
+        self._older_merge_held()
+        old = self._rec(d)["patch_digest"]
+        rc, err = self._real_publish(d)
+        self.assertEqual(rc, 1, err)
+        self.assertIn("patch may not apply against origin/main", err)
+        self.assertEqual(self._rec(d)["patch_digest"], old)
+        self._run(["D"])
+        self._older_merge_held()
+        # The rebuild on main: `pdca signoff P --iterate-do`, then Do and the accept.
+        self._iterated(d)
+        self.edits["P"] = {"P.txt": "rebuilt\n"}
+        self._run(["P"], do_publish=False)
+        self.assertEqual(self.results["P"], state.COMPLETE, self.err)
+        self.assertEqual(self.base_text["issue_P"]["P.txt"], "P\n")    # the older attempt's
+        rc, err = self._real_publish(d)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self._rec(d)["patch_digest"], _patch_sha(d))
+        self.pr["P"] = {"state": "OPEN", "draft": True, "rollup": "pass"}
+        self._run(["D"])
+        self.assertIn("issue_P: no merge-mode run may merge it", self._held_line())
+        self._merged_by_hand("P")
+        self._run(["D"])
+        self.assertEqual(self.results["D"], state.COMPLETE, self.err)
+        self.assertEqual(self.base_text["issue_D"]["P.txt"], "rebuilt\n", self.err)
+        self.assertNotIn("treating as not merged", self.err)
+
+    def _unreadable(self, d: Path) -> list:
+        """For ``_run``: ``d``'s ``patch.diff`` cannot be read (``EACCES``, what a file the run
+        may not read gives), every other file as it is."""
+        def deny(real):
+            def read(path, *a, **kw):
+                if path.name == "patch.diff" and path.parent.name == d.name:
+                    raise PermissionError(errno.EACCES, "Permission denied", str(path))
+                return real(path, *a, **kw)
+            return read
+        return [mock.patch.object(Path, "read_bytes", deny(Path.read_bytes)),
+                mock.patch.object(Path, "read_text", deny(Path.read_text))]
+
+    def test_a_digest_on_record_and_a_patch_that_cannot_be_read_holds_the_dependent(self):
+        # (h): nothing can show the merged PR is the accepted patch, so it is not counted.
+        d = self._opened("P")
+        self._digest(d)
+        self._merged_by_hand("P")
+        self._du()
+        self._run(["D", "U"], stack=self._unreadable(d))
+        line = self._held_line()
+        self.assertIn("issue_P: its patch.diff cannot be read, so its PR is not known to hold the "
+                      "accepted patch and does not count as merged", line)
+        # Publish cannot push a file it cannot read, and a merge by hand counts for nothing
+        # here: the step restores the file, or rebuilds the bundle.
+        self.assertIn("restore that file, then re-run, or, if it is lost, close the PR if it is "
+                      "open, rebuild issue_P on main (`pdca signoff P --iterate-do`), then accept "
+                      "and publish the rebuild, and merge the new PR by hand, then re-run", line)
+        for wrong in ("re-publish", "merge the PR by hand"):
+            self.assertNotIn(wrong, line)
+        self.assertIn("merged: P's PR (https://example.test/pr/P) merged, but its patch.diff "
+                      "cannot be read", self.err)
+        self.assertIn("issue_U", self.built, self.err)
+        # Readable again, the digest shows the merge is this patch's.
+        self._run(["D"])
+        self.assertEqual(self.results["D"], state.COMPLETE, self.err)
+
+    def test_an_older_attempt_under_a_prereq_stops_the_merge_above_it(self):
+        # `_merge_prereqs` asks the same rule of a prerequisite's own prerequisite: Q's merged PR
+        # is an older attempt, so P (marked, open) is not merged for D, and the note says why.
+        q = self._opened("Q")
+        self._digest(q)
+        self._rebuilt_patch(q)
+        self._merged_by_hand("Q")
+        self._opened("P", marked=True, edges="- **Depends on:** Q\n")
+        self._du()
+        self._run(["D", "U"])
+        line = self._held_line()
+        self.assertIn("issue_P: it was not merged, because its own prerequisite(s) issue_Q are not "
+                      "merged into main", line)
+        self.assertIn("issue_Q: its PR was published for a different patch.diff, so its merge put "
+                      "an older attempt on main", line)
+        self.assertIn("(`pdca publish Q`)", line)
+        self.assertNotIn("merge issue_P", self.events)
+        self.assertFalse(self._on_main("P"))
 
     # -- (4) nothing to merge ---------------------------------------------------------------
 

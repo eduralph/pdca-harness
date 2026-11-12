@@ -66,17 +66,21 @@ is a loud :class:`IntegrationError` that stops the run before the next wave buil
 broken base — unless its conflict is with bundles of its own wave merged before it (it
 merges cleanly onto the line as the wave found it, but not onto that line plus them): the
 flow's fold then holds just that bundle out of the line and names the bundles it conflicts
-with (``held_out``, #674). Mechanics are deterministic ``git`` subprocesses (no model).
+with (``held_out``, #674). On a wave a fold runs after, the flow applies that same rule at
+sign-off, to the commits publish would push, and refuses the accept that would add such a
+hold (:func:`same_wave_clash`, #782); the fold's own hold stays as the last check.
+Mechanics are deterministic ``git`` subprocesses (no model).
 """
 
 from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
 import subprocess
 import sys
 import time
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from pathlib import Path
 
 from . import brief, merged, publish, waves
@@ -136,6 +140,16 @@ class _Rewritten(IntegrationError):
     def __init__(self, message: str, name: str) -> None:
         super().__init__(message)
         self.name = name
+
+
+class _Unbuildable(IntegrationError):
+    """A bundle's would-be commit cannot be built for a reason that is the bundle's own
+    (#782, :func:`_would_be`): the ref publish cuts its branch from does not resolve to a
+    commit, or its ``patch.diff`` does not apply to that ref's tree (``git apply --check
+    --cached``). Publish runs those same steps, so it cannot push that bundle either.
+    :func:`same_wave_clash` leaves such a sibling out of its trial. For the bundle being
+    accepted it is a check that could not complete, as any other :class:`IntegrationError`
+    is. A failure of a later step is never this class: it is the tree's, not the bundle's."""
 
 
 def integration_branch(cfg: Config, base: str, batch: Iterable[str] | None = None) -> str:
@@ -201,6 +215,14 @@ def _git(repo: Path, *args: str) -> int:
     """Run ``git -C repo args`` quietly; return the exit code (no raise)."""
     return subprocess.run(["git", "-C", str(repo), *args],
                           capture_output=True, text=True).returncode
+
+
+def _git_stderr(repo: Path, *args: str) -> tuple[int, str]:
+    """Run ``git -C repo args`` quietly, as :func:`_git` does; return the exit code and what
+    git wrote to stderr, on one line — for a step whose failure should say why (#782: the
+    file in the way of a would-be commit's ``git apply``, :func:`_would_be`)."""
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    return r.returncode, " ".join(r.stderr.split())
 
 
 def _rev(repo: Path, ref: str) -> str | None:
@@ -365,6 +387,7 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
          clashes: dict[str, tuple[str, dict[str, list[str]], list[str]]] | None = None,
          bases: Bases | None = None, line_prs: LinePrs | None = None,
          finished_heads: Mapping[str, str] | None = None,
+         rerun: Rerun | None = None,
          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
     """Fold the cumulative accepted bundles' published branches onto a per-target
     integration branch.
@@ -512,6 +535,11 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     ``held_out`` conflict may be pinned on, and only while that head is on the line being
     built: never merged, never put in ``carried``, never checked for a rewrite. ``None``:
     none.
+
+    ``rerun`` (#912, the flow's): the re-run the run's advice prescribes so far
+    (:class:`Rerun`). A stop on a squash or rebase merge records its bundle in it and names
+    that re-run's lines (:func:`_gone_branch`). ``None``: the re-run of ``batch`` without that
+    bundle.
     """
     candidates = _fold_candidates(accepted)
     if not candidates:
@@ -653,7 +681,8 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                                                        f"re-run")
                     try:
                         _merge_published(cfg, wt, d, refs[d.name], head, branch=branch,
-                                         base=base, owners=tuple(owners.values()), batch=batch)
+                                         base=base, owners=tuple(owners.values()), batch=batch,
+                                         rerun=rerun)
                     except IntegrationError as exc:
                         if (held_out is not None and ours and head is not None
                                 and pre is not None and isinstance(exc, _Conflict)):
@@ -750,6 +779,340 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     return result
 
 
+def same_wave_clash(cfg: Config, d: Path, siblings: Sequence[Path], *,
+                    tip: str | None, batch: Collection[str] | None
+                    ) -> tuple[list[str], list[str]] | None:
+    """Whether accepting bundle ``d`` would add a same-wave hold to the :func:`fold` that
+    runs after its wave (#782): ``(partners, paths)`` if so, else None.
+
+    ``siblings``: the bundles of ``d``'s wave already accepted, each with a patch on ``d``'s
+    own target (the caller picks them: each target folds onto a line of its own). The rule is
+    the fold's (``held_out``, #674: :func:`_held_by`), applied to what that fold will merge:
+    each bundle's would-be commit — its ``patch.diff`` committed onto the commit publish cuts
+    its branch from (:func:`publish.cut_base`), built here on no branch and never pushed
+    (:func:`_would_be`). They are merged in the fold's order — name order within a wave —
+    onto ``pre``, the line as the fold after the wave finds it: ``tip``, the tip this run
+    last pushed (or carried) for the target, else ``<base_remote>/<base>``, where the run's
+    first fold of the target starts it. ``batch`` names the line's branch, as for
+    :func:`fold`.
+
+    A sibling publish will never push is no partner (the 2026-11-04 ruling): the fold never
+    merges it, so it is left out of the trial, named on stderr with why (:func:`_left_out`;
+    that line is the only record of it), and ``d`` is checked against the rest. Exactly
+    three tests decide that, each a read of the sibling's own inputs and none of the tree's
+    health: :func:`publish.cut_base` gives it no cut (no usable target, a ``Stacks on``
+    prerequisite with no published branch); after the fetch, its cut ref does not resolve to
+    a commit; or ``git apply --check --cached`` rejects its ``patch.diff`` on that ref's tree
+    — the two :class:`_Unbuildable` steps of :func:`_would_be`, which read the ref and the
+    patch alone. Any other step of a sibling's build that fails is the tree's or the
+    check's, and raises as below: a lock left behind, a tree half reset, or an ignored file
+    the reset keeps where a patch adds one must never read as "this sibling cannot be
+    built", which would drop every sibling and accept ``d`` unchecked. With no partner left
+    there is no trial, and None is returned once ``d``'s own commit is built. The stderr
+    line is printed only once the check has completed: a check that fails after it found
+    such a sibling refuses ``d`` as one that could not complete, which a line saying ``d``
+    was checked against the rest would contradict.
+
+    "Adds a hold" (the #395 ruling of 2026-10-23): the partners and ``d`` merged so have the
+    fold hold more bundles than the partners alone (:func:`_wave_holds`). Only a
+    :func:`_held_by` hold counts — a commit that does not merge onto ``pre`` alone conflicts
+    with the line, which the fold judges after publish (#747, :func:`_held_by_line`), so here
+    it is neither held nor merged. Whichever bundle was accepted first is kept, unless an
+    earlier override already has the fold holding a bundle of the wave: ``d`` is refused also
+    when it sorts first and the bundle its merge makes the fold hold is a sibling. The rule
+    counts holds, though. Once a ticked row has let through a bundle the fold holds, an
+    accept that only trades that hold for a hold of a bundle accepted earlier goes through
+    (the loophole the 2026-10-23 ruling accepts). ``partners``: for a newly held ``d``, the
+    siblings it conflicts with; for a newly held sibling, that sibling. ``paths``: the files
+    they conflict in. Both sorted, so one conflict always reads the same.
+
+    Runs in the target's shared integration worktree under its :func:`integ_lock`, entered
+    on an ``ExitStack`` as the flow's fold enters it (``flow._fold_lines``), after the fetch
+    a fold makes (:func:`_prepare_worktree`), each fetch tried twice (:func:`_fetch`): one
+    that fails once refuses no accept. Every exit, a raising one included, leaves the
+    tree on the line's branch at ``pre``, clean (:func:`_back_on`); nothing is pushed. Each
+    build also removes the files its apply added, ignored ones included (:func:`_would_be`),
+    so the check leaves nothing behind that a later check would find in its way.
+    Raises :class:`IntegrationError` when the check cannot complete: the lock, a fetch,
+    starting the line's branch, reading ``pre``, ``d``'s own would-be commit failing any of
+    its steps (its cut included, :class:`_Unbuildable`), a step of a sibling's build other
+    than the three tests above, a merge that fails with no conflicting path. Raises
+    :class:`IntegrationTreeError` / :class:`_LineBroken`, as the fold does (#631, #623), when
+    the tree cannot be put back — chained (``raise … from``) to the error already being
+    raised, if there was one, and saying in its own words what failed first
+    (:func:`_put_back_after`), however deep that was: a trial merge's own reset
+    (:func:`_trial`) chains it the same way."""
+    order = sorted([*siblings, d], key=lambda p: p.name)
+    repo_spec, base, _slug = publish._resolve_target(d)
+    cuts: dict[str, tuple[str, str]] = {}
+    left: dict[str, str] = {}     # sibling → why it is left out: said once the check completes
+    for x in order:
+        cut = publish.cut_base(cfg, x)
+        if cut is not None:
+            cuts[x.name] = cut
+            continue
+        cause = (f"publish would cut no branch for {x.name} (no usable target, or a "
+                 f"`Stacks on` prerequisite with no published branch)")
+        if x.name == d.name:
+            raise IntegrationError(f"{cause}, so the commit it would push cannot be built",
+                                   cause=cause)
+        left[x.name] = cause
+    order = [x for x in order if x.name in cuts]
+    repo = publish._checkout_path(cfg, repo_spec)
+    branch = integration_branch(cfg, base, batch)
+    start = tip or f"{cfg.base_remote}/{base}"
+    with contextlib.ExitStack() as locks:
+        wt = _integ_worktree(repo, base)
+        if not locks.enter_context(integ_lock(wt)):
+            cause = f"could not take the integration lock next to {wt.name}"
+            raise IntegrationError(f"{cause} — fix the checkout's parent directory, then "
+                                   f"re-run", cause=cause)
+        wt = _prepare_worktree(repo, cfg.base_remote, base,
+                               remotes=[r for r, _ref in cuts.values()], attempts=2)
+        _reset_tree(wt, "HEAD")
+        if _git(wt, "checkout", "-q", "-B", branch, start) != 0:
+            cause = f"could not start {branch} off {start} in {wt}"
+            raise IntegrationError(f"{cause} — check that checkout, then re-run", cause=cause)
+        pre = _rev(wt, "HEAD")
+        if pre is None:
+            cause = f"could not read the tip of {branch} in {wt}"
+            raise IntegrationTreeError(f"{cause} — check that checkout, then re-run",
+                                       cause=cause)
+        alone: dict[str, tuple[list[str], list[str]]] = {}
+        held: dict[str, tuple[list[str], list[str]]] = {}
+        try:
+            built: list[tuple[str, str]] = []
+            for x in order:
+                try:
+                    built.append((x.name, _would_be(wt, x, cuts[x.name][1])))
+                except _Unbuildable as exc:
+                    if x.name == d.name:
+                        raise
+                    left[x.name] = exc.cause
+            partners = [b for b in built if b[0] != d.name]
+            if partners:
+                _back_on(wt, branch, pre)
+                alone = _wave_holds(wt, branch, pre, partners)
+                _back_on(wt, branch, pre)
+                held = _wave_holds(wt, branch, pre, built)
+        except BaseException as exc:
+            _put_back_after(exc, lambda: _back_on(wt, branch, pre))
+            raise
+        _back_on(wt, branch, pre)
+    for name in sorted(left):
+        _left_out(d, name, left[name])
+    if len(held) <= len(alone):
+        return None
+    partner_names: set[str] = set()
+    paths: set[str] = set()
+    for name, (its, files) in held.items():
+        if name not in alone:
+            partner_names.update(its if name == d.name else [name])
+            paths.update(files)
+    return sorted(partner_names), sorted(paths)
+
+
+def _left_out(d: Path, name: str, cause: str) -> None:
+    """Say on stderr that sibling ``name`` is left out of bundle ``d``'s same-wave check, and
+    why (#782, :func:`same_wave_clash`, once that check has completed): publish cannot push
+    it, so the fold has nothing of it to merge. The only record of it: no §6 row, no
+    refusal."""
+    print(f"integrate: {name} is left out of {d.name}'s same-wave check — {cause}; so publish "
+          f"cannot push it as it stands, and the fold has nothing of it to merge. {d.name} was "
+          f"checked against the rest of its wave.", file=sys.stderr)
+
+
+def _would_be(wt: Path, d: Path, ref: str) -> str:
+    """The commit publish would push for bundle ``d`` (#782), made in ``wt`` on a detached
+    HEAD and never pushed: publish's own steps less the fetch and the push — resolve ``ref``
+    (:func:`publish.cut_base`), check it out, check that ``d``'s ``patch.diff`` applies to
+    its tree (``git apply --check --cached``, as publish's ``Onto branch`` path checks, but
+    against the index the checkout set), apply it, stage everything, commit. So it has the
+    parent and the tree of the branch publish pushes (the message differs, and no commit
+    hook runs).
+
+    Two failures are ``d``'s own, and raise :class:`_Unbuildable`: ``ref`` does not resolve
+    to a commit (``git rev-parse --verify <ref>^{commit}``), or ``git apply --check --cached``
+    rejects the patch on ``ref``'s tree. Publish fails on that patch at that ref too. Both
+    read only ``ref`` and the patch, never what the tree holds: ``wt`` keeps ignored files
+    (:func:`_reset_tree`), and one at a path the patch adds must not make ``d`` look
+    unbuildable. Every other failure — the tree that will not reset, the checkout of a ref
+    that resolves, listing what the patch adds, the apply after a passing check (a file left
+    in the tree where the patch adds one, say), ``add``, ``commit``, reading HEAD — is the
+    tree's, and raises a plain :class:`IntegrationError` (:class:`IntegrationTreeError` for
+    the reset). Each names the step; a failed apply also says what git said, which names the
+    file in its way. The caller puts the tree back.
+
+    What the apply adds is removed again, once the commit is made or a step after the check
+    failed (:func:`_remove_added`): each path the patch writes that was not in the tree
+    before it (:func:`_paths_added`), ignored ones included. ``git add --all`` leaves out a
+    file the patch adds that ``.gitignore`` covers, as publish's does, and the tree's reset
+    keeps ignored files, so without this the next check that builds ``d`` would find that
+    file in the way of its apply, and refuse. A file that was there before the apply is not
+    the check's, and stays: one in the way of the apply still fails it."""
+    def failed(what: str, kind: type[IntegrationError] = IntegrationError
+               ) -> IntegrationError:
+        cause = f"{d.name}'s would-be commit could not be built: {what}"
+        return kind(f"{cause} (in {wt}) — check that checkout and the bundle's patch, then "
+                    f"re-run", cause=cause)
+
+    patch = str((d / "patch.diff").resolve())
+    if _rev(wt, ref) is None:
+        raise failed(f"{ref}, where publish cuts its branch, does not resolve to a commit",
+                     _Unbuildable)
+    _reset_tree(wt, "HEAD")
+    if _git(wt, "checkout", "-q", "--detach", ref) != 0:
+        raise failed(f"could not check out {ref}")
+    # `--cached`: against the index the checkout just set to the ref's tree, so only the ref
+    # and the patch decide it. Against the tree, an ignored file the reset keeps, at a path
+    # the patch adds, would make it fail and leave the bundle out of the check.
+    if _git(wt, "apply", "--check", "--cached", patch) != 0:
+        raise failed(f"its patch.diff does not apply onto {ref}, where publish cuts its "
+                     f"branch", _Unbuildable)
+    added = _paths_added(wt, patch)
+    if added is None:
+        raise failed("`git apply --numstat` could not list the files its patch.diff writes")
+    try:
+        rc, said = _git_stderr(wt, "apply", patch)
+        if rc != 0:
+            raise failed(f"`git apply` failed onto {ref}, though `git apply --check --cached` "
+                         f"passed" + (f"; git said: {said}" if said else ""))
+        for args, what in ((("add", "--all"), "`git add --all` failed"),
+                           (("commit", "-q", "--no-verify", "-m",
+                             f"pdca-integrate: would-be commit of {d.name}"),
+                            "`git commit` failed")):
+            if _git(wt, *args) != 0:
+                raise failed(what)
+        head = _rev(wt, "HEAD")
+        if head is None:
+            cause = f"{d.name}'s would-be commit could not be read in {wt}"
+            raise IntegrationError(cause, cause=cause)
+    except BaseException as exc:
+        _put_back_after(exc, lambda: _remove_added(wt, d, added))
+        raise
+    _remove_added(wt, d, added)
+    return head
+
+
+def _paths_added(wt: Path, patch: str) -> list[str] | None:
+    """The paths applying ``patch`` in ``wt`` adds there (#782, :func:`_would_be`): each path
+    it writes — ``git apply --numstat -z`` names every file a patch creates or changes, a
+    renamed or copied one by its new name, a deleted one by its old — that is not in ``wt``
+    now, as a file, link or directory, tracked or not. Read before the apply, so a file that
+    is already there, ignored or not, is never counted as one the apply adds. None when git
+    cannot read the patch."""
+    r = subprocess.run(["git", "-C", str(wt), "apply", "--numstat", "-z", patch],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    paths = [row.split("\t", 2)[2] for row in r.stdout.split("\0") if row.count("\t") >= 2]
+    return [p for p in paths if not os.path.lexists(wt / p)]
+
+
+def _remove_added(wt: Path, d: Path, added: Sequence[str]) -> None:
+    """Remove from ``wt`` what building bundle ``d``'s would-be commit added there and left
+    untracked (#782, :func:`_would_be`): of ``added`` (:func:`_paths_added`), each path no
+    commit or index holds — ignored ones too, as ``git clean -x`` takes them, but only those
+    paths, read literally (``--literal-pathspecs``): never a blanket ``-x``, which would take
+    the re-gate's build caches with them. What the commit holds goes when the tree moves off
+    it. Raises :class:`IntegrationTreeError` when that ``git clean`` fails: the tree then
+    holds files the check made, which it cannot put back."""
+    if added and _git(wt, "--literal-pathspecs", "clean", "-q", "-ffdx", "--", *added) != 0:
+        cause = (f"could not remove the files building {d.name}'s would-be commit added in "
+                 f"{wt}")
+        raise IntegrationTreeError(f"{cause} — check that checkout (or remove it to have it "
+                                   f"recreated), then re-run", cause=cause)
+
+
+def _wave_holds(wt: Path, branch: str, pre: str, built: Sequence[tuple[str, str]]
+                ) -> dict[str, tuple[list[str], list[str]]]:
+    """What the fold's same-wave rule (#674) holds of ``built`` — ``(name, commit)`` in fold
+    order — merged one after another onto ``branch`` in ``wt``, checked out at ``pre``, as
+    :func:`fold` merges a wave (#782): a commit whose merge conflicts once others of
+    ``built`` are merged is held, never merged, exactly when :func:`_held_by` says so. One
+    that conflicts with ``pre`` itself is neither held nor merged (#747 is the fold's, after
+    publish). A merge that fails with no conflicting path is a failed git step and raises.
+    Leaves ``branch`` where the merges took it: the caller puts it back."""
+    held: dict[str, tuple[list[str], list[str]]] = {}
+    kept: list[tuple[str, str]] = []
+    for name, head in built:
+        rc, paths = _merge(wt, head, f"pdca-integrate: trial merge of {name}")
+        if rc == 0:
+            kept.append((name, head))
+        elif not paths:
+            cause = (f"could not try merging {name}'s would-be commit in {wt} — `git merge` "
+                     f"exited {rc} with no conflicting path")
+            raise IntegrationError(f"{cause}, so a git step failed: check that checkout, then "
+                                   f"re-run", cause=cause)
+        elif kept:
+            clash = _held_by(wt, branch, head, pre, kept)
+            if clash:
+                held[name] = clash
+    return held
+
+
+def _back_on(wt: Path, branch: str, at: str) -> None:
+    """Put ``wt`` back on ``branch`` at ``at``, clean (#782): after the same-wave check, or a
+    step of it, the line is where the check found it, whatever the step left — a merge, a
+    detached HEAD, untracked files. A tree that cannot be reset raises
+    :class:`IntegrationTreeError` (:func:`_reset_tree`); one that will not go back on
+    ``branch`` at ``at``, :class:`_LineBroken`. After a step that raised, the caller runs this
+    through :func:`_put_back_after`, so that error is not lost if this one fails too."""
+    _reset_tree(wt, "HEAD")
+    if (_git(wt, "checkout", "-q", branch) != 0 or _git(wt, "reset", "-q", "--hard", at) != 0
+            or _rev(wt, "HEAD") != at):
+        cause = f"could not put {branch} back at {at} in {wt} after the same-wave check"
+        raise _LineBroken(f"{cause} — check that checkout, then re-run", cause=cause)
+
+
+def _put_back_after(first: BaseException | None, put_back: Callable[[], None]) -> None:
+    """Run ``put_back`` — a step that puts the shared integration worktree back, raising an
+    :class:`IntegrationError` when it cannot (:class:`IntegrationTreeError`,
+    :class:`_LineBroken`: #631, #623) — after a step that raised ``first``, or that raised
+    nothing (``None``: its error is raised as it is). An error it raises while ``first`` was
+    being raised replaces ``first``, as a broken tree must reach the caller; so it is chained
+    to it (``raise … from``, #782) and its words end with what failed first
+    (:func:`_earlier`): the first failure is still reported, however many cleanups failed
+    after it. A ``first`` that is no ``Exception`` (a ``^C``) is never replaced: the tree is
+    put back if it goes, its error dropped if it does not, and the caller raises ``first`` on.
+    """
+    try:
+        put_back()
+    except IntegrationError as exc:
+        if first is None:
+            raise
+        if not isinstance(first, Exception):
+            return
+        then = _earlier(first)
+        kind = (_LineBroken if isinstance(exc, _LineBroken)
+                else IntegrationTreeError if isinstance(exc, IntegrationTreeError)
+                else IntegrationError)
+        raise kind(f"{exc}{then}", cause=f"{exc.cause}{then}") from first
+
+
+def _first_of(exc: BaseException) -> BaseException:
+    """The error the chain ``exc`` ends started with (#782): followed back through each
+    error's ``__cause__``, else its ``__context__`` (an error raised while handling it), to
+    one raised while no other was. ``exc`` itself when it was."""
+    seen = {id(exc)}
+    while True:
+        prev = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
+        if prev is None or id(prev) in seen:
+            return exc
+        seen.add(id(prev))
+        exc = prev
+
+
+def _earlier(first: BaseException) -> str:
+    """`` (after an earlier failure: <words>)``, which an error raised while ``first`` was
+    adds to its own words (#782, :func:`_put_back_after`): the words of the error that chain
+    started with (:func:`_first_of`) — an :class:`IntegrationError`'s ``cause``, else its
+    message, else its type — on one line."""
+    root = _first_of(first)
+    said = getattr(root, "cause", None) or str(root) or type(root).__name__
+    return f" (after an earlier failure: {' '.join(str(said).split())})"
+
+
 def _bundle_name(name: str) -> str:
     """``name`` as a bundle's name, given as one or as its id: ``500`` and ``issue_500`` are
     one bundle, as :func:`batch_key` counts them."""
@@ -761,7 +1124,8 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
                       excluded: Mapping[str, str],
                       merged_heads: dict[str, str] | None = None,
                       bases: Bases | None = None,
-                      line_prs: LinePrs | None = None) -> tuple[str, str]:
+                      line_prs: LinePrs | None = None,
+                      rerun: Rerun | None = None) -> tuple[str, str]:
     """Build bundle ``d``'s own base (#723, for #463's dependency-scoped bases): a branch on
     ``origin`` holding exactly ``<base_remote>/<base>`` as just fetched plus the published
     branches of ``members`` (bundle paths, merged in that order). Returns ``(branch, pushed
@@ -812,6 +1176,12 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
     ``merged_heads`` (#727), when given, gets each member's name with the head this build
     put on the branch (merged, or found on it) once the push has succeeded: what the run's
     later checks hold that branch to for ``d``'s PR (:data:`Bases`).
+
+    ``rerun`` (#912, the flow's): the re-run the run's advice prescribes so far
+    (:class:`Rerun`), as for :func:`fold`. A member gone by a squash or rebase merge stops
+    the build as it stops a fold, recording itself in it and naming that re-run's lines
+    (:func:`_gone_branch`). The flow prints every such stop (the bundle's base hold), so it
+    passes its own record. ``None``: the re-run of ``batch`` without that member.
 
     Push: a branch origin does not have is pushed plainly (no force, so an origin with
     ``receive.denyNonFastForwards`` takes it); one it has (``d``'s base built again) is
@@ -884,7 +1254,7 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
             head = heads[m.name]
             try:
                 _merge_published(cfg, wt, m, refs[m.name], head, branch=branch, base=base,
-                                 owners=tuple(mine), batch=batch)
+                                 owners=tuple(mine), batch=batch, rerun=rerun)
             except _Conflict as exc:
                 raise _member_clash(wt, d, branch, base_ref, m.name, refs[m.name][1], head,
                                     merged_in, exc) from exc
@@ -1335,7 +1705,8 @@ def _late_line_rewrite(facts: str, ref: str, took: str, line: str,
 def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, bool],
                      head: str | None, *, branch: str, base: str,
                      owners: Sequence[Path] = (),
-                     batch: Collection[str] | None = None) -> None:
+                     batch: Collection[str] | None = None,
+                     rerun: Rerun | None = None) -> None:
     """Merge bundle ``d``'s published branch onto the line checked out in ``wt`` (#593):
     its own commits, joined by a signed-off merge commit — not a re-applied copy. ``head``
     is the branch's tip as :func:`fold` read it — None: it does not resolve (gone). It is
@@ -1343,7 +1714,8 @@ def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, 
     reach the line too; for a branch the run carried, the tip checked to extend what the
     line took from it (:func:`_carried_tips`, #633). ``owners``: the bundles a refusal may
     name — to take the base in (:func:`_take_in_base`), or to keep this merge. ``batch``: the
-    run's, for the line a refusal of a squash or rebase merge names (:func:`_gone_branch`).
+    run's, for the line a refusal of a squash or rebase merge names (:func:`_gone_branch`),
+    with ``rerun``, the re-run the run's advice prescribes so far (#912).
 
     A merge that would remove work from the line, by a change none of the branch's own
     commits makes (#673: the branch was cut from, or updated from, a base that reverted
@@ -1351,7 +1723,7 @@ def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, 
     _remote, ref, onto = published
     if head is None:
         _gone_branch(cfg, wt, d, ref, onto, branch=branch, base=base, owners=owners,
-                     batch=batch)
+                     batch=batch, rerun=rerun)
         return
     if _in_line(wt, head, f"{d.name}'s branch {ref}", branch):
         return  # already in the line (an earlier fold carried it) — never merged twice
@@ -1409,7 +1781,8 @@ def _keep_merge(cfg: Config, wt: Path, d: Path, ref: str, head: str, before: str
 
 def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch: str,
                  base: str, owners: Sequence[Path] = (),
-                 batch: Collection[str] | None = None) -> None:
+                 batch: Collection[str] | None = None,
+                 rerun: Rerun | None = None) -> None:
     """``d``'s published branch ``ref`` does not resolve after the pruning fetch — a merged
     PR's branch is commonly deleted on merge (#593). Decided by commit, never by message:
 
@@ -1423,18 +1796,26 @@ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch
        merge commit the host reports being on the base (:func:`_squash_merged`, #626), for
        any record, as the carry tells it apart (``flow._finished_head``). That raises, saying
        so and what to do (:data:`SQUASH_STEP`; :data:`DROP_PREREQ` is its last part for a
-       record that never counts, :func:`merged.counts_into`, naming the line of ``batch``
-       without ``d``, :func:`reissue_line`): stack mode needs merge commits,
-       so the line does not take the base in for it. An ``Onto branch`` record (``onto``) is
-       a commit on another PR, and a legacy ``Stacks on:`` PR targets its parent's branch, so
-       either may have merged elsewhere, and that raises. Any other PR targeted this base,
-       but it may still have merged into another branch (its base edited on the host), so
-       the fold first checks that the base has the head: then the line takes the base in
-       (:func:`_take_in_base`), unless that would remove work a bundle put on the line
-       (#623), which raises. A base without it — or a clone without it, which, having fetched
-       the base, means the same — raises, rather than build the next wave on a line that
-       lacks the PR's work. A merge commit the base lacks, or one that cannot be read, names
-       no squash or rebase merge."""
+       record that never counts, :func:`merged.counts_into`): stack mode needs merge commits,
+       so the line does not take the base in for it. The re-issue it asks for is the run's
+       ``rerun`` (#912, :class:`Rerun`; ``None``: one of ``batch``) without ``d``, which it
+       records before it raises (with the edge it asks dropped, if any), so the line
+       :data:`DROP_PREREQ` names is that re-run's (:func:`reissue_line`). Leaving ``d`` out
+       changes that re-run's line on every target, so where a line of the run asked an edge
+       dropped on another target, or on this one when ``d``'s record counts and it asks for
+       no drop, it names those lines too (:func:`lines_unchecked`). It records how that
+       message is made from a record (:meth:`Rerun.stop`), so the carry, which prints a stop
+       of its own fold only once all its folds are over, makes it again from the record as
+       it then stands (``flow._carry_finished``). An ``Onto branch``
+       record (``onto``) is a commit on another PR, and a legacy ``Stacks on:`` PR targets
+       its parent's branch, so either may have merged elsewhere, and that raises. Any other
+       PR targeted this base, but it may still have merged into another branch (its base
+       edited on the host), so the fold first checks that the base has the head: then the
+       line takes the base in (:func:`_take_in_base`), unless that would remove work a
+       bundle put on the line (#623), which raises. A base without it — or a clone without
+       it, which, having fetched the base, means the same — raises, rather than build the
+       next wave on a line that lacks the PR's work. A merge commit the base lacks, or one
+       that cannot be read, names no squash or rebase merge."""
     base_ref = f"{cfg.base_remote}/{base}"
     head = merged.merged_head(cfg, d.name.removeprefix("issue_"))
     if not head:
@@ -1451,15 +1832,28 @@ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch
     on_base = _carries(wt, head, f"{d.name}'s merged head {head}", base_ref, of=base_ref)
     oid = "" if on_base else _squash_merged(cfg, d, wt, base_ref)
     if oid:
-        raise IntegrationError(
-            f"{d.name}'s branch {ref} is gone and its PR "
-            f"{rec.get('pr_url') or '(no recorded PR)'} was squash- or rebase-merged: {base_ref} "
-            f"has its merge commit {oid}, but neither {base_ref} nor {branch} has the head it "
-            f"merged ({head}), so a branch built on {d.name} holds commits {base_ref} never "
-            f"got; " + SQUASH_STEP.format(name=d.name, base=base_ref)
-            + ("" if merged.counts_into(rec, *publish._resolve_target(d)[:2])
-               else DROP_PREREQ.format(name=d.name,
-                                       next_line=reissue_line(cfg, base, batch, [d.name]))))
+        repo_spec, own_base = publish._resolve_target(d)[:2]
+        counts = merged.counts_into(rec, repo_spec, own_base)
+        target = (repo_spec, base)
+        # Recorded before the message is made, so the line it names is the re-run's without d.
+        rerun = rerun if rerun is not None else Rerun(batch)
+        rerun.leave_out(d.name)
+        if not counts:
+            rerun.drop_on(target, [d.name])
+        lead = (f"{d.name}'s branch {ref} is gone and its PR "
+                f"{rec.get('pr_url') or '(no recorded PR)'} was squash- or rebase-merged: "
+                f"{base_ref} has its merge commit {oid}, but neither {base_ref} nor {branch} "
+                f"has the head it merged ({head}), so a branch built on {d.name} holds commits "
+                f"{base_ref} never got; " + SQUASH_STEP.format(name=d.name, base=base_ref))
+
+        def say(r: Rerun) -> str:
+            more = lines_unchecked(cfg, r, f"leaving {d.name} out gives the re-run",
+                                   repo=repo_spec, but=None if counts else target)
+            return (lead + ("" if counts else DROP_PREREQ.format(
+                name=d.name, next_line=reissue_line(cfg, base, r)))
+                + (f"; {more}" if more else ""))
+
+        raise IntegrationError(rerun.stop(d.name, say))
     if onto or rec.get("base") != base:
         what = ("an `Onto branch` commit on another PR" if onto else
                 f"a PR against {rec.get('base') or '(no recorded base)'}, not {base}")
@@ -1493,21 +1887,172 @@ SQUASH_STEP = ("stack mode needs merge commits: update each branch built on {nam
 # continue a line it finds on origin, so with the edge gone the line of the batch to come has to
 # go too, or that run builds there without the merge and says nothing. So the drop is asked of
 # that batch alone: a bundle outside it keeps its edge, and its own run checks its own line.
-# ``{next_line}``: :func:`reissue_line`.
+# ``{next_line}``: :func:`reissue_line`, of the re-run the run's advice prescribes (#912).
 DROP_PREREQ = (", after dropping {name} from the brief of any bundle of the re-issued batch that "
                "names it as a prerequisite and deleting any line on origin that batch would "
                "continue{next_line}: with the edge gone nothing checks that line for the merge")
 
 
-def reissue_line(cfg: Config, base: str, batch: Collection[str] | None,
-                 without: Collection[str]) -> str:
-    """:data:`DROP_PREREQ`'s ``{next_line}`` (#626): the line a re-issue of ``batch`` without
-    the bundles ``without`` would continue on ``base``, said to be that batch's, since any other
-    batch has a line of its own (:func:`integration_branch`). "" when there is none to name: no
-    batch (a direct caller), or none of it left."""
-    rest = [n for n in batch or () if _bundle_name(n) not in without]
-    return (f" (for this batch without {', '.join(without)}: "
-            f"{integration_branch(cfg, base, rest)})" if rest else "")
+class Rerun:
+    """The re-run a run's printed advice prescribes, as far as the run has printed it (#912).
+
+    The way out of a squash- or rebase-merged prerequisite is a re-run of the run's ``batch``
+    without each id a line asks to re-issue without (``without``, :data:`SQUASH_STEP`), with
+    each id a line asks the operator to name in it (``named``, ``flow._runnable``'s hold), on
+    every target. Three kinds of line print parts of that advice: the carry's
+    (``flow._carry_finished``), a dependent's hold (``flow._runnable``) and the stop on a
+    gone branch (:func:`_gone_branch`), of a fold or of a bundle's own base
+    (:func:`build_bundle_base`, printed as that bundle's base hold). Each names lines that
+    re-run may continue, so all of them read this one record, one per run
+    (``flow._drive_and_act``). It grows as the run prints: the carry records every id it
+    re-issues without, on every target, before its first line; a hold records the ids it asks
+    to name as it prints; a stop records its own id before it raises. A stop of the carry's
+    own fold records into a copy, and the carry takes an id from it only while that id's line
+    still gives the stop's message (:meth:`take`): a later failure of that fold may replace
+    it. The carry prints such a stop only once all its folds are over, so it makes each one
+    it takes again from the record as it then stands (:meth:`again`): made as it raised, it
+    knew no later stop, and it counted each earlier stop of its fold, whose message the
+    carry may since have replaced. A line names the lines as the record stands when it
+    prints, so an earlier one may name fewer, and the operator deletes every line any line
+    names.
+
+    ``drops``: each target ``(repo, base)`` on which a line asked an edge dropped, with the ids
+    whose edges go there (:data:`DROP_PREREQ`, ``flow._runnable``). Only an edge makes a run
+    check its line for a merge, so only there may a re-run continue a line nothing checks.
+    ``said``: the message of each stop that recorded its id, as last made; ``says``: how
+    each one is made from a record (:meth:`stop`)."""
+
+    def __init__(self, batch: Iterable[str] | None) -> None:
+        self.batch = None if batch is None else list(batch)
+        self.without: list[str] = []
+        self.named: list[str] = []
+        self.drops: dict[tuple[str, str], list[str]] = {}
+        self.said: dict[str, str] = {}
+        self.says: dict[str, Callable[[Rerun], str]] = {}
+
+    def copy(self) -> Rerun:
+        """A copy to record into, which this record is not changed by."""
+        new = Rerun(self.batch)
+        new.without, new.named = list(self.without), list(self.named)
+        new.drops = {t: list(ids) for t, ids in self.drops.items()}
+        new.said, new.says = dict(self.said), dict(self.says)
+        return new
+
+    def stop(self, name: str, say: Callable[[Rerun], str]) -> str:
+        """A stop on bundle ``name``, which has recorded its id, records ``say``, how its
+        message is made from a record. Returns that message, made from this one now."""
+        name = _bundle_name(name)
+        self.says[name] = say
+        self.said[name] = say(self)
+        return self.said[name]
+
+    def again(self, name: str) -> str:
+        """Stop ``name``'s message (:meth:`stop`), made again from this record as it stands."""
+        self.said[name] = self.says[name](self)
+        return self.said[name]
+
+    def leave_out(self, name: str) -> None:
+        """A line asks to re-issue without bundle ``name``."""
+        name = _bundle_name(name)
+        if name not in self.without:
+            self.without.append(name)
+
+    def name_too(self, names: Iterable[str]) -> None:
+        """A line asks the operator to name the bundles ``names`` in the re-run."""
+        for name in map(_bundle_name, names):
+            if name not in self.named:
+                self.named.append(name)
+
+    def drop_on(self, target: tuple[str, str], names: Iterable[str]) -> None:
+        """A line asks to drop the edges to the bundles ``names`` on ``target``."""
+        ids = self.drops.setdefault(target, [])
+        ids.extend(n for n in map(_bundle_name, names) if n not in ids)
+
+    def take(self, other: Rerun, name: str) -> None:
+        """Record what ``other``, a copy a fold's stop recorded into, says of bundle ``name``."""
+        self.leave_out(name)
+        for target, ids in other.drops.items():
+            if name in ids:
+                self.drop_on(target, [name])
+        if name in other.said:
+            self.said[name] = other.said[name]
+        if name in other.says:
+            self.says[name] = other.says[name]
+
+    def adds(self) -> list[str]:
+        """The ids to name that the batch left once ``without`` is out does not hold."""
+        have = {_bundle_name(n) for n in self.batch or ()} - set(self.without)
+        return [n for n in self.named if n not in have]
+
+
+def rerun_lines(cfg: Config, base: str,
+                rerun: Rerun) -> list[tuple[str, list[str], list[str]]]:
+    """The line on ``base`` of each re-run ``rerun`` prescribes (#912), with that re-run's
+    batch and the ids it names: the batch without every id it leaves out, naming none of the
+    ids to name (the hold that asks to name them offers to wait for their merge instead), then
+    naming all of them (:meth:`Rerun.adds`), when there are any. Naming only some is a batch of
+    its own for each choice, so a line that asks to name two or more says all or none
+    (:func:`all_or_none`): two lines per base at most, never one per subset. A re-run with
+    nothing left has no line, and with no batch (a direct caller) there are none."""
+    if not rerun.batch:
+        return []
+    rest = [n for n in rerun.batch if _bundle_name(n) not in rerun.without]
+    add = rerun.adds()
+    return [(integration_branch(cfg, base, names), names, naming)
+            for names, naming in ([(rest, []), (rest + add, add)] if add else [(rest, [])])
+            if names]
+
+
+def all_or_none(rerun: Rerun) -> str:
+    """What a line naming a re-run's lines says of the ids to name when there are two or more
+    (#912, :func:`rerun_lines`): name all of them or none. "" for one, or none."""
+    add = rerun.adds()
+    return (f"name all of {', '.join(add)} in the re-run or none of them: naming only some "
+            f"gives a batch whose line no line of this run names" if len(add) > 1 else "")
+
+
+def reissue_line(cfg: Config, base: str, rerun: Rerun) -> str:
+    """:data:`DROP_PREREQ`'s ``{next_line}`` (#626): the lines on ``base`` of the re-run the
+    run's advice prescribes (#912, :func:`rerun_lines`), the first said to be the line of this
+    batch without every id a line asks to re-issue without, since any other batch has a line of
+    its own (:func:`integration_branch`), the second that batch naming the ids to name too. ""
+    when there is none to name: no batch (a direct caller), or none of it left."""
+    said: list[str] = []
+    for line, _names, naming in rerun_lines(cfg, base, rerun):
+        how = f"naming {', '.join(naming)} too" if naming else ""
+        if not said:
+            how = (f"for this batch without {', '.join(rerun.without)}"
+                   + (f", {how}" if how else ""))
+        said.append(f"{how}: {line}")
+    rule = all_or_none(rerun) if said else ""
+    return f" ({'; '.join(said + ([rule] if rule else []))})" if said else ""
+
+
+def lines_unchecked(cfg: Config, rerun: Rerun, lead: str, *, repo: str,
+                    but: tuple[str, str] | None = None, naming: bool = False) -> str:
+    """The step a line that changes the re-run ``rerun`` prescribes adds (#912), ``lead``
+    saying how (``Naming issue_O too gives the re-run``): on each target ``(repo, base)``
+    where a line of the run asked an edge dropped, but ``but``, the caller's own, whose line
+    it names itself, the lines of that re-run (:func:`rerun_lines`; ``naming``: only the one
+    naming the ids to name), to delete, since with the edge gone nothing checks them for that
+    merge. A line's name is its base's and its batch's alone, so two repos with one base name
+    each have a line of that name on their own origin: one on a repo other than ``repo``, the
+    caller's, is named with its repo. "" when there is none."""
+    drops = {t: ids for t, ids in rerun.drops.items() if t != but}
+    lines = list(dict.fromkeys(x + (f" ({r})" if r != repo else "") for r, b in drops
+                               for x, _names, adds in rerun_lines(cfg, b, rerun)
+                               if adds or not naming))
+    if not lines:
+        return ""
+    edges = list(dict.fromkeys(n for ids in drops.values() for n in ids))
+    one, edge = len(lines) == 1, len(edges) == 1
+    rule = all_or_none(rerun)
+    return (f"{lead} {'another line' if one else 'other lines'}, {' and '.join(lines)}, and "
+            f"with the {'edge' if edge else 'edges'} to {', '.join(edges)} dropped nothing "
+            f"checks {'it' if one else 'them'} for {'that merge' if edge else 'their merges'}: "
+            f"once this run ends, delete {'it' if one else 'them'} on origin if "
+            f"{'it is' if one else 'they are'} there"
+            + (f". {rule[:1].upper()}{rule[1:]}" if rule else ""))
 
 
 def _squash_merged(cfg: Config, d: Path, wt: Path, base_ref: str) -> str:
@@ -2174,11 +2719,15 @@ def _trial(wt: Path, branch: str, onto: str, revs: Sequence[str], *,
     holds the worktree's lock (:func:`fold`). ``wins`` (#694): the index of the rev merged
     with its side winning every clash with what came before it (:func:`_merge_over`), so it
     never stops the trial. ``made`` (#747): when all merge cleanly, gets the commit the
-    trial ended on — on no branch, for a later trial to merge."""
+    trial ended on — on no branch, for a later trial to merge. A step that raises is still
+    followed by that reset; if the reset fails too, its error is chained to the step's
+    (``raise … from``) and names it (:func:`_put_back_after`, #782), so what failed first is
+    not lost behind the broken tree."""
     tip = _rev(wt, "HEAD")
     if tip is None:
         raise IntegrationTreeError(f"could not read the tip of {branch} in {wt} — check that "
                                    f"checkout, then re-run")
+    first: BaseException | None = None
     try:
         if _git(wt, "checkout", "-q", "--detach", onto) != 0:
             raise IntegrationTreeError(f"could not check out {onto} in {wt} to try a merge "
@@ -2199,11 +2748,22 @@ def _trial(wt: Path, branch: str, onto: str, revs: Sequence[str], *,
             made.append(_out(wt, "rev-parse", "--verify", "HEAD",
                              what="the commit a trial merge made").strip())
         return None, []
+    except BaseException as exc:
+        first = exc
+        raise
     finally:
-        _reset_tree(wt, "HEAD")
-        if _git(wt, "checkout", "-q", branch) != 0 or _rev(wt, "HEAD") != tip:
-            raise _LineBroken(f"could not put {branch} back at {tip} in {wt} after a trial "
-                              f"merge — check that checkout, then re-run")
+        _put_back_after(first, lambda: _off_trial(wt, branch, tip))
+
+
+def _off_trial(wt: Path, branch: str, tip: str) -> None:
+    """Put ``wt`` back on ``branch`` at ``tip``, clean, after a trial merge (:func:`_trial`):
+    reset the tree (:func:`_reset_tree`, :class:`IntegrationTreeError` when it fails), then
+    check ``branch`` out — which the trial never moved — and raise :class:`_LineBroken` when
+    that fails or does not land on ``tip``."""
+    _reset_tree(wt, "HEAD")
+    if _git(wt, "checkout", "-q", branch) != 0 or _rev(wt, "HEAD") != tip:
+        raise _LineBroken(f"could not put {branch} back at {tip} in {wt} after a trial "
+                          f"merge — check that checkout, then re-run")
 
 
 def _work(wt: Path, heads: Iterable[str | None], ends: Sequence[str], *,
@@ -2289,7 +2849,12 @@ def _reset_tree(wt: Path, rev: str) -> None:
     gate's clone, which a single ``-f`` skips and which blocks a later merge the same way).
     No ``-x``: an ignored file never makes a checkout or merge refuse — git overwrites it —
     so it cannot change a fold's result, and keeping it lets the re-gate reuse its build
-    caches. Raises :class:`IntegrationTreeError` when either step fails."""
+    caches. A ``git apply`` is the exception: an ignored file at a path the patch adds makes
+    it refuse ("already exists in working directory"). The one apply made in this tree, the
+    same-wave check's (#782, :func:`_would_be`), removes what it added itself, ignored files
+    included (:func:`_remove_added`); an ignored file anything else left at such a path
+    still fails that apply, and the check then does not complete. Raises
+    :class:`IntegrationTreeError` when either step fails."""
     for step in (("reset", "-q", "--hard", rev), ("clean", "-q", "-ffd")):
         if _git(wt, *step) != 0:
             raise IntegrationTreeError(
@@ -2316,7 +2881,9 @@ def _fetch(repo: Path, base_remote: str, remotes: Iterable[str] = (), *,
     between, before it counts as failed — 2 for the carried-branch checks, which fetch
     while no integration lock is held (:func:`_carried_tips` before a fold takes any,
     :func:`rewritten_carried` at the end of the run), where a concurrent git process
-    holding a ref lock in the same checkout can fail it once; 1 (no retry) everywhere
+    holding a ref lock in the same checkout can fail it once, and for the accept-time
+    same-wave check (:func:`same_wave_clash`, #782), which fetches on every accept that has
+    an accepted sibling, and whose failed fetch refuses that accept; 1 (no retry) everywhere
     else."""
     if not (repo / ".git").exists():
         raise IntegrationError(f"checkout not found at {repo}")
@@ -2335,11 +2902,12 @@ def _fetch(repo: Path, base_remote: str, remotes: Iterable[str] = (), *,
 
 
 def _prepare_worktree(repo: Path, base_remote: str, base: str,
-                      remotes: Iterable[str] = ()) -> Path:
-    """Create (or reuse) the integration worktree off the freshly-fetched base (:func:`_fetch`);
-    raise :class:`IntegrationError` if it can't be made (worktree isolation is required here
-    — unlike Do/Check, there is no in-place fallback that would still produce the branch)."""
-    _fetch(repo, base_remote, remotes)
+                      remotes: Iterable[str] = (), *, attempts: int = 1) -> Path:
+    """Create (or reuse) the integration worktree off the freshly-fetched base (:func:`_fetch`,
+    each fetch tried ``attempts`` times); raise :class:`IntegrationError` if it can't be made
+    (worktree isolation is required here — unlike Do/Check, there is no in-place fallback that
+    would still produce the branch)."""
+    _fetch(repo, base_remote, remotes, attempts=attempts)
     wt = _integ_worktree(repo, base)
     if not (wt / ".git").exists() and _git(repo, "worktree", "add", "--force",
                                            str(wt), f"{base_remote}/{base}") != 0:
