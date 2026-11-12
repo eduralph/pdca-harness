@@ -849,14 +849,64 @@ wave builds on, via `[driver].wave_mode`:
   for sign-off still counts as finished. A bundle that did not finish still
   exits 1, which wins over 3 (a held bundle's dependent is left unbuilt, so a
   hold with a dependent in the run exits 1). So 0 means every bundle finished
-  and none was held out of a fold the run performed. An accepted bundle of the
-  last wave that pushed no branch is not covered: no fold runs after it, so the
-  run holds nothing. A bundle whose accept was refused at sign-off for a
+  and none was held, either out of a fold the run performed or for having no PR
+  (below). A bundle whose accept was refused at sign-off for a
   conflict with its wave, or for a check that could not complete, is not
   finished: it is `AWAITING_SIGNOFF`, so a run over several ids exits 1. In a
   run over one id that adopts a split parent's children, `AWAITING_SIGNOFF`
   counts as finished, so that run exits 0 or 3, and the §6 row and the stderr
   line are the signal.
+
+  An accepted bundle whose accepted patch is on no PR against its target is
+  held too, as `no-pr`, and the run exits **3**. At its end the run checks each
+  bundle it accepted, in any wave (the last included) and in either wave mode:
+  its publish pushed a branch but `gh pr create` failed; it pushed nothing this
+  run (its texts failed T4), whatever an earlier attempt's `publish.json` says;
+  or its `publish.json` names no PR, was written for another `patch.diff` than
+  the accepted one (a rebuild that was never published, so its PR still holds
+  the earlier attempt), or names another repo or base than its brief targets
+  now (a record with no `repo` field, written before publish recorded one, is
+  this repo's). A `patch.diff` that cannot be read is held too: no record can be
+  said to hold it. The patch is matched by each digest the record carries: its
+  `patch_digest`, which `Onto branch` records carry too, and the
+  `merge_eligible_patch` merge mode writes beside its marker. The target comes
+  from the brief: its `Repo + branch target`, or for an `Onto branch` brief
+  that PR's branch. An own-repo brief that hand-declares `Stacks on` (with no
+  wave's `stack-base` marker) targets the branch its parent published, read
+  from the parent's `publish.json`, also once the parent is archived to
+  `completed/`. When no record of the parent names a branch, that base is not
+  known: the bundle is held, saying so, and the step is to publish the parent
+  first. Switching `[driver].wave_mode` later does not change a target. A
+  bundle the fold already held for pushing no branch keeps that one hold and
+  its one line. The hold line names the cause and the step, most often
+  `pdca publish <id>`, with what publish needs first where the files show it
+  would refuse the bundle as it stands: an archived `Stacks on` parent moved
+  back out of `completed/` (publish chains a PR only onto an active parent's
+  branch); in merge mode, which opens no PR against another bundle's branch,
+  stack mode or no `Stacks on` (or, for a target base another bundle
+  published, the shared base); for an `Onto branch`, an open PR on that branch.
+  The check never asks the host, so a record that names no PR may still be on
+  an open PR: one opened by hand, or an earlier attempt's PR still open on the
+  same branch, for which `gh pr create` opens no second one. The line says so,
+  and the step then is to put that PR's URL in `publish.json` as `pr_url`. In
+  merge mode, a bundle whose record names no PR, in a wave that is not the
+  last, still stops that wave's merge, and the run exits 1, as before.
+
+  The check is also what a re-run does with a finished id. The same
+  `pdca flow <ids>` checks each id it skips as COMPLETE in the same way (and
+  `pdca flow <split parent>` checks each COMPLETE child it reaches), so it exits
+  3 again, with the hold line in place of the `rm -rf` hint, until the bundle
+  is published. On a re-run, a record with no `patch_digest` (written before
+  publish recorded one) is trusted, with one `flow: note` line saying that its
+  contents cannot be confirmed, and what to do if the bundle was rebuilt after
+  that PR. That is one note a run, also when the same run counts that PR's
+  merge for a dependent, which notes such a record too. In the run that
+  accepted the bundle the record is not trusted, since that run pushed nothing
+  for it. A close or no-fix bundle (no patch) and one whose brief names no
+  target are never held. Nothing is checked with `--no-publish` or a stub
+  publisher, and the check reads only files, never the host. A `--from-csv`
+  sweep resumes in-flight bundles only, so it never sees a COMPLETE one: to
+  re-check one, name it (`pdca flow <id>`).
 
   To recover a run that stopped part-way (an integrity stop, the pass budget, a
   crash, Ctrl-C), re-issue the same `pdca flow <ids>`. The ids the earlier run
@@ -866,12 +916,15 @@ wave builds on, via `[driver].wave_mode`:
   it. It continues the line already on origin, without force, when every commit
   on it is accounted for by your base or a finished prerequisite's PR head, and
   starts the line when origin has none. Only a clean prerequisite is carried:
-  its PR is open (or merged, with its head already on your base or the line), it
-  merges onto the line without error, and, with `[driver].regate_between_waves`,
-  the carried line's re-gate is not red. A finished prerequisite that is not
+  the no-PR check above did not hold it (a held one's branch may hold an
+  earlier attempt, not the patch you accepted), its PR is open (or merged, with
+  its head already on your base or the line), it merges onto the line without
+  error, and, with `[driver].regate_between_waves`, the carried line's re-gate
+  is not red. A finished prerequisite that is not
   clean holds the bundles whose plain `Depends on` names it, and is named on one
   line with the reason and what to do; the rest of the run goes on. One judged
-  not clean before the fold, from its PR state and head, also holds the finished
+  not clean before the fold, by the no-PR check or from its PR state and head,
+  also holds the finished
   prerequisites built on it (their plain `Depends on` names it, directly or
   through others), since their branches carry its work: none of them is carried
   or accounts for a commit on the line, and the bundles that depend on them are

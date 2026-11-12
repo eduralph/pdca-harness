@@ -156,11 +156,14 @@ class DependencyScopedBases(unittest.TestCase):
             sb._git(repo, "commit", "-q", "-s", "-m", f"fix {iid} ({i})")
         sb._git(repo, "push", "-q", "origin", branch)
         sb._git(repo, "checkout", "-q", "main")
+        # The brief's own target, as publish records it (a PR on another target is not this
+        # bundle's PR, #926).
+        target_repo, target_base = brief.repo_target(bp)
         record = ({"mode": "stacked", "branch": branch, "base": cut} if onto else
                   {"mode": "new-pr" if cut == "origin/main" else "stacked-pr",
-                   "branch": branch, "base": "main", "cut_from": start})
+                   "branch": branch, "base": target_base, "cut_from": start})
         (d / "publish.json").write_text(json.dumps(
-            {**record, "repo": "org/repo", "pr_url": f"https://example.test/pr/{iid}"}),
+            {**record, "repo": target_repo, "pr_url": f"https://example.test/pr/{iid}"}),
             encoding="utf-8")
         return True
 

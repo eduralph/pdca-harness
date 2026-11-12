@@ -54,8 +54,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from pdca_harness import (act, cli, drive_claim, driver, flow, leaves, merge, merged, publish,
-                          signoff, state, worktree)
+from pdca_harness import (act, brief, cli, drive_claim, driver, flow, leaves, merge, merged,
+                          publish, signoff, state, worktree)
 
 _SPEC = importlib.util.spec_from_file_location(
     "stack_bases_fixture", Path(__file__).with_name("test_integrate_stack_bases.py"))
@@ -262,7 +262,17 @@ class MergeResume(unittest.TestCase):
         return 1
 
     def _publish_bundle(self, _cfg, d: Path, **_kw) -> bool:
+        """A publish that pushed and opened its PR: the record publish writes for one, when
+        the build left none (one in ``finish`` has its own). Without a record an accepted
+        bundle is on no PR, and the run holds it (#926)."""
         self.published.append(d.name)
+        if not (d / "publish.json").exists():
+            iid = d.name.removeprefix("issue_")
+            repo, base = brief.repo_target(d / "brief.md")
+            (d / "publish.json").write_text(json.dumps({
+                "mode": "new-pr", "branch": f"fix/{iid}", "repo": repo, "base": base,
+                "pr_url": f"https://example.test/pr/{iid}", merged.PATCH_DIGEST: _patch_sha(d)}),
+                encoding="utf-8")
         return True
 
     def _real_publish_bundle(self, publishes) -> list:

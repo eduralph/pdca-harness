@@ -248,7 +248,6 @@ def publish(
     git = lambda *a: ["git", "-C", str(repo), *a]
     base_remote = cfg.base_remote
     own_repo = base_remote == "origin"
-    wave_stacked = cfg.wave_mode != "merge" and bool(wave_base)
     # Stacked: cut the dependent's branch off the PARENT / integration branch (on origin) so it
     # carries the predecessors' work; otherwise off the target base (#123). A wave>0 bundle is
     # cut from the line commit it was built on, when the run recorded one (#593): the line
@@ -277,7 +276,8 @@ def publish(
     # as the `--base` on own-repo (#123). A fork can never `--base` a branch on origin (the
     # fork), so a fork PR always opens against the upstream base (#185). Merge mode records
     # no stack-base, and its own guard (#411, below) judges the base this picks, unchanged.
-    pr_base = stack_branch if (stack_branch and own_repo and not wave_stacked) else base
+    # The rule is `_pr_base`, which the flow's no-PR hold reads too (#926).
+    pr_base = _pr_base(cfg, base, wave_base=wave_base, stack_branch=stack_branch)
     # Merge-mode base guard (#411) — fail-closed, BEFORE any branch/push/PR work. Under
     # `[driver].wave_mode = "merge"` the driver merges each accepted bundle's PR "into its
     # base" (merge.py:32-33), unattended, mid-flow — whatever base that PR happens to carry.
@@ -427,10 +427,16 @@ def publish(
         if r.returncode != 0:
             pr_failed = True
             print(r.stderr, file=sys.stderr)
+            # A PR opened by hand, or one already open from this branch (`gh pr create` opens
+            # no second one, and the push above updated it), is on no record until its URL is
+            # in publish.json, and the flow holds the bundle as on no PR till then (#926).
             print(f"\n!!! publish: branch {branch} is pushed to origin, but "
                   "`gh pr create` FAILED — no draft PR was opened.\n"
-                  f"    Open the draft PR by hand, or re-run `pdca publish {issue_id}`. "
-                  "This is NOT done.\n",
+                  f"    Open the draft PR by hand, or re-run `pdca publish {issue_id}`. If you "
+                  f"open it by hand, or a PR from {branch} into {pr_base} is already open "
+                  f"(`gh pr create` opens no second one), put that PR's URL in "
+                  f"{d / 'publish.json'}'s `pr_url`: until then `pdca flow` holds {d.name} as "
+                  "on no PR. This is NOT done.\n",
                   file=sys.stderr)
         else:
             print(out)
@@ -546,6 +552,10 @@ def _publish_stacked(
     if ci_base:
         steps = _pin_checkout(steps, git, branch, ci_base)
 
+    # The patch `git apply` below pushes, as a digest on the record, as the new-PR path writes
+    # it (#865): the record outlives an iterate, so a rebuild never pushed onto this PR's
+    # branch has another digest, and the flow holds it as on no PR (#926, `flow._no_pr`).
+    digest = merged.patch_hash(d)
     # Stash the (Do/Check-dirtied) tree so checkout -B + apply run clean; restore after (#83).
     orig_ref = _current_ref(repo)
     stashed = _stash_worktree(repo)
@@ -566,7 +576,7 @@ def _publish_stacked(
         "mode": "stacked",
         "branch": branch, "pr_url": pr_url, "base": base_ref, "repo": repo_spec,
         "by": by or _signoff_by(d) or cfg.author or "unknown", "date": today,
-        "id_pending": pending_id,
+        "id_pending": pending_id, merged.PATCH_DIGEST: digest,
     }
     if ci_base:
         rec["host_ci_base"] = ci_base  # certified == pushed, auditable (#311)
@@ -778,6 +788,17 @@ def _checkout_base(cfg: Config, base: str, *, wave_base: str, wave_tip: str,
     return (f"origin/{stack_branch}" if stack_branch else f"{cfg.base_remote}/{base}"), False
 
 
+def _pr_base(cfg: Config, base: str, *, wave_base: str, stack_branch: str | None) -> str:
+    """What :func:`publish` opens a new PR against (``gh pr create --base``): ``stack_branch``
+    (the branch it cuts the PR's branch from on origin: a recorded stack base, else a
+    hand-declared ``Stacks on`` parent's published branch) on own-repo, unless the stack base
+    is a stack-mode wave's (#593); else the brief's ``base``. The one rule :func:`publish` and
+    :func:`merge_base_refusal` share (#926)."""
+    wave_stacked = cfg.wave_mode != "merge" and bool(wave_base)
+    return (stack_branch if (stack_branch and cfg.base_remote == "origin" and not wave_stacked)
+            else base)
+
+
 def cut_base(cfg: Config, d: Path) -> tuple[str, str] | None:
     """``(remote, ref)`` for bundle ``d``: the remote :func:`publish` fetches, and the ref or
     commit it puts ``d``'s ``patch.diff`` on — so the flow can build the commit publish would
@@ -800,13 +821,65 @@ def cut_base(cfg: Config, d: Path) -> tuple[str, str] | None:
     return ("origin" if stack_branch else cfg.base_remote), ref
 
 
-def _stacks_on_branch(cfg: Config, d: Path) -> str | None:
-    """A legacy ``Stacks on:`` (#123) parent's published branch, or None."""
+def _stacks_on_branch(cfg: Config, d: Path, *, archived: bool = False) -> str | None:
+    """A legacy ``Stacks on:`` (#123) parent's published branch, or None: the ``branch`` its
+    ``publish.json`` names, read from the parent's ACTIVE bundle. A ``Stacks on`` parent must
+    be active (``waves.check_dep_graph`` keeps an archived-only one rejected), so publish
+    chains a PR onto no other. ``archived`` reads an archived parent's record too
+    (``cfg.find_bundle``, #171): the branch an earlier publish chained ``d``'s PR onto, which
+    archiving the parent does not move (:func:`pr_target`, #926)."""
     parents = brief.stacks_on(d / "brief.md")
     if not parents:
         return None
-    rec = _publish_record(cfg.bundle(parents[0]))
-    return rec.get("branch") if rec else None
+    rec = _publish_record((cfg.find_bundle if archived else cfg.bundle)(parents[0]))
+    branch = rec.get("branch") if isinstance(rec, dict) else None
+    return branch if isinstance(branch, str) and branch else None
+
+
+def pr_target(cfg: Config, d: Path) -> tuple[str, str, str | None] | None:
+    """The PR bundle ``d``'s accepted patch belongs on, as its brief gives it now (#926):
+    ``(kind, repo, base)``, or None when the brief names no usable ``Repo + branch target``
+    (publish skips it, ``skip_if_no_target``). Files only, never the host. Raises when the
+    brief cannot be read.
+
+    ``"stacked"``: an ``Onto branch`` brief, a commit on that PR's branch, ``base``
+    ``<remote>/<branch>`` (:func:`_publish_stacked`). ``"stacked-pr"``: an own-repo brief that
+    hand-declares ``Stacks on:`` and has no ``stack-base`` marker, whose PR is chained onto the
+    parent's published branch (#123, the ``--base`` :func:`publish` gives it). That branch is
+    publish's own reader's (:func:`_stacks_on_branch`), with the parent read wherever it is,
+    archived to ``completed/`` included: an earlier publish chained the PR there, and
+    archiving the parent moves no PR. ``base`` is None when no record of the parent names
+    one. ``"new-pr"``: any other brief, a PR against the brief's own base. A wave-stacked
+    bundle (a ``stack-base`` marker) is one, though its record says ``"stacked-pr"``, since
+    publish opens its PR against the real base (#593).
+
+    It goes by the brief and the marker only, never by ``[driver].wave_mode``: switching the
+    mode later does not move a PR an earlier run opened. Publish reads the mode too, but in
+    merge mode it refuses a marker's branch as the base (#411), so no record has one."""
+    repo_spec, base, _slug = _resolve_target(d)
+    if not repo_spec or not base:
+        return None
+    bp = d / "brief.md"
+    onto = brief.onto_branch(bp)
+    if onto is not None:
+        return "stacked", repo_spec, f"{onto[0]}/{onto[1]}"
+    if brief.stacks_on(bp) and cfg.base_remote == "origin" and not _read_stack_base(d):
+        return "stacked-pr", repo_spec, _stacks_on_branch(cfg, d, archived=True)
+    return "new-pr", repo_spec, base
+
+
+def on_pr_target(rec: dict, target: tuple[str, str, str | None]) -> bool:
+    """Whether publish record ``rec`` is for ``target`` (:func:`pr_target`) with a known base.
+    A ``"new-pr"`` target takes the shape test a merge of that PR counts by
+    (:func:`merged.counts_into`: any mode but ``"stacked"``, that repo and base); the other two
+    take that exact mode, repo and base. A record with no ``repo`` field (written before
+    publish recorded one) is the target's repo's, as :func:`_batch_branch_producer` reads it."""
+    kind, repo, base = target
+    rec = {**rec, "repo": rec.get("repo", repo)}
+    if kind == "new-pr":
+        return merged.counts_into(rec, repo, base)
+    return (base is not None and rec.get("mode") == kind and rec.get("repo") == repo
+            and rec.get("base") == base)
 
 
 # The way out of a merge-mode refusal of a base this run produced (#411), worded once for
@@ -852,6 +925,29 @@ def _merge_base_refusal(cfg: Config, d: Path, repo_spec: str, pr_base: str, base
                 f"base `{base}`, but that base is the branch {producer} produced in this "
                 f"batch, not a shared base. {fix}")
     return ""
+
+
+def merge_base_refusal(cfg: Config, d: Path) -> str:
+    """The refusal merge mode's base guard (#411, :func:`_merge_base_refusal`) gives accepted
+    bundle ``d`` in :func:`publish`, as publish prints it, or "": not merge mode, a base the
+    guard takes, or a bundle publish opens no new PR for (no usable target, an ``Onto
+    branch``). The base is publish's own (:func:`_pr_base`), from the files publish reads,
+    never the host, so the flow's no-PR hold can say what must change before ``pdca publish
+    <id>`` can work (#926). A hand-declared ``Stacks on`` parent is read archived too: publish
+    refuses an archived one before this guard, for its own reason (the hold names that one as
+    well), and gives this refusal once the parent is active again."""
+    if cfg.wave_mode != "merge":
+        return ""
+    repo_spec, base, _slug = _resolve_target(d)
+    if not repo_spec or not base or brief.onto_branch(d / "brief.md") is not None:
+        return ""
+    wave_base = _read_stack_base(d)
+    stack_branch = wave_base or _stacks_on_branch(cfg, d, archived=True)
+    if brief.stacks_on(d / "brief.md") and not stack_branch:
+        return ""   # refused before the guard: no parent's branch on record
+    return _merge_base_refusal(
+        cfg, d, repo_spec,
+        _pr_base(cfg, base, wave_base=wave_base, stack_branch=stack_branch), base)
 
 
 def _batch_branch_producer(cfg: Config, d: Path, repo_spec: str, branch: str) -> str:

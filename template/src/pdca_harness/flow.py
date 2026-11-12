@@ -1450,16 +1450,17 @@ def _released(cfg: Config, dep: str, repo: str, base: str, noted: set[str] | Non
 def _note_no_digest(p: Path, noted: set[str] | None) -> None:
     """Note on stderr that prerequisite ``p``'s merged PR was counted without checking which
     patch it holds, when its record carries no patch digest at all (``merged.for_this_patch``
-    ``None``) — once per prerequisite in ``noted`` (the names noted this run; ``None``: every
-    time). Asked only after a yes: a prerequisite that ships nothing merged nothing, so it gets
-    no note. Its own prefix, so a dependent's ``held`` line count is the same with it or
-    without it. A record written before #865 also gets the step for a ``p`` rebuilt after its
+    ``None``) — once per prerequisite in ``noted`` (the names noted this run, by the no-PR
+    check's own note for such a record too, #926; ``None``: every time). Asked only after a
+    yes: a prerequisite that ships nothing merged nothing, so it gets no note. Its own
+    prefix, so a dependent's ``held`` line count is the same with it or without it. A
+    record written before #865 also gets the step for a ``p`` rebuilt after its
     PR was published: re-publish it, or, when publish refuses that patch (it changes what the
     merged PR changed, or cannot be read), rebuild ``p`` on its base, as :func:`_older_attempt`
-    words it for a hold. An ``Onto branch`` record (``"stacked"``) never has a digest, as
-    publish writes none for it, and counts only for a dependent with no target of its own
-    (``merged.merged_into``), so its note says that instead, with no step: publish adds a
-    commit only to a PR that is still open (``publish._publish_stacked``)."""
+    words it for a hold. An ``Onto branch`` record (``"stacked"``) has no digest when it was
+    written before publish recorded one for it (#926), and counts only for a dependent with no
+    target of its own (``merged.merged_into``), so its note says that instead, with no step:
+    publish adds a commit only to a PR that is still open (``publish._publish_stacked``)."""
     if noted is not None and p.name in noted:
         return
     rec = publish._publish_record(p)
@@ -1471,9 +1472,10 @@ def _note_no_digest(p: Path, noted: set[str] | None) -> None:
     iid = p.name.removeprefix("issue_")
     if rec.get("mode") == "stacked":
         print(f"flow: note — {p.name}'s publish record is an `Onto branch` commit on another "
-              f"PR's branch ({rec.get('branch') or '?'}), and publish records no patch digest for "
-              f"one, so whether that merged PR ({rec['pr_url']}) holds the accepted patch.diff is "
-              f"not checked; it counts as merged only for a dependent with no target of its own. "
+              f"PR's branch ({rec.get('branch') or '?'}) with no patch digest (publish recorded "
+              f"none for one before #926), so whether that merged PR ({rec['pr_url']}) holds "
+              f"the accepted patch.diff is not checked; it counts as merged only for a "
+              f"dependent with no target of its own. "
               f"If {p.name} was rebuilt after that commit was pushed, that PR holds an older "
               f"attempt.", file=sys.stderr)
         return
@@ -2031,7 +2033,12 @@ _CARRY_HINTS = {
                      "{name}), then re-issue",
     "line_conflict": "rebuild {name} on a base that holds the work it conflicts with, then "
                      "re-issue",
+    # No PR holds its accepted patch (#926, `_NO_PR_CARRY`): its hold line gives the step.
+    "no_pr": "take the step that line gives, then re-issue",
 }
+# Why the carry holds a finished id the run's no-PR check held (#926): the hold line
+# `flow_ids` printed for it before the run began says why, and gives the step.
+_NO_PR_CARRY = "no PR holds its accepted patch (its hold line above says why)"
 # Each hint above that names a squash or rebase merge (#626) → the one its dependents get.
 _SQUASH_HINTS = {"squashed": "built_on_squashed", "squashed_drop": "built_on_squashed_drop",
                  "built_on_squashed": "built_on_squashed",
@@ -2373,7 +2380,8 @@ def _merge_prereqs(cfg: Config, bundles: list[Path], claims: drive_claim.Run | N
 def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
                     batch: list[str], integ: dict[tuple[str, str], str],
                     folded_tips: dict[tuple[str, str], str | None], held: set[str],
-                    finished_heads: dict[str, str] | None = None) -> None:
+                    finished_heads: dict[str, str] | None = None,
+                    no_pr: Collection[str] = frozenset()) -> None:
     """Before wave 0, put a re-issued run's finished named ids on its line (#646).
 
     ``finished`` (:func:`_finished_named`) are ids the run was asked for that an earlier run
@@ -2430,6 +2438,13 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
     dependents wait, but it has no line of its own (it has no PR to judge): the held id's
     line names, among the bundles it holds, those that reach it through one.
 
+    ``no_pr`` (#926) names the finished ids the run's no-PR check held (:func:`_no_pr`): no
+    PR holds their accepted patch, so the branch on record may hold an earlier attempt. Such
+    an id is not clean, whatever its PR's state, which is not read: it is never carried, and
+    it holds what any not-clean id holds — its plain ``Depends on`` dependents and the
+    finished ids built on it — as an ``"unpushed"`` bundle holds its dependents in the run
+    that accepted it (#593). Its line points at its hold line, which gives the step.
+
     ``finished_heads`` (#747), filled in place: each finished id carried onto a line the
     run uses → the head the fold put there. The in-run folds may pin a conflict on one of
     them (:func:`integrate.fold`); they never merge it or check it for a rewrite."""
@@ -2458,6 +2473,9 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
             repo, tip = integrate.carry_view(cfg, tgt[0], line, [
                 cands[d.name][2][0] for d in ids if cands[d.name][2]])
             for d in ids:
+                if d.name in no_pr:     # no PR holds its accepted patch (#926): not clean
+                    why[d.name] = (_NO_PR_CARRY, "no_pr")
+                    continue
                 try:
                     v = _finished_head(cfg, d, cands[d.name][2], repo, base_ref, tip)
                 except integrate.IntegrationError as exc:
@@ -2659,7 +2677,7 @@ def _lineage_children(record: dict) -> list[str]:
     return [c.strip() for c in value if isinstance(c, str) and c.strip()]
 
 
-def _terminal_hint(d: Path, s: str) -> str:
+def _terminal_hint(d: Path, s: str, *, no_pr: bool = False) -> str:
     """What an operator can DO about a bundle the drive set skipped as terminal, or ``""``.
 
     One hint, on the one shared path (issue #468). Both ``pdca flow <id>`` and ``pdca flow
@@ -2673,6 +2691,10 @@ def _terminal_hint(d: Path, s: str) -> str:
     (independent optional edges, ``children`` iff split — ``split.py:392``), so the key's
     mere PRESENCE suppresses the destructive advice; only the ability to NAME the children
     depends on the value being usable (:func:`_lineage_children`).
+
+    ``no_pr`` (#926): :func:`flow_ids` has just held ``d`` because its accepted patch is on
+    no PR, and printed the hold line with the way out (:func:`_check_no_pr`). The ``rm -rf``
+    advice is then dropped, since the fix is to publish the accepted work, not to delete it.
     """
     record = split.read_lineage(d) or {}
     if "children" in record:
@@ -2695,8 +2717,212 @@ def _terminal_hint(d: Path, s: str) -> str:
                 "otherwise rename notes.json away — e.g. to notes.superseded-by-reopen.json "
                 "— so the next Plan re-fetches the fresh thread) to plan it again.")
     if s == state.COMPLETE:
-        return f"already complete — nothing to run. To redo it: rm -rf {d}"
+        return "" if no_pr else f"already complete — nothing to run. To redo it: rm -rf {d}"
     return ""
+
+
+#: The ``holds`` reason of an accepted bundle whose accepted patch is on no PR against its
+#: target (#926, :func:`_no_pr`). ``cli._results_rc`` reads it as a hold: exit 3.
+NO_PR_HOLD = "no-pr"
+
+
+@dataclasses.dataclass
+class _NoPrCheck:
+    """One run's no-PR check (#926), shared by every reader of the run that reaches a bundle:
+    :func:`flow_ids`' terminal filter, :func:`_adoptable` and the end of
+    :func:`_drive_and_act`, each through :func:`_check_no_pr`. ``answers`` maps each bundle
+    name the check has read to :func:`_no_pr`'s answer ("" = on its PR), so a bundle two
+    readers reach is read and held once. ``noted`` is the run's set of bundles whose record
+    with no patch digest stderr has had a note about: the one set :func:`_note_no_digest`
+    keeps too (#865), so such a record gets one ``flow: note`` line a run, from whichever
+    reader reaches it first."""
+    answers: dict[str, str] = dataclasses.field(default_factory=dict)
+    noted: set[str] = dataclasses.field(default_factory=set)
+
+
+def _publish_cmd(cfg: Config, d: Path, target: tuple[str, str, str | None]) -> str:
+    """``pdca publish <id>`` for accepted bundle ``d``, as a no-PR hold gives it (#926), with
+    what publish needs first where the files show it would refuse ``d`` as it stands, in the
+    order publish refuses:
+
+    - a hand-declared ``Stacks on`` parent with no branch publish can chain onto
+      (``publish._stack_base_branch``, the reader publish's refusal uses): one archived to
+      ``completed/``, as publish reads an active parent only (``publish._stacks_on_branch``,
+      as the scheduler takes no archived ``Stacks on`` parent, ``waves.check_dep_graph``),
+      though the check judges ``d``'s PR against the branch that parent published
+      (``publish.pr_target``); or one whose record names no branch at all.
+    - merge mode's base guard (#411, ``publish.merge_base_refusal``), which opens no PR
+      against a branch another bundle produced: a ``Stacks on`` parent's, a recorded stack
+      base, or a target base another bundle published.
+
+    For an ``Onto branch`` it says what publish needs that only the host can show: an open PR
+    whose head is that branch, which publish adds its commit to and refuses without
+    (``publish._publish_stacked``). Never raises: a precondition that cannot be read is left
+    out, and publish's own refusal then names it."""
+    cmd = f"`pdca publish {d.name.removeprefix('issue_')}`"
+    kind, _repo, base = target
+    try:
+        if kind == "stacked":
+            onto = brief.onto_branch(d / "brief.md")
+            return (f"{cmd} (it adds a commit to the open PR whose head is "
+                    f"{onto[1] if onto else base}, and refuses while none is: open that PR "
+                    f"first, or drop the `Onto branch` from the brief for a PR of its own)")
+        parents = brief.stacks_on(d / "brief.md")
+        unchained = bool(parents) and not publish._stack_base_branch(cfg, d)
+        archived = unchained and bool(publish._stacks_on_branch(cfg, d, archived=True))
+        refusal = publish.merge_base_refusal(cfg, d)
+    except Exception:  # noqa: BLE001 — the step's wording never fails the check
+        return cmd
+    drop = "or drop that `Stacks on` from the brief"
+    needs: list[str] = []       # each refusal, in publish's order, with its way out
+    if unchained:
+        p = parents[0]
+        needs.append(f"its `Stacks on` parent {p} is archived, and publish chains a PR only onto "
+                     f"an active parent's branch: move {cfg.find_bundle(p)} back to "
+                     f"{cfg.bundle(p)}, {drop}" if archived else
+                     f"no publish record of its `Stacks on` parent {p} names a branch: publish "
+                     f"{p} (or restore its publish.json), {drop}")
+    if refusal:
+        # A `Stacks on` PR chained onto its parent's branch, or else publish's own refusal as
+        # it prints it, with its way out (`publish.MERGE_BASE_FIX`).
+        needs.append("merge mode opens no PR against a `Stacks on` parent's branch (#411): set "
+                     f'`[driver].wave_mode = "stack"`, {drop}' if kind == "stacked-pr" else
+                     refusal.removeprefix("publish: ").rstrip("."))
+    return f"{cmd} (publish refuses it as it stands: {'; and '.join(needs)})" if needs else cmd
+
+
+def _no_pr(cfg: Config, d: Path, *, pushed: Collection[str] | None = None,
+           noted: set[str] | None = None) -> str:
+    """Why accepted bundle ``d``'s accepted patch is on no PR against its target (#926), and
+    the step to take, or "" when it is, or when there is nothing to put on one: ``d`` is not
+    COMPLETE, ships no patch (a close / no-fix, ``publish.py``'s own early exit) or names no
+    usable target (publish skips it). Reads files only — never ``gh``.
+
+    ``pushed`` is the run's set of bundles whose publish pushed this run (``_publish_bundle``,
+    #593), for a bundle the run accepted; ``None`` for one an earlier run accepted (a re-run).
+    A bundle the run accepted and did not push has no PR of this patch, whatever its record
+    says: an iterate keeps the earlier attempt's ``publish.json``. Otherwise the record
+    (``publish.json``) must exist, name a PR (``pr_url``), be for the target the brief gives
+    now (``publish.pr_target``) and be for the ``patch.diff`` the bundle holds now: every
+    patch digest it carries must be that patch's (``merged.for_this_patch``, #865 — the PR's
+    own ``patch_digest``, and a merge-mode marker's, #839). A record with no digest at all was
+    written before publish recorded one: trusted, and on a re-run said on stderr, once a run
+    when ``noted`` is the run's set (:class:`_NoPrCheck`). That is the one exception.
+    Fail-closed: a brief, record or ``patch.diff`` that cannot be read is held, and so is a
+    hand-declared ``Stacks on`` whose parent has no branch on record, since the base its PR
+    belongs on is then not known.
+
+    The step a hold gives is ``pdca publish <id>``, with what publish needs first where the
+    files show it would refuse ``d`` as it stands (:func:`_publish_cmd`), or none, for a
+    parent with no branch, which publish refuses. A record that names no PR may still be on
+    one this check cannot see (it never asks the host): a PR opened by hand, or an earlier
+    attempt's PR still open on the same branch, for which ``gh pr create`` opens no second
+    one. Its line says so, and that the step then is to put that PR's URL in the record's
+    ``pr_url``. A refusal only the host, the target checkout or a gate can show (T4, host
+    CI, a line tip a later run replaced, a patch that no longer applies) is publish's own
+    line to name."""
+    iid = d.name.removeprefix("issue_")
+    try:
+        if state.state(d) != state.COMPLETE:
+            return ""
+        shipped = merged.has_patch(d)
+        target = publish.pr_target(cfg, d) if shipped is not False else None
+        if target is None:
+            return ""
+        kind, repo, base = target
+        parent = brief.stacks_on(d / "brief.md")[0] if kind == "stacked-pr" else ""
+    except Exception as exc:  # noqa: BLE001 — a bundle that cannot be read is not clean
+        return (f"it could not be checked ({type(exc).__name__}: {exc}). Fix what that names, "
+                f"then re-run.")
+    if shipped is None:
+        return ("its patch.diff cannot be read, so no PR is known to hold it. Restore that "
+                "file, then re-run.")
+    if base is None:
+        return (f"its brief stacks it on {parent} (`Stacks on`), but no publish record of "
+                f"{parent} names a branch, so the base its PR belongs on is not known, and "
+                f"publish refuses it. Publish {parent} (or restore its publish.json), or drop "
+                f"that `Stacks on` from the brief, then re-run.")
+
+    def step() -> str:
+        return f"Publish it with {_publish_cmd(cfg, d, target)}, then re-run."
+
+    if pushed is not None and d.name not in pushed:
+        return f"this run accepted it, but no publish of it completed this run. {step()}"
+    if not (d / "publish.json").exists():
+        return f"it has no publish record (publish.json). {step()}"
+    rec = publish._publish_record(d)
+    if not isinstance(rec, dict):
+        return f"its publish record (publish.json) cannot be read. {step()}"
+    url = rec.get("pr_url")
+    if not isinstance(url, str) or not url:
+        if kind == "stacked":     # publish records an `Onto branch` commit only with its PR
+            return f"its publish record names no PR. {step()}"
+        branch = rec.get("branch")
+        branch = branch if isinstance(branch, str) and branch else "its branch"
+        opened = (f"a PR from {branch} into {base} is open (one opened by hand, or an earlier "
+                  f"attempt's)")
+        if merged.for_this_patch(d, rec):
+            return (f"its publish pushed the accepted patch.diff to {branch}, but its record "
+                    f"names no PR. If {opened}, `gh pr create` opens no second one, and that "
+                    f"PR holds the patch: put its URL in publish.json's `pr_url`, then re-run. "
+                    f"If none is, publish it with {_publish_cmd(cfg, d, target)}, then re-run.")
+        return (f"its publish record names no PR. {step()} If {opened}, `gh pr create` opens no "
+                f"second one, but the publish pushes the accepted patch.diff to {branch} "
+                f"first: then put that PR's URL in publish.json's `pr_url`, and re-run.")
+    if not publish.on_pr_target(rec, target):
+        where = {"stacked": " (its `Onto branch`)",
+                 "stacked-pr": " (the branch its `Stacks on` parent published)"}.get(kind, "")
+        return (f"its PR ({url}) is for {rec.get('repo', repo) or '?'} @ "
+                f"{rec.get('base') or '?'}, but its brief now targets {repo} @ {base}{where}. "
+                f"{step()}")
+    fits = merged.for_this_patch(d, rec)
+    if fits is False:
+        if kind == "stacked":
+            return (f"the PR its commit went onto ({url}) holds an earlier attempt, not the "
+                    f"accepted patch.diff. {step()}")
+        return (f"its PR ({url}) was published from another patch.diff than the accepted one "
+                f"(an earlier attempt). {step()} While that PR is open, the publish pushes the "
+                f"accepted patch.diff to its branch, but `gh pr create` opens no second PR for "
+                f"it: then put that PR's URL back in publish.json's `pr_url`, and re-run (or "
+                f"close that PR first, for a new one). If that PR has merged and publish "
+                f"refuses the accepted patch (it changes what the earlier attempt changed), "
+                f"rebuild {d.name} on its base first (`pdca signoff {iid} --iterate-do`), then "
+                f"accept and publish the rebuild.")
+    if fits is None and pushed is None and (noted is None or d.name not in noted):
+        if noted is not None:
+            noted.add(d.name)
+        cmd = _publish_cmd(cfg, d, target)
+        again = (f"If {d.name} was rebuilt after its commit went onto that PR, publish it with "
+                 f"{cmd}." if kind == "stacked" else
+                 f"If {d.name} was rebuilt after that PR was published, re-publish it with "
+                 f"{cmd}; if publish refuses it (the accepted patch changes what that PR "
+                 f"changed), rebuild {d.name} on its base (`pdca signoff {iid} --iterate-do`), "
+                 f"then accept and publish the rebuild.")
+        print(f"flow: note — {d.name}'s publish record ({url}) has no patch digest (it was "
+              f"written before publish recorded one), so whether that PR holds the accepted "
+              f"patch.diff cannot be confirmed; it is trusted. {again}", file=sys.stderr)
+    return ""
+
+
+def _check_no_pr(cfg: Config, d: Path, run: _NoPrCheck, *,
+                 pushed: Collection[str] | None = None) -> str:
+    """:func:`_no_pr` for ``d``, once per run: ``run`` is the run's one :class:`_NoPrCheck`,
+    which every reader shares, so a bundle two of them reach is read, held and noted once. A
+    bundle on no PR gets its hold line here, the first time."""
+    if d.name not in run.answers:
+        why = run.answers[d.name] = _no_pr(cfg, d, pushed=pushed, noted=run.noted)
+        if why:
+            print(f"flow: {d.name} held — its accepted patch is on no PR against its target: "
+                  f"{why}", file=sys.stderr)
+    return run.answers[d.name]
+
+
+def _no_pr_holds(holds: dict[str, str] | None, run: _NoPrCheck | None) -> None:
+    """Write each bundle :func:`_check_no_pr` held into the caller's ``holds`` (#926), keyed as
+    the results map is: the one writer of a ``"no-pr"`` hold."""
+    if holds is not None and run is not None:
+        holds.update({n.replace("issue_", ""): NO_PR_HOLD
+                      for n, why in sorted(run.answers.items()) if why})
 
 
 def _warn_abandoned(bundles: list[Path], *, why: str) -> None:
@@ -2973,7 +3199,8 @@ def _admit(cfg: Config, d: Path, claims: drive_claim.Run | None) -> bool:
 
 
 def _adoptable(cfg: Config, parent: Path, *, known: set[str],
-               refused: list[tuple[str, str, str]]) -> tuple[list[Path], list[Path]]:
+               refused: list[tuple[str, str, str]],
+               no_pr: _NoPrCheck | None = None) -> tuple[list[Path], list[Path]]:
     """The children of ``parent`` this run can drive, and the ones to WALK THROUGH —
     ``([], [])`` unless it split.
 
@@ -3025,6 +3252,11 @@ def _adoptable(cfg: Config, parent: Path, *, known: set[str],
     attributed to the parent that actually declared them — rather than by a second reader of
     the same lineage record. It is a pair, not one list, because the two are different
     claims: the first is work this run takes on, the second is a bundle to ASK about.
+
+    A child already terminal is not adopted, but with ``no_pr`` (the run's no-PR check, where
+    it publishes for real) a COMPLETE one is checked as a named id is (:func:`_check_no_pr`,
+    #926): one whose accepted patch is on no PR is held, as ``pdca flow <child>`` would hold
+    it, since re-running the parent is how that child is reached.
     """
     if not _is_split_parent(parent):
         return [], []
@@ -3115,6 +3347,8 @@ def _adoptable(cfg: Config, parent: Path, *, known: set[str],
             else:
                 print(f"flow: {d.name} — child of {parent.name} NOT adopted: already "
                       f"terminal ({s})", file=sys.stderr)
+                if no_pr is not None:
+                    _check_no_pr(cfg, d, no_pr)     # accepted, on no PR: held (#926)
             continue
         out.append(d)
     return sorted(out, key=lambda p: p.name), sorted(walk, key=lambda p: p.name)
@@ -3190,7 +3424,8 @@ def _refused_child(claims: drive_claim.Run, parent: Path, child: Path) -> bool:
 def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
                           wave_list: list[list[Path]], bundles: list[Path],
                           batch_names: set[str], named: frozenset[str],
-                          claims: drive_claim.Run | None = None) -> None:
+                          claims: drive_claim.Run | None = None,
+                          no_pr: _NoPrCheck | None = None) -> None:
     """Splice the children of any bundle in ``candidates`` that has split into the waves
     AFTER ``k``, and announce each child's REAL wave. ``k`` is the wave just driven; ``-1``
     is the pre-pass over the run's adoption SEEDS (#473) — ids the operator named whose
@@ -3268,6 +3503,9 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
     command to resume it, and that command must not be refused by the run that has just
     stopped driving it. ``None`` (a library call) claims nothing.
 
+    ``no_pr`` is the run's no-PR check (#926), handed to :func:`_adoptable` for the children
+    it finds already COMPLETE; ``None`` checks none.
+
     Two things this deliberately does NOT do, both visible in a run and neither a
     consequence anyone should have to rediscover from the code:
 
@@ -3304,7 +3542,7 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
         # `_isolate` returns None iff the read RAISED: that candidate then contributes
         # neither children nor a walk-through, and the run carries on (its own report).
         got = _isolate(parent, "split adoption", lambda parent=parent: _adoptable(
-            cfg, parent, known=batch_names | taken, refused=refused))
+            cfg, parent, known=batch_names | taken, refused=refused, no_pr=no_pr))
         kids, onward = got or ([], [])
         if claims is not None:
             # Claimed only now, once `_adoptable` has vouched for each child (#565): a
@@ -3716,6 +3954,7 @@ def _drive_and_act(
     claims: drive_claim.Run | None = None,
     batch: Collection[str] | None = None,
     holds: dict[str, str] | None = None,
+    no_pr_checked: _NoPrCheck | None = None,
 ) -> dict[str, str]:
     """Drive a set of in-flight bundles through the full cycle to Act, in waves.
 
@@ -3777,9 +4016,21 @@ def _drive_and_act(
     that refusal, or a branch changed after its accept.
     ``"base"`` (#738) for one held before it was built, because its own base could not be
     built (:func:`_bundle_bases`): not driven this run — PLANNED in the map, for one not
-    built yet — and named on stderr with the cause and the fix. ``cli._flow`` reads this to
-    exit 3 instead of 0 (``cli._results_rc``). It also names each bundle whose carried
-    branch was rewritten after the run's last fold read it (#695,
+    built yet — and named on stderr with the cause and the fix.
+    ``"no-pr"`` (#926, :func:`_no_pr`) for an accepted bundle whose accepted patch is on no
+    PR against its target, judged at the end of the run for each bundle it accepted (with
+    the run's ``pushed`` set), in any wave mode, and for each COMPLETE split child an
+    adoption reaches: no record, no ``pr_url``, a record for another patch or target, or —
+    for one this run accepted — no push this run. A bundle the fold held ``"unpushed"`` keeps
+    that one hold. Only where the run publishes for real: ``--no-publish`` and a stub
+    publisher check nothing. ``no_pr_checked`` is the check the caller has begun
+    (:func:`flow_ids`' terminal filter, :class:`_NoPrCheck`): the run goes on with that same
+    one (:func:`_check_no_pr`), so a bundle the caller checked is not read, held or noted
+    again, and its ``noted`` set is the run's (:func:`_note_no_digest`). ``None``: the run
+    starts its own. A finished named id that check held is not carried before wave 0: the
+    bundles whose plain ``Depends on`` names it wait (:func:`_carry_finished`).
+    ``cli._flow`` reads this to exit 3 instead of 0 (``cli._results_rc``). It also names each
+    bundle whose carried branch was rewritten after the run's last fold read it (#695,
     :func:`_report_late_rewrites`), a branch a base's refusal named included:
     ``"rewritten"``, or ``"unchecked"`` for each carried branch that end-of-run check could
     not judge — either one makes ``cli._flow`` exit 1, ahead of any hold. ``None`` — nobody
@@ -3854,6 +4105,12 @@ def _drive_and_act(
     offered = _offered_by_seeds(cfg, list(adopt_seeds)) if adopt_seeds else frozenset()
     # validates (raises) + levels the batch
     wave_list = waves.compute_waves(cfg, bundles, offered=offered)
+    # The no-PR check (#926): each bundle it has read → why its accepted patch is on no PR
+    # ("" = it is not). Only where the run publishes for real: a dry run (stub publisher) and
+    # --no-publish ask nothing and report nothing missing. The caller's own check when it has
+    # one (`flow_ids`' terminal filter), so each bundle is read, held and noted once a run.
+    no_pr = ((no_pr_checked if no_pr_checked is not None else _NoPrCheck())
+             if do_publish and cfg.publisher.mode != "stub" else None)
     # Recovery (#473): a seed is an id the operator named whose bundle was ALREADY terminal
     # on a split, so an earlier run's children may still be sitting where it left them.
     # `k=-1` makes `wave_list[k+1:]` the WHOLE schedule — the children are levelled in front
@@ -3862,7 +4119,7 @@ def _drive_and_act(
     if adopt_seeds:
         _adopt_split_children(cfg, list(adopt_seeds), k=-1, wave_list=wave_list,
                               bundles=bundles, batch_names=batch_names, named=named,
-                              claims=claims)
+                              claims=claims, no_pr=no_pr)
         # The seed itself is terminal — nothing here drives it — and this is the ONE point
         # at which this run reads it. Held until now so no second run could split or
         # re-parent it half-way through the read; let go the moment the read is done, so
@@ -3876,11 +4133,14 @@ def _drive_and_act(
             # driven, or every child was refused and named above). There is no schedule, so
             # there is nothing to drive, sweep, publish or Act on — the quiet no-op naming a
             # finished bundle has always been. The seeds' own dispositions are `flow_ids`'
-            # `skipped` map, which is what the caller reports.
+            # `skipped` map, which is what the caller reports. A COMPLETE child the pre-pass
+            # found on no PR is still the run's hold (#926).
+            _no_pr_holds(holds, no_pr)
             return {}
     # A re-issued run's finished named ids (#646): carried onto the line before wave 0 when
     # clean, else named in `held_finished`, which holds only their plain `Depends on`
-    # dependents. Only where a fold would run: stack mode, publishing on.
+    # dependents. Only where a fold would run: stack mode, publishing on. One the no-PR check
+    # held (#926) is not clean: no PR holds its accepted patch, so its branch is no base.
     held_finished: set[str] = set()
     # Each finished id the carry put on the line → the head it put there (#747): an in-run
     # fold may pin a bundle's conflict on one, as on a bundle it took itself.
@@ -3889,7 +4149,9 @@ def _drive_and_act(
     if do_publish and cfg.wave_mode != "merge":
         _carry_finished(cfg, bundles, finished,
                         batch=run_batch, integ=integ, folded_tips=folded_tips,
-                        held=held_finished, finished_heads=finished_heads)
+                        held=held_finished, finished_heads=finished_heads,
+                        no_pr=({n for n, why in no_pr.answers.items() if why}
+                               if no_pr is not None else frozenset()))
     # `wave_list` is iterated by a LIST iterator on purpose (#469): adoption splices the
     # recomputed remainder into `wave_list[k+1:]` after wave k drives, and the iterator —
     # which simply indexes forward — picks the new tail up. So "how many waves are left" is
@@ -3910,8 +4172,10 @@ def _drive_and_act(
     merge_notes: dict[tuple[str, str, str], str] | None = None
     merge_busy: set[tuple[str, str, str]] = set()
     # Prerequisites whose merge this run counted with no patch digest to check, each noted
-    # once however many dependents it releases (#865, `_note_no_digest`).
-    noted: set[str] = set()
+    # once however many dependents it releases (#865, `_note_no_digest`). Where the no-PR
+    # check runs, its own set (#926): a record with no digest that it trusted has had its one
+    # note, and one this set already holds gets none from the check.
+    noted: set[str] = no_pr.noted if no_pr is not None else set()
     if merge_mode:
         merge_notes, merge_busy = (_merge_prereqs(cfg, bundles, claims, noted) if hold_unmerged
                                    else ({}, set()))
@@ -4052,7 +4316,8 @@ def _drive_and_act(
         # the `_pass_pool` read at the top of the NEXT iteration (#473); `spent` is untouched
         # here and never anywhere else — a bound, not a reset.
         _adopt_split_children(cfg, runnable, k=k, wave_list=wave_list, bundles=bundles,
-                              batch_names=batch_names, named=named, claims=claims)
+                              batch_names=batch_names, named=named, claims=claims,
+                              no_pr=no_pr)
         complete = [d for d in sorted(runnable, key=lambda p: p.name)
                     if state.state(d) == state.COMPLETE]
         _audit_wave_overlap(complete)
@@ -4179,6 +4444,15 @@ def _drive_and_act(
     _warn_stranded_split_children(cfg, bundles, adopt_seeds)
     # Each bundle a fold held for a conflict, again, with the step to take (#674, #747).
     _report_conflict_holds(cfg, held_conflict)
+    # Each bundle this run accepted whose accepted patch is on no PR against its target
+    # (#926): its `gh pr create` failed after the push, it was not pushed at all (its texts
+    # failed T4 — in the last wave, where no fold holds it, too), or it was published for
+    # another patch or target. In any wave mode: merge mode's merge runs only for a non-final
+    # wave. One the fold already held "unpushed" keeps that one hold and its one line.
+    if no_pr is not None:
+        for d in accepted:
+            if d.name not in held_unpushed:
+                _check_no_pr(cfg, d, no_pr, pushed=pushed)
     # A carried branch rewritten after the run's last fold read it (#695) — after Act on
     # purpose, so the window covers it too (Act never re-decides a bundle's disposition).
     # Only where a fold ran: `carried_heads` is filled by a stack-mode fold that pushed, so
@@ -4198,6 +4472,7 @@ def _drive_and_act(
     # fails the run (exit 1, `cli._results_rc`), so it is written last: it outranks a hold.
     if holds is not None:
         holds.update({n.replace("issue_", ""): "unpushed" for n in sorted(held_unpushed)})
+        _no_pr_holds(holds, no_pr)
         holds.update({n.replace("issue_", ""): "conflict" for n in held_conflict})
         holds.update({n.replace("issue_", ""): "base" for n in sorted(held_base)})
         holds.update({n.replace("issue_", ""): why for n, why in late.items()})
@@ -4447,8 +4722,12 @@ def flow_ids(
     has read it (:func:`_drive_and_act`). The rest reach adoption through
     :func:`_drive_and_act`.
 
-    ``holds`` is handed to :func:`_drive_and_act` unchanged (#693); an id skipped here is
-    never held.
+    ``holds`` is handed to :func:`_drive_and_act` (#693). An id skipped here is held in one
+    case (#926): COMPLETE, where the run publishes for real, with its accepted patch on no PR
+    against its target (:func:`_no_pr`) — ``"no-pr"``, its hold line printed in place of
+    :func:`_terminal_hint`, written to ``holds`` with the run's other no-PR holds
+    (:func:`_no_pr_holds`). So the same ``pdca flow <ids>`` that left it there exits 3 on
+    every re-run until it is published.
     """
     today = today or datetime.date.today().isoformat()
 
@@ -4486,6 +4765,11 @@ def flow_ids(
     bundles: list[Path] = []
     skipped: dict[str, str] = {}   # asked for, not driven — still gets a disposition (#468)
     seeds: list[Path] = []       # terminal on a split — examined for stranded kids (#473)
+    # The no-PR check of a finished id (#926), where the run publishes for real: each bundle
+    # it read → why it is on no PR ("" = it is not), and the run's set of no-digest notes.
+    # Handed on to `_drive_and_act`, which goes on with it, so a bundle read here is not read
+    # or noted again by an adoption or a prerequisite's merge (#865).
+    no_pr = _NoPrCheck() if do_publish and cfg.publisher.mode != "stub" else None
     for iid in ids:
         d = cfg.bundle(iid)
         s = state.state(d)
@@ -4497,7 +4781,11 @@ def flow_ids(
             continue
         if s in _TERMINAL:
             print(f"flow: {d.name} — already terminal ({s}), skipped", file=sys.stderr)
-            hint = _terminal_hint(d, s)   # the ONE recovery advice, both CLI shapes (#468)
+            # An accepted bundle whose accepted patch is on no PR is held, not finished
+            # (#926): its hold line, with the way out, stands in for the hint's `rm -rf`. The
+            # hold reaches the caller's exit code through `holds` (`_no_pr_holds`).
+            held = no_pr is not None and bool(_check_no_pr(cfg, d, no_pr))
+            hint = _terminal_hint(d, s, no_pr=held)   # the ONE recovery advice (#468)
             if hint:
                 print(f"  {hint}", file=sys.stderr)
             skipped[iid] = s
@@ -4530,6 +4818,7 @@ def flow_ids(
             continue
         bundles.append(d)
     if not bundles and not seeds:
+        _no_pr_holds(holds, no_pr)    # nothing to drive: the filter's holds are the run's
         return skipped
     bundles.sort(key=lambda p: p.name)
     # The batch is the ids AS ASKED FOR (#591), skipped ones included, so a re-issued run
@@ -4538,7 +4827,7 @@ def flow_ids(
     return skipped | _drive_and_act(cfg, bundles, adopt_seeds=seeds, do_publish=do_publish,
                                     do_act=do_act, by=by, today=today,
                                     max_passes=max_passes, claims=claims,
-                                    batch=list(ids), holds=holds)
+                                    batch=list(ids), holds=holds, no_pr_checked=no_pr)
 
 
 def _bundle_dirs(cfg: Config) -> set[str]:
