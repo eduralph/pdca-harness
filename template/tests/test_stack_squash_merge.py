@@ -16,7 +16,17 @@ recognises one by name when it happens:
   counts as merged, is told to drop the edge, not to wait for a merge or re-add it, and to
   delete a line of the run that lacks the merge, which nothing checks once the edge is gone,
   or one this run never got to check. It is told the PR merged, never that the base has its
-  work: a revert there is not seen.
+  work: a revert there is not seen;
+- between them, the lines a run asks to delete are the lines of the one re-run all its
+  printed advice prescribes (#912): the batch without every id any line asks to re-issue
+  without, on every target and from every site (the carry, the stop of a fold or of a
+  bundle's own base), with every id any line asks to name, each named to every dependent
+  that re-run may put on it. Those cases follow every printed step, read off the run's
+  output (``_every_step``), and no dependent is built on a line without the merge. A stop
+  whose message the carry loses never changes that re-run, and one it keeps is in it and
+  names it as the carry's other lines do. A drop a dependent's own hold asks for counts as
+  the carry's does: a later line that changes that re-run names its line on that base too.
+  A line on another repo's origin is named with that repo.
 
 Real git: the ``StackFoldGit`` fixture of tests/test_integrate_stack_bases.py (a bare
 ``origin``, a primary checkout and a scratch clone that plays the maintainer), loaded by path
@@ -34,9 +44,10 @@ import dataclasses
 import importlib.util
 import io
 import json
+import re
 import subprocess
 import unittest
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -63,6 +74,16 @@ WAIT = "until their PR merges into main"
 LEGACY = {"mode": "stacked-pr", "base": "fix/parent"}
 # A record for a repository whose name has changed since: only `repo` differs.
 RENAMED = {"repo": "old-org/old-name"}
+# What `_every_step` reads off a run's `flow:` lines (#912). A line name, whatever the sentence
+# around it, that is not a bundle's own base (`integrate.bundle_base_branch`, `-b<id>`).
+LINE_NAME = re.compile(r"pdca-integration/[^\s:;,)]+-r[0-9a-f]{12}(?!-b)")
+IDS = r"issue_\w+(?:, issue_\w+)*"
+# Each step's words: what comes before the ids, what must follow them, and whether the words
+# always come with ids (then a line whose ids cannot be read there fails the reading).
+REISSUE = (("re-issue without ", "", True), ("for this batch without ", "", True))
+DROPS = (("drop ", r" from (issue_\w+)'s brief", False),)
+DROPPING = (("dropping ", " from the brief of any bundle of the re-issued batch", False),)
+NAMES = (("name ", " in the same", False), ("Naming ", " too", False))
 
 
 def _onto_record(iid: str) -> dict[str, str]:
@@ -1899,6 +1920,659 @@ class ReissueCarry(_Git):
         self.assertEqual(self.results["D"], state.COMPLETE)
         self.assertFalse(self.fx._ancestor(oid, "fix/Q"))
         self.assertEqual(self.fx._diff_files("main", "fix/Q"), ["p.txt", "q.txt"])
+
+    # -- ... and the lines named are those of the one re-run all the advice prescribes (#912) --
+
+    @staticmethod
+    def _spans(x: str, words: tuple[tuple[str, str, bool], ...]) -> list[tuple[str, ...]]:
+        """Each step of ``words`` in the line ``x``: its ids (a list) and what its tail
+        captured. Words not followed by an id are not that step, unless they always are: then,
+        as for ids the step's tail does not follow, the reading fails."""
+        found: list[tuple[str, ...]] = []
+        for lead, tail, always in words:
+            for m in re.finditer(rf"(?<![\w-]){re.escape(lead)}", x):
+                rest = x[m.end():]
+                if not rest.startswith("issue_") and not always:
+                    continue
+                got = re.match(rf"({IDS}){tail}", rest)
+                if not got:
+                    raise AssertionError(f"cannot read the ids after {lead!r} in: {x}")
+                found.append(got.groups())
+        return found
+
+    def _every_step(self, batch: list[str]) -> list[str]:
+        """Follow every step the run just printed, read off its ``flow:`` lines: (1) each edge
+        any line asks dropped, from the brief it names, or from every bundle of the re-run for
+        one dropped from "the brief of any bundle of the re-issued batch"; (2) every line any
+        line names is deleted on origin (a bundle's own base aside), one not there skipped.
+        Returns (3) the re-run: ``batch`` without every id any line asks to re-issue without,
+        with every id any line asks to name. Fails closed: a line naming a squash or rebase
+        merge with neither a drop nor a re-issue in it, or ids a step's words cannot read."""
+        without: list[str] = []
+        named: list[str] = []
+        drops: list[tuple[str, list[str]]] = []
+        dropping: list[str] = []
+        lines: set[str] = set()
+        for x in (y for y in self.err.splitlines() if y.startswith("flow:")):
+            reissue = [n for ids, in self._spans(x, REISSUE) for n in ids.split(", ")]
+            drop = [(whose, ids.split(", ")) for ids, whose in self._spans(x, DROPS)]
+            gone = [n for ids, in self._spans(x, DROPPING) for n in ids.split(", ")]
+            if NAMED in x and not (reissue or drop or gone):
+                raise AssertionError(f"names a squash merge but gives no step: {x}")
+            without += reissue
+            drops += drop
+            dropping += gone
+            named += [n for g in self._spans(x, NAMES) for n in g[0].split(", ")]
+            lines |= set(LINE_NAME.findall(x))
+        again = [i for i in batch if f"issue_{i.removeprefix('issue_')}" not in without]
+        have = {f"issue_{i.removeprefix('issue_')}" for i in again}
+        again += [n.removeprefix("issue_") for n in dict.fromkeys(named) if n not in have]
+        for whose, ids in drops:
+            self._drop_edges(self.cfg.bundle(whose.removeprefix("issue_")), ids)
+        for name in dropping:
+            for i in again:
+                self._drop_edges(self.cfg.bundle(i.removeprefix("issue_")), [name])
+        there = sorted(x for x in lines if self.fx._has(x))
+        if there:
+            self.fx._delete(*there)
+        return again
+
+    def _drop_edges(self, d: Path, ids: list[str]) -> None:
+        """Take ``ids`` out of bundle ``d``'s `Depends on` and `Depends on (merged)` fields."""
+        bp = d / "brief.md"
+        if not bp.exists():
+            return
+        gone = {i.removeprefix("issue_") for i in ids}
+        kept_lines = []
+        for line in bp.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"(- \*\*Depends on(?: \(merged\))?:\*\* )(.*)", line)
+            if m:
+                kept = [x.strip() for x in m.group(2).split(",")
+                        if x.strip() and x.strip().removeprefix("issue_") not in gone]
+                if not kept:
+                    continue
+                line = m.group(1) + ", ".join(kept)
+            kept_lines.append(line)
+        bp.write_text("\n".join(kept_lines) + "\n", encoding="utf-8")
+
+    def _rerun(self, batch: list[str]) -> None:
+        """``pdca flow <batch>``: it drives the ids of ``batch`` not finished."""
+        self._run([b for b in (self.cfg.bundle(i.removeprefix("issue_")) for i in batch)
+                   if state.state(b) != state.COMPLETE], batch)
+
+    def _assert_built_with(self, iid: str, oid: str, *, base: str = "main") -> None:
+        """``iid`` is COMPLETE on a tip that has the merge commit ``oid``: cut from a line,
+        that line's tip; built from ``base``, ``base``."""
+        self.assertEqual(self.results[iid], state.COMPLETE, self.err)
+        line, tip = self.seen[f"issue_{iid}"]
+        self.assertTrue(self.fx._ancestor(oid, tip or base),
+                        f"{iid} built on {line or base} at {(tip or base)[:12]}, which lacks "
+                        f"{oid[:12]}\n{self.err}")
+
+    def _target(self, d: Path, base: str, extra: str = "") -> Path:
+        """``d``'s brief, targeting ``base`` of org/repo."""
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "brief.md").write_text(
+            f"- **Slug:** {d.name.removeprefix('issue_').lower()}\n"
+            f"- **Repo + branch target:** org/repo @ {base}\n{extra}", encoding="utf-8")
+        return d
+
+    def _finished_on(self, iid: str, base: str) -> Path:
+        """``iid`` finished in an earlier run, targeting ``base`` of org/repo."""
+        d = self.fx._publish(iid, {f"{iid.lower()}.txt": f"{iid}\n"}, cut_from=f"origin/{base}")
+        self._target(d, base)
+        self._record(d, mode="new-pr", base=base)
+        sb._accept(d)
+        return d
+
+    @contextmanager
+    def _merged_once(self, iid: str, record: dict[str, str], *, folded: bool, at: str = "",
+                     into: str = "main"):
+        """``iid``'s PR is squash-merged into ``into``, its branch deleted and its record then
+        ``record``, at the first fold of this run that takes ``at`` (``iid`` itself by default):
+        just after it pushes (``folded``), or just before it fetches. Inside,
+        ``flow._fold_lines`` is that fold, the real one doing the work; nested, the innermost
+        merges first. Yields [the merge commit], filled once it merges."""
+        oid: list[str] = []
+        real = flow._fold_lines
+        on = f"issue_{at or iid}"
+
+        def merge() -> None:
+            oid.append(self._squash(iid, into=into))
+            self.fx._delete(f"fix/{iid}")
+            self._record(self.cfg.bundle(iid), **record)
+
+        def fold(cfg, bundles, **kw):
+            takes = not oid and any(b.name == on for b in bundles)
+            if takes and not folded:
+                merge()
+            out = real(cfg, bundles, **kw)
+            if takes and folded:
+                merge()
+            return out
+
+        with mock.patch.object(flow, "_fold_lines", fold):
+            yield oid
+
+    def _refuse_pushes_to(self, branch: str) -> None:
+        """Origin's ``pre-receive`` hook refuses every push to ``branch``."""
+        hook = self.fx.origin / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\nwhile read old new ref; do\n"
+                        f"  if [ \"$ref\" = \"refs/heads/{branch}\" ]; then\n"
+                        "    echo refused >&2; exit 1\n  fi\ndone\nexit 0\n", encoding="utf-8")
+        hook.chmod(0o755)
+
+    def _keeping_briefs(self, *bundles: Path) -> None:
+        """From now on publish leaves the briefs of ``bundles`` as they are now. The fixture's
+        publish writes a brief with no edges, and a later wave of the run reads them."""
+        kept = {d.name: (d / "brief.md").read_text(encoding="utf-8") for d in bundles}
+        then = self.after_publish
+
+        def keep(d: Path) -> None:
+            if d.name in kept:
+                (d / "brief.md").write_text(kept[d.name], encoding="utf-8")
+            if then:
+                then(d)
+
+        self.after_publish = keep
+
+    def test_two_targets_each_name_the_line_of_the_batch_without_every_id_of_both(self):
+        # (b) P on main and O on release, both squash-merged, neither record counting. Before:
+        # each carry line named its base's line of the batch without its own id alone, so the
+        # re-run without both continued both older lines and built D and E without the merges.
+        sb._git(self.fx.origin, "branch", "release", "main")
+        p, r = self._finished("P"), self._finished("R")
+        o, s = self._finished_on("O", "release"), self._finished_on("S", "release")
+        later = ["R", "S", "D", "E"]
+        self._earlier_run_folds(later, r, s)
+        on_main, on_release = (integrate.integration_branch(self.cfg, b, later)
+                               for b in ("main", "release"))
+        p_oid, o_oid = self._squash("P"), self._squash("O", into="release")
+        self.fx._delete("fix/P", "fix/O")
+        self._record(p, **_onto_record("P"))
+        self._record(o, **_onto_record("O"))
+        self.assertFalse(self.fx._ancestor(p_oid, on_main))
+        self.assertFalse(self.fx._ancestor(o_oid, on_release))
+        d = self._planned("D", "R, P")
+        e = self._target(self.cfg.bundle("E"), "release", "- **Depends on:** S, O\n")
+        batch = ["P", "O", "R", "S", "D", "E"]
+        self._run([d, e], batch)
+        self._assert_never_built("D")
+        self._assert_never_built("E")
+        said = (self._not_carried("P"), self._not_carried("O"))
+        self.assertEqual(self._every_step(batch), later)
+        self._rerun(later)
+        self._assert_built_with("D", p_oid)
+        self._assert_built_with("E", o_oid, base="release")
+        for told, line in zip(said, (on_main, on_release)):
+            self._assert_names_the_line_to_come(told, line, "issue_P", "issue_O")
+
+    def test_a_folds_stop_after_the_carry_names_the_line_without_both(self):
+        # (b2) The carry holds P; A, built this run, then stops the fold on its own squash
+        # merge. Before: the stop named the line of the batch without A alone, so the re-run
+        # without both continued the older line of R and D, building D without either merge.
+        line, p_oid = self._line_older_than_the_merge(_onto_record("P"))
+        a, d = self._planned("A", "R"), self._planned("D", "R, A, P")
+        a_oid: list[str] = []
+
+        def merged_at_once(x: Path) -> None:
+            if x.name == "issue_A":
+                a_oid.append(self._squash("A"))
+                self.fx._delete("fix/A")
+                self._record(x, **_onto_record("A"))
+
+        self.after_publish = merged_at_once
+        batch = ["P", "A", "R", "D"]
+        self._run([a, d], batch)
+        self.after_publish = None
+        self._assert_never_built("D")
+        said = self.err
+        stop = next(x for x in said.splitlines() if "did not integrate" in x)
+        self.assertEqual(self._every_step(batch), ["R", "D"])
+        self._rerun(["R", "D"])
+        self.assertEqual(self.line, line)
+        self._assert_built_with("D", p_oid)
+        self._assert_built_with("D", a_oid[0])
+        self.assertIn("dropping issue_A from the brief", stop)
+        self._assert_names_the_line_to_come(stop, line, "issue_P", "issue_A")
+
+    def test_a_folds_stop_that_asks_for_no_drop_names_the_line_it_changes(self):
+        # A's record counts, so its stop asks for no drop, but it still asks to re-issue
+        # without A, which changes the line of the re-run nothing checks for P's merge. Before:
+        # the stop named no line, and the re-run built D on the older one without P's merge.
+        later = ["R", "D", "B"]
+        line, p_oid = self._line_older_than_the_merge(_onto_record("P"), batch=tuple(later))
+        a, d, b = self._planned("A", "R"), self._planned("D", "R, P"), self._planned("B", "A")
+
+        def merged_at_once(x: Path) -> None:
+            if x.name == "issue_A":
+                self._squash("A")
+                self.fx._delete("fix/A")
+
+        self.after_publish = merged_at_once
+        batch = ["P", "A", *later]
+        self._run([a, d, b], batch)
+        self.after_publish = None
+        said = self.err
+        stop = next(x for x in said.splitlines() if "did not integrate" in x)
+        self.assertNotIn("dropping issue_A", stop)
+        self.assertEqual(self._every_step(batch), later)
+        self._rerun(later)
+        self.assertEqual(self.line, line)
+        self._assert_built_with("D", p_oid)
+        self.assertIn(f"{line}, and with the edge to issue_P dropped", stop)
+        self.assertIn("delete it on origin if it is there", stop)
+
+    def test_an_id_to_name_past_a_drop_the_carry_asks_for_names_that_line(self):
+        # (c) The carry asks for P's drop; D's plain hold asks to name O, out of the batch, and
+        # the re-run naming O continues an older line of R, O and D. Before: no line named it,
+        # and with every step followed D was built there without P's merge.
+        r, o, p = self._finished("R"), self._finished("O"), self._finished("P")
+        other = self._earlier_run_folds(["R", "O", "D"], r, o)
+        oid = self._squash("P")
+        self.fx._delete("fix/P")
+        self._record(p, **_onto_record("P"))
+        self.assertFalse(self.fx._ancestor(oid, other))
+        batch = ["P", "R", "D"]
+        self._run([self._planned("D", "R, O, P")], batch)
+        self._assert_never_built("D")
+        said = self.err
+        again = self._every_step(batch)
+        self.assertEqual(again, ["R", "D", "O"])
+        self._rerun(again)
+        self.assertEqual(self.line, other)
+        self._assert_built_with("D", oid)
+        self._assert_names_the_line_to_come(
+            next(x for x in said.splitlines() if x.startswith("flow: issue_P (finished")),
+            integrate.integration_branch(self.cfg, "main", ["R", "D"]), "issue_P")
+        told = next(x for x in said.splitlines() if x.startswith("flow: issue_D held"))
+        self.assertIn(READD, told)
+        self.assertIn(f"Naming issue_O too gives the re-run another line, {other}, and with "
+                      "the edge to issue_P dropped", told)
+        self.assertIn("delete it on origin if it is there", told)
+
+    def test_a_dependent_tied_to_an_id_another_is_told_to_name_is_told_that_line(self):
+        # The forecast: D names only P, out of the batch, and `Conflicts with` O, which C's
+        # hold asks to name. D is on no line this run, but the re-run naming O puts it on O's
+        # line, an older one here. Before: D was told only to drop P, and was built there
+        # without the merge.
+        o, p = self._finished("O"), self._finished("P")
+        batch = ["C", "D"]
+        line = self._earlier_run_folds([*batch, "O"], o)
+        oid = self._squash("P")
+        self.fx._delete("fix/P")
+        self._record(p, **_onto_record("P"))
+        self.assertFalse(self.fx._ancestor(oid, line))
+        c, d = self._planned("C", "O"), self.cfg.bundle("D")
+        sb._brief(d, extra="- **Depends on:** P\n- **Conflicts with:** O\n")
+        self._run([c, d], batch)
+        self._assert_never_built("D")
+        said = self.err
+        again = self._every_step(batch)
+        self.assertEqual(again, [*batch, "O"])
+        self._rerun(again)
+        self.assertEqual(self.line, line)
+        self._assert_built_with("D", oid)
+        self.err = said
+        told = self._assert_told_line_not_checked(oid, line)
+        self.assertIn("that line, the line of a re-run naming issue_O too, for that merge", told)
+
+    def test_a_stop_whose_message_the_carry_loses_does_not_change_the_line_named(self):
+        # (f) The iteration-4 regression stays fixed (main passes this too). X's PR was open
+        # when the carry read it, then squash-merged before the carry's fold fetched, so that
+        # fold's stop asked to re-issue without X; then origin refused the fold's push, and the
+        # carry gave X that failure instead. No line says to re-issue without X, so P's line
+        # still names the line of the batch with X, the older line here, and D is built with
+        # P's merge.
+        line, p_oid = self._line_older_than_the_merge(_onto_record("P"), batch=("R", "D", "X"))
+        self._finished("X")
+        d = self._planned("D", "R, P")
+        batch = ["P", "X", "R", "D"]
+        self._refuse_pushes_to(integrate.integration_branch(self.cfg, "main", batch))
+        with self._merged_once("X", _onto_record("X"), folded=False) as x_oid:
+            self._run([d], batch)
+        self.assertTrue(x_oid)                              # X merged before that fold fetched
+        self._assert_never_built("D")
+        x, p = self._not_carried("X"), self._not_carried("P")
+        again = self._every_step(batch)
+        self.assertEqual(again, ["X", "R", "D"])
+        self._rerun(again)
+        self._assert_built_with("D", p_oid)
+        self.assertIn("could not push", x)
+        self.assertNotIn("re-issue without issue_X", x)
+        self._assert_names_the_line_to_come(p, line, "issue_P")
+
+    def test_a_conflict_another_bundle_declares_ties_the_dependent_to_its_re_run(self):
+        # B names O, out of the batch, so its hold asks to name O, and B declares `Conflicts
+        # with` D, which names only P. D is on no line this run, and the re-run naming O builds
+        # D after B, on O's line, an older one here. Before: D was told only to drop P (the
+        # forecast read the edges D and what it reaches declare, not B's), and was built there
+        # without the merge.
+        o, p = self._finished("O"), self._finished("P")
+        batch = ["B", "D"]
+        line = self._earlier_run_folds([*batch, "O"], o)
+        oid = self._squash("P")
+        self.fx._delete("fix/P")
+        self._record(p, **_onto_record("P"))
+        self.assertFalse(self.fx._ancestor(oid, line))
+        b, d = self.cfg.bundle("B"), self._planned("D", "P")
+        sb._brief(b, extra="- **Depends on:** O\n- **Conflicts with:** D\n")
+        self._run([b, d], batch)
+        self._assert_never_built("D")
+        told = self._d_held()
+        self.assertEqual(self._every_step(batch), [*batch, "O"])
+        self._keeping_briefs(b)
+        self._rerun([*batch, "O"])
+        self.assertEqual(self.line, line)
+        self._assert_built_with("D", oid)
+        first = integrate.integration_branch(self.cfg, "main", batch)
+        self.assertIn(f"delete {first} and {line} on origin if they are there", told)
+        self.assertIn("the lines of this batch and of a re-run naming issue_O too", told)
+
+    def test_a_dependent_on_a_base_of_its_own_is_told_the_line_of_the_re_run_naming_an_id(self):
+        # A `Conflicts with` B and O; D names B and P; E names O, so its hold asks to name O.
+        # P is squash-merged once B is published, after A and B were built. D, held for P, is
+        # on a base of its own this run (built from B), but the re-run naming O carries B,
+        # finished, and so puts D on O's line, an older one here. Before: D was told only to
+        # drop P, and was built there without the merge.
+        o, p = self._finished("O"), self._finished("P")
+        batch = ["A", "B", "D", "E"]
+        line = self._earlier_run_folds([*batch, "O"], o)
+        sb._brief(self.cfg.bundle("A"), extra="- **Conflicts with:** B, O\n")
+        sb._brief(self.cfg.bundle("B"))
+        self._planned("D", "B, P")
+        self._planned("E", "O")
+        oid: list[str] = []
+
+        def merged_once_b_is_out(x: Path) -> None:
+            if x.name == "issue_B":
+                oid.append(self._squash("P"))
+                self.fx._delete("fix/P")
+                self._record(p, **_onto_record("P"))
+
+        self.after_publish = merged_once_b_is_out
+        self._run([self.cfg.bundle(i) for i in batch], batch)
+        self.after_publish = None
+        self.assertTrue(oid)
+        self.assertFalse(self.fx._ancestor(oid[0], line))
+        self._assert_never_built("D")
+        told = self._d_held()
+        self.assertEqual(self._every_step(batch), [*batch, "O"])
+        self._rerun([*batch, "O"])
+        self.assertEqual(self.line, line)
+        self._assert_built_with("D", oid[0])
+        self.assertIn(f"{line} on origin if they are there", told)
+
+    def test_a_dependent_on_a_base_of_its_own_is_told_the_line_its_re_run_carries_it_to(self):
+        # D names B, of this batch, and P, squash-merged just after the fold that put B on the
+        # run's line, so that line lacks the merge. D is on a base of its own this run (built
+        # from B), but the re-run carries B, finished, onto that line and builds D there.
+        # Before: D was told only to drop P, and was built there without the merge.
+        p = self._finished("P")
+        sb._brief(self.cfg.bundle("B"))
+        b, d = self.cfg.bundle("B"), self._planned("D", "B, P")
+        batch = ["B", "D"]
+        with self._merged_once("P", _onto_record("P"), folded=True, at="B") as oid:
+            self._run([b, d], batch)
+        line = self.line
+        self.assertTrue(oid)
+        self.assertTrue(self.fx._has(line))
+        self.assertFalse(self.fx._ancestor(oid[0], line))
+        self._assert_never_built("D")
+        said = self.err
+        self.assertEqual(self._every_step(batch), batch)
+        self._rerun(batch)
+        self.assertEqual(self.line, line)
+        self._assert_built_with("D", oid[0])
+        self.err = said
+        self._assert_told_line_not_checked(oid[0], line)
+
+    def test_a_base_holds_stop_names_the_line_of_the_batch_without_every_id(self):
+        # The carry holds P; A, built in wave 0 and folded, is then squash-merged with its
+        # branch deleted, before wave 1 builds D's own base from it: that build's stop is D's
+        # hold line. Before: it named the line of the batch without A alone (the run's record
+        # was not passed to it), so the re-run without both continued the older line of R, D
+        # and X, and built X there without P's merge.
+        later = ["R", "D", "X"]
+        line, p_oid = self._line_older_than_the_merge(_onto_record("P"), batch=tuple(later))
+        sb._brief(self.cfg.bundle("A"))
+        a, d = self.cfg.bundle("A"), self._planned("D", "A")
+        x = self._planned("X", "R, P")
+        batch = ["P", "A", *later]
+        with self._merged_once("A", _onto_record("A"), folded=True) as a_oid:
+            self._run([a, d, x], batch)
+        self.assertTrue(a_oid)
+        self._assert_never_built("D")
+        self._assert_never_built("X")
+        told = self._d_held()
+        self.assertEqual(self._every_step(batch), later)
+        self._rerun(later)
+        self.assertEqual(self.line, line)
+        self._assert_built_with("X", p_oid)
+        self.assertIn("could not build issue_D's own base from issue_A", told)
+        self._assert_names_the_line_to_come(told, line, "issue_P", "issue_A")
+
+    def test_a_line_judged_to_have_the_merge_still_names_the_re_runs_other_line(self):
+        # D is on the run's line, which the carry cut after P's merge, so it has the merge. But
+        # O, on release, is squash-merged, and the carry asks to re-issue without it: that
+        # re-run's line on main is another line, an older one here, which nothing checked, and
+        # O's line names release's alone. Before: D was told only to drop P, and the re-run
+        # without O built D on that older line without the merge.
+        sb._git(self.fx.origin, "branch", "release", "main")
+        r, p = self._finished("R"), self._finished("P")
+        o = self._finished_on("O", "release")
+        later = ["R", "D", "E"]
+        line = self._earlier_run_folds(later, r)
+        p_oid = self._squash("P")
+        self.fx._delete("fix/P")
+        self._record(p, **_onto_record("P"))
+        self._squash("O", into="release")
+        self.fx._delete("fix/O")
+        self._record(o, **_onto_record("O"))
+        self.assertFalse(self.fx._ancestor(p_oid, line))
+        d = self._planned("D", "R, P")
+        e = self._target(self.cfg.bundle("E"), "release", "- **Depends on:** O\n")
+        batch = ["O", "R", "D", "E"]
+        self._run([d, e], batch)
+        self.assertTrue(self.fx._ancestor(p_oid, self.line))     # the run's own line has it
+        self._assert_never_built("D")
+        told = self._d_held()
+        self.assertEqual(self._every_step(batch), later)
+        self._rerun(later)
+        self.assertEqual(self.line, line)
+        self._assert_built_with("D", p_oid)
+        self.assertIn(f"delete {line} on origin if it is there", told)
+        self.assertIn("this run did not check that line, the line of a re-run leaving out "
+                      "issue_O, for that merge", told)
+
+    def test_a_stop_the_carry_keeps_is_in_the_re_run_a_later_hold_names(self):
+        # X, on release, is squash-merged after the carry read its PR and before its fold
+        # fetched, so that fold stops on X, and X's line gives that stop: the record takes X.
+        # D, on main and judged on the run's line, which has P's merge, is then told the line
+        # of the re-run without X, an older one here. Before, and with the record not taking X:
+        # D was told only to drop P, and the re-run without X built D there without P's merge.
+        sb._git(self.fx.origin, "branch", "release", "main")
+        later = ["R", "D", "E"]
+        line, p_oid = self._line_older_than_the_merge(_onto_record("P"), batch=tuple(later))
+        self._finished_on("X", "release")
+        d = self._planned("D", "R, P")
+        e = self._target(self.cfg.bundle("E"), "release", "- **Depends on:** X\n")
+        batch = ["X", "R", "D", "E"]
+        with self._merged_once("X", _onto_record("X"), folded=False, into="release") as x_oid:
+            self._run([d, e], batch)
+        self.assertTrue(x_oid)                              # X merged before that fold fetched
+        self.assertTrue(self.fx._ancestor(p_oid, self.line))     # the run's own line has it
+        self._assert_never_built("D")
+        told, x = self._d_held(), self._not_carried("X")
+        again = self._every_step(batch)
+        self._rerun(again)
+        self._assert_built_with("D", p_oid)
+        self.assertEqual(again, later)
+        self.assertEqual(self.line, line)
+        self.assertIn("re-issue without issue_X", x)
+        self.assertIn(f"delete {line} on origin if it is there", told)
+        self.assertIn("the line of a re-run leaving out issue_X, for that merge", told)
+
+    def test_a_stop_the_carry_keeps_names_no_id_of_a_stop_its_fold_then_lost(self):
+        # C, X (built on C) and Y, on main, are squash-merged after the carry read their PRs and
+        # before its fold fetched, so that fold stops on each. X's branch holds C's work, so the
+        # fold then gives X that cause instead, and no line asks to re-issue without X; but Y's
+        # stop was made while X's stood. D, on release, is told the line of the re-run the
+        # carry's lines give. With Y's line as it was made then, it named the batch without X
+        # too, so following it left X out of the re-run, whose line on release no line named,
+        # an older one here, and D was built there without P's merge. Before, each stop named
+        # its own id alone and D no line, so the re-run with X built D on the other older line.
+        sb._git(self.fx.origin, "branch", "release", "main")
+        r, p = self._finished_on("R", "release"), self._finished_on("P", "release")
+        older = [["R", "D", "E"], ["X", "R", "D", "E"]]
+        for b in older:
+            self._earlier_run_folds(b, r)
+        p_oid = self._squash("P", into="release")
+        self.fx._delete("fix/P")
+        self._record(p, **_onto_record("P"))
+        lines = [integrate.integration_branch(self.cfg, "release", b) for b in older]
+        for x in lines:
+            self.assertFalse(self.fx._ancestor(p_oid, x))
+        self._finished("C")
+        self._finished("X", on="C")
+        self._finished("Y")
+        d = self._target(self.cfg.bundle("D"), "release", "- **Depends on:** R, P\n")
+        e = self._planned("E", "Y")
+        batch = ["C", "X", "Y", "R", "D", "E"]
+        with ExitStack() as stack:
+            oids = [stack.enter_context(self._merged_once(i, _onto_record(i), folded=False,
+                                                          at="C"))
+                    for i in ("Y", "X", "C")]         # nested: C merges first, then X, then Y
+            self._run([d, e], batch)
+        self.assertTrue(all(oids))
+        self._assert_never_built("D")
+        c, x, y = (self._not_carried(i) for i in ("C", "X", "Y"))
+        told = self._d_held()
+        again = self._every_step(batch)
+        self._rerun(again)
+        self._assert_built_with("D", p_oid, base="release")
+        self.assertEqual(again, ["X", "R", "D", "E"])
+        self.assertIn("which is also issue_C's work", x)
+        self.assertNotIn("re-issue without issue_X", x)
+        on_main = integrate.integration_branch(self.cfg, "main", again)
+        for said in (c, y):     # C's stop, made before Y's, names the same re-run: Y's too
+            self._assert_names_the_line_to_come(said, on_main, "issue_C", "issue_Y")
+        self.assertNotIn("issue_X, issue_Y", y)
+        self.assertIn(f"delete {lines[1]} on origin if it is there", told)
+
+    def test_a_drop_an_earlier_hold_asks_for_is_named_by_a_later_hold_naming_an_id(self):
+        # A names P, out of the batch, squash-merged, its record never counting, and `Conflicts
+        # with` O; Z names O, out of the batch and finished, its PR open, so Z's hold asks to
+        # name O. A's hold prints first and asks for P's drop alone: no re-run names O yet, and
+        # none of this batch puts A on a line. Z's hold then names O, and the re-run naming O
+        # builds A after O, on O's line, an older one here. Only the drop A's hold recorded
+        # makes Z's hold name that line. Before, and with A's hold recording no drop: no line
+        # named it, and with every step followed A was built there without P's merge.
+        o, p = self._finished("O"), self._finished("P")
+        batch = ["A", "Z"]
+        line = self._earlier_run_folds([*batch, "O"], o)
+        oid = self._squash("P")
+        self.fx._delete("fix/P")
+        self._record(p, **_onto_record("P"))
+        self.assertFalse(self.fx._ancestor(oid, line))
+        a, z = self.cfg.bundle("A"), self._planned("Z", "O")
+        sb._brief(a, extra="- **Depends on:** P\n- **Conflicts with:** O\n")
+        self._run([a, z], batch)
+        self._assert_never_built("A")
+        said = self.err.splitlines()
+        first = next(i for i, x in enumerate(said) if x.startswith("flow: issue_A held"))
+        then = next(i for i, x in enumerate(said) if x.startswith("flow: issue_Z held"))
+        self.assertLess(first, then)
+        self.assertIn("To build it, drop issue_P from issue_A's brief, then re-run.", said[first])
+        self.assertIsNone(LINE_NAME.search(said[first]))
+        again = self._every_step(batch)
+        self.assertEqual(again, [*batch, "O"])
+        self._rerun(again)
+        self.assertEqual(self.line, line)
+        self._assert_built_with("A", oid)
+        self.assertIn(READD, said[then])
+        self.assertIn(f"Naming issue_O too gives the re-run another line, {line}, and with the "
+                      "edge to issue_P dropped nothing checks it", said[then])
+
+    def test_a_drop_a_hold_asks_for_is_named_by_a_later_stop_that_asks_for_none(self):
+        # D names R and P; P, out of the batch, is squash-merged, its record never counting. D's
+        # hold, before wave 0, asks for P's drop and names no line: the run's line, cut after
+        # P's merge, has it. A, built in wave 0, is then squash-merged, its record counting, so
+        # the fold's stop asks to re-issue without A and for no drop. The re-run without A
+        # continues an older line of R, D and B, and only the drop D's hold recorded makes the
+        # stop name it. Before, and with D's hold recording no drop: no line named it, and with
+        # every step followed D was built there without P's merge.
+        later = ["R", "D", "B"]
+        line, p_oid = self._line_older_than_the_merge(_onto_record("P"), batch=tuple(later))
+        a, d, b = self._planned("A", "R"), self._planned("D", "R, P"), self._planned("B", "A")
+
+        def merged_at_once(x: Path) -> None:
+            if x.name == "issue_A":
+                self._squash("A")
+                self.fx._delete("fix/A")
+
+        self.after_publish = merged_at_once
+        batch = ["A", *later]
+        self._run([a, d, b], batch)
+        self.after_publish = None
+        self._assert_never_built("D")
+        held = self._d_held()
+        self.assertIn("To build it, drop issue_P from issue_D's brief, then re-run.", held)
+        self.assertIsNone(LINE_NAME.search(held))
+        stop = next(x for x in self.err.splitlines() if "did not integrate" in x)
+        self.assertIn("re-issue without issue_A", stop)
+        self.assertNotIn("dropping issue_A", stop)
+        self.assertEqual(self._every_step(batch), later)
+        self._rerun(later)
+        self.assertEqual(self.line, line)
+        self._assert_built_with("D", p_oid)
+        self.assertIn(f"leaving issue_A out gives the re-run another line, {line}, and with the "
+                      "edge to issue_P dropped nothing checks it", stop)
+        self.assertIn("delete it on origin if it is there", stop)
+
+    def test_a_drop_asked_on_another_repo_with_the_same_base_is_named_with_that_repo(self):
+        # Q targets org/other's main, another repo with a base of the same name, and names P,
+        # whose record is org/repo's, so it never counts there: Q's hold asks for P's drop on
+        # org/other. A, on org/repo's main, built in wave 0, is then squash-merged, its record
+        # never counting, so the fold's stop asks to re-issue without A and for A's drop. A
+        # line's name is its base's and its batch's alone, so the re-run's line on org/other
+        # has the name of its line on org/repo, which the stop names as its own. The stop names
+        # it again with org/other's name. Before (a drop on any repo's main read as the stop's
+        # own), it was named once, for org/repo alone. The fixture has one origin, so org/other
+        # is that origin's checkout too, and only the words are checked: no run of two origins
+        # is built.
+        self.cfg.repo_checkouts = {**self.cfg.repo_checkouts, "org/other": str(self.fx.primary)}
+        self._finished("P")
+        oid = self._squash("P")
+        self.fx._delete("fix/P")
+        q = self.cfg.bundle("Q")
+        q.mkdir(parents=True, exist_ok=True)
+        (q / "brief.md").write_text(
+            "- **Slug:** q\n- **Repo + branch target:** org/other @ main\n"
+            "- **Depends on:** P\n", encoding="utf-8")
+        sb._brief(self.cfg.bundle("A"))
+        a, b = self.cfg.bundle("A"), self._planned("B", "A")
+
+        def merged_at_once(x: Path) -> None:
+            if x.name == "issue_A":
+                self._squash("A")
+                self.fx._delete("fix/A")
+                self._record(x, **_onto_record("A"))
+
+        self.after_publish = merged_at_once
+        batch = ["A", "B", "Q"]
+        self._run([a, b, q], batch)
+        self.after_publish = None
+        self._assert_never_built("Q")
+        held = next(x for x in self.err.splitlines() if x.startswith("flow: issue_Q held"))
+        self.assertIn(oid[:12], held)
+        self.assertIn("into main (org/other)", held)
+        self.assertIn("drop issue_P from issue_Q's brief", held)
+        stop = next(x for x in self.err.splitlines() if "did not integrate" in x)
+        line = integrate.integration_branch(self.cfg, "main", ["B", "Q"])
+        self.assertIn(f"(for this batch without issue_A: {line})", stop)
+        self.assertIn(f"leaving issue_A out gives the re-run another line, {line} (org/other), "
+                      "and with the edge to issue_P dropped nothing checks it", stop)
 
 
 if __name__ == "__main__":

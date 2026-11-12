@@ -888,12 +888,20 @@ wave builds on, via `[driver].wave_mode`:
   counts as merged into your base, so for one of those its line, the line of each
   one held for it and the fold's stop add two steps: drop it from the brief of any
   bundle of the re-issued batch that names it as a prerequisite, and delete any
-  line on origin that batch would continue. They name that line for the batch
-  without the merged prerequisite, since any other batch has a line of its own.
-  With the edge gone nothing checks that line for the merge, so a re-run that
-  finds it may build the dependent there without that merge; one that does not
-  starts from your base. A bundle still naming it, in that batch or another, is
-  held when it runs and given the steps for its own line, as below. A
+  line on origin that batch would continue. The line they name is the line of
+  the one re-run the run's lines give: the batch without every prerequisite any
+  line of the run asks to re-issue without, on every target, naming every id any
+  line asks you to name (below). Any other batch has a line of its own. The
+  carry's lines, a stop of its own fold among them, know every prerequisite the
+  carry asks to re-issue without, on every target, and a later stop adds its
+  own: a fold's, or one building a dependent's own base (that dependent's hold
+  line). With the edge gone nothing checks
+  that line for the merge, so a re-run that finds it may build the dependent
+  there without that merge; one that does not starts from your base. Each line
+  names that re-run as far as the run knows it when the line prints, so an
+  earlier line may name a line a later one does not: delete every line any line
+  of the run names, not one of them. A bundle still naming it, in that batch or
+  another, is held when it runs and given the steps for its own line, as below. A
   prerequisite squash- or rebase-merged with its head already on the line (an
   earlier fold put it there) is clean, as above: the line has its work, so the
   run carries it and the ones built on it and names no merge, and their PRs keep
@@ -1015,11 +1023,37 @@ wave builds on, via `[driver].wave_mode`:
   was not checked and to delete it if it is there. It does so for a dependent that
   is on the run's line, by any seam (a `Conflicts with` edge to a finished id the
   run names is one), whether or not it is held for anything else, and for one kept
-  off the line only this run because a prerequisite it names was left unbuilt. It says
-  the same of the line of a re-run naming another prerequisite the dependent is
-  told to name, which is another line. Nothing is held for a prerequisite with no
-  patch or no usable target, for a dependent with no usable target of its own,
-  with `--no-publish`, or in a dry-run. `Depends on (merged)` counts a merge the
+  off the line only this run because a prerequisite it names was left unbuilt. The
+  lines it names are those of the re-run the run's lines give, as above: the batch
+  without every prerequisite a line asks to re-issue without, and that batch
+  naming every id a line of the run asks you to name, which is another line. It
+  names each one that re-run may build the dependent on: for a dependent on a
+  line now or kept off it as above, and for one with a `Depends on` or
+  `Conflicts with` edge, declared by either of the two, to another bundle of that
+  re-run's batch. That re-run may carry that bundle, or build it first, and so
+  put the dependent on its line: one built on a base of its own this run, say,
+  whose prerequisite the re-run carries, finished. Where the run checked the line
+  a dependent is on, that check stands for it, as above; but when a line of the
+  run asks to re-issue without an id, the re-run's line is another one, which
+  nothing checked, so the step names it too. Name all of those ids or none:
+  naming only some gives a batch whose line no line of the run names. A line that
+  asks you to name an id also names the line of the re-run naming it, and a stop
+  that asks you to re-issue without an id names the lines of the re-run without
+  it, on each base where a line of the run (a dependent's own hold among them)
+  asked an edge dropped, since nothing checks that line for the merge. Delete
+  every line any line of the run names, on its own origin: a line's name
+  comes from its base and its batch alone, so where two repos of a run have a
+  base of the same name, a line on the other repo's origin is named with that
+  repo. What the run
+  leaves to you: it covers the re-run its lines give and no other, so a re-run
+  you make some other way (an id re-issued on its own, out of the batch, as the
+  carry's line for one that conflicts with work it took back off the line
+  suggests, or naming only some of the ids) may continue a line no line named;
+  and nothing checks a line a re-run continues for the merge of a prerequisite
+  whose edge you dropped. Nothing is
+  held for a prerequisite with no patch or no usable target, for a dependent with
+  no usable target of its own, with `--no-publish`, or in a dry-run.
+  `Depends on (merged)` counts a merge the
   same way, with the same step for such a PR: a prerequisite the run does not
   drive must have merged into the
   dependent's base (a dependent with no usable target still takes a merge into

@@ -387,6 +387,7 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
          clashes: dict[str, tuple[str, dict[str, list[str]], list[str]]] | None = None,
          bases: Bases | None = None, line_prs: LinePrs | None = None,
          finished_heads: Mapping[str, str] | None = None,
+         rerun: Rerun | None = None,
          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
     """Fold the cumulative accepted bundles' published branches onto a per-target
     integration branch.
@@ -534,6 +535,11 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     ``held_out`` conflict may be pinned on, and only while that head is on the line being
     built: never merged, never put in ``carried``, never checked for a rewrite. ``None``:
     none.
+
+    ``rerun`` (#912, the flow's): the re-run the run's advice prescribes so far
+    (:class:`Rerun`). A stop on a squash or rebase merge records its bundle in it and names
+    that re-run's lines (:func:`_gone_branch`). ``None``: the re-run of ``batch`` without that
+    bundle.
     """
     candidates = _fold_candidates(accepted)
     if not candidates:
@@ -675,7 +681,8 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                                                        f"re-run")
                     try:
                         _merge_published(cfg, wt, d, refs[d.name], head, branch=branch,
-                                         base=base, owners=tuple(owners.values()), batch=batch)
+                                         base=base, owners=tuple(owners.values()), batch=batch,
+                                         rerun=rerun)
                     except IntegrationError as exc:
                         if (held_out is not None and ours and head is not None
                                 and pre is not None and isinstance(exc, _Conflict)):
@@ -1117,7 +1124,8 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
                       excluded: Mapping[str, str],
                       merged_heads: dict[str, str] | None = None,
                       bases: Bases | None = None,
-                      line_prs: LinePrs | None = None) -> tuple[str, str]:
+                      line_prs: LinePrs | None = None,
+                      rerun: Rerun | None = None) -> tuple[str, str]:
     """Build bundle ``d``'s own base (#723, for #463's dependency-scoped bases): a branch on
     ``origin`` holding exactly ``<base_remote>/<base>`` as just fetched plus the published
     branches of ``members`` (bundle paths, merged in that order). Returns ``(branch, pushed
@@ -1168,6 +1176,12 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
     ``merged_heads`` (#727), when given, gets each member's name with the head this build
     put on the branch (merged, or found on it) once the push has succeeded: what the run's
     later checks hold that branch to for ``d``'s PR (:data:`Bases`).
+
+    ``rerun`` (#912, the flow's): the re-run the run's advice prescribes so far
+    (:class:`Rerun`), as for :func:`fold`. A member gone by a squash or rebase merge stops
+    the build as it stops a fold, recording itself in it and naming that re-run's lines
+    (:func:`_gone_branch`). The flow prints every such stop (the bundle's base hold), so it
+    passes its own record. ``None``: the re-run of ``batch`` without that member.
 
     Push: a branch origin does not have is pushed plainly (no force, so an origin with
     ``receive.denyNonFastForwards`` takes it); one it has (``d``'s base built again) is
@@ -1240,7 +1254,7 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
             head = heads[m.name]
             try:
                 _merge_published(cfg, wt, m, refs[m.name], head, branch=branch, base=base,
-                                 owners=tuple(mine), batch=batch)
+                                 owners=tuple(mine), batch=batch, rerun=rerun)
             except _Conflict as exc:
                 raise _member_clash(wt, d, branch, base_ref, m.name, refs[m.name][1], head,
                                     merged_in, exc) from exc
@@ -1691,7 +1705,8 @@ def _late_line_rewrite(facts: str, ref: str, took: str, line: str,
 def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, bool],
                      head: str | None, *, branch: str, base: str,
                      owners: Sequence[Path] = (),
-                     batch: Collection[str] | None = None) -> None:
+                     batch: Collection[str] | None = None,
+                     rerun: Rerun | None = None) -> None:
     """Merge bundle ``d``'s published branch onto the line checked out in ``wt`` (#593):
     its own commits, joined by a signed-off merge commit — not a re-applied copy. ``head``
     is the branch's tip as :func:`fold` read it — None: it does not resolve (gone). It is
@@ -1699,7 +1714,8 @@ def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, 
     reach the line too; for a branch the run carried, the tip checked to extend what the
     line took from it (:func:`_carried_tips`, #633). ``owners``: the bundles a refusal may
     name — to take the base in (:func:`_take_in_base`), or to keep this merge. ``batch``: the
-    run's, for the line a refusal of a squash or rebase merge names (:func:`_gone_branch`).
+    run's, for the line a refusal of a squash or rebase merge names (:func:`_gone_branch`),
+    with ``rerun``, the re-run the run's advice prescribes so far (#912).
 
     A merge that would remove work from the line, by a change none of the branch's own
     commits makes (#673: the branch was cut from, or updated from, a base that reverted
@@ -1707,7 +1723,7 @@ def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, 
     _remote, ref, onto = published
     if head is None:
         _gone_branch(cfg, wt, d, ref, onto, branch=branch, base=base, owners=owners,
-                     batch=batch)
+                     batch=batch, rerun=rerun)
         return
     if _in_line(wt, head, f"{d.name}'s branch {ref}", branch):
         return  # already in the line (an earlier fold carried it) — never merged twice
@@ -1765,7 +1781,8 @@ def _keep_merge(cfg: Config, wt: Path, d: Path, ref: str, head: str, before: str
 
 def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch: str,
                  base: str, owners: Sequence[Path] = (),
-                 batch: Collection[str] | None = None) -> None:
+                 batch: Collection[str] | None = None,
+                 rerun: Rerun | None = None) -> None:
     """``d``'s published branch ``ref`` does not resolve after the pruning fetch — a merged
     PR's branch is commonly deleted on merge (#593). Decided by commit, never by message:
 
@@ -1779,18 +1796,26 @@ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch
        merge commit the host reports being on the base (:func:`_squash_merged`, #626), for
        any record, as the carry tells it apart (``flow._finished_head``). That raises, saying
        so and what to do (:data:`SQUASH_STEP`; :data:`DROP_PREREQ` is its last part for a
-       record that never counts, :func:`merged.counts_into`, naming the line of ``batch``
-       without ``d``, :func:`reissue_line`): stack mode needs merge commits,
-       so the line does not take the base in for it. An ``Onto branch`` record (``onto``) is
-       a commit on another PR, and a legacy ``Stacks on:`` PR targets its parent's branch, so
-       either may have merged elsewhere, and that raises. Any other PR targeted this base,
-       but it may still have merged into another branch (its base edited on the host), so
-       the fold first checks that the base has the head: then the line takes the base in
-       (:func:`_take_in_base`), unless that would remove work a bundle put on the line
-       (#623), which raises. A base without it — or a clone without it, which, having fetched
-       the base, means the same — raises, rather than build the next wave on a line that
-       lacks the PR's work. A merge commit the base lacks, or one that cannot be read, names
-       no squash or rebase merge."""
+       record that never counts, :func:`merged.counts_into`): stack mode needs merge commits,
+       so the line does not take the base in for it. The re-issue it asks for is the run's
+       ``rerun`` (#912, :class:`Rerun`; ``None``: one of ``batch``) without ``d``, which it
+       records before it raises (with the edge it asks dropped, if any), so the line
+       :data:`DROP_PREREQ` names is that re-run's (:func:`reissue_line`). Leaving ``d`` out
+       changes that re-run's line on every target, so where a line of the run asked an edge
+       dropped on another target, or on this one when ``d``'s record counts and it asks for
+       no drop, it names those lines too (:func:`lines_unchecked`). It records how that
+       message is made from a record (:meth:`Rerun.stop`), so the carry, which prints a stop
+       of its own fold only once all its folds are over, makes it again from the record as
+       it then stands (``flow._carry_finished``). An ``Onto branch``
+       record (``onto``) is a commit on another PR, and a legacy ``Stacks on:`` PR targets
+       its parent's branch, so either may have merged elsewhere, and that raises. Any other
+       PR targeted this base, but it may still have merged into another branch (its base
+       edited on the host), so the fold first checks that the base has the head: then the
+       line takes the base in (:func:`_take_in_base`), unless that would remove work a
+       bundle put on the line (#623), which raises. A base without it — or a clone without
+       it, which, having fetched the base, means the same — raises, rather than build the
+       next wave on a line that lacks the PR's work. A merge commit the base lacks, or one
+       that cannot be read, names no squash or rebase merge."""
     base_ref = f"{cfg.base_remote}/{base}"
     head = merged.merged_head(cfg, d.name.removeprefix("issue_"))
     if not head:
@@ -1807,15 +1832,28 @@ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch
     on_base = _carries(wt, head, f"{d.name}'s merged head {head}", base_ref, of=base_ref)
     oid = "" if on_base else _squash_merged(cfg, d, wt, base_ref)
     if oid:
-        raise IntegrationError(
-            f"{d.name}'s branch {ref} is gone and its PR "
-            f"{rec.get('pr_url') or '(no recorded PR)'} was squash- or rebase-merged: {base_ref} "
-            f"has its merge commit {oid}, but neither {base_ref} nor {branch} has the head it "
-            f"merged ({head}), so a branch built on {d.name} holds commits {base_ref} never "
-            f"got; " + SQUASH_STEP.format(name=d.name, base=base_ref)
-            + ("" if merged.counts_into(rec, *publish._resolve_target(d)[:2])
-               else DROP_PREREQ.format(name=d.name,
-                                       next_line=reissue_line(cfg, base, batch, [d.name]))))
+        repo_spec, own_base = publish._resolve_target(d)[:2]
+        counts = merged.counts_into(rec, repo_spec, own_base)
+        target = (repo_spec, base)
+        # Recorded before the message is made, so the line it names is the re-run's without d.
+        rerun = rerun if rerun is not None else Rerun(batch)
+        rerun.leave_out(d.name)
+        if not counts:
+            rerun.drop_on(target, [d.name])
+        lead = (f"{d.name}'s branch {ref} is gone and its PR "
+                f"{rec.get('pr_url') or '(no recorded PR)'} was squash- or rebase-merged: "
+                f"{base_ref} has its merge commit {oid}, but neither {base_ref} nor {branch} "
+                f"has the head it merged ({head}), so a branch built on {d.name} holds commits "
+                f"{base_ref} never got; " + SQUASH_STEP.format(name=d.name, base=base_ref))
+
+        def say(r: Rerun) -> str:
+            more = lines_unchecked(cfg, r, f"leaving {d.name} out gives the re-run",
+                                   repo=repo_spec, but=None if counts else target)
+            return (lead + ("" if counts else DROP_PREREQ.format(
+                name=d.name, next_line=reissue_line(cfg, base, r)))
+                + (f"; {more}" if more else ""))
+
+        raise IntegrationError(rerun.stop(d.name, say))
     if onto or rec.get("base") != base:
         what = ("an `Onto branch` commit on another PR" if onto else
                 f"a PR against {rec.get('base') or '(no recorded base)'}, not {base}")
@@ -1849,21 +1887,172 @@ SQUASH_STEP = ("stack mode needs merge commits: update each branch built on {nam
 # continue a line it finds on origin, so with the edge gone the line of the batch to come has to
 # go too, or that run builds there without the merge and says nothing. So the drop is asked of
 # that batch alone: a bundle outside it keeps its edge, and its own run checks its own line.
-# ``{next_line}``: :func:`reissue_line`.
+# ``{next_line}``: :func:`reissue_line`, of the re-run the run's advice prescribes (#912).
 DROP_PREREQ = (", after dropping {name} from the brief of any bundle of the re-issued batch that "
                "names it as a prerequisite and deleting any line on origin that batch would "
                "continue{next_line}: with the edge gone nothing checks that line for the merge")
 
 
-def reissue_line(cfg: Config, base: str, batch: Collection[str] | None,
-                 without: Collection[str]) -> str:
-    """:data:`DROP_PREREQ`'s ``{next_line}`` (#626): the line a re-issue of ``batch`` without
-    the bundles ``without`` would continue on ``base``, said to be that batch's, since any other
-    batch has a line of its own (:func:`integration_branch`). "" when there is none to name: no
-    batch (a direct caller), or none of it left."""
-    rest = [n for n in batch or () if _bundle_name(n) not in without]
-    return (f" (for this batch without {', '.join(without)}: "
-            f"{integration_branch(cfg, base, rest)})" if rest else "")
+class Rerun:
+    """The re-run a run's printed advice prescribes, as far as the run has printed it (#912).
+
+    The way out of a squash- or rebase-merged prerequisite is a re-run of the run's ``batch``
+    without each id a line asks to re-issue without (``without``, :data:`SQUASH_STEP`), with
+    each id a line asks the operator to name in it (``named``, ``flow._runnable``'s hold), on
+    every target. Three kinds of line print parts of that advice: the carry's
+    (``flow._carry_finished``), a dependent's hold (``flow._runnable``) and the stop on a
+    gone branch (:func:`_gone_branch`), of a fold or of a bundle's own base
+    (:func:`build_bundle_base`, printed as that bundle's base hold). Each names lines that
+    re-run may continue, so all of them read this one record, one per run
+    (``flow._drive_and_act``). It grows as the run prints: the carry records every id it
+    re-issues without, on every target, before its first line; a hold records the ids it asks
+    to name as it prints; a stop records its own id before it raises. A stop of the carry's
+    own fold records into a copy, and the carry takes an id from it only while that id's line
+    still gives the stop's message (:meth:`take`): a later failure of that fold may replace
+    it. The carry prints such a stop only once all its folds are over, so it makes each one
+    it takes again from the record as it then stands (:meth:`again`): made as it raised, it
+    knew no later stop, and it counted each earlier stop of its fold, whose message the
+    carry may since have replaced. A line names the lines as the record stands when it
+    prints, so an earlier one may name fewer, and the operator deletes every line any line
+    names.
+
+    ``drops``: each target ``(repo, base)`` on which a line asked an edge dropped, with the ids
+    whose edges go there (:data:`DROP_PREREQ`, ``flow._runnable``). Only an edge makes a run
+    check its line for a merge, so only there may a re-run continue a line nothing checks.
+    ``said``: the message of each stop that recorded its id, as last made; ``says``: how
+    each one is made from a record (:meth:`stop`)."""
+
+    def __init__(self, batch: Iterable[str] | None) -> None:
+        self.batch = None if batch is None else list(batch)
+        self.without: list[str] = []
+        self.named: list[str] = []
+        self.drops: dict[tuple[str, str], list[str]] = {}
+        self.said: dict[str, str] = {}
+        self.says: dict[str, Callable[[Rerun], str]] = {}
+
+    def copy(self) -> Rerun:
+        """A copy to record into, which this record is not changed by."""
+        new = Rerun(self.batch)
+        new.without, new.named = list(self.without), list(self.named)
+        new.drops = {t: list(ids) for t, ids in self.drops.items()}
+        new.said, new.says = dict(self.said), dict(self.says)
+        return new
+
+    def stop(self, name: str, say: Callable[[Rerun], str]) -> str:
+        """A stop on bundle ``name``, which has recorded its id, records ``say``, how its
+        message is made from a record. Returns that message, made from this one now."""
+        name = _bundle_name(name)
+        self.says[name] = say
+        self.said[name] = say(self)
+        return self.said[name]
+
+    def again(self, name: str) -> str:
+        """Stop ``name``'s message (:meth:`stop`), made again from this record as it stands."""
+        self.said[name] = self.says[name](self)
+        return self.said[name]
+
+    def leave_out(self, name: str) -> None:
+        """A line asks to re-issue without bundle ``name``."""
+        name = _bundle_name(name)
+        if name not in self.without:
+            self.without.append(name)
+
+    def name_too(self, names: Iterable[str]) -> None:
+        """A line asks the operator to name the bundles ``names`` in the re-run."""
+        for name in map(_bundle_name, names):
+            if name not in self.named:
+                self.named.append(name)
+
+    def drop_on(self, target: tuple[str, str], names: Iterable[str]) -> None:
+        """A line asks to drop the edges to the bundles ``names`` on ``target``."""
+        ids = self.drops.setdefault(target, [])
+        ids.extend(n for n in map(_bundle_name, names) if n not in ids)
+
+    def take(self, other: Rerun, name: str) -> None:
+        """Record what ``other``, a copy a fold's stop recorded into, says of bundle ``name``."""
+        self.leave_out(name)
+        for target, ids in other.drops.items():
+            if name in ids:
+                self.drop_on(target, [name])
+        if name in other.said:
+            self.said[name] = other.said[name]
+        if name in other.says:
+            self.says[name] = other.says[name]
+
+    def adds(self) -> list[str]:
+        """The ids to name that the batch left once ``without`` is out does not hold."""
+        have = {_bundle_name(n) for n in self.batch or ()} - set(self.without)
+        return [n for n in self.named if n not in have]
+
+
+def rerun_lines(cfg: Config, base: str,
+                rerun: Rerun) -> list[tuple[str, list[str], list[str]]]:
+    """The line on ``base`` of each re-run ``rerun`` prescribes (#912), with that re-run's
+    batch and the ids it names: the batch without every id it leaves out, naming none of the
+    ids to name (the hold that asks to name them offers to wait for their merge instead), then
+    naming all of them (:meth:`Rerun.adds`), when there are any. Naming only some is a batch of
+    its own for each choice, so a line that asks to name two or more says all or none
+    (:func:`all_or_none`): two lines per base at most, never one per subset. A re-run with
+    nothing left has no line, and with no batch (a direct caller) there are none."""
+    if not rerun.batch:
+        return []
+    rest = [n for n in rerun.batch if _bundle_name(n) not in rerun.without]
+    add = rerun.adds()
+    return [(integration_branch(cfg, base, names), names, naming)
+            for names, naming in ([(rest, []), (rest + add, add)] if add else [(rest, [])])
+            if names]
+
+
+def all_or_none(rerun: Rerun) -> str:
+    """What a line naming a re-run's lines says of the ids to name when there are two or more
+    (#912, :func:`rerun_lines`): name all of them or none. "" for one, or none."""
+    add = rerun.adds()
+    return (f"name all of {', '.join(add)} in the re-run or none of them: naming only some "
+            f"gives a batch whose line no line of this run names" if len(add) > 1 else "")
+
+
+def reissue_line(cfg: Config, base: str, rerun: Rerun) -> str:
+    """:data:`DROP_PREREQ`'s ``{next_line}`` (#626): the lines on ``base`` of the re-run the
+    run's advice prescribes (#912, :func:`rerun_lines`), the first said to be the line of this
+    batch without every id a line asks to re-issue without, since any other batch has a line of
+    its own (:func:`integration_branch`), the second that batch naming the ids to name too. ""
+    when there is none to name: no batch (a direct caller), or none of it left."""
+    said: list[str] = []
+    for line, _names, naming in rerun_lines(cfg, base, rerun):
+        how = f"naming {', '.join(naming)} too" if naming else ""
+        if not said:
+            how = (f"for this batch without {', '.join(rerun.without)}"
+                   + (f", {how}" if how else ""))
+        said.append(f"{how}: {line}")
+    rule = all_or_none(rerun) if said else ""
+    return f" ({'; '.join(said + ([rule] if rule else []))})" if said else ""
+
+
+def lines_unchecked(cfg: Config, rerun: Rerun, lead: str, *, repo: str,
+                    but: tuple[str, str] | None = None, naming: bool = False) -> str:
+    """The step a line that changes the re-run ``rerun`` prescribes adds (#912), ``lead``
+    saying how (``Naming issue_O too gives the re-run``): on each target ``(repo, base)``
+    where a line of the run asked an edge dropped, but ``but``, the caller's own, whose line
+    it names itself, the lines of that re-run (:func:`rerun_lines`; ``naming``: only the one
+    naming the ids to name), to delete, since with the edge gone nothing checks them for that
+    merge. A line's name is its base's and its batch's alone, so two repos with one base name
+    each have a line of that name on their own origin: one on a repo other than ``repo``, the
+    caller's, is named with its repo. "" when there is none."""
+    drops = {t: ids for t, ids in rerun.drops.items() if t != but}
+    lines = list(dict.fromkeys(x + (f" ({r})" if r != repo else "") for r, b in drops
+                               for x, _names, adds in rerun_lines(cfg, b, rerun)
+                               if adds or not naming))
+    if not lines:
+        return ""
+    edges = list(dict.fromkeys(n for ids in drops.values() for n in ids))
+    one, edge = len(lines) == 1, len(edges) == 1
+    rule = all_or_none(rerun)
+    return (f"{lead} {'another line' if one else 'other lines'}, {' and '.join(lines)}, and "
+            f"with the {'edge' if edge else 'edges'} to {', '.join(edges)} dropped nothing "
+            f"checks {'it' if one else 'them'} for {'that merge' if edge else 'their merges'}: "
+            f"once this run ends, delete {'it' if one else 'them'} on origin if "
+            f"{'it is' if one else 'they are'} there"
+            + (f". {rule[:1].upper()}{rule[1:]}" if rule else ""))
 
 
 def _squash_merged(cfg: Config, d: Path, wt: Path, base_ref: str) -> str:

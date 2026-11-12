@@ -1113,7 +1113,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
               unbuilt: Collection[str] = frozenset(),
               merge_notes: Mapping[tuple[str, str, str], str] | None = None,
               merge_busy: Collection[tuple[str, str, str]] = frozenset(),
-              noted: set[str] | None = None
+              noted: set[str] | None = None,
+              rerun: integrate.Rerun | None = None
               ) -> list[Path]:
     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
 
@@ -1149,6 +1150,18 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     line was not checked, and to delete it if it is there, held for anything else or not (#911).
     "Not judged" and "not on the line" are separate facts. It is told the same
     of the line of a re-run naming a prerequisite it is told to name, which is another line.
+    The lines it names are those of the re-run the run's advice prescribes (#912): ``rerun``,
+    the run's record of it (:class:`integrate.Rerun`; ``None``: one of the batch asked for,
+    for this call alone), read as it stands when the line prints — the batch without every id
+    a line asks to re-issue without, on every target, naming none of the ids a line asks to
+    name, then all of them (:func:`integrate.rerun_lines`). It names each line such a re-run
+    may build the bundle on: the bundle is on a line now, or held for something else with no
+    line judged, or it has an edge to a bundle of that re-run's batch
+    (:func:`_rerun_puts_on_line`). The run's own line, judged for it, is that re-run's only
+    when no line asks to leave an id out: then the judgement above stands for it, and any
+    other re-run's line is named. A line that asks to name ids records them, and, on each
+    base where a line of the run asked an edge dropped, names the line of the re-run naming
+    them, which nothing checks for that merge (:func:`integrate.lines_unchecked`).
     ``merge_notes`` is not ``None`` in merge mode (#839), where the run has no line at all, so
     no prerequisite is on one: a plain ``Depends on`` one waits whether or not the run was
     asked for it, whatever its brief says, unless it ships nothing. It maps ``(prerequisite,
@@ -1211,6 +1224,7 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     and Check refresh it only best-effort. Else d is held, named on ONE stderr line. A
     target with no line (or no recorded tip: a dry-run) is judged as before."""
     asked = set(requested) if requested is not None else set(batch_names)
+    rerun = rerun if rerun is not None else integrate.Rerun(sorted(asked))
     in_merge_mode = merge_notes is not None
     unpushed_set = set(unpushed)
     unbuilt_set = set(unbuilt)
@@ -1244,6 +1258,7 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
         stale: list[tuple[str, str, bool]] = []  # … of those, not on d's line: off_line's shape
         unjudged = False                         # … of those, no line was judged for d
         unchecked = False                        # … d is on a line now, and it was not judged
+        judged = False                           # … d is on a line now, and it was (#912)
         older: list[tuple[str, str]] = []  # … not those: their PR is another patch's (#865)
         busy: list[str] = []       # could not be claimed before wave 0, so not judged (#839)
         for dep in deps:
@@ -1303,6 +1318,7 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                     # base of its own, every one once the target has a line.
                     here = d.name in on_line if on_line is not None else line is not None
                     if line and line[1] and here:
+                        judged = True
                         key = (p.name, repo, base)
                         if key not in lacks:
                             lacks[key] = _line_lacks_merge(cfg, dep, repo, line, views)
@@ -1340,10 +1356,16 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
         elif unmerged:
             todo = (f"name {', '.join(carryable)} in the same `pdca flow <ids>` command so "
                     f"the run's line carries them, or wait" if carryable else "wait")
+            # Naming them changes the re-run the run's advice prescribes, and so its line on
+            # every base (#912): where an edge is dropped, nothing checks that line.
+            rerun.name_too(carryable)
+            more = integrate.lines_unchecked(
+                cfg, rerun, f"Naming {', '.join(rerun.adds())} too gives the re-run",
+                repo=repo, naming=True) if carryable else ""
             print(f"flow: {d.name} held — prerequisite(s) {', '.join(unmerged)} not merged "
                   f"into {base} ({repo}), and no line of this run carries them; not built "
                   f"on a base missing them. To build it, {todo} until their PR merges into "
-                  f"{base}, then re-run.", file=sys.stderr)
+                  f"{base}, then re-run." + (f" {more}." if more else ""), file=sys.stderr)
         if older:
             ways = "; ".join(f"{n}: {way}" for n, way in older)
             print(f"flow: {d.name} held — prerequisite(s) {', '.join(n for n, _w in older)} not "
@@ -1355,11 +1377,24 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                   f"merged into {base} ({repo}); not built on a base that may be missing them. "
                   f"{ways}.", file=sys.stderr)
         if squashed:
+            # The edges this line asks dropped (#912): a later line that changes the re-run
+            # names its line on this base too.
+            rerun.drop_on((repo, base), [n for n, _oid in squashed])
             drop = f"drop {', '.join(n for n, _oid in squashed)} from {d.name}'s brief"
             step = f"{drop}, then re-run"
             after = (f"and with the edge gone nothing checks that. A re-run that finds the line "
                      f"on origin may continue it and build {d.name} without that merge, and one "
                      f"that does not starts from {base}, which has the merge commit")
+            # The lines of the re-run the run's advice prescribes (#912) that may build d with
+            # nothing checking for that merge: each one that re-run may put d on — d is on a
+            # line now, or held for something else with no line judged, or has an edge to a
+            # bundle of that re-run's batch (`_rerun_puts_on_line`) — but the run's own line,
+            # judged for d: that re-run's when no line asks to leave an id of the batch out.
+            now = judged or unchecked or (unjudged and bool(unmet))
+            mine = (lines or {})[(repo, base)][0] if judged else ""
+            reruns = [(x, naming) for x, names, naming in integrate.rerun_lines(cfg, base, rerun)
+                      if (naming or not judged or (rerun.without and x != mine))
+                      and (now or _rerun_puts_on_line(cfg, d, names))]
             if stale:
                 branch, tip = (lines or {})[(repo, base)]  # stale: only when d has one
                 has = ("does not have" if all(known for _n, _w, known in stale)
@@ -1368,17 +1403,28 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                 step = (f"{drop} and, once this run ends, delete {branch} on origin, then "
                         f"re-run: the line {d.name} would build on, {branch} at "
                         f"{(tip or '')[:12]}, {has} the merge of {which}, {after}")
-            elif (unjudged and unmet) or carryable or unchecked:
-                branch = integrate.integration_branch(cfg, base, asked | set(carryable))
-                of = (f", the line of a re-run naming {', '.join(carryable)} too,"
-                      if carryable else "")
-                step = (f"{drop} and, once this run ends, delete {branch} on origin if it is "
-                        f"there, then re-run: this run did not check that line{of} for that "
-                        f"merge, {after}")
-            if stale and carryable:
-                also = integrate.integration_branch(cfg, base, asked | set(carryable))
-                step += (f". Naming {', '.join(carryable)} too gives the re-run another line: "
-                         f"delete {also} on origin as well if it is there")
+                # Each other line of that re-run: the batch's own line is the one just named.
+                more = [(x, _rerun_how(rerun, naming)) for x, naming in reruns if x != branch]
+                if more:
+                    first, *rest = more
+                    step += (f". {first[1][:1].upper()}{first[1][1:]} gives the re-run another "
+                             f"line" + "".join(f", and {how} another" for _x, how in rest)
+                             + f": delete {' and '.join(x for x, _h in more)} on origin as well "
+                             f"if {'they are' if rest else 'it is'} there")
+            elif reruns:
+                one = len(reruns) == 1
+                hows = [_rerun_how(rerun, naming) for _x, naming in reruns]
+                of = ((f", the line of a re-run {hows[0]}," if hows[0] else "") if one else
+                      ", the lines of " + " and of ".join(f"a re-run {h}" if h else "this batch"
+                                                          for h in hows) + ",")
+                step = (f"{drop} and, once this run ends, delete "
+                        f"{' and '.join(x for x, _n in reruns)} on origin if "
+                        f"{'it is' if one else 'they are'} there, then re-run: this run did not "
+                        f"check {'that line' if one else 'those lines'}{of} for that merge, "
+                        f"{after}")
+            rule = integrate.all_or_none(rerun) if any(n for _x, n in reruns) else ""
+            if rule:
+                step += f". {rule[:1].upper()}{rule[1:]}"
             print(f"flow: {d.name} held — prerequisite(s) "
                   f"{', '.join(f'{n} (merge commit {oid[:12]})' for n, oid in squashed)}: their "
                   f"PR was squash- or rebase-merged into {base} ({repo}), but their publish "
@@ -1719,6 +1765,36 @@ def _closure_members(cfg: Config, d: Path, *, built: Mapping[str, tuple[Path, in
     return f"{seam} was pointed at a seam itself" if seam else members
 
 
+def _rerun_puts_on_line(cfg: Config, d: Path, names: Collection[str]) -> bool:
+    """Whether a re-run of the batch ``names`` may build ``d`` on its line (#912). It holds
+    wherever :func:`_closure_members` on that re-run could find a seam for ``d``, and may hold
+    where it would not: ``d`` declares ``Stacks on`` or ``Onto branch``, or it has an edge to
+    another bundle of that batch — its own ``Depends on``, ``Depends on (merged)`` or ``Stacks
+    on``, or a ``Conflicts with`` either of the two declares (:func:`waves.conflict_map`, the
+    map that walk reads). That walk starts at ``d`` and finds a seam only past such an edge:
+    from ``d`` it goes on only to a bundle the re-run builds or carries, which is one of that
+    batch. Past it, any bundle of the batch may be finished by then (a seam) or built (walked
+    on), so no edge further on is read. With none, that re-run builds ``d`` from the base."""
+    bp = d / "brief.md"
+    if not bp.exists():
+        return False
+    if brief.stacks_on(bp) or brief.onto_branch(bp):
+        return True
+    others = [p for p in (cfg.find_bundle(str(n).removeprefix("issue_")) for n in names)
+              if p.name != d.name]
+    them = {p.name for p in others}
+    if {cfg.bundle(x).name for x in waves.declared_deps(bp)} & them:
+        return True
+    return bool(waves.conflict_map(cfg, [d, *others])[d.name] & them)
+
+
+def _rerun_how(rerun: integrate.Rerun, naming: Collection[str]) -> str:
+    """How a re-run ``rerun`` prescribes, naming the ids ``naming``, differs from the run's
+    batch (#912): ``leaving out issue_X``, ``naming issue_O too``, both, or "" for none."""
+    return " and ".join(([f"leaving out {', '.join(rerun.without)}"] if rerun.without else [])
+                        + ([f"naming {', '.join(naming)} too"] if naming else []))
+
+
 def _base_plans(cfg: Config, ds: list[Path], *, built: Mapping[str, tuple[Path, int]],
                 finished: list[Path], bundles: list[Path], seams: Collection[str]
                 ) -> dict[str, tuple[set[str], list[Path] | str]]:
@@ -1749,7 +1825,8 @@ def _bundle_bases(cfg: Config, runnable: list[Path], *,
                   bases: dict[str, tuple[str, dict[str, str]]],
                   line_cut: dict[str, dict[str, str]],
                   taken: tuple[integrate.Bases, integrate.LinePrs],
-                  held: dict[str, tuple[str, integrate.IntegrationError]]) -> None:
+                  held: dict[str, tuple[str, integrate.IntegrationError]],
+                  rerun: integrate.Rerun | None = None) -> None:
     """Point each bundle of ``runnable`` at what its plan says it is built on (#727,
     ``plans``: :func:`_base_plans`): a base of its own, the real base, or — a seam — the
     run's line, as before (:func:`_point_at_integration`). A base of its own is
@@ -1767,7 +1844,11 @@ def _bundle_bases(cfg: Config, runnable: list[Path], *,
     its message naming the bundle and its members (the caller stops the run), and ``held``
     keeps each bundle held before it. Then ``bases`` gets ``(branch, {member: head})`` per
     base, and ``line_cut`` the heads of its target's branches the line held (none: no line
-    yet) per bundle pointed at a seam."""
+    yet) per bundle pointed at a seam. ``rerun`` (#912): the run's record of the re-run its
+    advice prescribes, which a member gone by a squash or rebase merge records itself in
+    before its build raises, naming that re-run's lines, as a fold's stop does. Every such
+    failure is printed (:func:`_announce_base_holds`, in either case above), so the build
+    gets the run's own record."""
     made: dict[str, tuple[str, str, dict[str, str]]] = {}
     for d in runnable:
         members = plans[d.name][1]
@@ -1777,7 +1858,7 @@ def _bundle_bases(cfg: Config, runnable: list[Path], *,
         try:
             branch, tip = integrate.build_bundle_base(
                 cfg, d, members, batch=batch, carried=carried_heads, excluded=carried_heads,
-                merged_heads=took, bases=taken[0], line_prs=taken[1])
+                merged_heads=took, bases=taken[0], line_prs=taken[1], rerun=rerun)
         except integrate.IntegrationError as exc:
             whose = (f"could not build {d.name}'s own base from "
                      f"{', '.join(m.name for m in members)}")
@@ -1892,6 +1973,7 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
                 bases: integrate.Bases | None = None,
                 line_prs: integrate.LinePrs | None = None,
                 finished_heads: Mapping[str, str] | None = None,
+                rerun: integrate.Rerun | None = None,
                 ) -> tuple[dict[tuple[str, str], tuple[str, Path | None]],
                            dict[tuple[str, str], str | None], tuple[str, str] | None]:
     """ONE :func:`integrate.fold` of ``bundles`` and, with ``[driver].regate_between_waves``,
@@ -1917,7 +1999,9 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
     what each id skipped for a textual conflict conflicts with (:func:`integrate._clash`);
     the in-run folds pass none. ``bases`` / ``line_prs`` (#727): the in-run folds pass what
     the run's PRs hold (:func:`_heads_taken`), which the same check holds each branch to
-    too.
+    too. ``rerun`` (#912): the re-run the run's advice prescribes, which a stop on a squash or
+    rebase merge records its bundle in and names the lines of (:class:`integrate.Rerun`); the
+    in-run folds pass the run's, whose stop always reaches the operator, the carry a copy.
 
     Returns ``(folded, tips, red)``: the fold's result, each folded target's pushed tip
     (None in a dry-run, which pushes nothing), and the first target whose re-gate is red
@@ -1928,7 +2012,8 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
                                 folded_this_run=folded_this_run, batch=batch, skipped=skipped,
                                 carried=carried, held_out=held_out, wave=wave,
                                 pr_heads=pr_heads, holds=holds, clashes=clashes,
-                                bases=bases, line_prs=line_prs, finished_heads=finished_heads)
+                                bases=bases, line_prs=line_prs, finished_heads=finished_heads,
+                                rerun=rerun)
         tips = {tgt: integrate.pushed_tip(wt) if wt is not None else None
                 for tgt, (_branch, wt) in folded.items()}
         # hold_lock=False: the locks stack already holds each tree's lock (re-acquiring
@@ -2373,7 +2458,8 @@ def _merge_prereqs(cfg: Config, bundles: list[Path], claims: drive_claim.Run | N
 def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
                     batch: list[str], integ: dict[tuple[str, str], str],
                     folded_tips: dict[tuple[str, str], str | None], held: set[str],
-                    finished_heads: dict[str, str] | None = None) -> None:
+                    finished_heads: dict[str, str] | None = None,
+                    rerun: integrate.Rerun | None = None) -> None:
     """Before wave 0, put a re-issued run's finished named ids on its line (#646).
 
     ``finished`` (:func:`_finished_named`) are ids the run was asked for that an earlier run
@@ -2432,7 +2518,22 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
 
     ``finished_heads`` (#747), filled in place: each finished id carried onto a line the
     run uses → the head the fold put there. The in-run folds may pin a conflict on one of
-    them (:func:`integrate.fold`); they never merge it or check it for a rewrite."""
+    them (:func:`integrate.fold`); they never merge it or check it for a rewrite.
+
+    ``rerun`` (#912): the run's record of the re-run its advice prescribes
+    (:class:`integrate.Rerun`; ``None``: one of ``batch``, for this call alone). Every line
+    that asks to delete the line a re-issue continues names that re-run's, so the carry
+    first judges every target, then records every id its lines ask to re-issue without, on
+    every target, then folds, and only then prints any line. A stop of a target's fold (a
+    branch gone by a squash or rebase merge since its PR was read) records into a copy, taken
+    into the record only while that id's line still gives the stop's message: the fold, or
+    this carry, may replace it with a later failure, and a line that never says to re-issue
+    without an id must not change the re-run the others name. Once every fold is over, each
+    stop taken is made again from the record as it then stands
+    (:meth:`integrate.Rerun.again`), so it names the re-run every other line of the carry
+    names: made as it raised, it knew no later stop, and it counted each earlier stop of its
+    fold, one whose message the fold then replaced among them."""
+    rerun = rerun if rerun is not None else integrate.Rerun(batch)
     cands = {d.name: (d, (repo, base), ref)
              for d, repo, base, _slug, ref in integrate._fold_candidates(finished)}
     # No fold candidate, still a node (#728): each walk below goes through one of these.
@@ -2441,6 +2542,9 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
     for b in bundles:
         for name in _reached(cfg, b, cands, bare):
             dependents.setdefault(name, []).append(b.name)
+    # 1. Each target's finished ids, judged from their PR state and origin's line.
+    judged: list[tuple[tuple[str, str], list[Path], str, str, str | None,
+                       dict[str, tuple[str, str]], dict[str, str], dict[str, str]]] = []
     for tgt in sorted({cands[name][1] for name in dependents}):
         ids = [d for d, t, _ref in cands.values() if t == tgt]          # in the order asked for
         line = integrate.integration_branch(cfg, tgt[1], batch)
@@ -2452,7 +2556,6 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
         why: dict[str, tuple[str, str]] = {}    # not clean: name → (reason, hint)
         heads: dict[str, str] = {}              # state-clean: name → its PR head
         causes: dict[str, str] = {}             # built on a not-clean id: name → that id
-        partners: dict[str, list[str]] = {}     # conflicts with these finished ids (#694)
         base_ref, tip, bad = f"{cfg.base_remote}/{tgt[1]}", None, None
         try:
             repo, tip = integrate.carry_view(cfg, tgt[0], line, [
@@ -2478,49 +2581,78 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
             why = _hold_all(ids, why, f"origin's {line} holds {bad[:12]}, which neither "
                             f"{base_ref} nor a clean finished prerequisite's PR accounts for",
                             "line")
+        judged.append((tgt, ids, line, base_ref, tip, why, heads, causes))
+    # 2. Every id their lines ask to re-issue without, on every target, recorded before any
+    # line names the line that re-issue continues (#912), with each edge one asks dropped.
+    for tgt, ids, _line, _ref, _tip, why, _heads, _causes in judged:
+        for d in ids:
+            hint = why.get(d.name, ("", ""))[1]
+            if hint in ("squashed", "squashed_drop"):
+                rerun.leave_out(d.name)
+            if hint == "squashed_drop":
+                rerun.drop_on(tgt, [d.name])
+    # 3. One fold per target, of its clean ids.
+    partners: dict[str, list[str]] = {}         # conflicts with these finished ids (#694)
+    carried_on: dict[tuple[str, str], str] = {}  # target → the line saying what it carried
+    kept: list[tuple[dict[str, tuple[str, str]], str]] = []   # each stop taken: (why, name)
+    for tgt, ids, line, base_ref, tip, why, heads, causes in judged:
         clean = [d for d in ids if d.name not in why]
-        if clean:
-            skipped: dict[str, str] = {}
-            holds: dict[str, str] = {}      # left out for a skipped id's work → that id
-            # skipped for a textual conflict → (kind, partners, files) (#694)
-            clashes: dict[str, tuple[str, dict[str, list[str]], list[str]]] = {}
-            put: dict[str, str] = {}        # carried → the head the fold put on the line (#747)
-            try:
-                folded, tips, red = _fold_lines(cfg, clean, dry=False, batch=batch,
-                                                folded_this_run={tgt: tip} if tip else {},
-                                                skipped=skipped, pr_heads=heads, holds=holds,
-                                                clashes=clashes, carried=put)
-            except integrate.IntegrationError as exc:
-                folded, tips, red = {}, {}, None
-                skipped.update({d.name: str(exc) for d in clean})
-                holds.clear()
-                clashes.clear()
-            carried = [d.name for d in clean if d.name not in skipped]
-            why.update({name: (msg, "open") for name, msg in skipped.items()})
-            # One whose branch conflicts with the line (#694): named with what it conflicts
-            # with — finished ids of the batch the line carries, or ones it does not, the
-            # base, or other work on the line — and the step that resolves that. The `open`
-            # hint cannot: its PR is open already. The fold judges no id it held (#672).
-            why.update({name: _clash_why(clash, cands[name][2][1], base_ref)
-                        for name, clash in clashes.items()})
-            partners.update({name: list(clash[1]) for name, clash in clashes.items()})
-            # One whose branch holds a skipped id's work never reached the push (#672): held
-            # for that id, as one built on it, and its dependents wait.
-            why.update({name: (skipped[name], "built_on") for name in holds})
-            causes.update(holds)
-            if red:
-                why.update({name: (f"the re-gate of {line} carrying it is red", "open")
-                            for name in carried})
-            elif tgt in folded:
-                integ[tgt], folded_tips[tgt] = folded[tgt][0], tips[tgt]
-                if finished_heads is not None:
-                    finished_heads.update({n: put[n] for n in carried if n in put})
-                print(f"flow: carried {', '.join(carried)} (finished in an earlier run) onto "
-                      f"{line} at {tips[tgt]} before wave 0 — this run's {tgt[0]} @ {tgt[1]} "
-                      f"bundles build on it.", file=sys.stderr)
-        # Every id the lines below ask to re-issue without: their step names the batch left's line.
-        gone = [d.name for d in ids if d.name in why
-                and why[d.name][1] in ("squashed", "squashed_drop")]
+        if not clean:
+            continue
+        skipped: dict[str, str] = {}
+        holds: dict[str, str] = {}      # left out for a skipped id's work → that id
+        # skipped for a textual conflict → (kind, partners, files) (#694)
+        clashes: dict[str, tuple[str, dict[str, list[str]], list[str]]] = {}
+        put: dict[str, str] = {}        # carried → the head the fold put on the line (#747)
+        stops = rerun.copy()            # what a stop of this fold records (#912)
+        try:
+            folded, tips, red = _fold_lines(cfg, clean, dry=False, batch=batch,
+                                            folded_this_run={tgt: tip} if tip else {},
+                                            skipped=skipped, pr_heads=heads, holds=holds,
+                                            clashes=clashes, carried=put, rerun=stops)
+        except integrate.IntegrationError as exc:
+            folded, tips, red = {}, {}, None
+            skipped.update({d.name: str(exc) for d in clean})
+            holds.clear()
+            clashes.clear()
+        carried = [d.name for d in clean if d.name not in skipped]
+        why.update({name: (msg, "open") for name, msg in skipped.items()})
+        # One whose branch conflicts with the line (#694): named with what it conflicts
+        # with — finished ids of the batch the line carries, or ones it does not, the
+        # base, or other work on the line — and the step that resolves that. The `open`
+        # hint cannot: its PR is open already. The fold judges no id it held (#672).
+        why.update({name: _clash_why(clash, cands[name][2][1], base_ref)
+                    for name, clash in clashes.items()})
+        partners.update({name: list(clash[1]) for name, clash in clashes.items()})
+        # One whose branch holds a skipped id's work never reached the push (#672): held
+        # for that id, as one built on it, and its dependents wait.
+        why.update({name: (skipped[name], "built_on") for name in holds})
+        causes.update(holds)
+        if red:
+            why.update({name: (f"the re-gate of {line} carrying it is red", "open")
+                        for name in carried})
+        elif tgt in folded:
+            integ[tgt], folded_tips[tgt] = folded[tgt][0], tips[tgt]
+            if finished_heads is not None:
+                finished_heads.update({n: put[n] for n in carried if n in put})
+            carried_on[tgt] = (f"flow: carried {', '.join(carried)} (finished in an earlier "
+                               f"run) onto {line} at {tips[tgt]} before wave 0 — this run's "
+                               f"{tgt[0]} @ {tgt[1]} bundles build on it.")
+        # A stop of this fold asked to re-issue without its id (#912): recorded only while
+        # that id's line still gives the stop's message, which a later failure replaces.
+        for name, said in stops.said.items():
+            if name not in rerun.said and why.get(name, ("", ""))[0] == said:
+                rerun.take(stops, name)
+                kept.append((why, name))
+    # Each stop taken, made again from the record as it now stands (#912): made as it raised,
+    # it knew no later stop, of its fold or another target's, and it counted every earlier
+    # stop of its fold, one whose message the fold then replaced among them.
+    for why, name in kept:
+        why[name] = (rerun.again(name), why[name][1])
+    # 4. Every target's lines, each naming the lines of the re-run as now recorded.
+    for tgt, ids, line, base_ref, _tip, why, _heads, causes in judged:
+        if tgt in carried_on:
+            print(carried_on[tgt], file=sys.stderr)
         for d in ids:
             if d.name in why:
                 held.add(d.name)
@@ -2530,7 +2662,7 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
                     name=d.name, line=line, iid=d.name.removeprefix("issue_"),
                     cause=causes.get(d.name, ""), base=base_ref, partners=", ".join(with_),
                     ids=", ".join(p.removeprefix("issue_") for p in with_),
-                    next_line=integrate.reissue_line(cfg, tgt[1], batch, gone))
+                    next_line=integrate.reissue_line(cfg, tgt[1], rerun))
                 print(f"flow: {d.name} (finished in an earlier run) is not carried onto "
                       f"{line}: {reason} — holding "
                       f"{', '.join(dependents.get(d.name, [])) or 'no bundle'} this run; "
@@ -3885,11 +4017,16 @@ def _drive_and_act(
     # Each finished id the carry put on the line → the head it put there (#747): an in-run
     # fold may pin a bundle's conflict on one, as on a bundle it took itself.
     finished_heads: dict[str, str] = {}
+    # The re-run this run's printed advice prescribes, as far as it has printed it (#912): the
+    # carry, each dependent's hold and the stop of a fold or of a bundle's own base record what
+    # they ask into it, and every line that names a line to delete names that re-run's, on
+    # every target.
+    rerun = integrate.Rerun(run_batch)
     finished = _finished_named(cfg, batch, batch_names)
     if do_publish and cfg.wave_mode != "merge":
         _carry_finished(cfg, bundles, finished,
                         batch=run_batch, integ=integ, folded_tips=folded_tips,
-                        held=held_finished, finished_heads=finished_heads)
+                        held=held_finished, finished_heads=finished_heads, rerun=rerun)
     # `wave_list` is iterated by a LIST iterator on purpose (#469): adoption splices the
     # recomputed remainder into `wave_list[k+1:]` after wave k drives, and the iterator —
     # which simply indexes forward — picks the new tail up. So "how many waves are left" is
@@ -3954,7 +4091,7 @@ def _drive_and_act(
                              # and the bundles cut from it (#729).
                              lines={tgt: (branch, folded_tips.get(tgt))
                                     for tgt, branch in integ.items()},
-                             on_line=on_line, unbuilt=held_base, noted=noted)
+                             on_line=on_line, unbuilt=held_base, noted=noted, rerun=rerun)
         if not runnable:
             continue
         # The pool, read off the schedule as it stands NOW — so a splice below has already
@@ -4010,7 +4147,8 @@ def _drive_and_act(
                 _bundle_bases(cfg, runnable, plans=plans, integ=integ,
                               folded_tips=folded_tips, carried_heads=carried_heads,
                               batch=run_batch, bases=bases_took, line_cut=line_cut,
-                              taken=_heads_taken(bases_took, line_cut, pushed), held=failed)
+                              taken=_heads_taken(bases_took, line_cut, pushed), held=failed,
+                              rerun=rerun)
             except (integrate.IntegrationTreeError, integrate._LineBroken) as exc:
                 _announce_base_holds(cfg, failed, fold_next=False, stopping=True)
                 held_base.update(failed)
@@ -4140,7 +4278,7 @@ def _drive_and_act(
                         dry=dry, folded_this_run=dict(folded_tips), batch=run_batch,
                         carried=carried_heads, held_out=None if dry else held_conflict,
                         wave=wave_names, bases=taken[0], line_prs=taken[1],
-                        finished_heads=finished_heads)
+                        finished_heads=finished_heads, rerun=rerun)
                 except integrate.IntegrationError as exc:
                     _announce_conflict_holds(cfg, held_conflict,
                                              [n for n in held_conflict if n not in had], k,
