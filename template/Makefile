@@ -37,15 +37,10 @@ open('.claude/settings.local.json', 'w'), indent=2)"
 	@echo "(folder TRUST is separate — it lives in the GLOBAL ~/.claude.json, not here:"
 	@echo " the first interactive '<cli> flow' asks once to TRUST this project — accept it.)"
 	@# Secret guard (.pre-commit-config.yaml): git hooks are not cloned, so activate per clone.
-	@# The hook reads a copy taken from the default branch (origin/HEAD) into the git directory,
-	@# so a checked-out branch cannot redefine what runs on commit. Re-run after it changes.
-	@if ! command -v pre-commit >/dev/null 2>&1; then \
-	  echo "pre-commit not found: pipx install pre-commit==4.7.0, then re-run make setup"; \
-	else d=$$(git rev-parse --path-format=absolute --git-common-dir) && \
-	  git show origin/HEAD:.pre-commit-config.yaml > "$$d/secret-guard.yaml" && \
-	  printf '#!/bin/sh\nexec pre-commit run --config "%s/secret-guard.yaml" --hook-stage pre-commit\n' "$$d" \
-	    > "$$d/hooks/pre-commit" && chmod +x "$$d/hooks/pre-commit" && \
-	  echo "secret guard active (reviewed copy: $$d/secret-guard.yaml)"; fi
+	@# Runs the default branch's reviewed activation script; the hook it writes reads copies in
+	@# the git directory, so a checked-out branch cannot redefine what runs on commit.
+	@if command -v pre-commit >/dev/null 2>&1; then git show origin/HEAD:.secret-guard/activate.sh | sh; \
+	else echo "pre-commit not found: pipx install pre-commit==4.7.0, then re-run make setup"; fi
 
 # --- install every tool `flow` needs (issue #207) --------------------------
 # Delegates to scripts/bootstrap-tools.sh: harness-universal tools (git, gh, a
