@@ -447,17 +447,31 @@ def _in_work_tree(path: Path) -> bool:
 
 
 def _crosses_work_tree(path: Path) -> bool:
-    """True when ``path`` passes through a work tree a branch controls: any existing prefix of
-    it as written (a symlink or a directory crossed with ``..``) lies in a work tree, or its
-    resolved target does."""
-    prefix = Path(path.anchor)
-    for part in path.parts[1:]:
-        prefix = prefix / part
-        if prefix.is_symlink() and _in_work_tree(prefix.parent):
+    """True when ``path`` passes through a work tree a branch controls. Symlinks are followed
+    one hop at a time, as activation's ``chain_unsafe`` does: the place each link sits, every
+    directory crossed (also on the way to ``..``) and the final target are checked, so a chain
+    such as ``outside -> checkout/link -> outside`` is caught. Unfollowable: treated as inside."""
+    p = path if path.is_absolute() else Path.cwd() / path
+    for _ in range(40):
+        prefix, link, rest = Path(p.anchor), None, ()
+        parts = p.parts[1:]
+        for i, part in enumerate(parts):
+            prefix = prefix / part
+            if prefix.is_symlink():
+                if _in_work_tree(prefix.parent):
+                    return True
+                link, rest = prefix, parts[i + 1:]
+                break
+            if part != ".." and prefix.is_dir() and _in_work_tree(prefix):
+                return True
+        if link is None:
+            return _in_work_tree(p.resolve())
+        try:
+            target = Path(os.readlink(link))
+        except OSError:
             return True
-        if part != ".." and prefix.is_dir() and not prefix.is_symlink() and _in_work_tree(prefix):
-            return True
-    return _in_work_tree(path.resolve())
+        p = (target if target.is_absolute() else link.parent / target).joinpath(*rest)
+    return True
 
 
 def _repo_worktrees(repo: Path) -> list[Path]:

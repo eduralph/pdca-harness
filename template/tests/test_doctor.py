@@ -656,3 +656,17 @@ class SecretGuard(unittest.TestCase):
             status, hint = self._status()
         self.assertEqual(status, doctor.WARN)
         self.assertIn("cannot verify", hint)
+
+    def test_an_outside_link_through_a_checkout_link_back_outside_warns(self) -> None:
+        self._activate()
+        ext = self.tmp / "ext-hooks"
+        ext.mkdir()
+        (ext / "pre-commit").write_text(f"#!/bin/sh\n{doctor._GUARD_REQ}\n", encoding="utf-8")
+        (ext / "pre-commit").chmod(0o755)
+        (self.clone / "pivot").symlink_to(ext)            # checkout link, points back outside
+        alias = self.tmp / "alias"
+        alias.symlink_to(self.clone / "pivot")           # outside link to the checkout link
+        _git(self.clone, "config", "core.hooksPath", str(alias))
+        self.assertIn("passes through a work tree", self._status()[1])
+        _git(self.clone, "config", "core.hooksPath", str(ext))
+        self.assertEqual(self._status(), (doctor.OK, ""))   # the direct path stays fine
