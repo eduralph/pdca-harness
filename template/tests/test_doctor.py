@@ -538,7 +538,7 @@ class SecretGuard(unittest.TestCase):
         inside = self.clone / "hooks-in-tree"
         inside.mkdir()
         _git(self.clone, "config", "core.hooksPath", str(inside))
-        self.assertIn("inside a work tree", self._status()[1])
+        self.assertIn("passes through a work tree", self._status()[1])
         ext = self.tmp / "ext-hooks"
         ext.mkdir()
         (ext / "pre-commit").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -566,3 +566,55 @@ class SecretGuard(unittest.TestCase):
             doctor.run(cfg)
         self.assertIn("secret guard (clone)", out.getvalue())
         self.assertIn("not active", out.getvalue())
+
+    def test_an_intermediate_checkout_symlink_in_hooks_path_warns(self) -> None:
+        self._activate()
+        ext = self.tmp / "ext-hooks"
+        ext.mkdir()
+        (ext / "pre-commit").write_text(f"#!/bin/sh\n{doctor._GUARD_REQ}\n", encoding="utf-8")
+        (ext / "pre-commit").chmod(0o755)
+        (self.clone / "link").symlink_to(ext)          # tracked-looking link in the checkout
+        _git(self.clone, "config", "core.hooksPath", str(self.clone / "link"))
+        self.assertIn("passes through a work tree", self._status()[1])
+
+    def test_dot_dot_through_a_checkout_directory_warns(self) -> None:
+        self._activate()
+        ext = self.tmp / "ext-hooks"
+        ext.mkdir()
+        (ext / "pre-commit").write_text(f"#!/bin/sh\n{doctor._GUARD_REQ}\n", encoding="utf-8")
+        (ext / "pre-commit").chmod(0o755)
+        (self.clone / "pivot").mkdir()
+        _git(self.clone, "config", "core.hooksPath", f"{self.clone}/pivot/../../ext-hooks")
+        self.assertIn("passes through a work tree", self._status()[1])
+
+    def test_a_worktree_hooks_path_override_warns(self) -> None:
+        self._activate()
+        _git(self.clone, "config", "extensions.worktreeConfig", "true")
+        wt = self.tmp / "linked"
+        _git(self.clone, "worktree", "add", "-q", str(wt), "-b", "linked")
+        _git(wt, "config", "--worktree", "core.hooksPath", "")
+        self.assertIn("set their own core.hooksPath", self._status()[1])
+
+    def test_an_unused_default_hooks_symlink_is_ignored_with_external_hooks_path(self) -> None:
+        self._activate()
+        ext = self.tmp / "ext-hooks"
+        ext.mkdir()
+        (ext / "pre-commit").write_text(f"#!/bin/sh\n{doctor._GUARD_REQ}\n", encoding="utf-8")
+        (ext / "pre-commit").chmod(0o755)
+        _git(self.clone, "config", "core.hooksPath", str(ext))
+        moved = self.tmp / "old-hooks"
+        (self.d / "hooks").rename(moved)
+        (self.d / "hooks").symlink_to(moved)
+        self.assertEqual(self._status(), (doctor.OK, ""))
+
+    def test_a_moved_remote_default_branch_warns(self) -> None:
+        self._activate()
+        (self.up / "other").write_text("x\n", encoding="utf-8")
+        _git(self.up, "add", "other")
+        _git(self.up, "commit", "-qm", "moved on")     # not fetched by the clone
+        self.assertIn("moved since the last fetch", self._status()[1])
+
+    def test_an_unreachable_remote_cannot_confirm(self) -> None:
+        self._activate()
+        _git(self.clone, "remote", "set-url", "origin", str(self.tmp / "gone"))
+        self.assertIn("could not be asked", self._status()[1])

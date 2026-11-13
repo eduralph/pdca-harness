@@ -446,6 +446,49 @@ def _in_work_tree(path: Path) -> bool:
     return (_git_raw(target, "rev-parse", "--is-inside-work-tree", env=env) or "").strip() == "true"
 
 
+def _crosses_work_tree(path: Path) -> bool:
+    """True when ``path`` passes through a work tree a branch controls: any existing prefix of
+    it as written (a symlink or a directory crossed with ``..``) lies in a work tree, or its
+    resolved target does."""
+    prefix = Path(path.anchor)
+    for part in path.parts[1:]:
+        prefix = prefix / part
+        if prefix.is_symlink() and _in_work_tree(prefix.parent):
+            return True
+        if part != ".." and prefix.is_dir() and not prefix.is_symlink() and _in_work_tree(prefix):
+            return True
+    return _in_work_tree(path.resolve())
+
+
+def _worktree_overrides(repo: Path) -> list[str]:
+    """Worktrees that set their own core.hooksPath (extensions.worktreeConfig): Git there
+    ignores the hook activation installed. Activation refuses these; doctor reports them."""
+    if (_git_raw(repo, "config", "--bool", "extensions.worktreeConfig") or "").strip() != "true":
+        return []
+    listing = _git_raw(repo, "worktree", "list", "--porcelain") or ""
+    found = []
+    for block in listing.split("\n\n"):
+        lines = block.splitlines()
+        path = next((ln[9:] for ln in lines if ln.startswith("worktree ")), None)
+        if path and "bare" not in lines and \
+                _git_raw(Path(path), "config", "--worktree", "--get", "core.hooksPath") is not None:
+            found.append(path)
+    return found
+
+
+def _remote_head_current(repo: Path, rev: str) -> bool | None:
+    """Whether ``rev`` (the cached refs/remotes/origin/HEAD) is still the remote's HEAD:
+    True/False, or None when the remote cannot be asked (offline, no access)."""
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "ls-remote", "origin", "HEAD"],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    return r.stdout.split()[0] == rev
+
+
 def _dry_activation(repo: Path, rev: str, script: str) -> tuple[Path, Path] | str:
     """Run the reviewed ``script`` in a throwaway shared copy of ``repo`` at ``rev`` (default
     hooks, no global or system git config). Returns ``(tmpdir, git_dir)`` holding the
@@ -487,6 +530,11 @@ def secret_guard_status(repo: Path) -> tuple[str, str] | None:
         return None
     d = Path(common.strip())
     again = f"run there: {GUARD_ACTIVATE}"
+    overrides = _worktree_overrides(repo)
+    if overrides:
+        return WARN, (f"worktrees set their own core.hooksPath ({', '.join(overrides)}), so Git "
+                      "there skips the guard; unset it in each (git -C <worktree> config "
+                      f"--worktree --unset core.hooksPath), then {again}")
 
     # Where Git looks for the hook, and nothing a branch could replace on the way.
     hooks_set = _git_raw(repo, "config", "--get", "core.hooksPath") is not None
@@ -496,17 +544,19 @@ def secret_guard_status(repo: Path) -> tuple[str, str] | None:
             return WARN, ("core.hooksPath is set but empty, so Git runs no hooks; unset it "
                           f"(git config --unset core.hooksPath), then {again}")
         hp = Path(hooks_path)
-        if not hp.is_absolute() or hp.is_symlink() or _in_work_tree(hp) or \
-                (hp / "pre-commit").is_symlink():
-            return WARN, (f"core.hooksPath ({hooks_path}) is relative, a symlink, or inside a "
-                          f"work tree, where a branch could replace the hook; {again}")
+        if not hp.is_absolute() or _crosses_work_tree(hp) or \
+                _crosses_work_tree(hp / "pre-commit"):
+            return WARN, (f"core.hooksPath ({hooks_path}) is relative or passes through a work "
+                          f"tree, where a branch could replace the hook; {again}")
         hook_file = hp / "pre-commit"
         hook = (_read_bytes(hook_file) or b"").decode(errors="replace")
         wired = _GUARD_REQ in hook.splitlines()
     else:
         hook_file = d / "hooks" / "pre-commit"
         wired = hook_file.is_file()
-    links = [n for n in (*_GUARD_ARTIFACTS, "hooks", "hooks/pre-commit") if (d / n).is_symlink()]
+    # .git/hooks matters only while Git uses it (no core.hooksPath).
+    watched = (*_GUARD_ARTIFACTS, *(() if hooks_set else ("hooks", "hooks/pre-commit")))
+    links = [n for n in watched if (d / n).is_symlink()]
     if links:
         return WARN, f"{', '.join(links)} in {d} is a symlink; {again}"
     if not (wired and os.access(hook_file, os.X_OK) and os.access(d / "secret-guard-run", os.X_OK)):
@@ -528,6 +578,13 @@ def secret_guard_status(repo: Path) -> tuple[str, str] | None:
     if differ:
         return WARN, (f"stale or modified ({', '.join(differ)} differ from what the default "
                       f"branch's script writes); {again}")
+    current = _remote_head_current(repo, rev)
+    if current is None:
+        return WARN, ("matches the last fetched default branch, but the remote could not be "
+                      "asked (git ls-remote origin HEAD) to confirm it is still current")
+    if not current:
+        return WARN, ("the remote default branch moved since the last fetch; run there: "
+                      f"git fetch origin, then re-run doctor (and {GUARD_ACTIVATE} if it warns)")
     return OK, ""
 
 
