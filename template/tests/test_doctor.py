@@ -415,3 +415,99 @@ class SandboxDeps(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _git(cwd: Path, *args: str) -> None:
+    import subprocess
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main",
+                    "-C", str(cwd), *args], check=True, capture_output=True)
+
+
+class SecretGuard(unittest.TestCase):
+    """The "secret guard" rows: reported per clone the harness commits into, from the
+    default branch's reviewed copies (no pre-commit needed; activation is simulated)."""
+
+    CONFIG = "repos: []\n"
+    SCRIPT = "#!/bin/sh\nmark=\"# secret-guard managed hook v10\"\n"
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        up = self.tmp / "up"
+        up.mkdir()
+        _git(up, "init", "-q")
+        (up / ".pre-commit-config.yaml").write_text(self.CONFIG, encoding="utf-8")
+        (up / ".secret-guard").mkdir()
+        (up / ".secret-guard" / "activate.sh").write_text(self.SCRIPT, encoding="utf-8")
+        _git(up, "add", ".")
+        _git(up, "commit", "-qm", "guard")
+        self.clone = self.tmp / "clone"
+        _git(self.tmp, "clone", "-q", str(up), str(self.clone))
+        self.d = self.clone / ".git"
+
+    def _activate(self, *, version: str = "v10", config: str | None = None,
+                  pre_commit: str = "/bin/sh") -> None:
+        hooks = self.d / "hooks"
+        hooks.mkdir(exist_ok=True)
+        (hooks / "pre-commit").write_text(
+            f"#!/bin/sh\n# secret-guard managed hook {version}\nexec true\n", encoding="utf-8")
+        runner = self.d / "secret-guard-run"
+        runner.write_text("#!/bin/sh\n", encoding="utf-8")
+        runner.chmod(0o755)
+        (self.d / "secret-guard.yaml").write_text(self.CONFIG if config is None else config,
+                                                  encoding="utf-8")
+        (self.d / "secret-guard-pre-commit").write_text(pre_commit + "\n", encoding="utf-8")
+
+    def test_a_repo_without_the_guard_gets_no_row(self) -> None:
+        plain = self.tmp / "plain"
+        plain.mkdir()
+        _git(plain, "init", "-q")
+        self.assertIsNone(doctor.secret_guard_status(plain))
+
+    def test_shipped_but_not_activated_warns_with_the_command(self) -> None:
+        status, hint = doctor.secret_guard_status(self.clone)
+        self.assertEqual(status, doctor.WARN)
+        self.assertIn("not active", hint)
+        self.assertIn(doctor.GUARD_ACTIVATE, hint)
+
+    def test_activated_and_current_is_ok(self) -> None:
+        self._activate()
+        self.assertEqual(doctor.secret_guard_status(self.clone), (doctor.OK, ""))
+
+    def test_a_stale_config_copy_warns(self) -> None:
+        self._activate(config="repos: [old]\n")
+        status, hint = doctor.secret_guard_status(self.clone)
+        self.assertEqual(status, doctor.WARN)
+        self.assertIn("stale", hint)
+
+    def test_an_older_hook_version_warns(self) -> None:
+        self._activate(version="v8")
+        status, hint = doctor.secret_guard_status(self.clone)
+        self.assertEqual(status, doctor.WARN)
+        self.assertIn("stale", hint)
+
+    def test_a_vanished_pre_commit_warns(self) -> None:
+        self._activate(pre_commit=str(self.tmp / "gone" / "pre-commit"))
+        status, hint = doctor.secret_guard_status(self.clone)
+        self.assertEqual(status, doctor.WARN)
+        self.assertIn("pipx install pre-commit", hint)
+
+    def test_a_hooks_path_hook_must_carry_the_runner_line(self) -> None:
+        self._activate()
+        ext = self.tmp / "ext-hooks"
+        ext.mkdir()
+        _git(self.clone, "config", "core.hooksPath", str(ext))
+        (ext / "pre-commit").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        self.assertEqual(doctor.secret_guard_status(self.clone)[0], doctor.WARN)
+        (ext / "pre-commit").write_text(f"#!/bin/sh\n{doctor._GUARD_REQ}\n", encoding="utf-8")
+        self.assertEqual(doctor.secret_guard_status(self.clone), (doctor.OK, ""))
+
+    def test_doctor_reports_each_target_checkout(self) -> None:
+        root = self.tmp / "instance"
+        root.mkdir()
+        cfg = _load(root, f'[publisher.checkouts]\n"org/clone" = "{self.clone}"\n')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            doctor.run(cfg)
+        self.assertIn("secret guard (clone)", out.getvalue())
+        self.assertIn("not active", out.getvalue())

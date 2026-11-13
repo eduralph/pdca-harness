@@ -37,6 +37,7 @@ idempotent — the doctor never installs or changes anything.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -409,6 +410,62 @@ def failing_dependencies(brief_path, cfg) -> list[str]:
     return failed
 
 
+# The secret guard (.secret-guard/activate.sh, .pre-commit-config.yaml). The harness commits
+# into the instance repo (records, reverts) and into each target checkout (publish), as the
+# user running the driver, so the guard only protects those commits where that user activated
+# it. Activation reads the default branch's reviewed copies; doctor reports a clone where it
+# is missing or no longer matches the default branch.
+GUARD_SCRIPT = ".secret-guard/activate.sh"
+GUARD_ACTIVATE = ('s=$(PATH=/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin git show '
+                  'refs/remotes/origin/HEAD:.secret-guard/activate.sh) && /bin/sh -c "$s" activate')
+_GUARD_REQ = 'exec "$(git rev-parse --path-format=absolute --git-common-dir)/secret-guard-run" "$@"'
+_GUARD_MARK = re.compile(r"^# secret-guard managed hook (v\d+)$", re.M)  # in the written hook
+_GUARD_VERSION = re.compile(r"secret-guard managed hook (v\d+)")         # in activate.sh's source
+
+
+def _git_raw(repo: Path, *args: str) -> str | None:
+    """``git -C repo args`` stdout, unstripped (file contents compare byte for byte), or None."""
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    return r.stdout if r.returncode == 0 else None
+
+
+def _read(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def secret_guard_status(repo: Path) -> tuple[str, str] | None:
+    """``(status, hint)`` for the secret guard in the clone at ``repo``; None when ``repo``
+    is not a git checkout or its default branch ships no guard (nothing to activate)."""
+    common = _git_raw(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    script = _git_raw(repo, "show", f"refs/remotes/origin/HEAD:{GUARD_SCRIPT}")
+    if common is None or script is None:
+        return None
+    d = Path(common.strip())
+    reviewed = _git_raw(repo, "show", "refs/remotes/origin/HEAD:.pre-commit-config.yaml")
+    hooks_path = (_git_raw(repo, "config", "--path", "core.hooksPath") or "").strip()
+    runner = d / "secret-guard-run"
+    if hooks_path:
+        hook = _read(Path(hooks_path) / "pre-commit") or ""
+        wired = _GUARD_REQ in hook.splitlines()
+    else:
+        hook = _read(d / "hooks" / "pre-commit") or ""
+        wired = _GUARD_MARK.search(hook) is not None
+    if not (wired and os.access(runner, os.X_OK)):
+        return WARN, f"not active in this clone; run there: {GUARD_ACTIVATE}"
+    recorded = (_read(d / "secret-guard-pre-commit") or "").strip()
+    if not recorded or not os.access(recorded, os.X_OK):
+        return WARN, (f"the pre-commit it recorded ({recorded or 'none'}) is gone; "
+                      f"pipx install pre-commit==4.7.0, then run there: {GUARD_ACTIVATE}")
+    installed, expected = _GUARD_MARK.search(hook), _GUARD_VERSION.search(script)
+    stale_hook = not hooks_path and expected and installed and installed[1] != expected[1]
+    if _read(d / "secret-guard.yaml") != reviewed or stale_hook:
+        return WARN, f"stale: the default branch changed the guard; run there: {GUARD_ACTIVATE}"
+    return OK, ""
+
+
 def run(cfg: Config, *, strict: bool = False) -> int:
     r = _Report()
 
@@ -444,6 +501,19 @@ def run(cfg: Config, *, strict: bool = False) -> int:
         r.row(OK, f"bundle root writable ({cfg.bundle_root.name}/)")
     except OSError as exc:
         r.row(MISSING, "bundle root writable", str(exc), required=True)
+
+    if _have("git"):
+        from . import sweep  # lazy: doctor stays import-light
+        seen: set[Path] = set()
+        for repo in [cfg.root, *sweep.target_checkouts(cfg)]:
+            repo = repo.resolve()
+            if repo in seen or not repo.is_dir():
+                continue
+            seen.add(repo)
+            status = secret_guard_status(repo)
+            if status is not None:
+                label = "secret guard" if repo == cfg.root.resolve() else f"secret guard ({repo.name})"
+                r.row(status[0], label, status[1])
 
     print()
     print("== model leaves (from pdca.toml) ==")
