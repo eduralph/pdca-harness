@@ -670,3 +670,16 @@ class SecretGuard(unittest.TestCase):
         self.assertIn("passes through a work tree", self._status()[1])
         _git(self.clone, "config", "core.hooksPath", str(ext))
         self.assertEqual(self._status(), (doctor.OK, ""))   # the direct path stays fine
+
+    def test_an_approved_legacy_hook_must_stay_executable(self) -> None:
+        import subprocess
+        legacy = self.d / "hooks" / "pre-commit.legacy"
+        legacy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        legacy.chmod(0o755)
+        script = (self.up / ".secret-guard" / "activate.sh").read_text(encoding="utf-8")
+        r = subprocess.run(["/bin/sh", "-c", script, "activate", "--approve-legacy"], cwd=self.clone,
+                           capture_output=True, text=True, env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._status(), (doctor.OK, ""))
+        legacy.chmod(0o644)
+        self.assertIn("not executable", self._status()[1])

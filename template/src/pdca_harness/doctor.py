@@ -637,6 +637,9 @@ def secret_guard_status(repo: Path) -> tuple[str, str] | None:
             return WARN, ("hooks/pre-commit.legacy is not approved as it is now, so every commit "
                           f"stops before the guard; review it, then run there: {GUARD_ACTIVATE} "
                           "--approve-legacy (or delete it)")
+        if not os.access(legacy, os.X_OK):
+            return WARN, ("hooks/pre-commit.legacy is approved but not executable, so every commit "
+                          "fails before the guard; chmod +x it (or delete it), then re-run doctor")
     dry = _dry_activation(repo, rev, script)
     if isinstance(dry, str):
         return WARN, f"cannot verify (a dry activation failed: {dry}); {again}"
