@@ -39,7 +39,7 @@ open('.claude/settings.local.json', 'w'), indent=2)"
 	@# Secret guard (.pre-commit-config.yaml): git hooks are not cloned, so activate per clone.
 	@# Runs the default branch's reviewed activation script; the hook it writes reads copies in
 	@# the git directory, so a checked-out branch cannot redefine what runs on commit.
-	@s=$$(git show origin/HEAD:.secret-guard/activate.sh) && sh -c "$$s" activate || \
+	@s=$$(git show refs/remotes/origin/HEAD:.secret-guard/activate.sh) && sh -c "$$s" activate || \
 	{ echo "secret guard NOT active: needs pre-commit (pipx install pre-commit==4.7.0) and origin/HEAD, then re-run make setup" >&2; exit 1; }
 
 # --- install every tool `flow` needs (issue #207) --------------------------
