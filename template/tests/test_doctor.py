@@ -449,8 +449,10 @@ class SecretGuard(unittest.TestCase):
                   pre_commit: str = "/bin/sh") -> None:
         hooks = self.d / "hooks"
         hooks.mkdir(exist_ok=True)
-        (hooks / "pre-commit").write_text(
-            f"#!/bin/sh\n# secret-guard managed hook {version}\nexec true\n", encoding="utf-8")
+        hook = hooks / "pre-commit"
+        hook.write_text(f"#!/bin/sh\n# secret-guard managed hook {version}\n"
+                        f"{doctor._GUARD_EXEC}\n", encoding="utf-8")
+        hook.chmod(0o755)
         runner = self.d / "secret-guard-run"
         runner.write_text("#!/bin/sh\n", encoding="utf-8")
         runner.chmod(0o755)
@@ -498,9 +500,35 @@ class SecretGuard(unittest.TestCase):
         ext.mkdir()
         _git(self.clone, "config", "core.hooksPath", str(ext))
         (ext / "pre-commit").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (ext / "pre-commit").chmod(0o755)
         self.assertEqual(doctor.secret_guard_status(self.clone)[0], doctor.WARN)
         (ext / "pre-commit").write_text(f"#!/bin/sh\n{doctor._GUARD_REQ}\n", encoding="utf-8")
         self.assertEqual(doctor.secret_guard_status(self.clone), (doctor.OK, ""))
+
+    def test_a_non_executable_hook_is_not_active(self) -> None:
+        self._activate()
+        (self.d / "hooks" / "pre-commit").chmod(0o644)
+        status, hint = doctor.secret_guard_status(self.clone)
+        self.assertEqual(status, doctor.WARN)
+        self.assertIn("not active", hint)
+
+    def test_a_marker_without_the_runner_call_is_not_active(self) -> None:
+        self._activate()
+        hook = self.d / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\n# secret-guard managed hook v10\nexit 0\n", encoding="utf-8")
+        self.assertIn("not active", doctor.secret_guard_status(self.clone)[1])
+
+    def test_a_runner_older_than_the_script_change_is_stale_with_hooks_path(self) -> None:
+        self._activate()
+        ext = self.tmp / "ext-hooks"
+        ext.mkdir()
+        (ext / "pre-commit").write_text(f"#!/bin/sh\n{doctor._GUARD_REQ}\n", encoding="utf-8")
+        (ext / "pre-commit").chmod(0o755)
+        _git(self.clone, "config", "core.hooksPath", str(ext))
+        os.utime(self.d / "secret-guard-run", (1_000_000_000, 1_000_000_000))  # 2001
+        status, hint = doctor.secret_guard_status(self.clone)
+        self.assertEqual(status, doctor.WARN)
+        self.assertIn("stale", hint)
 
     def test_doctor_reports_each_target_checkout(self) -> None:
         root = self.tmp / "instance"
