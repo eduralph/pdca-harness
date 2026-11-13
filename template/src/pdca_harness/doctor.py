@@ -37,7 +37,6 @@ idempotent — the doctor never installs or changes anything.
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -413,75 +412,122 @@ def failing_dependencies(brief_path, cfg) -> list[str]:
 # The secret guard (.secret-guard/activate.sh, .pre-commit-config.yaml). The harness commits
 # into the instance repo (records, reverts) and into each target checkout (publish), as the
 # user running the driver, so the guard only protects those commits where that user activated
-# it. Activation reads the default branch's reviewed copies; doctor reports a clone where it
-# is missing or no longer matches the default branch.
+# it. Doctor does not re-implement the guard's rules: it runs the default branch's reviewed
+# activation script in a throwaway shared copy of the clone and compares every artifact it
+# writes, byte for byte, with the clone's own, so drift, a stale version or a modified hook,
+# runner or policy all show up as a difference.
 GUARD_SCRIPT = ".secret-guard/activate.sh"
 GUARD_ACTIVATE = ('s=$(PATH=/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin git show '
                   'refs/remotes/origin/HEAD:.secret-guard/activate.sh) && /bin/sh -c "$s" activate')
 _GUARD_REQ = 'exec "$(git rev-parse --path-format=absolute --git-common-dir)/secret-guard-run" "$@"'
-_GUARD_EXEC = 'exec "$d/secret-guard-run" "$@"'   # the managed hook's last line
-_GUARD_MARK = re.compile(r"^# secret-guard managed hook (v\d+)$", re.M)  # in the written hook
-_GUARD_VERSION = re.compile(r"secret-guard managed hook (v\d+)")         # in activate.sh's source
-# The runner's fixed body: the quoted heredoc that follows the runner's header in activate.sh.
-_GUARD_RUNNER_BODY = re.compile(r"Secret guard runner.*?cat <<'EOF'\n(.*?\n)EOF\n", re.S)
+# What activation writes into the git directory (the hook only without core.hooksPath).
+_GUARD_ARTIFACTS = ("secret-guard-run", "secret-guard.yaml", "secret-guard-gitleaks.toml",
+                    "secret-guard-pre-commit")
+_GIT_CLEAN_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
 
 
-def _git_raw(repo: Path, *args: str) -> str | None:
-    """``git -C repo args`` stdout, unstripped (file contents compare byte for byte), or None."""
-    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+def _git_raw(repo: Path, *args: str, env: dict | None = None) -> str | None:
+    """``git -C repo args`` stdout, unstripped, or None when git fails."""
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, env=env)
     return r.stdout if r.returncode == 0 else None
 
 
-def _read(path: Path) -> str | None:
+def _read_bytes(path: Path) -> bytes | None:
     try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        return path.read_bytes()
+    except OSError:
         return None
+
+
+def _in_work_tree(path: Path) -> bool:
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_CLEAN_ENV}
+    target = path if path.is_dir() else path.parent
+    return (_git_raw(target, "rev-parse", "--is-inside-work-tree", env=env) or "").strip() == "true"
+
+
+def _dry_activation(repo: Path, rev: str, script: str) -> tuple[Path, Path] | str:
+    """Run the reviewed ``script`` in a throwaway shared copy of ``repo`` at ``rev`` (default
+    hooks, no global or system git config). Returns ``(tmpdir, git_dir)`` holding the
+    expected artifacts, or the failure text."""
+    tmp = Path(tempfile.mkdtemp(prefix="pdca-guard-"))
+    copy = tmp / "copy"
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_CLEAN_ENV}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", SECRET_GUARD_REF="HEAD")
+    steps = (["git", "clone", "-q", "--shared", "--no-checkout", str(repo), str(copy)],
+             ["git", "-C", str(copy), "update-ref", "--no-deref", "HEAD", rev])
+    for argv in steps:
+        r = subprocess.run(argv, capture_output=True, text=True, env=env)
+        if r.returncode != 0:
+            shutil.rmtree(tmp, ignore_errors=True)
+            return (r.stderr or "git failed").strip()
+    r = subprocess.run(["/bin/sh", "-c", script, "activate"], cwd=copy, capture_output=True,
+                       text=True, env=env)
+    if r.returncode != 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return (r.stderr or r.stdout or "activation failed").strip().splitlines()[-1]
+    return tmp, copy / ".git"
 
 
 def secret_guard_status(repo: Path) -> tuple[str, str] | None:
-    """``(status, hint)`` for the secret guard in the clone at ``repo``; None when ``repo``
-    is not a git checkout or its default branch ships no guard (nothing to activate)."""
+    """``(status, hint)`` for the secret guard in the clone at ``repo``; None when ``repo`` is
+    not a git checkout or ships no guard (nothing to activate)."""
     common = _git_raw(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    script = _git_raw(repo, "show", f"refs/remotes/origin/HEAD:{GUARD_SCRIPT}")
-    if common is None or script is None:
+    if common is None:
+        return None
+    rev = (_git_raw(repo, "rev-parse", "--verify", "--quiet",
+                    "refs/remotes/origin/HEAD^{commit}") or "").strip()
+    if not rev:
+        if _git_raw(repo, "cat-file", "-e", f"HEAD:{GUARD_SCRIPT}") is not None:
+            return WARN, ("cannot read the default branch (refs/remotes/origin/HEAD); run there: "
+                          "git remote set-head origin -a, then re-run doctor")
+        return None
+    script = _git_raw(repo, "show", f"{rev}:{GUARD_SCRIPT}")
+    if script is None:
         return None
     d = Path(common.strip())
-    reviewed = _git_raw(repo, "show", "refs/remotes/origin/HEAD:.pre-commit-config.yaml")
+    again = f"run there: {GUARD_ACTIVATE}"
+
+    # Where Git looks for the hook, and nothing a branch could replace on the way.
     hooks_set = _git_raw(repo, "config", "--get", "core.hooksPath") is not None
     hooks_path = (_git_raw(repo, "config", "--path", "core.hooksPath") or "").strip()
-    if hooks_set and not hooks_path:
-        return WARN, ("core.hooksPath is set but empty, so Git runs no hooks; unset it "
-                      f"(git config --unset core.hooksPath), then run there: {GUARD_ACTIVATE}")
-    runner = d / "secret-guard-run"
-    # Git runs only an executable hook, and the hook must hand over to the runner.
-    hook_file = Path(hooks_path) / "pre-commit" if hooks_path else d / "hooks" / "pre-commit"
-    hook = _read(hook_file) or ""
-    lines = hook.splitlines()
-    if hooks_path:
-        wired = _GUARD_REQ in lines
+    if hooks_set:
+        if not hooks_path:
+            return WARN, ("core.hooksPath is set but empty, so Git runs no hooks; unset it "
+                          f"(git config --unset core.hooksPath), then {again}")
+        hp = Path(hooks_path)
+        if not hp.is_absolute() or hp.is_symlink() or _in_work_tree(hp) or \
+                (hp / "pre-commit").is_symlink():
+            return WARN, (f"core.hooksPath ({hooks_path}) is relative, a symlink, or inside a "
+                          f"work tree, where a branch could replace the hook; {again}")
+        hook_file = hp / "pre-commit"
+        hook = (_read_bytes(hook_file) or b"").decode(errors="replace")
+        wired = _GUARD_REQ in hook.splitlines()
     else:
-        wired = _GUARD_MARK.search(hook) is not None and _GUARD_EXEC in lines
-    if not (wired and os.access(hook_file, os.X_OK) and os.access(runner, os.X_OK)):
-        return WARN, f"not active in this clone; run there: {GUARD_ACTIVATE}"
-    recorded = (_read(d / "secret-guard-pre-commit") or "").strip()
-    if not recorded or not os.access(recorded, os.X_OK):
-        return WARN, (f"the pre-commit it recorded ({recorded or 'none'}) is gone; "
-                      f"pipx install pre-commit==4.7.0, then run there: {GUARD_ACTIVATE}")
-    installed, expected = _GUARD_MARK.search(hook), _GUARD_VERSION.search(script)
-    stale_hook = not hooks_path and expected and installed and installed[1] != expected[1]
-    # The runner must carry the body the default branch's script writes (content, not
-    # timestamps: a merged older commit or a touched file says nothing about provenance).
-    body = _GUARD_RUNNER_BODY.search(script)
-    if body is None:
-        if hooks_path:  # no hook version to fall back on in this mode: cannot vouch for it
-            return WARN, ("cannot verify the runner against this activation script; "
-                          f"re-run there after the guard changes: {GUARD_ACTIVATE}")
-        stale_runner = False
-    else:
-        stale_runner = body[1] not in (_read(runner) or "")
-    if _read(d / "secret-guard.yaml") != reviewed or stale_hook or stale_runner:
-        return WARN, f"stale: the default branch changed the guard; run there: {GUARD_ACTIVATE}"
+        hook_file = d / "hooks" / "pre-commit"
+        wired = hook_file.is_file()
+    links = [n for n in (*_GUARD_ARTIFACTS, "hooks", "hooks/pre-commit") if (d / n).is_symlink()]
+    if links:
+        return WARN, f"{', '.join(links)} in {d} is a symlink; {again}"
+    if not (wired and os.access(hook_file, os.X_OK) and os.access(d / "secret-guard-run", os.X_OK)):
+        return WARN, f"not active in this clone; {again}"
+
+    # What the default branch's script writes, compared with what the clone has.
+    if shutil.which("pre-commit") is None:
+        return WARN, ("cannot verify: pre-commit is not on PATH "
+                      f"(pipx install pre-commit==4.7.0), then {again}")
+    dry = _dry_activation(repo, rev, script)
+    if isinstance(dry, str):
+        return WARN, f"cannot verify (a dry activation failed: {dry}); {again}"
+    tmp, expected = dry
+    try:
+        names = [*_GUARD_ARTIFACTS] + ([] if hooks_set else ["hooks/pre-commit"])
+        differ = [n for n in names if _read_bytes(d / n) != _read_bytes(expected / n)]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if differ:
+        return WARN, (f"stale or modified ({', '.join(differ)} differ from what the default "
+                      f"branch's script writes); {again}")
     return OK, ""
 
 
