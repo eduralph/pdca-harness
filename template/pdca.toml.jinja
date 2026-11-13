@@ -923,6 +923,12 @@ argv = []
 # The built-in workspace section also WARNs when free disk space under the project root
 # drops below [doctor].min_free_gb GiB (issue #297 — quota exhaustion mid-gate produces
 # an arbitrary failing test name, misattributed to the patch). 0 disables the row.
+# It also WARNs, per clone the harness commits into (this repo and each target checkout),
+# when the secret guard that clone's default branch ships (.secret-guard/activate.sh) is not
+# active there, or any artifact it installed differs from what that script writes in a dry
+# run (stale, modified, symlinked); the hint is the activation command. The dry run needs
+# pre-commit on PATH. Run doctor as the user that runs the driver: hooks belong to that
+# user's clones.
 # [doctor]
 # min_free_gb = 10.0
 # Each cmd runs from the project root; exit 0 = OK. A row a brief's `External

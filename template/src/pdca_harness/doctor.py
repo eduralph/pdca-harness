@@ -409,6 +409,259 @@ def failing_dependencies(brief_path, cfg) -> list[str]:
     return failed
 
 
+# The secret guard (.secret-guard/activate.sh, .pre-commit-config.yaml). The harness commits
+# into the instance repo (records, reverts) and into each target checkout (publish), as the
+# user running the driver, so the guard only protects those commits where that user activated
+# it. Doctor does not re-implement the guard's rules: it runs the default branch's reviewed
+# activation script in a throwaway shared copy of the clone and compares every artifact it
+# writes, byte for byte, with the clone's own, so drift, a stale version or a modified hook,
+# runner or policy all show up as a difference.
+GUARD_SCRIPT = ".secret-guard/activate.sh"
+GUARD_ACTIVATE = ('s=$(PATH=/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin git show '
+                  'refs/remotes/origin/HEAD:.secret-guard/activate.sh) && /bin/sh -c "$s" activate')
+_GUARD_REQ = 'exec "$(git rev-parse --path-format=absolute --git-common-dir)/secret-guard-run" "$@"'
+# What activation writes into the git directory (the hook only without core.hooksPath).
+_GUARD_ARTIFACTS = ("secret-guard-run", "secret-guard.yaml", "secret-guard-gitleaks.toml",
+                    "secret-guard-pre-commit")
+_GIT_CLEAN_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
+
+
+def _git_raw(repo: Path, *args: str, env: dict | None = None) -> str | None:
+    """``git -C repo args`` stdout, unstripped, or None when git fails."""
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, env=env)
+    return r.stdout if r.returncode == 0 else None
+
+
+def _read_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _in_work_tree(path: Path) -> bool:
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_CLEAN_ENV}
+    target = path if path.is_dir() else path.parent
+    return (_git_raw(target, "rev-parse", "--is-inside-work-tree", env=env) or "").strip() == "true"
+
+
+def _crosses_work_tree(path: Path) -> bool:
+    """True when ``path`` passes through a work tree a branch controls. Symlinks are followed
+    one hop at a time, as activation's ``chain_unsafe`` does: the place each link sits, every
+    directory crossed (also on the way to ``..``) and the final target are checked, so a chain
+    such as ``outside -> checkout/link -> outside`` is caught. Unfollowable: treated as inside."""
+    p = path if path.is_absolute() else Path.cwd() / path
+    for _ in range(40):
+        prefix, link, rest = Path(p.anchor), None, ()
+        parts = p.parts[1:]
+        for i, part in enumerate(parts):
+            prefix = prefix / part
+            if prefix.is_symlink():
+                if _in_work_tree(prefix.parent):
+                    return True
+                link, rest = prefix, parts[i + 1:]
+                break
+            if part != ".." and prefix.is_dir() and _in_work_tree(prefix):
+                return True
+        if link is None:
+            return _in_work_tree(p.resolve())
+        try:
+            target = Path(os.readlink(link))
+        except OSError:
+            return True
+        p = (target if target.is_absolute() else link.parent / target).joinpath(*rest)
+    return True
+
+
+def _repo_worktrees(repo: Path) -> list[Path]:
+    """The physical paths of ``repo``'s worktrees (bare entries excluded)."""
+    listing = _git_raw(repo, "worktree", "list", "--porcelain") or ""
+    roots = []
+    for block in listing.split("\n\n"):
+        lines = block.splitlines()
+        path = next((ln[9:] for ln in lines if ln.startswith("worktree ")), None)
+        if path and "bare" not in lines:
+            roots.append(Path(path).resolve())
+    return roots
+
+
+def _in_repo_worktrees(path: Path, roots: list[Path], git_dir: Path) -> bool:
+    """``path`` (as written, each prefix, or resolved) lies in one of ``roots`` outside the
+    git directory: a checkout of this repository a branch can rewrite."""
+    def inside(p: Path) -> bool:
+        try:
+            real = p.resolve()
+        except OSError:
+            return True
+        if real == git_dir or git_dir in real.parents:
+            return False
+        return any(real == root or root in real.parents for root in roots)
+    prefix = Path(path.anchor)
+    for part in path.parts[1:]:
+        prefix = prefix / part
+        if prefix.is_symlink() and inside(prefix.parent):
+            return True
+    return inside(path)
+
+
+def _worktree_overrides(repo: Path) -> list[str]:
+    """Worktrees that set their own core.hooksPath (extensions.worktreeConfig): Git there
+    ignores the hook activation installed. Activation refuses these; doctor reports them."""
+    if (_git_raw(repo, "config", "--bool", "extensions.worktreeConfig") or "").strip() != "true":
+        return []
+    listing = _git_raw(repo, "worktree", "list", "--porcelain") or ""
+    found = []
+    for block in listing.split("\n\n"):
+        lines = block.splitlines()
+        path = next((ln[9:] for ln in lines if ln.startswith("worktree ")), None)
+        if path and "bare" not in lines and \
+                _git_raw(Path(path), "config", "--worktree", "--get", "core.hooksPath") is not None:
+            found.append(path)
+    return found
+
+
+def _remote_head_current(repo: Path, rev: str) -> bool | None:
+    """Whether ``rev`` (the cached refs/remotes/origin/HEAD) is still the remote's HEAD:
+    True/False, or None when the remote cannot be asked (offline, no access)."""
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "ls-remote", "origin", "HEAD"],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    return r.stdout.split()[0] == rev
+
+
+def _dry_activation(repo: Path, rev: str, script: str) -> tuple[Path, Path] | str:
+    """Run the reviewed ``script`` in a throwaway shared copy of ``repo`` at ``rev`` (default
+    hooks, no global or system git config). Returns ``(tmpdir, git_dir)`` holding the
+    expected artifacts, or the failure text."""
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="pdca-guard-"))
+    except OSError as exc:
+        return f"no temporary directory ({exc})"
+    copy = tmp / "copy"
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_CLEAN_ENV}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", SECRET_GUARD_REF="HEAD")
+    steps = (["git", "clone", "-q", "--shared", "--no-checkout", str(repo), str(copy)],
+             ["git", "-C", str(copy), "update-ref", "--no-deref", "HEAD", rev])
+    try:
+        for argv in steps:
+            r = subprocess.run(argv, capture_output=True, text=True, env=env)
+            if r.returncode != 0:
+                shutil.rmtree(tmp, ignore_errors=True)
+                return (r.stderr or "git failed").strip()
+        r = subprocess.run(["/bin/sh", "-c", script, "activate"], cwd=copy,
+                           capture_output=True, text=True, env=env)
+    except OSError as exc:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return str(exc)
+    if r.returncode != 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return (r.stderr or r.stdout or "activation failed").strip().splitlines()[-1]
+    return tmp, copy / ".git"
+
+
+def secret_guard_status(repo: Path) -> tuple[str, str] | None:
+    """``(status, hint)`` for the secret guard in the clone at ``repo``; None when ``repo`` is
+    not a git checkout or ships no guard (nothing to activate)."""
+    common = _git_raw(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if common is None:
+        return None
+    rev = (_git_raw(repo, "rev-parse", "--verify", "--quiet",
+                    "refs/remotes/origin/HEAD^{commit}") or "").strip()
+    if not rev:
+        if _git_raw(repo, "cat-file", "-e", f"HEAD:{GUARD_SCRIPT}") is not None:
+            return WARN, ("cannot read the default branch (refs/remotes/origin/HEAD); run there: "
+                          "git remote set-head origin -a, then re-run doctor")
+        return None
+    script = _git_raw(repo, "show", f"{rev}:{GUARD_SCRIPT}")
+    if script is None:
+        # No guard as last fetched; a remote that moved since may have added one.
+        if _remote_head_current(repo, rev) is False:
+            return WARN, ("the remote default branch moved since the last fetch and may ship the "
+                          "guard; run there: git fetch origin, then re-run doctor")
+        return None
+    d = Path(common.strip())
+    again = f"run there: {GUARD_ACTIVATE}"
+    overrides = _worktree_overrides(repo)
+    if overrides:
+        return WARN, (f"worktrees set their own core.hooksPath ({', '.join(overrides)}), so Git "
+                      "there skips the guard; unset it in each (git -C <worktree> config "
+                      f"--worktree --unset core.hooksPath), then {again}")
+
+    # Where Git looks for the hook, and nothing a branch could replace on the way.
+    hooks_set = _git_raw(repo, "config", "--get", "core.hooksPath") is not None
+    hooks_path = (_git_raw(repo, "config", "--path", "core.hooksPath") or "").strip()
+    if hooks_set:
+        if not hooks_path:
+            return WARN, ("core.hooksPath is set but empty, so Git runs no hooks; unset it "
+                          f"(git config --unset core.hooksPath), then {again}")
+        hp = Path(hooks_path)
+        if not hp.is_absolute() or _crosses_work_tree(hp) or \
+                _crosses_work_tree(hp / "pre-commit"):
+            return WARN, (f"core.hooksPath ({hooks_path}) is relative or passes through a work "
+                          f"tree, where a branch could replace the hook; {again}")
+        hook_file = hp / "pre-commit"
+        hook = (_read_bytes(hook_file) or b"").decode(errors="replace")
+        wired = _GUARD_REQ in hook.splitlines()
+    else:
+        hook_file = d / "hooks" / "pre-commit"
+        wired = hook_file.is_file()
+    # .git/hooks matters only while Git uses it (no core.hooksPath).
+    watched = (*_GUARD_ARTIFACTS, *(() if hooks_set else ("hooks", "hooks/pre-commit")))
+    links = [n for n in watched if (d / n).is_symlink()]
+    if links:
+        return WARN, f"{', '.join(links)} in {d} is a symlink; {again}"
+    if not (wired and os.access(hook_file, os.X_OK) and os.access(d / "secret-guard-run", os.X_OK)):
+        return WARN, f"not active in this clone; {again}"
+
+    # What the default branch's script writes, compared with what the clone has.
+    on_path = shutil.which("pre-commit")
+    if on_path is None:
+        return WARN, ("cannot verify: pre-commit is not on PATH "
+                      f"(pipx install pre-commit==4.7.0), then {again}")
+    roots, git_dir = _repo_worktrees(repo), d.resolve()
+    recorded = (_read_bytes(d / "secret-guard-pre-commit") or b"").decode(errors="replace").strip()
+    for which, exe in (("on PATH", on_path), ("recorded", recorded)):
+        if exe and _in_repo_worktrees(Path(exe), roots, git_dir):
+            return WARN, (f"the pre-commit {which} ({exe}) is in a checkout of this repository, "
+                          f"where a branch can replace it; put the pipx one first on PATH, then {again}")
+    legacy = d / "hooks" / "pre-commit.legacy"
+    if not hooks_set and (legacy.exists() or legacy.is_symlink()):
+        approved = (_read_bytes(d / "secret-guard-legacy.approved") or b"").decode().strip()
+        current = (_git_raw(repo, "hash-object", "--", str(legacy)) or "").strip()
+        if legacy.is_symlink() or not current or approved != current:
+            return WARN, ("hooks/pre-commit.legacy is not approved as it is now, so every commit "
+                          f"stops before the guard; review it, then run there: {GUARD_ACTIVATE} "
+                          "--approve-legacy (or delete it)")
+        if not os.access(legacy, os.X_OK):
+            return WARN, ("hooks/pre-commit.legacy is approved but not executable, so every commit "
+                          "fails before the guard; chmod +x it (or delete it), then re-run doctor")
+    dry = _dry_activation(repo, rev, script)
+    if isinstance(dry, str):
+        return WARN, f"cannot verify (a dry activation failed: {dry}); {again}"
+    tmp, expected = dry
+    try:
+        names = [*_GUARD_ARTIFACTS] + ([] if hooks_set else ["hooks/pre-commit"])
+        differ = [n for n in names if _read_bytes(d / n) != _read_bytes(expected / n)]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if differ:
+        return WARN, (f"stale or modified ({', '.join(differ)} differ from what the default "
+                      f"branch's script writes); {again}")
+    current = _remote_head_current(repo, rev)
+    if current is None:
+        return WARN, ("matches the last fetched default branch, but the remote could not be "
+                      "asked (git ls-remote origin HEAD) to confirm it is still current")
+    if not current:
+        return WARN, ("the remote default branch moved since the last fetch; run there: "
+                      f"git fetch origin, then re-run doctor (and {GUARD_ACTIVATE} if it warns)")
+    return OK, ""
+
+
 def run(cfg: Config, *, strict: bool = False) -> int:
     r = _Report()
 
@@ -444,6 +697,19 @@ def run(cfg: Config, *, strict: bool = False) -> int:
         r.row(OK, f"bundle root writable ({cfg.bundle_root.name}/)")
     except OSError as exc:
         r.row(MISSING, "bundle root writable", str(exc), required=True)
+
+    if _have("git"):
+        from . import sweep  # lazy: doctor stays import-light
+        seen: set[Path] = set()
+        for repo in [cfg.root, *sweep.target_checkouts(cfg)]:
+            repo = repo.resolve()
+            if repo in seen or not repo.is_dir():
+                continue
+            seen.add(repo)
+            status = secret_guard_status(repo)
+            if status is not None:
+                label = "secret guard" if repo == cfg.root.resolve() else f"secret guard ({repo.name})"
+                r.row(status[0], label, status[1])
 
     print()
     print("== model leaves (from pdca.toml) ==")

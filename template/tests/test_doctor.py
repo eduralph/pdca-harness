@@ -415,3 +415,271 @@ class SandboxDeps(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _git(cwd: Path, *args: str) -> None:
+    import subprocess
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main",
+                    "-C", str(cwd), *args], check=True, capture_output=True)
+
+
+GUARD_SCRIPT = Path(__file__).resolve().parents[1] / ".secret-guard" / "activate.sh"
+
+
+class SecretGuard(unittest.TestCase):
+    """The "secret guard" rows. Activation and the doctor's dry run both use the real
+    template/.secret-guard/activate.sh; a fake pre-commit on PATH keeps it offline (activation
+    only records where pre-commit is)."""
+
+    CONFIG = "repos: []\n"
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "pre-commit").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (bin_dir / "pre-commit").chmod(0o755)
+        patcher = mock.patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.up = self.tmp / "up"
+        self.up.mkdir()
+        _git(self.up, "init", "-q")
+        (self.up / ".pre-commit-config.yaml").write_text(self.CONFIG, encoding="utf-8")
+        (self.up / ".secret-guard").mkdir()
+        shutil.copy(GUARD_SCRIPT, self.up / ".secret-guard" / "activate.sh")
+        _git(self.up, "add", ".")
+        _git(self.up, "commit", "-qm", "guard")
+        self.clone = self.tmp / "clone"
+        _git(self.tmp, "clone", "-q", str(self.up), str(self.clone))
+        self.d = self.clone / ".git"
+
+    def _activate(self) -> None:
+        import subprocess
+        script = (self.up / ".secret-guard" / "activate.sh").read_text(encoding="utf-8")
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull}
+        r = subprocess.run(["/bin/sh", "-c", script, "activate"], cwd=self.clone,
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def _status(self) -> tuple[str, str] | None:
+        return doctor.secret_guard_status(self.clone)
+
+    def test_a_repo_without_the_guard_gets_no_row(self) -> None:
+        plain = self.tmp / "plain"
+        plain.mkdir()
+        _git(plain, "init", "-q")
+        self.assertIsNone(doctor.secret_guard_status(plain))
+
+    def test_shipped_but_not_activated_warns_with_the_command(self) -> None:
+        status, hint = self._status()
+        self.assertEqual(status, doctor.WARN)
+        self.assertIn("not active", hint)
+        self.assertIn(doctor.GUARD_ACTIVATE, hint)
+
+    def test_activated_and_current_is_ok(self) -> None:
+        self._activate()
+        self.assertEqual(self._status(), (doctor.OK, ""))
+
+    def test_a_runner_that_exits_early_is_reported_modified(self) -> None:
+        self._activate()
+        runner = self.d / "secret-guard-run"
+        text = runner.read_text(encoding="utf-8").replace("#!/bin/sh\n", "#!/bin/sh\nexit 0\n", 1)
+        runner.write_text(text, encoding="utf-8")
+        status, hint = self._status()
+        self.assertEqual(status, doctor.WARN)
+        self.assertIn("secret-guard-run", hint)
+
+    def test_a_hook_that_skips_the_runner_is_reported_modified(self) -> None:
+        self._activate()
+        hook = self.d / "hooks" / "pre-commit"
+        hook.write_text(hook.read_text(encoding="utf-8").replace("#!/bin/sh\n", "#!/bin/sh\nexit 0\n", 1),
+                        encoding="utf-8")
+        self.assertIn("hooks/pre-commit", self._status()[1])
+
+    def test_a_missing_or_weakened_gitleaks_policy_is_reported(self) -> None:
+        self._activate()
+        (self.d / "secret-guard-gitleaks.toml").write_text("[allowlist]\nregexes = ['.*']\n",
+                                                           encoding="utf-8")
+        self.assertIn("secret-guard-gitleaks.toml", self._status()[1])
+        (self.d / "secret-guard-gitleaks.toml").unlink()
+        self.assertEqual(self._status()[0], doctor.WARN)
+
+    def test_a_changed_default_branch_makes_it_stale(self) -> None:
+        self._activate()
+        (self.up / ".pre-commit-config.yaml").write_text("repos: [newer]\n", encoding="utf-8")
+        _git(self.up, "commit", "-qam", "newer config")
+        _git(self.clone, "fetch", "-q", "origin")
+        status, hint = self._status()
+        self.assertEqual(status, doctor.WARN)
+        self.assertIn("stale or modified", hint)
+        self.assertIn("secret-guard.yaml", hint)
+
+    def test_a_non_executable_hook_is_not_active(self) -> None:
+        self._activate()
+        (self.d / "hooks" / "pre-commit").chmod(0o644)
+        self.assertIn("not active", self._status()[1])
+
+    def test_a_symlinked_artifact_warns(self) -> None:
+        self._activate()
+        runner = self.d / "secret-guard-run"
+        moved = self.tmp / "runner-copy"
+        runner.rename(moved)
+        runner.symlink_to(moved)
+        self.assertIn("symlink", self._status()[1])
+
+    def test_hooks_path_rules(self) -> None:
+        self._activate()
+        _git(self.clone, "config", "core.hooksPath", "")
+        self.assertIn("set but empty", self._status()[1])
+        _git(self.clone, "config", "core.hooksPath", ".githooks")
+        self.assertIn("relative", self._status()[1])
+        inside = self.clone / "hooks-in-tree"
+        inside.mkdir()
+        _git(self.clone, "config", "core.hooksPath", str(inside))
+        self.assertIn("passes through a work tree", self._status()[1])
+        ext = self.tmp / "ext-hooks"
+        ext.mkdir()
+        (ext / "pre-commit").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (ext / "pre-commit").chmod(0o755)
+        _git(self.clone, "config", "core.hooksPath", str(ext))
+        self.assertIn("not active", self._status()[1])
+        (ext / "pre-commit").write_text(f"#!/bin/sh\n{doctor._GUARD_REQ}\n", encoding="utf-8")
+        self.assertEqual(self._status(), (doctor.OK, ""))
+
+    def test_an_unreadable_default_branch_warns(self) -> None:
+        _git(self.clone, "symbolic-ref", "-d", "refs/remotes/origin/HEAD")
+        self.assertIn("cannot read the default branch", self._status()[1])
+
+    def test_without_pre_commit_it_cannot_verify(self) -> None:
+        self._activate()
+        with mock.patch.object(doctor.shutil, "which", return_value=None):
+            self.assertIn("cannot verify", self._status()[1])
+
+    def test_doctor_reports_each_target_checkout(self) -> None:
+        root = self.tmp / "instance"
+        root.mkdir()
+        cfg = _load(root, f'[publisher.checkouts]\n"org/clone" = "{self.clone}"\n')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            doctor.run(cfg)
+        self.assertIn("secret guard (clone)", out.getvalue())
+        self.assertIn("not active", out.getvalue())
+
+    def test_an_intermediate_checkout_symlink_in_hooks_path_warns(self) -> None:
+        self._activate()
+        ext = self.tmp / "ext-hooks"
+        ext.mkdir()
+        (ext / "pre-commit").write_text(f"#!/bin/sh\n{doctor._GUARD_REQ}\n", encoding="utf-8")
+        (ext / "pre-commit").chmod(0o755)
+        (self.clone / "link").symlink_to(ext)          # tracked-looking link in the checkout
+        _git(self.clone, "config", "core.hooksPath", str(self.clone / "link"))
+        self.assertIn("passes through a work tree", self._status()[1])
+
+    def test_dot_dot_through_a_checkout_directory_warns(self) -> None:
+        self._activate()
+        ext = self.tmp / "ext-hooks"
+        ext.mkdir()
+        (ext / "pre-commit").write_text(f"#!/bin/sh\n{doctor._GUARD_REQ}\n", encoding="utf-8")
+        (ext / "pre-commit").chmod(0o755)
+        (self.clone / "pivot").mkdir()
+        _git(self.clone, "config", "core.hooksPath", f"{self.clone}/pivot/../../ext-hooks")
+        self.assertIn("passes through a work tree", self._status()[1])
+
+    def test_a_worktree_hooks_path_override_warns(self) -> None:
+        self._activate()
+        _git(self.clone, "config", "extensions.worktreeConfig", "true")
+        wt = self.tmp / "linked"
+        _git(self.clone, "worktree", "add", "-q", str(wt), "-b", "linked")
+        _git(wt, "config", "--worktree", "core.hooksPath", "")
+        self.assertIn("set their own core.hooksPath", self._status()[1])
+
+    def test_an_unused_default_hooks_symlink_is_ignored_with_external_hooks_path(self) -> None:
+        self._activate()
+        ext = self.tmp / "ext-hooks"
+        ext.mkdir()
+        (ext / "pre-commit").write_text(f"#!/bin/sh\n{doctor._GUARD_REQ}\n", encoding="utf-8")
+        (ext / "pre-commit").chmod(0o755)
+        _git(self.clone, "config", "core.hooksPath", str(ext))
+        moved = self.tmp / "old-hooks"
+        (self.d / "hooks").rename(moved)
+        (self.d / "hooks").symlink_to(moved)
+        self.assertEqual(self._status(), (doctor.OK, ""))
+
+    def test_a_moved_remote_default_branch_warns(self) -> None:
+        self._activate()
+        (self.up / "other").write_text("x\n", encoding="utf-8")
+        _git(self.up, "add", "other")
+        _git(self.up, "commit", "-qm", "moved on")     # not fetched by the clone
+        self.assertIn("moved since the last fetch", self._status()[1])
+
+    def test_an_unreachable_remote_cannot_confirm(self) -> None:
+        self._activate()
+        _git(self.clone, "remote", "set-url", "origin", str(self.tmp / "gone"))
+        self.assertIn("could not be asked", self._status()[1])
+
+    def test_a_guard_added_after_the_last_fetch_is_reported(self) -> None:
+        plain_up = self.tmp / "plain-up"
+        plain_up.mkdir()
+        _git(plain_up, "init", "-q")
+        (plain_up / "x").write_text("x\n", encoding="utf-8")
+        _git(plain_up, "add", "x")
+        _git(plain_up, "commit", "-qm", "x")
+        clone = self.tmp / "plain-clone"
+        _git(self.tmp, "clone", "-q", str(plain_up), str(clone))
+        self.assertIsNone(doctor.secret_guard_status(clone))
+        (plain_up / ".secret-guard").mkdir()
+        shutil.copy(GUARD_SCRIPT, plain_up / ".secret-guard" / "activate.sh")
+        _git(plain_up, "add", ".")
+        _git(plain_up, "commit", "-qm", "guard")
+        self.assertIn("may ship the guard", doctor.secret_guard_status(clone)[1])
+
+    def test_a_pre_commit_inside_the_clone_is_rejected(self) -> None:
+        self._activate()
+        inside = self.clone / ".venv" / "bin"
+        inside.mkdir(parents=True)
+        (inside / "pre-commit").symlink_to(self.tmp / "bin" / "pre-commit")
+        with mock.patch.dict(os.environ, {"PATH": f"{inside}{os.pathsep}{os.environ['PATH']}"}):
+            self.assertIn("in a checkout of this repository", self._status()[1])
+
+    def test_an_unapproved_legacy_hook_warns(self) -> None:
+        self._activate()
+        legacy = self.d / "hooks" / "pre-commit.legacy"
+        legacy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        legacy.chmod(0o755)
+        self.assertIn("pre-commit.legacy is not approved", self._status()[1])
+
+    def test_a_temp_dir_failure_is_a_warning_not_a_crash(self) -> None:
+        self._activate()
+        with mock.patch.object(doctor.tempfile, "mkdtemp", side_effect=OSError("disk full")):
+            status, hint = self._status()
+        self.assertEqual(status, doctor.WARN)
+        self.assertIn("cannot verify", hint)
+
+    def test_an_outside_link_through_a_checkout_link_back_outside_warns(self) -> None:
+        self._activate()
+        ext = self.tmp / "ext-hooks"
+        ext.mkdir()
+        (ext / "pre-commit").write_text(f"#!/bin/sh\n{doctor._GUARD_REQ}\n", encoding="utf-8")
+        (ext / "pre-commit").chmod(0o755)
+        (self.clone / "pivot").symlink_to(ext)            # checkout link, points back outside
+        alias = self.tmp / "alias"
+        alias.symlink_to(self.clone / "pivot")           # outside link to the checkout link
+        _git(self.clone, "config", "core.hooksPath", str(alias))
+        self.assertIn("passes through a work tree", self._status()[1])
+        _git(self.clone, "config", "core.hooksPath", str(ext))
+        self.assertEqual(self._status(), (doctor.OK, ""))   # the direct path stays fine
+
+    def test_an_approved_legacy_hook_must_stay_executable(self) -> None:
+        import subprocess
+        legacy = self.d / "hooks" / "pre-commit.legacy"
+        legacy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        legacy.chmod(0o755)
+        script = (self.up / ".secret-guard" / "activate.sh").read_text(encoding="utf-8")
+        r = subprocess.run(["/bin/sh", "-c", script, "activate", "--approve-legacy"], cwd=self.clone,
+                           capture_output=True, text=True, env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._status(), (doctor.OK, ""))
+        legacy.chmod(0o644)
+        self.assertIn("not executable", self._status()[1])
