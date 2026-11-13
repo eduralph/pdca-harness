@@ -37,8 +37,10 @@ open('.claude/settings.local.json', 'w'), indent=2)"
 	@echo "(folder TRUST is separate — it lives in the GLOBAL ~/.claude.json, not here:"
 	@echo " the first interactive '<cli> flow' asks once to TRUST this project — accept it.)"
 	@# Secret guard (.pre-commit-config.yaml): git hooks are not cloned, so activate per clone.
-	@if command -v pre-commit >/dev/null 2>&1; then pre-commit install; \
-	else echo "pre-commit not found: pipx install pre-commit && pre-commit install"; fi
+	@# Runs the default branch's reviewed activation script; the hook it writes reads copies in
+	@# the git directory, so a checked-out branch cannot redefine what runs on commit.
+	@s=$$(PATH=/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin git show refs/remotes/origin/HEAD:.secret-guard/activate.sh) && /bin/sh -c "$$s" activate || \
+	{ echo "secret guard NOT active: needs pre-commit (pipx install pre-commit==4.7.0) and origin/HEAD, then re-run make setup" >&2; exit 1; }
 
 # --- install every tool `flow` needs (issue #207) --------------------------
 # Delegates to scripts/bootstrap-tools.sh: harness-universal tools (git, gh, a
