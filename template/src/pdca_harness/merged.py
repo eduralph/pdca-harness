@@ -37,10 +37,12 @@ is that still the patch a PR's merge marker was written for?
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from . import state
@@ -137,6 +139,14 @@ def counts_into(rec: dict, repo: str, base: str) -> bool:
             and rec.get("base") == base)
 
 
+# Where :func:`merged_head` says that it could not read a PR's state: on stderr, unless a
+# caller keeping its stderr lines back has set a function here (#893: the integration fold,
+# while it runs one of a refresh's two attempts, ``integrate._said_into``). A context
+# variable, so another thread's line never goes to it.
+SAY: contextvars.ContextVar[Callable[[str], None] | None] = contextvars.ContextVar(
+    "SAY", default=None)
+
+
 def merged_head(cfg: Config, dep_id: str) -> str | None:
     """The head commit bundle ``dep_id``'s recorded PR merged with, or ``None`` (#593).
 
@@ -144,7 +154,8 @@ def merged_head(cfg: Config, dep_id: str) -> str | None:
     and returns ``headRefOid`` only when ``state`` is ``MERGED``. Fail-closed, as
     :func:`is_merged` is: no recorded PR, a PR not merged, a ``gh`` failure (``gh``
     missing included) or output it cannot parse all return ``None``, which the caller
-    treats as "not known to be merged".
+    treats as "not known to be merged". A ``gh`` failure is said on stderr, or to the
+    function in :data:`SAY` when one is set (#893).
     """
     rec = _publish_record(cfg.find_bundle(dep_id))
     pr_url = rec.get("pr_url") if isinstance(rec, dict) else None
@@ -156,8 +167,12 @@ def merged_head(cfg: Config, dep_id: str) -> str | None:
     except OSError:
         r = None
     if r is None or r.returncode != 0:
-        print(f"merged: could not read PR state for {dep_id} ({pr_url}); "
-              "treating as not merged", file=sys.stderr)
+        line = f"merged: could not read PR state for {dep_id} ({pr_url}); treating as not merged"
+        say = SAY.get()
+        if say is None:
+            print(line, file=sys.stderr)
+        else:
+            say(line)
         return None
     try:
         info = json.loads(r.stdout or "{}")

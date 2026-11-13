@@ -34,7 +34,11 @@ later fold continues from the tip this run pushed, pushed without force, and ref
 line another run moved (``folded_this_run``, #591). The one exception is a line the flow's
 pre-wave carry puts to use (#646): a re-issued run that carries finished prerequisites
 onto its batch's line continues origin's line from its tip — only when every commit on it
-is accounted for (:func:`foreign_commit`) — and stays append-only from there.
+is accounted for (:func:`foreign_commit`) — and stays append-only from there. Before its
+bundles it merges the base into that line (#893, ``refreshed``) unless the line has it
+already, or the merge conflicts, would remove work a bundle put on the line, or would leave
+off a bundle the line as found takes: then it says so once, with the step, and continues the
+line as found.
 
 Commits pushed straight onto a stack PR branch after a fold carried it reach the line only
 when they extend it (a fast-forward; GitHub's merge-style "Update branch" is one): the next
@@ -72,12 +76,15 @@ with (``held_out``, #674). Mechanics are deterministic ``git`` subprocesses (no 
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import hashlib
 import subprocess
 import sys
 import time
+from collections import Counter
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 from . import brief, merged, publish, waves
 from .config import Config
@@ -352,6 +359,116 @@ def _targeted(patched: list[Path]) -> list[tuple[Path, str, str, str]]:
     return out
 
 
+class _Passes(NamedTuple):
+    """What one run of :func:`fold`'s bundle passes left (#893: a refresh runs them twice):
+    the commit the line started from, what a bundle's work is measured against (#672), the
+    bundles left out and never tried again, those whose merge failed, each left-out one's
+    work, each skipped for a conflict with its files (#694), the heads the last pass put on
+    the line, and the ``skipped`` / ``holds`` it recorded in."""
+    start: str
+    ends: tuple[str, str]
+    dropped: set[str]
+    failed: list[str]
+    work: dict[str, list[str]]
+    conflicting: dict[str, tuple[str, list[str], list[str]]]
+    took: dict[str, str]
+    skipped: dict[str, str] | None
+    holds: dict[str, str] | None
+
+    @property
+    def off(self) -> list[str]:
+        """The bundles it left off the line, skipped or held, in the order recorded."""
+        return list(dict.fromkeys([*(self.skipped or {}), *(self.holds or {})]))
+
+
+# What a fold says about a bundle it merges (:func:`_say`), a PR state the host would not give
+# included (:data:`merged.SAY`). While :func:`fold` refreshes a line (#893), what its refresh
+# steps and each run of its bundle passes say is kept here (:class:`_Kept`), and of the two
+# runs only the one that stands is printed: the other was building a line that is never
+# pushed, and what it said may contradict the line that is, or say again what the one that
+# stands says.
+_SAID: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar("_SAID", default=None)
+
+
+def _say(line: str) -> None:
+    """``line`` on stderr, or kept back while :func:`_said_into` is open."""
+    kept = _SAID.get()
+    if kept is None:
+        print(line, file=sys.stderr)
+    else:
+        kept.append(line)
+
+
+@contextlib.contextmanager
+def _said_into(lines: list[str]):
+    """While open, keep in ``lines`` what :func:`_say` says in this thread (#893), and what
+    :func:`merged.merged_head` says (:data:`merged.SAY`) — context variables, so a lane
+    thread's output is never caught in it."""
+    token, host = _SAID.set(lines), merged.SAY.set(lines.append)
+    try:
+        yield
+    finally:
+        merged.SAY.reset(host)
+        _SAID.reset(token)
+
+
+class _Kept:
+    """What :func:`fold` says about one target while it refreshes that line (#893), kept
+    back (:func:`_said_into`) until the bundle passes are over: what the refresh's own steps
+    said (``pre``: a PR state the host would not give, read to name whose a path is), what
+    the passes that stand said, or the ones the fold stopped in or last ran (``said``), and
+    why the refresh was not kept, with the step for it (``note``). :meth:`lines` prints the first
+    two, a line both say only once (:func:`_once`); :meth:`warn` the ONE warning, after
+    them. :meth:`stopped`, on the fold's exit stack, prints whatever is still kept back when
+    an exception stops the fold, as the fold without a refresh says its lines before it
+    raises."""
+
+    def __init__(self, branch: str, base_ref: str) -> None:
+        self.branch, self.base_ref = branch, base_ref
+        self.pre: list[str] = []
+        self.said: list[str] = []
+        self.note = ""
+        self.heard = self.warned = False
+
+    def lines(self) -> None:
+        """Print ``pre`` and ``said`` on stderr, once."""
+        if not self.heard:
+            self.heard = True
+            for text in _once(self.pre, self.said):
+                print(text, file=sys.stderr)
+
+    def warn(self, then: str) -> None:
+        """The warning for a refresh not kept (none when it was), ``then`` saying what the
+        fold does instead."""
+        if self.note and not self.warned:
+            self.warned = True
+            print(f"integrate: refresh dropped — {self.branch} is not brought up to date with "
+                  f"{self.base_ref} before its bundles: {self.note}. This fold {then}.",
+                  file=sys.stderr)
+
+    def stopped(self, kind: type[BaseException] | None, *_exc: object) -> bool:
+        """An exit for an ``ExitStack``: on the way out by an exception, print what is still
+        kept back, the warning saying that the fold stops. Never swallows the exception."""
+        if kind is not None:
+            self.lines()
+            self.warn("stops on an error and pushes nothing")
+        return False
+
+
+def _once(first: Sequence[str], then: Sequence[str]) -> list[str]:
+    """``first``, then ``then`` less one line for each time ``first`` says it (#893): a host
+    read that the refresh's own check and the bundle passes both make is said once, and a
+    line the passes say more often than that is said as often as they say it."""
+    left = Counter(first)
+    out = list(first)
+    for line in then:
+        if left[line]:
+            left[line] -= 1
+        else:
+            out.append(line)
+    return out
+
+
 def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
          locks: contextlib.ExitStack | None = None,
          folded_this_run: Mapping[tuple[str, str], str | None] | None = None,
@@ -365,6 +482,7 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
          clashes: dict[str, tuple[str, dict[str, list[str]], list[str]]] | None = None,
          bases: Bases | None = None, line_prs: LinePrs | None = None,
          finished_heads: Mapping[str, str] | None = None,
+         refreshed: set[tuple[str, str]] | None = None,
          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
     """Fold the cumulative accepted bundles' published branches onto a per-target
     integration branch.
@@ -512,6 +630,36 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     ``held_out`` conflict may be pinned on, and only while that head is on the line being
     built: never merged, never put in ``carried``, never checked for a rewrite. ``None``:
     none.
+
+    ``refreshed`` (#893, the flow's pre-wave carry), with ``skipped``: a target whose line
+    the fold continues from origin (not one it starts fresh) is brought up to date with
+    ``<base_remote>/<base>`` when the line does not have it yet: the base is merged in as
+    :func:`_take_in_base` merges it (one signed-off merge commit on top, never a rewrite) and
+    kept unless that merge conflicts, would remove work a bundle put on the line (#623,
+    :func:`_undone_paths`) or fails as a git step — then the line is put back
+    (:func:`_reset_line`). Kept, the bundle passes run on it; when they leave off (skip or
+    hold) any bundle, they run again on the line as found, each run with state of its own,
+    sharing only the branch tips read (#633). The refreshed run stands unless it leaves off a
+    bundle the other takes; a bundle both leave off never costs the refresh. A git step that
+    fails in it (a plain :class:`IntegrationError`) drops the refresh too. Everything after
+    the passes (:func:`_built_on_skipped`, the clash judgement, the push) runs once, on the
+    run that stands, whose results alone reach ``skipped`` / ``holds`` / ``clashes`` /
+    ``carried``, and whose stderr lines alone are printed (:func:`_say`, a host read's
+    failure included), after what the refresh's own steps said, a line both say once
+    (:class:`_Kept`). A refresh not kept is named on ONE stderr line with its cause and the
+    step for it, once the line is pushed, saying whether the line pushed has the base all
+    the same (a carried bundle can bring it in) — or, when every bundle is skipped, that the
+    fold pushes nothing — and the fold goes on as without one. An exception that stops the
+    fold first (a refused push too) still prints what it kept back: the lines of the passes
+    it stopped in or last ran, and that one line, saying the fold stops.
+    :class:`IntegrationTreeError` and :class:`_LineBroken` from the refresh's own steps stop
+    the fold, as from a bundle's merge. Filled in place: each target whose line lacked the
+    base and is pushed with it — the refresh kept, or a carried bundle bringing it in — so
+    this fold put the base on it. When the first read of whether the line has the base
+    fails (which drops the refresh), and the line pushed has it, the line as found is read
+    again: one that had the base already is not filled in, nor is one that read fails for.
+    In a dry-run the plan names the merge, as conditional as the ``auto`` start. ``None``
+    (every other caller): no refresh.
     """
     candidates = _fold_candidates(accepted)
     if not candidates:
@@ -568,6 +716,9 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                     "auto": f"continue {branch} if origin has it, else start fresh "
                             f"from {base_remote}/{base}"}[start]
             print(f"  git worktree → {_integ_worktree(repo, base)}; {plan}")
+            if refreshed is not None and start != "fresh":
+                print(f"  git merge --no-ff --signoff {base_remote}/{base}   (into {branch}, "
+                      f"if origin has it and it is behind {base_remote}/{base})")
             for d in bundles:
                 print(f"  git merge --no-ff --signoff {refs[d.name][1]}   ({d.name})")
             print({"fresh": f"  git push --force origin {branch}",
@@ -623,83 +774,158 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                                   for n in batch or ())]:
                 owners.setdefault(o.name, o)
             read: dict[str, str | None] = {}   # each branch's tip, read once (#633)
-            dropped: set[str] = set()          # left out of the line: never tried again (#672)
-            failed: list[str] = []             # the bundles skipped: their merge raised (#672)
-            work: dict[str, list[str]] = {}    # each bundle left out → its work (#672)
-            # skipped for a conflict → (head, files, the bundles on the line then) (#694)
-            conflicting: dict[str, tuple[str, list[str], list[str]]] = {}
-            ends = (f"{base_remote}/{base}", start_ref)   # a bundle's work: what neither has
             pr = pr_heads or {}
-            while True:
-                took: dict[str, str] = {}   # bundle name → the head this fold put on the line
-                pre: str | None = None      # the line before the wave's first merge (#674)
-                kept: list[tuple[str, str]] = []   # the wave's bundles merged so far: (name, head)
-                new: list[str] = []         # the bundles this pass skipped
-                for d in bundles:
-                    if d.name in dropped:
-                        continue
-                    # Its branch's tip, read once — a carried branch's is the one checked
-                    # (#633) — and kept for a pass that starts the line again (#672).
-                    if d.name not in read:
-                        read[d.name] = (checked[d.name] if d.name in checked
-                                        else _rev(wt, refs[d.name][1]))
-                    head = read[d.name]
-                    ours = held_out is not None and d.name in wave
-                    if ours and pre is None:
-                        pre = _rev(wt, "HEAD")
-                        if pre is None:
-                            raise IntegrationTreeError(f"could not read the tip of {branch} "
-                                                       f"in {wt} — check that checkout, then "
-                                                       f"re-run")
+
+            def passes(begin: str, skip: dict[str, str] | None,
+                       keep: dict[str, str] | None) -> _Passes:
+                """The bundle passes on the line checked out at ``begin``, recording in
+                ``skip`` / ``keep`` what ``skipped`` / ``holds`` record, with state of their
+                own so a refresh (#893) can run them twice; only ``read`` is shared (#633)."""
+                dropped: set[str] = set()      # left out of the line: never tried again (#672)
+                failed: list[str] = []         # the bundles skipped: their merge raised (#672)
+                work: dict[str, list[str]] = {}    # each bundle left out → its work (#672)
+                # skipped for a conflict → (head, files, the bundles on the line then) (#694)
+                conflicting: dict[str, tuple[str, list[str], list[str]]] = {}
+                ends = (f"{base_remote}/{base}", begin)   # a bundle's work: what neither has
+                while True:
+                    took: dict[str, str] = {}   # bundle name → the head this fold put on the line
+                    pre: str | None = None      # the line before the wave's first merge (#674)
+                    # the wave's bundles merged so far: (name, head)
+                    kept: list[tuple[str, str]] = []
+                    new: list[str] = []         # the bundles this pass skipped
+                    for d in bundles:
+                        if d.name in dropped:
+                            continue
+                        # Its branch's tip, read once — a carried branch's is the one checked
+                        # (#633) — and kept for a pass that starts the line again (#672).
+                        if d.name not in read:
+                            read[d.name] = (checked[d.name] if d.name in checked
+                                            else _rev(wt, refs[d.name][1]))
+                        head = read[d.name]
+                        ours = held_out is not None and d.name in wave
+                        if ours and pre is None:
+                            pre = _rev(wt, "HEAD")
+                            if pre is None:
+                                raise IntegrationTreeError(f"could not read the tip of {branch} "
+                                                           f"in {wt} — check that checkout, "
+                                                           f"then re-run")
+                        try:
+                            _merge_published(cfg, wt, d, refs[d.name], head, branch=branch,
+                                             base=base, owners=tuple(owners.values()),
+                                             batch=batch)
+                        except IntegrationError as exc:
+                            if (held_out is not None and ours and head is not None
+                                    and pre is not None and isinstance(exc, _Conflict)):
+                                # A same-wave conflict (#674), else one that bundles already
+                                # on the line explain (#747): this bundle only.
+                                clash = (_held_by(wt, branch, head, pre, kept) if kept
+                                         else None)
+                                if not clash:
+                                    clash = _held_by_line(
+                                        cfg, wt, branch, d, head, f"{base_remote}/{base}",
+                                        exc.paths, list(took.items()), finished_heads or {},
+                                        {n: h for n, h in read.items() if h})
+                                if clash:
+                                    held_out[d.name] = clash
+                                    dropped.add(d.name)
+                                    continue
+                            if skip is None or isinstance(exc, (IntegrationTreeError,
+                                                                 _LineBroken)):
+                                raise
+                            if head is not None and isinstance(exc, _Conflict):
+                                conflicting[d.name] = (head, exc.paths, list(took))
+                            skip[d.name] = str(exc)   # this bundle only; its merge was undone
+                            dropped.add(d.name)
+                            new.append(d.name)
+                        else:
+                            if head is not None:        # merged, or in the line already
+                                took[d.name] = head
+                                if ours:
+                                    kept.append((d.name, head))
+                    if not new:     # none skipped (never, without ``skipped``): the line stands
+                        break
+                    # A skipped bundle's work stays off the line (#672). A merged bundle that
+                    # holds any of it, merged before the skip or after, comes off too; then the
+                    # line starts again from the same commit with only the bundles kept. Each
+                    # pass leaves out at least one more bundle, so this ends.
+                    failed += new
+                    for n in new:
+                        work[n] = _work(wt, (read[n], pr.get(n)), ends, what=f"{n}'s work")
+                    held = _hold_work(wt, [d.name for d in bundles], took, work, ends, pr,
+                                      refs=refs, branch=branch, skipped=skip, holds=keep)
+                    if not held:
+                        break
+                    dropped.update(held)
+                    _reset_tree(wt, "HEAD")
+                    if _git(wt, "checkout", "-B", branch, begin) != 0:
+                        raise IntegrationError(f"could not start {branch} off {begin}")
+                return _Passes(begin, ends, dropped, failed, work, conflicting, took, skip, keep)
+
+            # A line continued from origin is first brought up to date with the base (#893,
+            # the carry only). Kept, the passes run on it; if they leave off a bundle, or a
+            # git step in them fails, they run again on the line as found, and the refresh
+            # stands only when that leaves off every bundle it does (``_Passes.off``). Not
+            # kept: one warning, today's fold. Meanwhile what the fold says is kept back
+            # (:class:`_Kept`), so only the passes that stand are heard, each line once.
+            base_ref = f"{base_remote}/{base}"
+            up = None             # the refreshed line's tip, when the merge was kept
+            # The line as found lacks the base; None: that read failed, so the refresh is
+            # dropped, and whether it lacked it is read again once the passes are over.
+            behind: bool | None = False
+            kept = (_Kept(branch, base_ref)
+                    if refreshed is not None and skipped is not None and not fresh else None)
+            if kept is None:
+                run = passes(start_ref, skipped, holds)
+            else:
+                scope.push(kept.stopped)    # an exception still prints what is kept back
+                with _said_into(kept.pre):
                     try:
-                        _merge_published(cfg, wt, d, refs[d.name], head, branch=branch,
-                                         base=base, owners=tuple(owners.values()), batch=batch)
-                    except IntegrationError as exc:
-                        if (held_out is not None and ours and head is not None
-                                and pre is not None and isinstance(exc, _Conflict)):
-                            # A same-wave conflict (#674), else one that bundles already
-                            # on the line explain (#747): this bundle only.
-                            clash = (_held_by(wt, branch, head, pre, kept) if kept else None)
-                            if not clash:
-                                clash = _held_by_line(
-                                    cfg, wt, branch, d, head, f"{base_remote}/{base}",
-                                    exc.paths, list(took.items()), finished_heads or {},
-                                    {n: h for n, h in read.items() if h})
-                            if clash:
-                                held_out[d.name] = clash
-                                dropped.add(d.name)
-                                continue
-                        if skipped is None or isinstance(exc, (IntegrationTreeError,
-                                                                _LineBroken)):
-                            raise
-                        if (clashes is not None and head is not None
-                                and isinstance(exc, _Conflict)):
-                            conflicting[d.name] = (head, exc.paths, list(took))
-                        skipped[d.name] = str(exc)   # this bundle only; its merge was undone
-                        dropped.add(d.name)
-                        new.append(d.name)
-                    else:
-                        if head is not None:        # merged, or in the line already
-                            took[d.name] = head
-                            if ours:
-                                kept.append((d.name, head))
-                if not new:     # none skipped (never, without ``skipped``): the line stands
-                    break
-                # A skipped bundle's work stays off the line (#672). A merged bundle that
-                # holds any of it, merged before the skip or after, comes off too; then the
-                # line starts again from the same commit with only the bundles kept. Each
-                # pass leaves out at least one more bundle, so this ends.
-                failed += new
-                for n in new:
-                    work[n] = _work(wt, (read[n], pr.get(n)), ends, what=f"{n}'s work")
-                held = _hold_work(wt, [d.name for d in bundles], took, work, ends, pr,
-                                  refs=refs, branch=branch, skipped=skipped, holds=holds)
-                if not held:
-                    break
-                dropped.update(held)
-                _reset_tree(wt, "HEAD")
-                if _git(wt, "checkout", "-B", branch, start_ref) != 0:
-                    raise IntegrationError(f"could not start {branch} off {start_ref}")
+                        behind = not _in_line(wt, base_ref, base_ref, branch)
+                    except IntegrationError as exc:     # _in_line raises no tree error
+                        behind, kept.note = None, _step_failed(exc)
+                    if behind:
+                        up, kept.note = _refresh_line(cfg, wt, branch, base_ref, start_ref,
+                                                      tuple(owners.values()))
+                if up is None:
+                    with _said_into(kept.said):
+                        run = passes(start_ref, skipped, holds)
+                else:
+                    on: _Passes | None = None
+                    on_said = kept.said     # heard if it stands, or the fold stops before leaving
+                    try:
+                        with _said_into(on_said):
+                            on = run = passes(up, {}, None if holds is None else {})
+                    except (IntegrationTreeError, _LineBroken):
+                        raise
+                    except IntegrationError as exc:     # a git step failed on the refreshed line
+                        kept.note = _step_failed(exc)
+                    if on is None or on.off:    # then the line as found, which may stand
+                        on_tip = _rev(wt, "HEAD") if on is not None else None
+                        if on is not None and on_tip is None:
+                            raise IntegrationTreeError(f"could not read the tip of {branch} in "
+                                                       f"{wt} — check that checkout, then "
+                                                       f"re-run")
+                        _reset_tree(wt, "HEAD")
+                        if _git(wt, "checkout", "-B", branch, start_ref) != 0:
+                            raise IntegrationError(f"could not start {branch} off {start_ref}")
+                        kept.said = []
+                        with _said_into(kept.said):
+                            run = passes(start_ref, {}, None if holds is None else {})
+                        lost = [n for n in on.off if n not in run.off] if on is not None else []
+                        if lost:        # the refresh would leave these off: the line as found
+                            kept.note = _left_off(branch, base_ref, on, lost)
+                        elif on is not None:    # left off either way: the refresh stands
+                            run, kept.said = on, on_said
+                            _reset_tree(wt, "HEAD")
+                            if _git(wt, "checkout", "-B", branch, on_tip) != 0:
+                                raise IntegrationError(f"could not put {branch} back at "
+                                                       f"{on_tip}")
+                    skipped.update(run.skipped or {})
+                    if holds is not None:
+                        holds.update(run.holds or {})
+                kept.lines()
+            failed, work, ends = run.failed, run.work, run.ends
+            dropped, conflicting, took = run.dropped, run.conflicting, run.took
             if len(failed) > 1:
                 _built_on_skipped(wt, [d.name for d in bundles if d.name in failed],
                                   {n: read[n] or pr.get(n) for n in failed}, work, ends,
@@ -727,7 +953,30 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                     clashes[n] = (("line", {}, list(ps)) if under is None else
                                   _clash(wt, branch, h, f"{base_remote}/{base}", ps,
                                          list(took.items()), off, under))
-            if skipped is not None and all(d.name in skipped for d in bundles):
+            idle = skipped is not None and all(d.name in skipped for d in bundles)
+            # Whether the line this fold pushes has the base (#893): the refreshed one does;
+            # after a dropped refresh a carried bundle may bring it in all the same (a branch
+            # updated from the base, or a gone branch's base merge, :func:`_take_in_base`).
+            # None: not read, or the read failed, so neither is said.
+            has: bool | None = None
+            if up is not None and run.start == up:
+                has = True
+            elif behind is not False and not idle:
+                try:
+                    has = _in_line(wt, base_ref, base_ref, branch)
+                except IntegrationError:            # _in_line raises no tree error
+                    has = None
+            if behind is None and has:
+                # The first read of the line as found failed, and the line pushed has the
+                # base: read again whether the line as found had it, so a line that had it
+                # already is never counted as given it by this fold.
+                try:
+                    behind = not _in_line(wt, base_ref, base_ref, branch, of=start_ref)
+                except IntegrationError:            # still unknown: neither is said
+                    pass
+            if idle:
+                if kept is not None:
+                    kept.warn("pushes nothing: no bundle is carried onto it")
                 continue   # nothing of this target merged: push nothing, report nothing
             # Fresh: the run's first fold of this target replaces an earlier run of the same
             # batch's line (the name is batch-scoped, #591), so it is forced. Continuing: a
@@ -744,8 +993,16 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                 raise IntegrationError(
                     f"could not push {branch} to origin{why} — the next wave cannot stack "
                     f"on it")
+            if kept is not None:    # pushed (refused, :meth:`_Kept.stopped` says it stops)
+                kept.warn("continues it from its tip on origin" + (
+                    f" without {base_ref}" if has is False else
+                    f"; {base_ref} reaches it through a carried bundle instead"
+                    if has and behind else
+                    f"; the line it pushes has {base_ref}" if has else ""))
             if carried is not None:
                 carried.update(took)   # pushed: the line now holds these heads (#633)
+            if behind and has:
+                refreshed.add((repo_spec, base))    # pushed: this fold put the base on it (#893)
         result[(repo_spec, base)] = (branch, wt)
     return result
 
@@ -1443,9 +1700,8 @@ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch
             f"and its PR is not known to be merged (not merged, or its state could not be "
             f"read) — restore or re-publish the branch, then re-run")
     if _carries(wt, head, f"{d.name}'s merged head {head}", branch):
-        print(f"integrate: {d.name}'s branch {ref} is gone and its PR merged at "
-              f"{head[:12]} — {branch} already carries that commit; skipped.",
-              file=sys.stderr)
+        _say(f"integrate: {d.name}'s branch {ref} is gone and its PR merged at "
+             f"{head[:12]} — {branch} already carries that commit; skipped.")
         return
     rec = publish._publish_record(d) or {}
     on_base = _carries(wt, head, f"{d.name}'s merged head {head}", base_ref, of=base_ref)
@@ -1576,9 +1832,117 @@ def _take_in_base(cfg: Config, wt: Path, d: Path, ref: str, branch: str, base_re
                 f"changed it (a revert on {base_ref}?). Not building the next wave on a line "
                 f"without that work — get it back into {base_ref}, or restore {ref}, then "
                 f"re-run")
-    print(f"integrate: {d.name}'s branch {ref} is gone and its PR merged at {head[:12]}, "
-          f"which {branch} did not have — the merged work reaches {branch} through "
-          f"{base_ref}.", file=sys.stderr)
+    _say(f"integrate: {d.name}'s branch {ref} is gone and its PR merged at {head[:12]}, "
+         f"which {branch} did not have — the merged work reaches {branch} through "
+         f"{base_ref}.")
+
+
+def _refresh_line(cfg: Config, wt: Path, branch: str, base_ref: str, before: str,
+                  owners: Sequence[Path]) -> tuple[str | None, str]:
+    """Bring the line checked out in ``wt`` at ``before``, which lacks ``base_ref`` (the
+    caller checked, :func:`_in_line`), up to date with it before the carry's bundle passes
+    (#893): merge it in as :func:`_take_in_base` does — signed off, on top, so the push is a
+    fast-forward, never a rewrite (#593).
+
+    ``(tip, "")``: kept, ``tip`` the merge commit, checked out. ``(None, why)``: not kept,
+    the line back at ``before``, and ``why`` what happened with the step for it, for
+    :func:`fold`'s warning: a conflict (each path with the bundle of ``owners`` whose own
+    commits last changed it on the line, :func:`_last_changed`); a merge that would remove
+    work a bundle put on the line (#623, judged as :func:`_take_in_base` judges it,
+    :func:`_undone_paths`, and named as :func:`_removed` names it); or a git step that
+    failed (an :class:`IntegrationError`, named). :class:`IntegrationTreeError` (``_merge``'s
+    tip read) and :class:`_LineBroken` (a line that will not go back, :func:`_reset_line`)
+    raise: the fold stops. Any other exception propagates."""
+    rc, conflicts = _merge(wt, base_ref, f"pdca-integrate: {base_ref} (brings {branch} up "
+                                         f"to date)")
+    if rc != 0 and not conflicts:
+        return None, (f"`git merge` exited {rc} with no conflicting path: a git step failed; "
+                      f"check that checkout, then re-run")
+    if rc != 0:
+        paths = ", ".join(f"{p} ({', '.join(names)})" if names else p
+                          for p, names in _last_changed(cfg, wt, before, base_ref, branch,
+                                                        owners, conflicts))
+        return None, (f"merging it conflicts: update the PR branch that changed {paths} on "
+                      f"{branch} from {base_ref} (resolving the conflict), then re-run")
+    unread: list[str] = []      # owners whose commits could not be read
+    try:
+        undone = _undone_paths(cfg, wt, before, base_ref, branch, owners, unread=unread)
+    except (IntegrationTreeError, _LineBroken):
+        raise
+    except IntegrationError as exc:
+        _reset_line(wt, before, branch, base_ref)
+        return None, _step_failed(exc)
+    if undone:
+        _reset_line(wt, before, branch, base_ref)
+        work, paths = _removed(undone, branch)
+        whose = sorted({n for _p, names, _note, _groups in undone for n in names})
+        if not whose and not unread:    # no bundle's own commit changed them: the base's
+            it, them = ("it", "it") if len(undone) == 1 else ("they", "them")
+            return None, (f"merging it would remove {paths}: {it} came onto the line from "
+                          f"{base_ref}, not from a bundle, and {base_ref} has since deleted, "
+                          f"renamed or reverted {them}; deleting {branch} on origin loses no "
+                          f"bundle's work and is the way out (a re-run then starts the line "
+                          f"from {base_ref})")
+        it = "it" if len(whose) <= 1 else "them"
+        return None, (f"merging it would remove {work} from {branch}: {paths} would go back "
+                      f"to how {base_ref} had it before the line changed it (a revert on "
+                      f"{base_ref}?); the line keeps that work: put it back on {base_ref} "
+                      f"(revert the revert) if the revert was a mistake; if it was meant, "
+                      f"drop {', '.join(whose) or 'the bundle whose work it is'} from the "
+                      f"briefs that name {it} and re-issue without {it}; deleting {branch} on "
+                      f"origin would build on {base_ref} without that work")
+    tip = _rev(wt, "HEAD")
+    if tip is None:
+        raise IntegrationTreeError(f"could not read the tip of {branch} in {wt} — check that "
+                                   f"checkout, then re-run")
+    return tip, ""
+
+
+def _step_failed(exc: IntegrationError) -> str:
+    """A refresh dropped for a failed git step (#893): the error, with the step for it when
+    the message does not give one already."""
+    said = str(exc)
+    return said if "then re-run" in said else f"{said} — check that checkout, then re-run"
+
+
+def _left_off(branch: str, base_ref: str, on: _Passes, names: Sequence[str]) -> str:
+    """Why :func:`fold` dropped a refresh it could merge (#893): the passes on the refreshed
+    line ``on`` leave off ``names``, which the line as found takes. Named are the ones it
+    left off for themselves; one held only for another's work (#672) is not, unless no
+    other is. Each with the files its branch conflicts in and the step, or else the reason
+    its merge failed."""
+    roots = [n for n in names if n not in (on.holds or {})] or list(names)
+    why = []
+    for n in roots:
+        if n in on.conflicting:
+            why.append(f"{n}'s branch does not merge onto {branch} once {base_ref} is in it "
+                       f"({', '.join(on.conflicting[n][1])}): update {n}'s PR branch from "
+                       f"{base_ref}, resolving the conflict, then re-run")
+        else:
+            why.append(f"{n} is left off {branch} once {base_ref} is in it "
+                       f"({(on.skipped or {}).get(n, 'held')})")
+    return "; ".join(why)
+
+
+def _last_changed(cfg: Config, wt: Path, before: str, base_ref: str, branch: str,
+                  owners: Sequence[Path], paths: Sequence[str]
+                  ) -> list[tuple[str, list[str]]]:
+    """For each of ``paths``, the bundles of ``owners`` whose own commits last changed it on
+    the line at ``before`` since the line's cut point (#893: a refresh's conflict), as
+    :func:`_undone_paths` attributes a path (:func:`_owned`): those of the newest commit on
+    the line that changed it and is any bundle's own. None when no such commit is, or when a
+    git read fails: the names are a hint, never a stop."""
+    try:
+        cut, chain = _cut_point(wt, before, base_ref)
+        since = ("--not", cut) if cut else ()
+        skip = {*chain, *_out(wt, "rev-list", "--first-parent", base_ref, *since,
+                              what=f"the first-parent chain of {base_ref}").split()}
+        found = _owned(cfg, wt, before, branch, owners, paths, since, skip)
+    except (IntegrationTreeError, _LineBroken):
+        raise
+    except IntegrationError:
+        return [(p, []) for p in paths]
+    return [(p, list(groups[0]) if groups else []) for p, _names, _note, groups in found]
 
 
 def _removed(undone: Sequence[tuple[str, list[str], str, list[tuple[str, ...]]]],
@@ -1702,7 +2066,8 @@ def _own_removals(wt: Path, head: str, before: str, skip: Collection[str],
 
 
 def _undone_paths(cfg: Config, wt: Path, before: str, base_ref: str, branch: str,
-                  owners: Sequence[Path], *, head: str | None = None
+                  owners: Sequence[Path], *, head: str | None = None,
+                  unread: list[str] | None = None
                   ) -> list[tuple[str, list[str], str, list[tuple[str, ...]]]]:
     """``(path, bundles, note, groups)`` for each path the merge just made in ``wt`` undoes
     — of the base (#623), or of a bundle's branch at ``head`` (#673): one the line at
@@ -1720,7 +2085,8 @@ def _undone_paths(cfg: Config, wt: Path, before: str, base_ref: str, branch: str
     both: git cannot tell which branch it was made on, and naming both never leaves out the
     one whose work it is. ``groups`` keeps them apart for the bundle-branch refusal
     (:func:`_branch_removed`): for each of those commits a bundle has as its own, the
-    bundles that have it — one, or the several that share it.
+    bundles that have it — one, or the several that share it. ``unread`` (#893), when given,
+    gets each owner whose commits could not be read, so a path named for no bundle may be its.
 
     Judged per path from the line's cut point, so it does not see a partial revert inside a
     file the line also changed in other ways, nor a revert of work below the cut point
@@ -1740,6 +2106,17 @@ def _undone_paths(cfg: Config, wt: Path, before: str, base_ref: str, branch: str
         undone = [p for p in undone if p not in mine]
         if not undone:
             return []
+    return _owned(cfg, wt, before, branch, owners, undone, since, skip, unread)
+
+
+def _owned(cfg: Config, wt: Path, before: str, branch: str, owners: Sequence[Path],
+           paths: Sequence[str], since: Sequence[str], skip: Collection[str],
+           unread: list[str] | None = None
+           ) -> list[tuple[str, list[str], str, list[tuple[str, ...]]]]:
+    """:func:`_undone_paths`' ``(path, bundles, note, groups)`` for each of ``paths``, which
+    the line at ``before`` changed (``since``: down to its cut point; ``skip``: the line's
+    and the base's first-parent commits, :func:`_own_commits`): whose own commits changed
+    it, judged as that docstring says. Shared with :func:`_last_changed` (#893)."""
     tips: dict[str, str] = {}                 # bundle name → its branch tip (or merged head)
     for o in owners:
         pub = _published_ref(o)
@@ -1748,6 +2125,8 @@ def _undone_paths(cfg: Config, wt: Path, before: str, base_ref: str, branch: str
         tip = _rev(wt, pub[1]) or merged.merged_head(cfg, o.name.removeprefix("issue_"))
         if tip and _git(wt, "cat-file", "-e", f"{tip}^{{commit}}") == 0:
             tips[o.name] = tip
+        elif unread is not None:
+            unread.append(o.name)
     walks = {name: _own_commits(wt, tip, since, skip, what=f"{name}'s commits")
              for name, tip in tips.items()}
     own: list[tuple[str, set[str]]] = []      # (bundle name, the commits it adds)
@@ -1757,7 +2136,7 @@ def _undone_paths(cfg: Config, wt: Path, before: str, base_ref: str, branch: str
                 and _in_line(wt, t, f"{n}'s branch tip {t[:12]}", f"{name}'s branch", of=tip)]
         own.append((name, mine.difference(*held)))
     out: list[tuple[str, list[str], str, list[tuple[str, ...]]]] = []
-    for path in undone:
+    for path in paths:
         touched = _out(wt, "rev-list", before, *since, "--", f":(literal){path}",
                        what=f"the commits on {branch} that changed {path}").split()
         groups = [tuple(name for name, commits in own if c in commits) for c in touched]
