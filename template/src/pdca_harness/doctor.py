@@ -422,6 +422,8 @@ _GUARD_REQ = 'exec "$(git rev-parse --path-format=absolute --git-common-dir)/sec
 _GUARD_EXEC = 'exec "$d/secret-guard-run" "$@"'   # the managed hook's last line
 _GUARD_MARK = re.compile(r"^# secret-guard managed hook (v\d+)$", re.M)  # in the written hook
 _GUARD_VERSION = re.compile(r"secret-guard managed hook (v\d+)")         # in activate.sh's source
+# The runner's fixed body: the quoted heredoc that follows the runner's header in activate.sh.
+_GUARD_RUNNER_BODY = re.compile(r"Secret guard runner.*?cat <<'EOF'\n(.*?\n)EOF\n", re.S)
 
 
 def _git_raw(repo: Path, *args: str) -> str | None:
@@ -446,7 +448,11 @@ def secret_guard_status(repo: Path) -> tuple[str, str] | None:
         return None
     d = Path(common.strip())
     reviewed = _git_raw(repo, "show", "refs/remotes/origin/HEAD:.pre-commit-config.yaml")
+    hooks_set = _git_raw(repo, "config", "--get", "core.hooksPath") is not None
     hooks_path = (_git_raw(repo, "config", "--path", "core.hooksPath") or "").strip()
+    if hooks_set and not hooks_path:
+        return WARN, ("core.hooksPath is set but empty, so Git runs no hooks; unset it "
+                      f"(git config --unset core.hooksPath), then run there: {GUARD_ACTIVATE}")
     runner = d / "secret-guard-run"
     # Git runs only an executable hook, and the hook must hand over to the runner.
     hook_file = Path(hooks_path) / "pre-commit" if hooks_path else d / "hooks" / "pre-commit"
@@ -464,14 +470,16 @@ def secret_guard_status(repo: Path) -> tuple[str, str] | None:
                       f"pipx install pre-commit==4.7.0, then run there: {GUARD_ACTIVATE}")
     installed, expected = _GUARD_MARK.search(hook), _GUARD_VERSION.search(script)
     stale_hook = not hooks_path and expected and installed and installed[1] != expected[1]
-    # The runner is rewritten on every activation; one older than the default branch's last
-    # change to the activation script predates that change (both modes, incl. core.hooksPath).
-    changed = (_git_raw(repo, "log", "-1", "--format=%ct", "refs/remotes/origin/HEAD", "--",
-                        GUARD_SCRIPT) or "").strip()
-    try:
-        stale_runner = bool(changed) and runner.stat().st_mtime < int(changed)
-    except (OSError, ValueError):
-        stale_runner = True
+    # The runner must carry the body the default branch's script writes (content, not
+    # timestamps: a merged older commit or a touched file says nothing about provenance).
+    body = _GUARD_RUNNER_BODY.search(script)
+    if body is None:
+        if hooks_path:  # no hook version to fall back on in this mode: cannot vouch for it
+            return WARN, ("cannot verify the runner against this activation script; "
+                          f"re-run there after the guard changes: {GUARD_ACTIVATE}")
+        stale_runner = False
+    else:
+        stale_runner = body[1] not in (_read(runner) or "")
     if _read(d / "secret-guard.yaml") != reviewed or stale_hook or stale_runner:
         return WARN, f"stale: the default branch changed the guard; run there: {GUARD_ACTIVATE}"
     return OK, ""
