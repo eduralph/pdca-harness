@@ -618,3 +618,41 @@ class SecretGuard(unittest.TestCase):
         self._activate()
         _git(self.clone, "remote", "set-url", "origin", str(self.tmp / "gone"))
         self.assertIn("could not be asked", self._status()[1])
+
+    def test_a_guard_added_after_the_last_fetch_is_reported(self) -> None:
+        plain_up = self.tmp / "plain-up"
+        plain_up.mkdir()
+        _git(plain_up, "init", "-q")
+        (plain_up / "x").write_text("x\n", encoding="utf-8")
+        _git(plain_up, "add", "x")
+        _git(plain_up, "commit", "-qm", "x")
+        clone = self.tmp / "plain-clone"
+        _git(self.tmp, "clone", "-q", str(plain_up), str(clone))
+        self.assertIsNone(doctor.secret_guard_status(clone))
+        (plain_up / ".secret-guard").mkdir()
+        shutil.copy(GUARD_SCRIPT, plain_up / ".secret-guard" / "activate.sh")
+        _git(plain_up, "add", ".")
+        _git(plain_up, "commit", "-qm", "guard")
+        self.assertIn("may ship the guard", doctor.secret_guard_status(clone)[1])
+
+    def test_a_pre_commit_inside_the_clone_is_rejected(self) -> None:
+        self._activate()
+        inside = self.clone / ".venv" / "bin"
+        inside.mkdir(parents=True)
+        (inside / "pre-commit").symlink_to(self.tmp / "bin" / "pre-commit")
+        with mock.patch.dict(os.environ, {"PATH": f"{inside}{os.pathsep}{os.environ['PATH']}"}):
+            self.assertIn("in a checkout of this repository", self._status()[1])
+
+    def test_an_unapproved_legacy_hook_warns(self) -> None:
+        self._activate()
+        legacy = self.d / "hooks" / "pre-commit.legacy"
+        legacy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        legacy.chmod(0o755)
+        self.assertIn("pre-commit.legacy is not approved", self._status()[1])
+
+    def test_a_temp_dir_failure_is_a_warning_not_a_crash(self) -> None:
+        self._activate()
+        with mock.patch.object(doctor.tempfile, "mkdtemp", side_effect=OSError("disk full")):
+            status, hint = self._status()
+        self.assertEqual(status, doctor.WARN)
+        self.assertIn("cannot verify", hint)

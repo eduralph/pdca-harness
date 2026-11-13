@@ -460,6 +460,37 @@ def _crosses_work_tree(path: Path) -> bool:
     return _in_work_tree(path.resolve())
 
 
+def _repo_worktrees(repo: Path) -> list[Path]:
+    """The physical paths of ``repo``'s worktrees (bare entries excluded)."""
+    listing = _git_raw(repo, "worktree", "list", "--porcelain") or ""
+    roots = []
+    for block in listing.split("\n\n"):
+        lines = block.splitlines()
+        path = next((ln[9:] for ln in lines if ln.startswith("worktree ")), None)
+        if path and "bare" not in lines:
+            roots.append(Path(path).resolve())
+    return roots
+
+
+def _in_repo_worktrees(path: Path, roots: list[Path], git_dir: Path) -> bool:
+    """``path`` (as written, each prefix, or resolved) lies in one of ``roots`` outside the
+    git directory: a checkout of this repository a branch can rewrite."""
+    def inside(p: Path) -> bool:
+        try:
+            real = p.resolve()
+        except OSError:
+            return True
+        if real == git_dir or git_dir in real.parents:
+            return False
+        return any(real == root or root in real.parents for root in roots)
+    prefix = Path(path.anchor)
+    for part in path.parts[1:]:
+        prefix = prefix / part
+        if prefix.is_symlink() and inside(prefix.parent):
+            return True
+    return inside(path)
+
+
 def _worktree_overrides(repo: Path) -> list[str]:
     """Worktrees that set their own core.hooksPath (extensions.worktreeConfig): Git there
     ignores the hook activation installed. Activation refuses these; doctor reports them."""
@@ -493,19 +524,26 @@ def _dry_activation(repo: Path, rev: str, script: str) -> tuple[Path, Path] | st
     """Run the reviewed ``script`` in a throwaway shared copy of ``repo`` at ``rev`` (default
     hooks, no global or system git config). Returns ``(tmpdir, git_dir)`` holding the
     expected artifacts, or the failure text."""
-    tmp = Path(tempfile.mkdtemp(prefix="pdca-guard-"))
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="pdca-guard-"))
+    except OSError as exc:
+        return f"no temporary directory ({exc})"
     copy = tmp / "copy"
     env = {k: v for k, v in os.environ.items() if k not in _GIT_CLEAN_ENV}
     env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", SECRET_GUARD_REF="HEAD")
     steps = (["git", "clone", "-q", "--shared", "--no-checkout", str(repo), str(copy)],
              ["git", "-C", str(copy), "update-ref", "--no-deref", "HEAD", rev])
-    for argv in steps:
-        r = subprocess.run(argv, capture_output=True, text=True, env=env)
-        if r.returncode != 0:
-            shutil.rmtree(tmp, ignore_errors=True)
-            return (r.stderr or "git failed").strip()
-    r = subprocess.run(["/bin/sh", "-c", script, "activate"], cwd=copy, capture_output=True,
-                       text=True, env=env)
+    try:
+        for argv in steps:
+            r = subprocess.run(argv, capture_output=True, text=True, env=env)
+            if r.returncode != 0:
+                shutil.rmtree(tmp, ignore_errors=True)
+                return (r.stderr or "git failed").strip()
+        r = subprocess.run(["/bin/sh", "-c", script, "activate"], cwd=copy,
+                           capture_output=True, text=True, env=env)
+    except OSError as exc:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return str(exc)
     if r.returncode != 0:
         shutil.rmtree(tmp, ignore_errors=True)
         return (r.stderr or r.stdout or "activation failed").strip().splitlines()[-1]
@@ -527,6 +565,10 @@ def secret_guard_status(repo: Path) -> tuple[str, str] | None:
         return None
     script = _git_raw(repo, "show", f"{rev}:{GUARD_SCRIPT}")
     if script is None:
+        # No guard as last fetched; a remote that moved since may have added one.
+        if _remote_head_current(repo, rev) is False:
+            return WARN, ("the remote default branch moved since the last fetch and may ship the "
+                          "guard; run there: git fetch origin, then re-run doctor")
         return None
     d = Path(common.strip())
     again = f"run there: {GUARD_ACTIVATE}"
@@ -563,9 +605,24 @@ def secret_guard_status(repo: Path) -> tuple[str, str] | None:
         return WARN, f"not active in this clone; {again}"
 
     # What the default branch's script writes, compared with what the clone has.
-    if shutil.which("pre-commit") is None:
+    on_path = shutil.which("pre-commit")
+    if on_path is None:
         return WARN, ("cannot verify: pre-commit is not on PATH "
                       f"(pipx install pre-commit==4.7.0), then {again}")
+    roots, git_dir = _repo_worktrees(repo), d.resolve()
+    recorded = (_read_bytes(d / "secret-guard-pre-commit") or b"").decode(errors="replace").strip()
+    for which, exe in (("on PATH", on_path), ("recorded", recorded)):
+        if exe and _in_repo_worktrees(Path(exe), roots, git_dir):
+            return WARN, (f"the pre-commit {which} ({exe}) is in a checkout of this repository, "
+                          f"where a branch can replace it; put the pipx one first on PATH, then {again}")
+    legacy = d / "hooks" / "pre-commit.legacy"
+    if not hooks_set and (legacy.exists() or legacy.is_symlink()):
+        approved = (_read_bytes(d / "secret-guard-legacy.approved") or b"").decode().strip()
+        current = (_git_raw(repo, "hash-object", "--", str(legacy)) or "").strip()
+        if legacy.is_symlink() or not current or approved != current:
+            return WARN, ("hooks/pre-commit.legacy is not approved as it is now, so every commit "
+                          f"stops before the guard; review it, then run there: {GUARD_ACTIVATE} "
+                          "--approve-legacy (or delete it)")
     dry = _dry_activation(repo, rev, script)
     if isinstance(dry, str):
         return WARN, f"cannot verify (a dry activation failed: {dry}); {again}"
