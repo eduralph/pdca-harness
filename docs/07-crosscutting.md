@@ -809,7 +809,11 @@ wave builds on, via `[driver].wave_mode`:
   that target onto the line, before wave 0, and points that target's bundles at
   it. It continues the line already on origin, without force, when every commit
   on it is accounted for by your base or a finished prerequisite's PR head, and
-  starts the line when origin has none. Only a clean prerequisite is carried:
+  starts the line when origin has none. A line it continues is first brought up
+  to date with your base: one merge commit on top, pushed without force, unless
+  the line has your base already. When that merge cannot be kept, the run says
+  so on one line with what to do and carries onto the line as found (see the
+  end of this section). Only a clean prerequisite is carried:
   its PR is open (or merged, with its head already on your base or the line), it
   merges onto the line without error, and, with `[driver].regate_between_waves`,
   the carried line's re-gate is not red. A finished prerequisite that is not
@@ -834,12 +838,13 @@ wave builds on, via `[driver].wave_mode`:
   bundle of the re-issued batch that names it as a prerequisite, and delete any
   line on origin that batch would continue. They name that line for the batch
   without the merged prerequisite, since any other batch has a line of its own.
-  With the edge gone nothing checks that line for the merge, so a re-run that
-  finds it may build the dependent there without that merge; one that does not
-  starts from your base. A bundle still naming it, in that batch or another, is
-  held when it runs and given the steps for its own line, as below. A
-  prerequisite squash- or rebase-merged with its head already on the line (an
-  earlier fold put it there) is clean, as above: the line has its work, so the
+  With the edge gone nothing checks that line for the merge. A re-run that finds
+  it brings it up to date with your base first, but if that run reports the
+  refresh dropped, it builds the dependent there without that merge; one that
+  does not find it starts from your base. A bundle still naming it, in that
+  batch or another, is held when it runs and given the steps for its own line,
+  as below. A prerequisite squash- or rebase-merged with its head already on the
+  line (an earlier fold put it there) is clean, as above: the line has its work, so the
   run carries it and the ones built on it and names no merge, and their PRs keep
   showing its change until they are updated from your base. A prerequisite
   whose merge fails
@@ -928,10 +933,12 @@ wave builds on, via `[driver].wave_mode`:
   later revert on the base: after one, dropping the edge builds the dependent
   without that change. With the edge gone nothing checks the line for that merge
   either. So when the dependent is cut from a line of the run that lacks it (say
-  a line older than the merge, continued from origin), or that cannot be checked
-  for it, the step also says to delete that line on origin once the run ends: a
-  re-run that still finds it builds the dependent there without the merge, and
-  one that does not starts from the base, which has the merge commit. Dropping
+  a line continued from origin whose refresh, below, was dropped), or that cannot
+  be checked for it, the step also says to delete that line on origin once the
+  run ends: a re-run that still finds it brings it up to date with the base
+  first, but if that refresh is dropped again it builds the dependent there
+  without the merge; one that does not find it starts from the base, which has
+  the merge commit. Dropping
   the edge before the re-run, as the prerequisite's own line above asks, skips
   this check, which is why that line gives the delete step too. When no line was
   judged for the dependent but a re-run may continue one, because it is held for
@@ -947,20 +954,85 @@ wave builds on, via `[driver].wave_mode`:
   any branch).
 
   Once the run has a line for the dependent's target (its first fold, or the
-  carry above), the dependent is cut from that line, not from the base, and the
-  line does not follow the base: a merge into the base after the line was
-  started may be missing from it. For either edge the dependent then also waits
-  until the line has the prerequisite's work: the commit its PR merge put on
-  the base (`gh pr view --json mergeCommit`; a merge, squash or rebase merge
-  all put one there), or the PR's head, which the carry puts on the line when
-  it carries that prerequisite. A merge commit that cannot be read, or a
-  checkout that cannot be fetched, holds it too. It is named on one line with
-  the line's tip, and the rest of the run goes on. Re-running alone may not
-  help, and that includes a re-run after waiting for a merge as above: a
-  re-run whose carry finds the line on origin continues it, and holds the
-  dependent this way. So once the run ends, delete that line on origin, then
-  re-run: with no line there, the re-run starts from the base, which has the
-  merge. A target with no line yet is judged as above.
+  carry above), the dependent is cut from that line, not from the base, and
+  within the run the line does not follow the base: a merge into the base after
+  the line was started may be missing from it. For either edge the dependent
+  then also waits until the line has the prerequisite's work: the commit its PR
+  merge put on the base (`gh pr view --json mergeCommit`; a merge, squash or
+  rebase merge all put one there), or the PR's head, which the carry puts on the
+  line when it carries that prerequisite. A merge commit that cannot be read, or
+  a checkout that cannot be fetched, holds it too. It is named on one line with
+  the line's tip, and the rest of the run goes on. To build it, re-run with the
+  same ids. The line follows the base at the carry: a re-run whose carry finds
+  the line on origin brings it up to date with the base before wave 0, by
+  merging the base into it (one merge commit on top, pushed without force, so
+  the line keeps every commit it had), and one whose carry finds no line starts
+  it from the base. Either way the dependent is built once the line has the
+  merge. A re-run with no carry (no bundle it drives has a plain `Depends on`
+  naming a finished id) starts the line from the base at its first fold, as
+  before. A kept refresh cannot be undone: the merge commit stays on the line.
+
+  The carry drops the refresh, says so on one line (`integrate: refresh dropped
+  — <line> is not brought up to date with <base> before its bundles: …`, with
+  the cause and what to do), and carries onto the line as found, as it did
+  before, when the refresh cannot be kept. That line ends by saying whether the
+  line the fold pushes still lacks your base or has it all the same, because a
+  carried prerequisite brought it in (its branch was updated from your base,
+  say), or, when no prerequisite can be carried, that the fold pushes nothing.
+  When the fold tried the prerequisites on both lines, only what it said about
+  them on the line it keeps is printed, a PR state it could not read included.
+  A PR state that neither the refresh's own check nor the merges after it could
+  read is reported once. A fold that stops on an error still prints what it
+  said and, if it dropped the refresh, that one line, which then says the fold
+  stops and pushes nothing.
+  If your base does not merge onto the line (a conflict), the line names the
+  files, each with the bundle whose own change last touched it on the line when
+  the run can tell: update that PR's branch from your base, resolving the
+  conflict, then re-run. If merging your base would remove work a bundle put on
+  the line (your base reverted a merged PR the line carries), the line names the
+  file and the bundle. The line keeps that work: put it back on your base
+  (revert the revert) if the revert was a mistake; if it was meant, drop that
+  bundle from the briefs that name it and re-issue without it. Deleting the line
+  on origin would build on your base without that work. If no bundle put the
+  file there (it came onto the line from your base, which has since deleted,
+  renamed or reverted it) and the run could read every bundle's commits, the
+  line says so instead: deleting the line on origin loses no bundle's work and
+  is the way out. If a finished
+  prerequisite merges onto the line as found but not once your base is in it,
+  the line names it and the files: update its PR branch from your base,
+  resolving the conflict, then re-run. A prerequisite that is left off either
+  way (it conflicts with another one, say) does not cost the refresh: it is held
+  with its own reason, as above. If a git step of the refresh fails, the line
+  names the error: check that checkout, then re-run. After a dropped refresh a
+  dependent that needs the newer base stays held; its line gives the delete step
+  as the other way out: once the run ends, delete that line on origin, then
+  re-run, and the re-run starts from the base. A dependent whose line could not
+  be checked for the merge gets only that step. With
+  `[driver].regate_between_waves`, a red re-gate of a line the carry brought up
+  to date (by the refresh, or through a carried prerequisite after a dropped
+  one) holds the carried prerequisites with a line saying the run merged your
+  base into the line before the re-gate, so your base itself may be what is red,
+  and gives the delete step rather than re-opening a PR, which cannot help.
+
+  Known limits of the refresh: the check for removed work compares each file
+  with where the line leaves your base, so it misses a revert of a bundle's
+  lines when your base also edits that file (as the fold's own checks above
+  do), and every re-run now meets that case; that point never moves past a
+  refresh, so once your base deletes or renames a file it added after that
+  point, or reverts another change of its own made after it, every later
+  refresh of that line is dropped, not only the next, until that point moves
+  (#894) or the line is deleted (the warning says the file came from your base
+  and gives deleting the line as the way out), and the fold can refuse a branch
+  for the same reason (too much refused, never work lost); a prerequisite your
+  base merged and then reverted that was never on the line arrives through the
+  refresh with its work absent, as on a fresh line; a kept
+  refresh is pushed before the re-gate, so a red base makes every carry of that
+  line red until the base is fixed or the line deleted; base commits a refresh
+  put on the line that later leave your base (a force-push there) make the next
+  re-run find commits it cannot account for, and it asks you to delete the line;
+  a refused push is refused as any other fold push is, not retried; and a file
+  name on your base that is not valid UTF-8 can stop the run during the check
+  for removed work. A target with no line yet is judged as above.
 - **`"merge"`** (own-repo / continuous-delivery only) — actually `gh pr merge`s
   each non-final wave's PRs, so the next wave builds on a genuinely merged base.
   Needs merge rights on the base remote and relaxes STOP discipline for the
