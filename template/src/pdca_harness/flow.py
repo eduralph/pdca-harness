@@ -764,12 +764,15 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     names the bundles built on that line — those a seam keeps there (#727, the answer
     :func:`_base_plans` gives) — and ``None`` is every bundle, as where none gets a base of
     its own. Such a d is cut from the line, not from the freshly fetched base (#655), and
-    the line does not follow the base. So for it an out-of-batch prerequisite judged merged
-    into d's base above counts only when the line has its work: the commit its PR merge put
-    on the base, or the PR's head, which the carry may have put on the line
+    the line follows the base only where the pre-wave carry continues it: the carry brings it
+    up to date with the base before wave 0 (#893). So for it an out-of-batch prerequisite
+    judged merged into d's base above counts only when the line has its work: the commit
+    its PR merge put on the base, or the PR's head, which the carry may have put on the line
     (:func:`_line_lacks_merge`). Else d is held, named on ONE stderr line with the line's
-    tip and the way out — once the run ends, delete the line on origin, then re-run: a
-    re-run whose carry finds the line continues it, and holds d again. Any other d — on a
+    tip and the way out: a re-run with the same ids, whose carry brings the line up to date
+    and builds d once it has the merge — if that run reports the refresh dropped, the step
+    its warning gives, or deleting the line on origin, then re-running. A line that could not
+    be read for the merge gets the delete step alone. Any other d — on a
     base of its own (:func:`integrate.build_bundle_base`) or on the real base — is built
     from the base as fetched, so the line is not read (#729): the base as this check
     fetches it, failing closed, must have the merge (:func:`_base_lacks_merge`), since Do
@@ -902,8 +905,10 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
             drop = f"drop {', '.join(n for n, _oid in squashed)} from {d.name}'s brief"
             step = f"{drop}, then re-run"
             after = (f"and with the edge gone nothing checks that. A re-run that finds the line "
-                     f"on origin may continue it and build {d.name} without that merge, and one "
-                     f"that does not starts from {base}, which has the merge commit")
+                     f"on origin continues it, brought up to date with {base} before wave 0 "
+                     f"unless the run reports that refresh dropped — then it builds {d.name} "
+                     f"there without that merge; one that does not find it starts from {base}, "
+                     f"which has the merge commit")
             if stale:
                 branch, tip = (lines or {})[(repo, base)]  # stale: only when d has one
                 has = ("does not have" if all(known for _n, _w, known in stale)
@@ -930,16 +935,24 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                   f"merge will not build it. To build it, {step}.", file=sys.stderr)
         if off_line:
             branch, tip = (lines or {})[(repo, base)]  # off_line: only when d has one
-            has = ("does not have" if all(known for _n, _w, known in off_line)
-                   else "is not known to have")
+            known = all(k for _n, _w, k in off_line)
+            has = "does not have" if known else "is not known to have"
+            # A re-run's carry brings a line it continues up to date with the base (#893); a
+            # failed read is not fixed by that, so that case keeps the delete step alone.
+            way = (f"re-run with the same ids: before wave 0 the re-run brings {branch} up to "
+                   f"date with {base} (merging {base} into it when it continues the line, "
+                   f"starting from {base} when origin has none) and builds {d.name} once the "
+                   f"line has the merge. If that run reports that refresh dropped, its warning "
+                   f"line gives the step; or, once this run ends, delete {branch} on origin, "
+                   f"then re-run" if known else
+                   f"once this run ends delete {branch} on origin, then re-run: a re-run that "
+                   f"finds the line on origin may continue it and hold {d.name} again, and one "
+                   f"that does not starts from {base}, which has the merge")
             print(f"flow: {d.name} held — prerequisite(s) "
                   f"{', '.join(f'{n} ({why})' for n, why, _k in off_line)}: their PR merged "
                   f"into {base} ({repo}), but the line {d.name} would build on, {branch} at "
                   f"{(tip or '')[:12]}, {has} that merge; not built on a base missing them. "
-                  f"To build it, once this run ends delete {branch} on origin, then re-run: "
-                  f"a re-run that finds the line on origin may continue it and hold "
-                  f"{d.name} again, and one that does not starts from {base}, which has the "
-                  f"merge.", file=sys.stderr)
+                  f"To build it, {way}.", file=sys.stderr)
         if off_base:
             has = ("does not have" if all(known for _n, _w, known in off_base)
                    else "is not known to have")
@@ -1334,6 +1347,7 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
                 bases: integrate.Bases | None = None,
                 line_prs: integrate.LinePrs | None = None,
                 finished_heads: Mapping[str, str] | None = None,
+                refreshed: set[tuple[str, str]] | None = None,
                 ) -> tuple[dict[tuple[str, str], tuple[str, Path | None]],
                            dict[tuple[str, str], str | None], tuple[str, str] | None]:
     """ONE :func:`integrate.fold` of ``bundles`` and, with ``[driver].regate_between_waves``,
@@ -1359,7 +1373,9 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
     what each id skipped for a textual conflict conflicts with (:func:`integrate._clash`);
     the in-run folds pass none. ``bases`` / ``line_prs`` (#727): the in-run folds pass what
     the run's PRs hold (:func:`_heads_taken`), which the same check holds each branch to
-    too.
+    too. ``refreshed`` (#893): the carry passes it, so a line it continues is brought up to
+    date with the base first, and gets back each target whose line the fold pushed with the
+    base it lacked (:func:`integrate.fold`); the in-run folds pass none, and never refresh.
 
     Returns ``(folded, tips, red)``: the fold's result, each folded target's pushed tip
     (None in a dry-run, which pushes nothing), and the first target whose re-gate is red
@@ -1370,7 +1386,8 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
                                 folded_this_run=folded_this_run, batch=batch, skipped=skipped,
                                 carried=carried, held_out=held_out, wave=wave,
                                 pr_heads=pr_heads, holds=holds, clashes=clashes,
-                                bases=bases, line_prs=line_prs, finished_heads=finished_heads)
+                                bases=bases, line_prs=line_prs, finished_heads=finished_heads,
+                                refreshed=refreshed)
         tips = {tgt: integrate.pushed_tip(wt) if wt is not None else None
                 for tgt, (_branch, wt) in folded.items()}
         # hold_lock=False: the locks stack already holds each tree's lock (re-acquiring
@@ -1808,7 +1825,14 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
     clean (:func:`_finished_head`), origin's line holding nothing else it cannot account for
     (:func:`integrate.foreign_commit`), merged without error, re-gate not red — it is folded
     by ONE fold per target (:func:`_fold_lines`), which continues origin's line from the
-    tip checked here (no force; refused if it moved) or starts it when absent. The target
+    tip checked here (no force; refused if it moved) or starts it when absent. A line it
+    continues is first brought up to date with the base by one merge commit (#893,
+    ``refreshed``), unless that merge conflicts, would remove work a bundle put on the line,
+    fails, or would leave off a finished id the line as found takes: then the fold says so on
+    ONE stderr line with the step, and carries onto the line as found. A red re-gate of a
+    line the fold put the base on — the refresh kept, or a carried id bringing it in —
+    names that merge and gives the ``line`` hint: the base itself may be what is red, which
+    re-opening a PR cannot change. The target
     is then seeded into ``integ`` / ``folded_tips``: wave 0 is pointed at the line and every
     later fold continues it. Any other finished id goes into ``held``, so its plain
     ``Depends on`` dependents wait (:func:`_runnable`), named with its reason on ONE stderr
@@ -1871,7 +1895,7 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
         if cfg.publisher.mode == "stub":    # dry-run: ask no host, hold nothing
             print(f"flow: dry-run — before wave 0, carry {', '.join(d.name for d in ids)} "
                   f"(finished in an earlier run) onto {line} if clean:", file=sys.stderr)
-            integrate.fold(cfg, ids, dry_run=True, batch=batch)
+            integrate.fold(cfg, ids, dry_run=True, batch=batch, refreshed=set())
             continue
         why: dict[str, tuple[str, str]] = {}    # not clean: name → (reason, hint)
         heads: dict[str, str] = {}              # state-clean: name → its PR head
@@ -1909,11 +1933,13 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
             # skipped for a textual conflict → (kind, partners, files) (#694)
             clashes: dict[str, tuple[str, dict[str, list[str]], list[str]]] = {}
             put: dict[str, str] = {}        # carried → the head the fold put on the line (#747)
+            refreshed: set[tuple[str, str]] = set()     # the fold put the base on it (#893)
             try:
                 folded, tips, red = _fold_lines(cfg, clean, dry=False, batch=batch,
                                                 folded_this_run={tgt: tip} if tip else {},
                                                 skipped=skipped, pr_heads=heads, holds=holds,
-                                                clashes=clashes, carried=put)
+                                                clashes=clashes, carried=put,
+                                                refreshed=refreshed)
             except integrate.IntegrationError as exc:
                 folded, tips, red = {}, {}, None
                 skipped.update({d.name: str(exc) for d in clean})
@@ -1932,7 +1958,15 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
             # for that id, as one built on it, and its dependents wait.
             why.update({name: (skipped[name], "built_on") for name in holds})
             causes.update(holds)
-            if red:
+            if red and tgt in refreshed:
+                # The fold put the base on the line before the re-gate (#893: the refresh, or
+                # a carried id that brings it): the base may be what is red, which re-opening
+                # a PR cannot change.
+                why.update({name: (f"the re-gate of {line} carrying it is red; this run "
+                                   f"merged {base_ref} into {line} before the re-gate — "
+                                   f"{base_ref} itself may be red", "line")
+                            for name in carried})
+            elif red:
                 why.update({name: (f"the re-gate of {line} carrying it is red", "open")
                             for name in carried})
             elif tgt in folded:
