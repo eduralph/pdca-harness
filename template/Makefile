@@ -36,6 +36,9 @@ open('.claude/settings.local.json', 'w'), indent=2)"
 	@echo "wrote .claude/settings.local.json — workspace read + /tmp (PERMISSIONS only)"
 	@echo "(folder TRUST is separate — it lives in the GLOBAL ~/.claude.json, not here:"
 	@echo " the first interactive '<cli> flow' asks once to TRUST this project — accept it.)"
+	@# Secret guard (.pre-commit-config.yaml): git hooks are not cloned, so activate per clone.
+	@if command -v pre-commit >/dev/null 2>&1; then pre-commit install; \
+	else echo "pre-commit not found: pipx install pre-commit && pre-commit install"; fi
 
 # --- install every tool `flow` needs (issue #207) --------------------------
 # Delegates to scripts/bootstrap-tools.sh: harness-universal tools (git, gh, a
