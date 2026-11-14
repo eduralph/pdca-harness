@@ -32,7 +32,9 @@ nor the line: a merge commit on the base then means a squash or rebase merge
 record does not count (:func:`counts_into`): only a drop of the edge ends that hold.
 :func:`has_patch` answers what comes before all of these (#839): does a bundle ship anything
 to merge, and can that even be read? :func:`marked_for_this_patch` answers the one after it:
-is that still the patch a PR's merge marker was written for?
+is that still the patch a PR's merge marker was written for? :func:`for_this_patch` asks the
+same of every patch digest a record carries (#865), so :func:`merged_into` never counts the
+merge of an older attempt as the bundle's work.
 """
 
 from __future__ import annotations
@@ -49,6 +51,8 @@ from .config import Config
 # The record's key beside ``merge_eligible`` (#839): :func:`patch_hash` of the patch that
 # marker was written for.
 MARKED_PATCH = "merge_eligible_patch"
+# The PR record's key (#865): :func:`patch_hash` of the patch.diff publish pushed for that PR.
+PATCH_DIGEST = "patch_digest"
 
 
 def is_merged(cfg: Config, dep_id: str) -> bool:
@@ -93,6 +97,16 @@ def merged_into(cfg: Config, dep_id: str, repo: str, base: str) -> bool:
     dependent with no usable ``Repo + branch target``, which publish skips), any merge
     counts — :func:`is_merged`'s answer.
 
+    A merge counts as the prerequisite's work only when its PR was published from the
+    ``patch.diff`` the bundle holds now (#865), whether or not there is a target: the record
+    survives an iterate, so after a rebuild that never reached the PR (a publish that failed
+    before its push, or ``--no-publish``) the merged head is an older attempt. A record that
+    carries a patch digest is counted only when :func:`for_this_patch` says each one is the
+    patch's now; one for another patch, or a patch that cannot be read, is "not merged", said
+    on stderr. A record with no digest at all is counted as before: one written before #865, or
+    an ``Onto branch`` record, for which publish writes none (and which counts only with no
+    target, above). The flow notes that this was not checked (``flow._note_no_digest``).
+
     Otherwise as :func:`is_merged`: a close/no-fix prereq (COMPLETE, empty or no patch) ⇒
     ``True``; not COMPLETE, or no recorded PR ⇒ ``False``. Fail-closed: a ``gh`` failure,
     ``gh`` missing included (:func:`pr_state` guards it), is "not merged", said on stderr —
@@ -103,7 +117,8 @@ def merged_into(cfg: Config, dep_id: str, repo: str, base: str) -> bool:
     d = cfg.find_bundle(dep_id)  # a merged prereq may be archived to completed/ (#171)
     if state.state(d) != state.COMPLETE:
         return False
-    if has_patch(d) is False:
+    ships = has_patch(d)
+    if ships is False:
         return True  # close/no-fix disposition — no contribution to wait on
     rec = _publish_record(d)
     pr_url = rec.get("pr_url") if isinstance(rec, dict) else None
@@ -122,6 +137,14 @@ def merged_into(cfg: Config, dep_id: str, repo: str, base: str) -> bool:
         onto = " (an `Onto branch` commit)" if rec.get("mode") == "stacked" else ""
         print(f"merged: {dep_id}'s PR ({pr_url}) merged, but into "
               f"{rec.get('repo') or '?'} @ {rec.get('base') or '?'}{onto}; "
+              f"treating as not merged{into}", file=sys.stderr)
+        return False
+    if for_this_patch(d, rec) is False:
+        why = ("its patch.diff cannot be read, so that PR is not known to hold the accepted "
+               "patch" if ships is None or patch_hash(d) is None else
+               "it was published for a different patch.diff than the one the bundle holds "
+               "now (an older attempt)")
+        print(f"merged: {dep_id}'s PR ({pr_url}) merged, but {why}; "
               f"treating as not merged{into}", file=sys.stderr)
         return False
     return True
@@ -253,8 +276,28 @@ def marked_for_this_patch(d: Path, rec: dict) -> bool:
     (a publish that failed before its push, or ``--no-publish``) the marker is still there and
     the PR's head is still the older attempt. A marker with no hash says nothing about that
     head, so it is not trusted either."""
+    return _is_this_patch(d, rec.get(MARKED_PATCH))
+
+
+def for_this_patch(d: Path, rec: dict) -> bool | None:
+    """Was the PR on ``d``'s publish record ``rec`` published from the ``patch.diff`` ``d`` holds
+    now (#865)? Asked of every patch digest the record carries: the one publish writes for its
+    PR (:data:`PATCH_DIGEST`) and the merge marker's (:data:`MARKED_PATCH`). ``True``: each is
+    the patch's :func:`patch_hash` now, as :func:`marked_for_this_patch` compares it. ``False``:
+    one is not — another patch's, not a digest at all, or the patch cannot be read — so the PR
+    may hold an older attempt. ``None``: the record carries no digest (one written before
+    #865, or an ``Onto branch`` record), so nothing can be checked."""
+    digests = [rec[k] for k in (PATCH_DIGEST, MARKED_PATCH) if k in rec]
+    if not digests:
+        return None
+    return all(_is_this_patch(d, v) for v in digests)
+
+
+def _is_this_patch(d: Path, digest: object) -> bool:
+    """Is ``digest`` the :func:`patch_hash` of the ``patch.diff`` ``d`` holds now? Never when it
+    cannot be read: neither side then has an answer. The one comparison both checks above use."""
     now = patch_hash(d)
-    return now is not None and rec.get(MARKED_PATCH) == now
+    return now is not None and digest == now
 
 
 def _publish_record(d: Path) -> dict | None:
