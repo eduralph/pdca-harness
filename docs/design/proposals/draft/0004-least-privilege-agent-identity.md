@@ -59,8 +59,11 @@ repositories of that owner's instances and targets.
   a stolen key from reaching the other owners. The key is readable only by the loop's OS user
   (section 5), rotated on a schedule (GitHub allows two active keys, so rotation has no gap),
   and revoked in the App settings if exposed.
-- **Tokens are short-lived.** The driver mints an installation token per run, scoped down to
-  the repositories that run touches; it expires after one hour and is never written to disk.
+- **Tokens are short-lived.** The driver mints installation tokens just in time, scoped down
+  to the repositories the run touches, and keeps them only in memory. A token lives one hour
+  while a bundle runs for hours (the median was 6.1 hours in proposal 0001), so the driver's
+  GitHub client mints a fresh one before each authenticated call once the current one is
+  older than 50 minutes; a call that still meets an expired token re-mints once and retries.
   Model leaves and gates see neither key nor token (ADR-0007's sandbox rules stand).
 - **The bot is the author.** A token only authenticates the push and the API calls; the
   commit object keeps whatever identity git is configured with. The driver therefore commits
@@ -74,7 +77,7 @@ repositories of that owner's instances and targets.
 
 | Permission | App | Why |
 |---|---|---|
-| Contents | read & write | push bundle branches (this also covers tags and releases; section 3 fences those) |
+| Contents | read & write | push driver branches (this also covers tags and releases; section 3 fences those) |
 | Pull requests | read & write | open and update pull requests |
 | Issues | read & write | backlog comments, labels, cleanup |
 | Metadata | read | mandatory |
@@ -94,7 +97,11 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
   checks from `.github/required-checks.txt`, and **code-owner review** as the review rule, with
   no general approval count. `CODEOWNERS` names the maintainer; only users and teams can be
   code owners, so the App can never satisfy that review, whether or not GitHub counts an
-  App's approval as a review.
+  App's approval as a review. The rule also sets **dismiss stale approvals on push**, so a
+  push the App makes after the maintainer's approval voids that approval instead of riding on
+  it. It does not set "require approval of the most recent push": that demands a human
+  approval of every App push and would block `merge` mode's ordinary PRs, which carry no
+  required review at all.
 - **What `CODEOWNERS` covers follows the instance's `[driver].wave_mode`.** PDCA's opt-in
   `merge` mode merges each non-final wave's PR itself so the next wave can build on it (the
   final wave's PR stays a draft for the maintainer); `stack` mode, the default, merges nothing.
@@ -102,22 +109,51 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
   | `wave_mode` | `CODEOWNERS` covers | The App can merge |
   |---|---|---|
   | `stack` (default) | everything (`*`) | nothing: every PR needs the maintainer |
-  | `merge` | the files that govern the agent: `.github/**`, `.secret-guard/**`, `.pre-commit-config.yaml`, `AGENTS.md`, `pdca.toml`, `scripts/**`, `CODEOWNERS` | an ordinary code PR once its required checks pass; a PR touching a governing file still waits for the maintainer |
+  | `merge` | the files that govern or run the agent (list below) | an ordinary code PR once its required checks pass; a PR touching a governing file still waits for the maintainer |
 
-  `doctor` and `repo-settings.py check` read `wave_mode` and warn when `CODEOWNERS` does not
-  match it.
-- **Bundle branches**: the App may create and update only `bundle/*` (and `bug/*`,
-  `bugfix/*` for the bug track); every other branch name is refused to it.
+  The governing set in `merge` mode is everything the next run executes or obeys, not only
+  CI: `CODEOWNERS`, `.github/**`, `.secret-guard/**`, `.pre-commit-config.yaml`, `pdca.toml`,
+  `AGENTS.md`, `CLAUDE.md`, the harness code and its packaging (`src/pdca_harness/**`,
+  `pyproject.toml`, `Makefile`, `scripts/**`, the copier answers file), and the prompts and
+  hooks the leaves and gates run with (`agents/**`, `.claude/**`, `engine/**`, `process/**`,
+  `templates/**`). Without this, a merged PR could change the driver that holds the App key,
+  or switch off a gate, before the maintainer sees it. In a target repository the set is its
+  `.github/**`, `CODEOWNERS` and whatever its required checks build or run with.
+
+  `doctor` and `repo-settings.py check` read `wave_mode` and **fail** when `CODEOWNERS` does
+  not cover the set its mode requires; the driver re-reads `CODEOWNERS` from `main` before
+  every merge and refuses to merge while it is short.
+
+  `merge` mode trusts the agent with ordinary code by definition: a non-final wave can change
+  an existing test's assertions and reach `main` without review, to be seen only when the
+  maintainer reviews the final wave. That is the trade the maintainer opts into. Instances
+  that cannot accept it stay in `stack` mode, or add `tests/**` to `merge` mode's governing
+  set, so that any PR touching a test waits for the maintainer.
+- **Driver branches**: a branch ruleset lets the App create and update only the namespaces
+  the driver itself uses, and refuses every other branch name to it. `repo-settings.py`
+  derives the list from the instance's configuration rather than hard-coding it: the prefixes
+  of `[publisher].fix_branch_pattern` and `feature_branch_pattern` (defaults `fix/*`,
+  `enhancement/*`), `pdca-integration/*` for stacked batches (force-pushes allowed there, as
+  `integrate.py` requires), `revert/*` for `pdca revert`, the bug track's branches, and
+  `[records].branch` (default `records/*`) when records are published as pull requests, and
+  `pdca-doctor/*` for the probe of section 6. `doctor` warns when a configured pattern falls
+  outside the ruleset, so a renamed pattern fails before a publish does.
 - **No push rulesets.** Rulesets that block file paths on push are not assumed. Instead:
   - Without the Workflows permission the App cannot change `.github/workflows/**`, so every
     guard whose logic is written inline in its workflow file is out of its reach as it is
     (in the project template: `docs-immutability`, `dco`, `require-linked-issue`).
   - Code-owner review covers all of `.github/**` in both modes, so a change to a script a
     workflow runs (for example `.github/docs-check/*.py`) always needs the maintainer.
-  - Required checks that run scripts take them from the base commit
-    (`git show "$BASE_SHA":<path>`), not from the pull request's checkout, so even an approved
-    change cannot make its own check pass by changing the checker in the same PR. The
-    template's `docs-check` and `template-test` move to this pattern.
+  - Required checks that run scripts take them from the base commit, not from the pull
+    request's checkout, so even an approved change cannot make its own check pass by
+    changing the checker in the same PR. That means the checker's **whole closure**, not just
+    its entry script: the job checks out the base commit into its own directory and runs the
+    checker, its helpers and its test runner from there, treating the pull request's tree as
+    data. The tests themselves are the pull request's (they are what it changes), so a
+    base-loaded `test-inventory` check fails when the pull request deletes, renames, skips or
+    marks as expected-failure a test that exists on the base; such a pull request waits for
+    the maintainer in both modes. The template's `docs-check`, `render-check` and
+    `template-test` move to this pattern.
 - **Tags and releases.** A tag ruleset on `refs/tags/**` restricts creation, update and
   deletion to the maintainer, with no bypass for the App. **Immutable releases** are on for
   every repository (`PUT /repos/{repo}/immutable-releases`; generally available since October
@@ -129,7 +165,22 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
   `Contents: write` lets the App publish a release on any existing tag that has none yet, and
   under immutability its assets would then be locked in; with no tag ever left without a
   release there is nothing to attach to, and `repo-settings.py check` flags any tag that has no
-  release. Immutability leaves a release's title and notes editable and the
+  release.
+
+  `Contents: write` also reaches **drafts**: while a draft waits for its assets, the App could
+  replace them or publish it, and immutability would then lock in its version. So no draft
+  waits. A release is assembled and published in one uninterrupted step by the release
+  workflow on `main` (create the draft, upload, publish, in one job), which the maintainer
+  starts with `workflow_dispatch`; there is no manual asset upload, because a manually
+  uploaded asset would carry no attestation. Trust in the assets does not rest on that window
+  being short: the release workflow signs a build-provenance attestation for every asset it
+  built (`actions/attest-build-provenance`, which needs `id-token: write` and
+  `attestations: write` on `main` only, out of the App's reach), and after publishing it
+  compares each published asset's digest with its own build output and fails loudly on a
+  mismatch. Consumers verify with `gh attestation verify --signer-workflow` naming that
+  workflow, which an asset the App swapped in cannot pass.
+
+  Immutability leaves a release's title and notes editable and the
   release deletable; with `Contents: write` the App could do either. That is accepted:
   downloads are trusted through the attestation, not the notes, and a deletion is visible in
   the audit log and cannot be replaced under the same tag.
@@ -139,13 +190,38 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
 - Every repository secret moves into a GitHub Environment that requires the maintainer's
   approval or deploys only from `main`. Workflows on `pull_request` keep no secret.
 - The default `GITHUB_TOKEN` stays read-only (`repo-settings.py` sets this today).
-- **OIDC counts as a secret.** A `pull_request` job with `id-token: write` can exchange its
-  token for a cloud or model credential with no stored secret involved. Such jobs are removed,
-  or every federation trust policy they could match pins the subject to
-  `refs/heads/main` (as ADR-0017 already does for issue triage).
+- **OIDC counts as a secret.** Any job with `id-token: write` that the App can start can
+  exchange its token for a cloud or model credential with no stored secret involved. The App
+  starts workflows through more than pull requests: its pushes fire `push` and `create`
+  triggers on its own branches, and its comments, labels and issues fire `issue_comment`,
+  `issues` and `pull_request_target`, and through them `workflow_run`.
+- **Running from `main` is not the same as being trusted.** `pull_request_target`,
+  `workflow_run`, `issue_comment` and `issues` run the workflow file from `main`, so an
+  environment limited to `main` and a trust policy pinned to `refs/heads/main` both admit
+  them, even when the App caused the event. A job that holds a secret or `id-token: write`
+  is therefore allowed only in one of two shapes:
+  - **triggered by the maintainer or by `main` itself**: `workflow_dispatch`, and in
+    `stack` mode also `push` limited to `main` and `schedule`, because only the maintainer
+    puts code on `main` there. In `merge` mode the App merges into `main`, so `push` and
+    `schedule` jobs run agent-merged code and fall under the second shape or need approval.
+    `release` is always App-causable (`Contents: write` covers releases), so it is never
+    in this group; or
+  - **triggered by an event the App can cause, but taking nothing executable from it**: it
+    does not check out the pull request's head, download the triggering run's artifacts, or
+    run a script the event names, and event text reaches it only as data (an environment
+    variable, never `${{ github.event.* }}` inside `run:`). ADR-0017's issue triage is this
+    shape: it reads issue text as data for a model call. A job that needs more than this
+    runs in an environment that requires the maintainer's approval.
+
+  Every federation trust policy such a job could match pins the subject to
+  `refs/heads/main` or to that environment.
+- **A write-scoped `GITHUB_TOKEN` counts too.** The repository default is read-only, but a
+  workflow's own `permissions:` block can raise it; such a job is treated like one holding a
+  secret.
 - `repo-settings.py check` lists any repository-level secret, any workflow that reads a
-  secret outside an approval-gated environment, and any `pull_request` workflow that requests
-  `id-token: write`.
+  secret outside an approval-gated environment, and every job with a secret,
+  `id-token: write` or a write-scoped `GITHUB_TOKEN` that matches neither shape, flagging each forbidden pattern by line
+  (head checkout, artifact download, event expression in `run:`).
 
 ### 5. The local side
 
@@ -170,7 +246,7 @@ ambiguous; none infers a restriction from an error it did not provoke:
   maintainer's side (below). It cannot see bypass actors (that needs Administration access the
   App does not have), so it does not claim to.
 - **Workflow changes are refused**: a probe pushes a commit that touches
-  `.github/workflows/` to a fresh `bundle/doctor-probe-<random>` branch and expects GitHub to
+  `.github/workflows/` to a fresh `pdca-doctor/probe-<random>` branch and expects GitHub to
   refuse it. If the push is accepted, the row deletes the branch and fails; any other
   response fails as inconclusive. Nothing is left behind on success.
 - **Reach**: repository access to a canary repository outside the installation is refused
@@ -182,8 +258,12 @@ What the App cannot read is checked from the maintainer's side: `repo-settings.p
 run with the maintainer's admin login, reads the ruleset definitions and fails unless the
 tag ruleset of section 3 targets `refs/tags/**` and no ruleset lists the App among
 `bypass_actors`, checks that immutable releases are on and that every tag has a release, and runs the secret and
-OIDC audit of section 4. `doctor` reports when that check last passed rather than repeating
-it with credentials it must not hold.
+OIDC audit of section 4. `doctor` cannot repeat it with credentials it must not hold, so the
+check writes its result (date, repository, the settings it read) to the instance state that `doctor`
+reads, and **an unattended run refuses to start** when that result is older than seven days
+or missing. The App cannot change any of these settings (it has no Administration
+permission), so between checks only the maintainer can loosen them; the expiry bounds how
+long such a mistake goes unnoticed.
 
 ## Alternatives considered
 
@@ -249,8 +329,15 @@ on `pull_request` break until that secret moves into an environment, which is th
 - **Immutable releases** (was open): available on every plan. Switched on for all 25 public,
   non-fork, non-archived repositories of getwyrd, Ralphovi and eduralph on 14.11.2026;
   `repo-settings.py` keeps them on. Editable notes and deletable releases are accepted (section 3).
+- **App key location for the bug-track driver** (was open): the key goes only to the driver,
+  never into the job VM, and is stored by the driver's backend. On a local host it is a
+  Podman secret (or systemd credential) readable only by the driver's container; on Google
+  Cloud it is a Secret Manager secret readable only by the driver's service account. Once a
+  model-key gateway exists, a shared token broker that hands the driver short-lived
+  installation tokens replaces both, so no backend holds the key. ADR-0021 is to be
+  superseded by a backend-neutral decision (a disposable job VM on a dedicated host); this
+  rule applies to whichever backend that decision allows.
 
 ## Open questions
 
-- **[OPEN]** Where the App key lives for ADR-0021's driver container (secret manager versus a
-  mounted file), to be settled with that ADR's pilot.
+None remain; question 4 was settled on 14.11.2026 (below, under decisions).
