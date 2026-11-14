@@ -101,9 +101,13 @@ repositories of that owner's instances and targets.
   `doctor` fails when `signoff` is missing or names a bot (a `[bot]` name or a
   `noreply.github.com` bot address). The template's `dco` check requires a `Signed-off-by`
   whose email matches the commit author's, the rule common DCO checkers apply, and rejects
-  one that names a bot, so a commit signed off only by a bot cannot merge. Agent commits are
-  identified by their committer, not their author: the auditor fails on a commit committed
-  by `pdca-bot-<owner>[bot]` that lacks the `Assisted-by` trailer. Commits carry the human's
+  one that names a bot, so a commit signed off only by a bot cannot merge. The committer field
+  and the `Assisted-by` trailer are **advisory**: git identities are unsigned strings that
+  whoever pushes can set, so a stolen App token could write any name and drop the trailer.
+  The authenticated record is GitHub's: which account opened each PR and pushed to its
+  branch (PR author, timeline and `performed_via_github_app`). The auditor reconciles each
+  merged PR's commits against that record and flags a PR opened by the agent App whose
+  commits lack the trailer, or claim a committer other than the bot. Commits carry the human's
   name without the human's signing key, so they stay unsigned; with GitHub's vigilant mode
   on they show as "Unverified", and the committer field and trailer are what mark them as the
   loop's. A ruleset that requires signed commits cannot be used on branches the loop pushes to.
@@ -221,10 +225,13 @@ the environment policies and the `doctor` rows all take the name from there.
   configured pattern falls outside the ruleset, so a renamed pattern blocks the run before a
   publish would fail.
 
-  **Dependabot** keeps its branches through a separate ruleset on `dependabot/**` whose only
-  bypass actor, besides the maintainer, is the Dependabot App (an `Integration` with
-  GitHub's fixed Dependabot App id); the agent App's ruleset excludes nothing, so
-  `dependabot/**` stays closed to the agent App. Dependabot's PRs then reach `main` through
+  **Dependabot** keeps its branches because a bypass applies only to the ruleset that grants
+  it: the general branch restriction excludes `dependabot/**`, and a separate ruleset covers
+  exactly `dependabot/**` with the same creation and update restriction and one bypass actor
+  besides the maintainer, the Dependabot App (an `Integration` with GitHub's fixed
+  Dependabot App id). `dependabot/**` thus stays closed to the agent App, and `doctor`'s
+  namespace check treats the two rulesets as one composition: every branch name outside the
+  driver namespaces must be restricted by exactly one of them. Dependabot's PRs then reach `main` through
   the same pull-request rule as any other.
 - **No push rulesets.** Rulesets that block file paths on push are not assumed. Instead:
   - Without the Workflows permission the App cannot change `.github/workflows/**`, so every
@@ -295,10 +302,10 @@ review aid, never the gate.
   in the repository, not only to those with secrets.
 - **Secrets live only in environments.** No repository secret, and no organization secret
   visible to a repository the App is installed on (an organization secret cannot be put
-  behind an environment). Every environment that holds a secret has a deployment policy that
-  admits only `main` (or, for `release`, only `v*` tags), so a job on a driver branch gets
-  nothing however its file is written. Every such environment also **requires the
-  maintainer's approval**, with no exception. A deployment policy alone is not enough: any
+  behind an environment). Every environment, whether it holds a secret, anchors an OIDC
+  trust or deploys Pages, has a deployment policy that admits only `main` (or, for
+  `release`, only `v*` tags), so a job on a driver branch gets nothing however its file is
+  written. Every environment also **requires the maintainer's approval**, with no exception. A deployment policy alone is not enough: any
   workflow token with `actions: write`, including one from an old commit on a driver branch,
   can re-run an earlier run whose ref was `main`, and the re-run passes the policy while
   executing that earlier commit's workflow. GitHub asks for approval again on every run
