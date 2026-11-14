@@ -93,11 +93,13 @@ the *names* of their secrets, never the values:
 
 | Permission | Auditor | Reads |
 |---|---|---|
-| Administration | read | whether immutable releases are on (`GET /repos/{repo}/immutable-releases`) and which self-hosted runners exist (`GET /repos/{repo}/actions/runners`) |
+| Administration | read | immutable releases, the Actions workflow-permission settings, and repository self-hosted runners |
+| Organization: Self-hosted runners | read | organization runners available to the repository (getwyrd, Ralphovi) |
 | Secrets | read | names of repository secrets, and of organization secrets visible to the repository (`GET /repos/{repo}/actions/organization-secrets`) |
 | Environments | read | names of environment secrets |
 | Actions | read | environments and their protection rules |
 | Contents | read | workflow files for the audit of section 4, tags and releases |
+| Attestations | read | the provenance attestations of release assets (`gh attestation verify`) |
 | Metadata | read | mandatory; also rulesets |
 
 ### 3. Rulesets and code owners (template `repo-settings.py`)
@@ -124,7 +126,7 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
 
   | `wave_mode` | `CODEOWNERS` covers | The App can merge |
   |---|---|---|
-  | `stack` (default) | everything (`*`) | nothing: every PR needs the maintainer |
+  | `stack` (default) | everything (`*`) | nothing: `main` also carries an update restriction whose only bypass actor is the maintainer (pull-request mode), so even an approved PR is merged by the maintainer, not the App |
   | `merge` | the files that govern or run the agent (list below) | any PR that touches no governing file, once its required checks pass; a PR touching a governing file still waits for the maintainer |
 
   GitHub does not know a PR's wave position, so "the final wave stays a draft" is the
@@ -150,7 +152,9 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
   closure is not covered by `CODEOWNERS`. In a
   target repository the set is its `.github/**`, `CODEOWNERS`, the same instruction files
   at any depth (`**/AGENTS*.md`, `**/CLAUDE*.md`, `**/.claude/**`, `**/.codex/**`) with the
-  transitive closure of the files they name, and whatever its required checks build or run with.
+  transitive closure of the files they name, and the implementation of its required checks:
+  CI configuration, build and test-runner configuration and scripts, not the application
+  source those checks build and test (that is the ordinary code `merge` mode merges).
 
   `doctor` and `repo-settings.py check` read `wave_mode` and **fail** when `CODEOWNERS` does
   not cover the set its mode requires; the driver re-reads `CODEOWNERS` from `main` before
@@ -187,117 +191,128 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
     the maintainer in both modes. The template's `docs-check`, `render-check` and
     `template-test` move to this pattern.
 - **Tags and releases.** A tag ruleset on `refs/tags/**` restricts creation, update and
-  deletion to the maintainer and to the release workflow, with no bypass for the agent App.
-  The workflow's `GITHUB_TOKEN` acts as GitHub Actions, not as the maintainer, so the ruleset
-  lists GitHub Actions as a bypass actor. That would let *any* workflow with
-  `contents: write` create tags, so the audit of section 4 requires that the release job is
-  the only job with `contents: write` and that it starts only from `workflow_dispatch`,
-  which the agent App cannot trigger (it has no Actions permission). **Immutable releases** are on for
-  every repository (`PUT /repos/{repo}/immutable-releases`; generally available since October
-  2025, on every plan, private repositories included): a published release's tag and assets
-  cannot change, its tag name can never be reused once deleted, and GitHub records an
-  attestation that `gh release verify` and `gh release verify-asset` check. Releases are
-  created only by the maintainer or by a workflow on `main`, as a draft that gets its assets
-  before it is published, and **a tag is created together with its release** in that one step.
-  `Contents: write` lets the App publish a release on any existing tag that has none yet, and
-  under immutability its assets would then be locked in; with no tag ever left without a
-  release there is nothing to attach to, and the auditor check (section 6) flags any tag that has no
-  release.
+  deletion to the maintainer, with **no bypass for anyone else**, GitHub Actions included.
+  **Immutable releases** are on for every repository (`PUT /repos/{repo}/immutable-releases`;
+  generally available since October 2025, on every plan, private repositories included): a
+  published release's tag and assets cannot change, its tag name can never be reused once
+  deleted, and GitHub records an attestation that `gh release verify` and
+  `gh release verify-asset` check.
 
-  `Contents: write` also reaches **drafts**: while a draft waits for its assets, the App could
-  replace them or publish it, and immutability would then lock in its version. So no draft
-  waits. A release is assembled and published in one uninterrupted step by the release
-  workflow on `main` (create the draft, upload, publish, in one job), which the maintainer
-  starts with `workflow_dispatch`; there is no manual asset upload, because a manually
-  uploaded asset would carry no attestation. Trust in the assets does not rest on that window
-  being short: the release workflow signs a build-provenance attestation for every asset it
-  built (`actions/attest-build-provenance`, which needs `id-token: write` and
-  `attestations: write` on `main` only, out of the App's reach), and after publishing it
-  compares each published asset's digest with its own build output and fails loudly on a
-  mismatch. Consumers verify with `gh attestation verify --signer-workflow` naming that
-  workflow, which an asset the App swapped in cannot pass.
+  The maintainer releases by pushing a tag (`v*`) from their own login. A release workflow
+  triggered by that tag push builds the assets, signs a build-provenance attestation for
+  each (`actions/attest-build-provenance`), and creates, fills and publishes the release in
+  one job. That job runs in a `release` environment whose deployment policy admits only `v*`
+  tags and which requires the maintainer's approval, so its `id-token: write` and
+  `attestations: write` are reachable from nothing the App can create (section 4). There
+  is no manual asset upload, because a manually uploaded asset would carry no attestation.
 
-  Immutability leaves a release's title and notes editable and the
-  release deletable; with `Contents: write` the App could do either. That is accepted:
-  downloads are trusted through the attestation, not the notes, and a deletion is visible in
-  the audit log and cannot be replaced under the same tag.
+  `Contents: write` still lets the App create or publish a release on that tag in the
+  seconds before the workflow does, or touch a draft. That can be detected, not prevented:
+  the auditor fails on any release not published by `github-actions[bot]` and on any asset
+  without a provenance attestation from the release workflow at that tag, and consumers
+  verify with `gh attestation verify --signer-workflow <release workflow>
+  --source-ref refs/tags/<tag>`, which an asset the App supplied cannot pass. Because
+  immutability would lock such a release, the response is to delete it and release under
+  the next version number.
 
-### 4. CI secrets: nothing worth stealing on an agent branch
+  Turning immutability on protects only releases published afterwards; older ones keep
+  `immutable: false`, and `Contents: write` can still replace their assets. A digest
+  snapshot checked now and then cannot close that, since an asset can be swapped and
+  restored between two checks. So before the agent App is installed on a repository, every
+  mutable release there is either republished, which makes it immutable, or deleted, and the
+  auditor fails on any mutable release from then on. `repo-settings.py` lists the releases
+  concerned (for the repositories switched on, 14.11.2026).
 
-- Every repository secret moves into a GitHub Environment that requires the maintainer's
-  approval or deploys only from `main`. Workflows on `pull_request` keep no secret.
-- The default `GITHUB_TOKEN` stays read-only (`repo-settings.py` sets this today).
-- **OIDC counts as a secret.** Any job with `id-token: write` that the App can start can
-  exchange its token for a cloud or model credential with no stored secret involved. The App
-  starts workflows through more than pull requests: its pushes fire `push` and `create`
-  triggers on its own branches, and its comments, labels and issues fire `issue_comment`,
-  `issues` and `pull_request_target`, and through them `workflow_run`; and `Contents: write`
-  lets it call `POST /repos/{repo}/dispatches`, which fires `repository_dispatch` with a
-  `client_payload` it chooses. That list is not meant to be complete: **every trigger
-  outside the maintainer-only set below counts as App-causable**, including ones not named
-  here (`delete`, for instance, which the App fires by deleting one of its branches).
-- **Running from `main` is not the same as being trusted.** `pull_request_target`,
-  `workflow_run`, `issue_comment`, `issues` and `repository_dispatch` run the workflow file from `main`, so an
-  environment limited to `main` and a trust policy pinned to `refs/heads/main` both admit
-  them, even when the App caused the event. A job that holds a secret or `id-token: write`
-  is therefore allowed only in one of two shapes:
-  - **triggered by the maintainer on code only the maintainer put there**: in `stack`
-    mode, `workflow_dispatch`, `schedule` and `push` limited to `main`, because nothing
-    reaches `main` there without the maintainer's review. In `merge` mode the App merges
-    ordinary code into `main`, so even a maintainer-triggered run may build and execute
-    agent-merged code; there **every** job holding a secret, `id-token: write` or a
-    write-scoped token runs in an environment that requires the maintainer's approval, which
-    approves that run and with it the exact commit it runs on. `release` is always
-    App-causable (`Contents: write` covers releases), so it is never in this group; or
-  - **triggered by an event the App can cause, and reviewed as such** (`stack` mode only,
-    where everything the job imports or runs from the repository reached `main` through the
-    maintainer's review; in `merge` mode such jobs are approval-gated like all others, since
-    a hashed script could import ordinary code the App merged later): whether a job treats
-    event data only as data cannot be decided from where the expressions sit (a fixed step
-    can still `eval` an environment variable or read `GITHUB_EVENT_PATH`). So these jobs are
-    allowed only from a maintainer-reviewed **allowlist** (`.github/privileged-jobs.toml`,
-    covered by `CODEOWNERS`), which names each workflow and job with the SHA-256 of the
-    whole workflow file (triggers, `permissions`, `env` and `defaults` included) and of the
-    job's own directory under `.github/` (for example `.github/triage/**`), the only
-    repository code the job may run: it checks out at most that directory (a sparse
-    checkout), and third-party actions are pinned by commit SHA. Any change to the workflow
-    file or to any file in that directory voids the entry, so there is no import or sourced
-    file outside the digest.
-    Reviewing an entry means confirming that the job does not check out the pull request's
-    head, download the triggering run's artifacts or run anything the event names, and that
-    event data reaches only consumers that treat it as data. ADR-0017's issue triage is such
-    a job: it hands issue text to a model call. Every other privileged job on an App-causable
-    event runs in an environment that requires the maintainer's approval.
+  Immutability leaves a release's title and notes editable and the release deletable; with
+  `Contents: write` the App could do either. That is accepted: downloads are trusted through
+  the attestation, not the notes, and a deletion is visible in the audit log and cannot be
+  replaced under the same tag.
 
-  Every federation trust policy such a job could match pins the subject to
-  `refs/heads/main` or to that environment.
-- **A write-scoped `GITHUB_TOKEN` counts too.** The repository default is read-only, but a
-  workflow's own `permissions:` block can raise it; such a job is treated like one holding a
-  secret.
-- **Workflows on every App-writable branch, not only `main`.** A `push` to a driver branch
-  runs that branch's own copy of each workflow. A branch that predates the installation can
-  carry an older workflow the App could then trigger without touching a workflow file. So
-  before the App is installed, existing branches in the driver namespaces are audited or
-  deleted, and the auditor reads the workflow files on every branch the App can write, not
-  only on `main`.
-- **Self-hosted runners.** A job the App can trigger on a persistent self-hosted runner runs
-  App-controlled code on that host, with no GitHub secret needed to do harm. Such jobs run
-  on GitHub-hosted runners, or on ephemeral runners that are rebuilt for every job and hold
-  no credentials. The auditor reads each job's `runs-on` and the repository's runners and
-  fails on an App-causable job that can land on a persistent self-hosted runner unless it
-  is approval-gated.
-- **Organization secrets** cannot be put behind an environment, and an organization secret
-  selected for a repository reaches its workflows like a repository secret. So no
-  organization secret may be visible to a repository the agent App is installed on; the
-  auditor fails on any that is.
-- The auditor check (section 6) lists any repository-level secret, any organization secret
-  visible to an installed repository, any workflow that reads a
-  secret outside an approval-gated environment, and every job with a secret,
-  `id-token: write` or a write-scoped `GITHUB_TOKEN` that matches neither shape: not
-  approval-gated, and not on the allowlist with matching digests. As a review aid it also
-  flags known-dangerous patterns by line (head checkout, artifact download, an
-  event-controlled expression outside `env:`, including in an action's `with:` inputs such as
-  `actions/github-script`'s `script`), but passing those patterns never admits a job.
+### 4. CI privilege: enforced by settings, never by workflow content
+
+**The principle.** A push runs the workflow files *of the pushed branch*. The App cannot
+change a workflow file, but it can point a driver branch at any commit in the repository's
+history and push there, which runs whatever workflow that old commit carried. So no
+protection may depend on what a workflow file says: every privilege a workflow could use is
+fenced by a repository or organization **setting** that GitHub enforces whatever the file
+says, and the auditor (section 6) checks those settings. Reading workflow files remains a
+review aid, never the gate.
+
+- **Every environment is fenced, whatever it holds.** An environment that holds no secret
+  can still be an OIDC trust anchor (below), so the rules here apply to every environment
+  in the repository, not only to those with secrets.
+- **Secrets live only in environments.** No repository secret, and no organization secret
+  visible to a repository the App is installed on (an organization secret cannot be put
+  behind an environment). Every environment that holds a secret has a deployment policy that
+  admits only `main` (or, for `release`, only `v*` tags), so a job on a driver branch gets
+  nothing however its file is written. An environment additionally **requires the
+  maintainer's approval** unless every job that can use it runs only maintainer-reviewed
+  code: code under `.github/**` (code-owned in both modes, section 3) and actions pinned by
+  commit SHA. Issue triage (ADR-0017) is such a job: it hands issue text to a model call.
+  In `merge` mode, any environment whose jobs build or run ordinary repository code requires
+  approval, since the App merges ordinary code into `main`; approving a run approves the
+  exact commit it runs on.
+- **OIDC trusts environments, not refs.** Any job, on any branch, can request an OIDC token.
+  So every cloud trust policy pins the subject to an environment
+  (`repo:<owner>/<repo>:environment:<name>`), never to a branch or to `ref:refs/heads/main`:
+  `pull_request_target`, `issue_comment` and `workflow_run` jobs also carry `main` as their
+  ref, even when the App caused the event. A token from a job outside a protected
+  environment then matches no policy. These policies live with the cloud provider, out of
+  the auditor's reach; `repo-settings.py` prints the subjects the maintainer must pin, and
+  the auditor checks the repository's OIDC subject template is the default, which includes
+  the environment.
+- **Privileged jobs build clean.** A job in an environment restores no Actions cache and
+  downloads no artifact from another run: in `merge` mode an unprivileged run on `main` could
+  have filled the cache with agent-merged output. Unlike the other workflow rules this one
+  is a real gate: deployment policies admit only `main` (and `v*` tags), so only the current,
+  code-owned workflow files on `main` and on release tags can reach an environment, and the
+  auditor reads exactly those. It fails on any environment job that uses `actions/cache`,
+  a `setup-*` action with caching on, or `download-artifact` with a `run-id`.
+- **What the workflow token can still do.** The repository default for `GITHUB_TOKEN` is
+  read-only, but a workflow file can raise it, and an old commit's file can too. Every
+  writable scope is therefore accounted for:
+
+  | Scope | Fenced by | Residual |
+  |---|---|---|
+  | `contents` | rulesets on `main`, tags and non-driver branches (no bypass for GitHub Actions) | driver branches, which the App can write anyway |
+  | `pull-requests`, `issues`, `discussions` | "Allow GitHub Actions to create and approve pull requests" off; code-owner review | comments and labels, as the App |
+  | `id-token` | trust policies pinned to fenced environments | none |
+  | `attestations` | consumers verify `--source-ref refs/tags/<tag>` and the signer workflow | an attestation from a branch run, which that check rejects |
+  | `deployments` | environment deployment policies | deployment records without access |
+  | `pages` | the `github-pages` environment's deployment policy (`main` only) | none |
+  | `actions` | none available | known limit: disable workflows, cancel or delete runs and artifacts |
+  | `statuses`, `checks` | none available | known limit: fake status checks |
+  | `packages` | none available | known limit |
+  | `security-events` | none available | known limit: upload or dismiss code-scanning results |
+
+- **No persistent self-hosted runners** are available to a repository the App is installed
+  on, at repository or organization level. A job on such a runner runs App-controlled code
+  on that host, and a runner group cannot be restricted by branch on a personal account.
+  GitHub-hosted runners only, or ephemeral runners rebuilt for every job holding no
+  credentials.
+
+**Known limits** (accepted; the pilot shows whether any needs more):
+
+- **Fake status checks in `merge` mode.** A job with `statuses: write` or `checks: write`
+  on an old commit can post a passing status for a required check's name, and GitHub
+  attributes it to GitHub Actions just like the real check. In `stack` mode the maintainer
+  reviews every PR, so this changes nothing. In `merge` mode it can let the driver merge an
+  ordinary-code PR whose real checks failed; governing files still wait for the maintainer.
+- **Packages.** A token with `packages: write` can publish to GitHub Packages from a driver
+  branch, and package access cannot be restricted by branch. Repositories that publish
+  packages from Actions are listed by the auditor, and their publishing moves to the
+  `release` environment's credentials or they stay outside the App installation.
+- **Disruption through `actions: write`.** A workflow on an old commit can disable other
+  workflows, cancel runs and delete runs, logs and artifacts. That cannot loosen a gate: a
+  required check that does not run leaves the PR unmergeable. It can erase evidence, so the
+  n8n audit alerts on a disabled workflow.
+- **Code scanning.** With `security-events: write` such a workflow can upload or dismiss
+  code-scanning results. Code scanning is not a merge gate here; the maintainer treats its
+  alerts as advisory.
+- **Event-data injection on `main`.** Whether a reviewed job treats event text only as data
+  is a property of reviewed code; the auditor flags known patterns (head checkout, an
+  event-controlled expression outside `env:`, `actions/github-script` fed event data) but
+  cannot prove their absence.
 
 ### 5. The local side
 
@@ -345,8 +360,10 @@ every unattended run, so no proof is cached between runs.
   write access to the ruleset, but every ruleset response carries `current_user_can_bypass`
   for the caller. Asked with the agent App's token, it answers exactly the question that
   matters: the row fails unless it is `never` for every ruleset, and fails as inconclusive
-  when the field is missing. Who *else* may bypass (the maintainer, say) is not this
-  proposal's concern and is not checked here.
+  when the field is missing. Other bypass actors matter too: a ruleset that lets
+  GitHub Actions or a deploy key bypass would let a workflow on an old commit push straight
+  to `main`. Those lists are visible only with write access to the rulesets, so they are
+  checked from the maintainer's side (below).
 - **Reach**: repository access to a canary repository outside the installation is refused
   (the all-zero-ref probe of `token-scope` suffices for this one: it only asks whether the
   repository is reachable).
@@ -372,8 +389,13 @@ repositories) rather than a live one:
 **With the auditor App's token**: first the same identity check as for the agent App, an
 unscoped token whose permissions must equal the auditor table of section 2 exactly (any write
 permission fails) and whose repositories must be exactly the configured ones. Then:
-immutable releases are on, every tag has a release, every release is immutable, and the secret, OIDC and write-token audit of section 4 passes. Any
-failure blocks the run.
+the settings of sections 3 and 4: immutable releases are on, every release is immutable,
+published by `github-actions[bot]` and attested by the release workflow, and every tag
+older than an hour has one; no repository secret and no visible organization secret; every
+environment with a secret has the deployment policy and, where section 4 requires it, the
+approval rule; the OIDC subject template is the default; "Allow GitHub Actions to create
+and approve pull requests" is off; no persistent self-hosted runner is available; and the
+review aids of section 4 report nothing new on `main`. Any failure blocks the run.
 
 Turning immutability on protects only releases published afterwards; older ones keep
 `immutable: false`, and `Contents: write` can still replace their assets. A digest snapshot
@@ -402,8 +424,12 @@ one failing vector, which the harness's CI enforces, and each side reports the I
 The run fails when that set differs from the manifest, on either side.
 
 `repo-settings.py check` with the maintainer's admin login remains for what only an admin
-can see, the full `bypass_actors` lists, and for applying settings. It is a maintenance
-tool, not a gate on runs.
+can see: the full `bypass_actors` lists. It fails unless every ruleset's only bypass actor
+is the maintainer (the repository admin role, or the organization admin), with no
+`Integration` (GitHub Actions or any App) and no `DeployKey`. It runs when an App is first
+installed, and `repo-settings.py apply` runs it after every ruleset change it makes;
+`doctor` shows the date of the last pass. Only an admin can change a ruleset, so between
+those checks only the maintainer can add a bypass actor; that residual is accepted.
 
 The checks rest on two API facts confirmed in GitHub's REST documentation on 14.11.2026:
 rulesets are readable with Metadata: read, while `bypass_actors` "is only returned if the
