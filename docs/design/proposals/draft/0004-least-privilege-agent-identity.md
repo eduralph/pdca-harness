@@ -83,18 +83,52 @@ repositories of that owner's instances and targets.
 
 ### 3. Rulesets and code owners (template `repo-settings.py`)
 
-- **`main`**: changes only through a pull request with one approving review, approval of the
-  most recent push by someone other than its pusher, and no bypass for the App.
+Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
+
+- **Public repositories only.** Branch protection and rulesets are enforced on public
+  repositories on every plan, but not on private repositories of a free personal account. The
+  App is therefore installed only where they are enforced; `repo-settings.py check` fails an
+  installation that includes a repository where they are not. A private repository's loop
+  keeps publishing from the maintainer's own login in `stack` mode, as today.
+- **`main` is reached only through a pull request.** No bypass for the App, required status
+  checks from `.github/required-checks.txt`, and **code-owner review** as the review rule, with
+  no general approval count. `CODEOWNERS` names the maintainer; only users and teams can be
+  code owners, so the App can never satisfy that review, whether or not GitHub counts an
+  App's approval as a review.
+- **What `CODEOWNERS` covers follows the instance's `[driver].wave_mode`.** PDCA's opt-in
+  `merge` mode merges each non-final wave's PR itself so the next wave can build on it (the
+  final wave's PR stays a draft for the maintainer); `stack` mode, the default, merges nothing.
+
+  | `wave_mode` | `CODEOWNERS` covers | The App can merge |
+  |---|---|---|
+  | `stack` (default) | everything (`*`) | nothing: every PR needs the maintainer |
+  | `merge` | the files that govern the agent: `.github/**`, `.secret-guard/**`, `.pre-commit-config.yaml`, `AGENTS.md`, `pdca.toml`, `scripts/**`, `CODEOWNERS` | an ordinary code PR once its required checks pass; a PR touching a governing file still waits for the maintainer |
+
+  `doctor` and `repo-settings.py check` read `wave_mode` and warn when `CODEOWNERS` does not
+  match it.
 - **Bundle branches**: the App may create and update only `bundle/*` (and `bug/*`,
   `bugfix/*` for the bug track); every other branch name is refused to it.
-- **Tags and releases**: a tag ruleset on `refs/tags/**` restricts creation, update and
-  deletion to the maintainer, with no bypass for the App; releases are made immutable where
-  GitHub offers it, so a published release's tag and assets cannot change. Releases are
-  created only by the maintainer or by a workflow on `main`.
-- **Code owners**: `.github/**`, `.secret-guard/**`, `.pre-commit-config.yaml`, `AGENTS.md`,
-  `pdca.toml`, `scripts/**` and `CODEOWNERS` itself are owned by the maintainer and require
-  that review. Where push rulesets are available, the same paths are blocked for the App
-  outright, not just reviewed.
+- **No push rulesets.** Rulesets that block file paths on push are not assumed. Instead:
+  - Without the Workflows permission the App cannot change `.github/workflows/**`, so every
+    guard whose logic is written inline in its workflow file is out of its reach as it is
+    (in the project template: `docs-immutability`, `dco`, `require-linked-issue`).
+  - Code-owner review covers all of `.github/**` in both modes, so a change to a script a
+    workflow runs (for example `.github/docs-check/*.py`) always needs the maintainer.
+  - Required checks that run scripts take them from the base commit
+    (`git show "$BASE_SHA":<path>`), not from the pull request's checkout, so even an approved
+    change cannot make its own check pass by changing the checker in the same PR. The
+    template's `docs-check` and `template-test` move to this pattern.
+- **Tags and releases.** A tag ruleset on `refs/tags/**` restricts creation, update and
+  deletion to the maintainer, with no bypass for the App. **Immutable releases** are on for
+  every repository (`PUT /repos/{repo}/immutable-releases`; generally available since October
+  2025, on every plan, private repositories included): a published release's tag and assets
+  cannot change, its tag name can never be reused once deleted, and GitHub records an
+  attestation that `gh release verify` and `gh release verify-asset` check. Releases are
+  created only by the maintainer or by a workflow on `main`, as a draft that gets its assets
+  before it is published. Immutability leaves a release's title and notes editable and the
+  release deletable; with `Contents: write` the App could do either. That is accepted:
+  downloads are trusted through the attestation, not the notes, and a deletion is visible in
+  the audit log and cannot be replaced under the same tag.
 
 ### 4. CI secrets: nothing worth stealing on an agent branch
 
@@ -165,7 +199,10 @@ it with credentials it must not hold.
    through it, rulesets and code owners applied, secrets moved into environments.
    Done when a full flow (plan to publish) runs on the App token, and the `doctor` rows above
    pass and are shown to fail on a token with workflow or admin rights.
-2. **Template**: `repo-settings.py` applies the rulesets, code owners and the secret audit;
+2. **Template**: `repo-settings.py` applies the rulesets, `CODEOWNERS` matching `wave_mode`,
+   immutable releases and the secret audit, and refuses an App installation on a repository
+   without enforced branch protection; `docs-check` and `template-test` load their scripts
+   from the base commit;
    `setup-loop-user.sh` and the App-token minting move into the template; the `doctor` rows
    ship with tests against a stub API.
 3. **Roll out** to the other instances through `copier update`, one owner at a time.
@@ -194,14 +231,20 @@ maintainer must review, not what the loop produces. Workflows that read a reposi
 on `pull_request` break until that secret moves into an environment, which is the point; the
 `doctor` row names them first.
 
+## Decisions taken while drafting
+
+- **App approvals** (was open): the review rule is code-owner review, which an App cannot
+  satisfy, so whether GitHub counts an App's approval no longer matters. The App keeps the
+  ability to merge for `merge`-mode instances (section 3).
+- **Push rulesets** (was open): not assumed, since PDCA cannot rely on a paid plan; the
+  missing Workflows permission, code-owner review of `.github/**` and checkers loaded from the
+  base commit replace them. The App is installed only on repositories where branch protection
+  is enforced (public ones on a free plan).
+- **Immutable releases** (was open): available on every plan. Switched on for all 25 public,
+  non-fork, non-archived repositories of getwyrd, Ralphovi and eduralph on 14.11.2026;
+  `repo-settings.py` keeps them on. Editable notes and deletable releases are accepted (section 3).
+
 ## Open questions
 
-- **[OPEN]** Do approvals by a GitHub App count toward required reviews? If they do, the
-  ruleset must exclude the App from reviewers, or rely on code-owner review by the maintainer.
-- **[OPEN]** Push rulesets with file-path restrictions: availability on public repositories
-  and on personal accounts (eduralph) must be checked; code-owner review is the fallback.
-- **[OPEN]** Immutable releases: availability on public repositories and personal accounts,
-  and whether the App's `Contents: write` can still edit release notes once a release is
-  immutable.
 - **[OPEN]** Where the App key lives for ADR-0021's driver container (secret manager versus a
   mounted file), to be settled with that ADR's pilot.
