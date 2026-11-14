@@ -163,7 +163,8 @@ class _Gh:
             head = self.head
             if self.updating:                   # the update lands after this read
                 self.head, self.updating = HEAD, False
-            return _res(out=json.dumps({"headRefOid": head, "baseRefName": "main"}))
+            return _res(out=json.dumps({"headRefOid": head, "baseRefName": "main",
+                                        "isCrossRepository": False}))
         if verb == "checks":
             return _res(0 if self.checks == "pass" else 1,
                         out=json.dumps([{"name": "ci", "bucket": self.checks}]))

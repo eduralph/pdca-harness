@@ -964,7 +964,10 @@ wave builds on, via `[driver].wave_mode`:
 - **`"merge"`** (own-repo / continuous-delivery only) — actually `gh pr merge`s
   each non-final wave's PRs, so the next wave builds on a genuinely merged base.
   Needs merge rights on the base remote and relaxes STOP discipline for the
-  batch; fails closed if a PR turns out non-mergeable. `[driver].merge_method`
+  batch; fails closed if a PR turns out non-mergeable. Before every ready-mark the
+  driver asks the host whether the PR's head is in the base repository
+  (`isCrossRepository`), and refuses a fork PR or an answer it cannot read, leaving
+  the PR as it found it. `[driver].merge_method`
   picks the merge strategy (`"merge"` / `"squash"` / `"rebase"`).
   A merge-mode run marks each PR it pushes and then tries to merge as a
   non-final wave (`"merge_eligible": true` in the bundle's `publish.json`, with a

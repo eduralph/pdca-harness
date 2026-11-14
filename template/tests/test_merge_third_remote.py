@@ -138,6 +138,9 @@ class ThirdRemoteHead(unittest.TestCase):
         if cmd[2] == "update-branch" and self.update:
             self.head = self.update()
             return ok
+        if cmd[2] == "view" and cmd[cmd.index("--json") + 1] == "isCrossRepository":
+            return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
+                {"isCrossRepository": False}))
         if cmd[2] in ("ready", "merge"):
             return ok
         raise AssertionError(f"unexpected gh call: {cmd}")

@@ -12,8 +12,8 @@ bundle's target base, as `publish._resolve_target` resolves it (the one parse pu
   take, refuses naming both branches, with no `gh pr ready` (so no `--undo`) at all for
   that PR, and points at the PR on the host rather than at the brief (b);
 - a target that a sibling bundle of the batch published (#411 route 2) is refused before
-  the host is asked anything, whatever base the PR is on, with the way out publish's own
-  #411 refusal gives (e);
+  the PR's base is read, whatever base it is on, with the way out publish's own #411
+  refusal gives (e);
 - a malformed `expected_checks` is still refused first, with no `gh pr edit` (f);
 - under `merge_requires = "all"`, a base edited on the host after that check (while the
   checks are read, or right after the ready-mark) is refused at the next read, ready-mark
@@ -47,6 +47,7 @@ BASE_TIP = "b" * 40
 OLD = "fix/old-parent"            # the wrong base the PR carries
 REQUIRES = ("all", "required")
 VIEW = ["gh", "pr", "view", PR, "--json", "headRefOid,baseRefName"]
+OWN_REPO_READ = ["gh", "pr", "view", PR, "--json", "isCrossRepository"]
 
 
 def _cfg(root: Path, **overrides: object) -> Config:
@@ -102,7 +103,8 @@ class _Host:
 
     def _gh(self, verb: str, cmd: list[str]) -> SimpleNamespace:
         if verb == "view":
-            return _res(out=json.dumps({"headRefOid": HEAD, "baseRefName": self.base}))
+            return _res(out=json.dumps({"headRefOid": HEAD, "baseRefName": self.base,
+                                        "isCrossRepository": False}))
         if verb == "edit":
             if self.edit_fails:
                 return _res(1, err="GraphQL: Resource not accessible by integration "
@@ -228,9 +230,10 @@ class MergeHoldsThePrToItsTargetBase(unittest.TestCase):
                 self.assertEqual(host.merged_into, ["main"])
 
     # (e) + (c): a target base that a sibling bundle of this batch published (#411 route 2)
-    # is refused before the host is asked anything, whether or not the host already reports
-    # it as the PR's base, with the same way out as publish's own #411 refusal.
-    def test_batch_produced_target_is_refused_before_any_gh_call(self) -> None:
+    # is refused before the PR's base is read (only issue #806's read comes first), whether
+    # or not the host already reports it as the PR's base, with the same way out as publish's
+    # own #411 refusal.
+    def test_batch_produced_target_is_refused_before_any_gh_write(self) -> None:
         for host_base in ("feat/sibling", "main"):
             for requires in REQUIRES:
                 with self.subTest(host_base=host_base, merge_requires=requires):
@@ -243,7 +246,8 @@ class MergeHoldsThePrToItsTargetBase(unittest.TestCase):
                     host = _Host(host_base)
                     rc, err = self._run(cfg, host, d)
                     self.assertEqual(rc, 1)
-                    self.assertEqual([c for c in host.calls if c[:2] == ["gh", "pr"]], [])
+                    self.assertEqual([c for c in host.calls if c[:2] == ["gh", "pr"]],
+                                     [OWN_REPO_READ])   # issue #806
                     self.assertEqual(host.merged_into, [])
                     self.assertIn("issue_499", err)
                     self.assertIn("`feat/sibling`", err)
@@ -301,7 +305,8 @@ class MergeHoldsThePrToItsTargetBase(unittest.TestCase):
                 host = _Host(OLD)
                 rc, err = self._run(cfg, host, d)
                 self.assertEqual(rc, 1)
-                self.assertEqual([c for c in host.calls if c[:2] == ["gh", "pr"]], [])
+                self.assertEqual([c for c in host.calls if c[:2] == ["gh", "pr"]],
+                                 [OWN_REPO_READ])       # issue #806
                 self.assertIn("no target base", err)
 
 

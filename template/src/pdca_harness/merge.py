@@ -118,6 +118,14 @@ someone else's, with other work on it and any base — so ``_merge_one`` refuses
 reads merged, as ``merged.merged_into`` and the fold (``integrate._gone_branch``) never trust
 such a record either.
 
+Merge mode also readies and merges only a PR whose head is in its base repository (issue
+#806). A PR on a fork is a contribution to someone else's project, so its ready-mark and merge
+stay the human's. ``_merge_one`` asks the host on every attempt (``_own_repo``), since
+``contribution_model`` can be wrong, and goes on only on the JSON boolean ``false`` for
+``isCrossRepository``: any other answer, or a read that fails, refuses too. It asks before
+``_target_base`` can retarget the PR, so a refused PR is left as found, with nothing to undo.
+Its marker stays, since that grants nothing by itself; a later run asks again.
+
 A PR merges only into its bundle's own target base (issue #500), the ``Repo + branch
 target`` publish resolves (``publish._resolve_target``), and only when that base exists
 independently of the run. Publish enforces that rule when it opens the PR (#411,
@@ -342,6 +350,31 @@ def _pr_head(pr_url: str) -> tuple[str, str, str]:
         return head, base, ""
     err = (r.stderr or r.stdout or "").strip()[:200]
     return "", "", f"its head and base could not be read (`gh pr view`: {err or 'no output'})"
+
+
+def _own_repo(pr_url: str) -> tuple[bool | None, str]:
+    """Whether the host says PR ``pr_url``'s head is in its base repository (issue #806), from
+    one ``gh pr view``: ``(True, "")`` only on the JSON boolean ``false`` for
+    ``isCrossRepository``, ``(False, why)`` on ``true``, and ``(None, why)`` when the answer
+    cannot be interpreted. The host's answer rather than ``contribution_model``, which can be
+    wrong. A caller goes on only on ``True``, so a read that failed refuses as a fork does."""
+    r = subprocess.run(["gh", "pr", "view", str(pr_url), "--json", "isCrossRepository"],
+                       capture_output=True, text=True)
+    try:
+        pr = json.loads(r.stdout or "") if r.returncode == 0 else None
+    except ValueError:
+        pr = None
+    cross = pr.get("isCrossRepository") if isinstance(pr, dict) else None
+    if cross is False:
+        return True, ""
+    rule = "merge mode readies and merges only PRs whose head is in the base repository"
+    if cross is True:
+        return False, f"its head is on a fork, and {rule}"
+    # `gh`'s errors run over several lines (a bad token's advice, every field it knows): joined,
+    # so the refusal that quotes one stays a single line with its way out at the end.
+    err = " ".join((r.stderr or r.stdout or "").split())[:200]
+    return None, (f"whether its head is in the base repository could not be read (`gh pr "
+                  f"view`: {err or 'no output'}), and {rule}")
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -718,7 +751,7 @@ def _target_base(cfg: Config, d: Path, pr_url: str) -> tuple[str, str]:
     ``target`` is ``publish._resolve_target``'s, the one parse publish uses; with no brief,
     or no usable ``Repo + branch target`` in it, there is no target and the PR is refused. A
     target that is a branch another bundle of this batch published (#411 route 2,
-    ``publish._batch_branch_producer``) is refused before the host is asked anything,
+    ``publish._batch_branch_producer``) is refused before this asks the host anything,
     whatever base the PR is on. Otherwise the PR's base is read (``_pr_head``); a PR on
     another base is retargeted (``gh pr edit --base``) and its base read again, and only a
     read that reports ``target`` lets the merge go on. ``_merge_one`` calls this before the
@@ -840,6 +873,26 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
                     "fix the setting in pdca.toml, then re-run")
         print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — "
               f"{cfg.expected_checks_error}. {end}\n", file=sys.stderr)
+        return 1
+    # Issue #806: merge mode is own-repo only. A PR whose head is on a fork is a contribution
+    # to someone else's project, so its ready-mark and merge stay the human's. Asked on every
+    # attempt, before `_target_base` can run `gh pr edit`, so a refused PR is left as found
+    # with nothing to undo. Any marker written above stays: it grants nothing by itself, and
+    # a later run asks again.
+    own, why = _own_repo(str(pr_url))
+    if not own:
+        # What clears it depends on why. A read that failed has not shown the PR is on a fork,
+        # so it is not sent to a merge by hand. A fork contributor may hold no merge rights on
+        # the base, so a stopped run also names the wave mode that needs none.
+        stop, todo = (("Fix what stopped the read", "fix what stopped the read")
+                      if own is None else
+                      ("Merge the PR by hand, or run this batch in the default [driver] "
+                       "wave_mode = \"stack\"", "merge the PR by hand"))
+        end = _next(held, "STOP: later waves are NOT run, and the PR is left draft or ready, "
+                          f"as it was. {stop}, then re-run (the run resumes idempotently).",
+                    f"the PR is left draft or ready, as it was; {todo}, then re-run")
+        print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. {end}\n",
+              file=sys.stderr)
         return 1
     # Issue #500: merge only into the bundle's own target base, and only when that base
     # exists independently of this run (#411) — never into whatever base the PR carries.

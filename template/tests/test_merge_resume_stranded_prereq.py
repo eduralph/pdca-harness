@@ -187,6 +187,7 @@ class MergeResume(unittest.TestCase):
             head = self.fx._tip(branch) if self.fx._has(branch) else ""
             out = json.dumps({"state": pr["state"], "headRefOid": head,
                               "baseRefName": pr.get("host_base", "main"),
+                              "isCrossRepository": pr.get("cross_repo", False),
                               "mergeStateStatus": pr.get("merge_state", "CLEAN"),
                               "reviewDecision": pr.get("decision", ""), "latestReviews": []})
         elif verb == "checks":
@@ -1086,6 +1087,53 @@ class MergeResume(unittest.TestCase):
         self.assertIn("merged: could not read PR state for P", self.err)
         self.assertEqual([c for c in self.gh_calls if c[2] != "view"], [])
         self.assertIn("issue_U", self.built)
+
+    def _not_merged_line(self) -> str:
+        """The one `merge:` line saying a PR was refused, with nothing of a stopped run in it."""
+        lines = [x for x in self.err.splitlines() if "was NOT merged" in x]
+        self.assertEqual(len(lines), 1, self.err)
+        self.assertIn("only PRs whose head is in the base repository", lines[0])
+        self.assertNotIn(STOP, lines[0])
+        return lines[0]
+
+    def test_a_fork_pr_is_refused_before_the_ready_mark_and_holds_the_dependent(self):
+        # Issue #806: the pre-wave walk runs `_merge_one`, so the host's answer stops it too,
+        # in the walk's terms: the run goes on, and the dependent waits.
+        self._opened("P", marked=True)
+        self._du()
+        self.pr["P"]["cross_repo"] = True
+        self._run(["D", "U"])
+        self._held_line()
+        self.assertIn("issue_D is held; the PR is left draft or ready, as it was; merge the PR "
+                      "by hand, then re-run.", self._not_merged_line())
+        self.assertEqual([c for c in self.gh_calls if c[2] != "view"], [])
+        self.assertTrue(self.pr["P"]["draft"])
+        self.assertIn("issue_U", self.built)
+        # The way out it names is one: merged by hand, the dependent goes on.
+        self._merged_by_hand("P")
+        self._run(["D"])
+        self.assertEqual(self.results["D"], state.COMPLETE, self.err)
+        self.assertIn("P.txt", self.base_files["issue_D"], self.err)
+
+    def test_a_pr_whose_repo_cannot_be_read_holds_the_dependent_until_it_can(self):
+        # Issue #806: an answer it cannot use refuses as a fork does, but nothing has shown this
+        # PR is on a fork, so what it names is the read. Fixed, the same PR merges unattended.
+        self._opened("P", marked=True)
+        self._du()
+        self.pr["P"]["cross_repo"] = None
+        self._run(["D", "U"])
+        self._held_line()
+        line = self._not_merged_line()
+        self.assertIn("could not be read", line)
+        self.assertIn("issue_D is held; the PR is left draft or ready, as it was; fix what "
+                      "stopped the read, then re-run.", line)
+        self.assertNotIn("by hand", line)
+        self.assertEqual([c for c in self.gh_calls if c[2] != "view"], [])
+        self.assertTrue(self.pr["P"]["draft"])
+        self.pr["P"]["cross_repo"] = False
+        self._run(["D"])
+        self.assertIn("merge issue_P", self.events)
+        self.assertEqual(self.results["D"], state.COMPLETE, self.err)
 
     # -- the way out names what can actually release the dependent --------------------------
 
