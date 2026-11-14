@@ -74,7 +74,7 @@ repositories of that owner's instances and targets.
 
 | Permission | App | Why |
 |---|---|---|
-| Contents | read & write | push bundle branches |
+| Contents | read & write | push bundle branches (this also covers tags and releases; section 3 fences those) |
 | Pull requests | read & write | open and update pull requests |
 | Issues | read & write | backlog comments, labels, cleanup |
 | Metadata | read | mandatory |
@@ -87,6 +87,10 @@ repositories of that owner's instances and targets.
   most recent push by someone other than its pusher, and no bypass for the App.
 - **Bundle branches**: the App may create and update only `bundle/*` (and `bug/*`,
   `bugfix/*` for the bug track); every other branch name is refused to it.
+- **Tags and releases**: a tag ruleset on `refs/tags/**` restricts creation, update and
+  deletion to the maintainer, with no bypass for the App; releases are made immutable where
+  GitHub offers it, so a published release's tag and assets cannot change. Releases are
+  created only by the maintainer or by a workflow on `main`.
 - **Code owners**: `.github/**`, `.secret-guard/**`, `.pre-commit-config.yaml`, `AGENTS.md`,
   `pdca.toml`, `scripts/**` and `CODEOWNERS` itself are owned by the maintainer and require
   that review. Where push rulesets are available, the same paths are blocked for the App
@@ -97,8 +101,13 @@ repositories of that owner's instances and targets.
 - Every repository secret moves into a GitHub Environment that requires the maintainer's
   approval or deploys only from `main`. Workflows on `pull_request` keep no secret.
 - The default `GITHUB_TOKEN` stays read-only (`repo-settings.py` sets this today).
-- `doctor` (or `repo-settings.py check`) lists any repository-level secret and any workflow
-  that reads a secret outside an approval-gated environment.
+- **OIDC counts as a secret.** A `pull_request` job with `id-token: write` can exchange its
+  token for a cloud or model credential with no stored secret involved. Such jobs are removed,
+  or every federation trust policy they could match pins the subject to
+  `refs/heads/main` (as ADR-0017 already does for issue triage).
+- `repo-settings.py check` lists any repository-level secret, any workflow that reads a
+  secret outside an approval-gated environment, and any `pull_request` workflow that requests
+  `id-token: write`.
 
 ### 5. The local side
 
@@ -112,12 +121,15 @@ the maintainer's account stay allowed and `doctor` keeps warning about them.
 Each row reads what GitHub actually grants and fails when the answer is missing or
 ambiguous; none infers a restriction from an error it did not provoke:
 
-- **Identity and permissions**: the installation token's response lists its permissions and
-  repositories; the row fails unless they are exactly section 2's set (no `workflows`, no
-  `administration`, no `secrets`) and the expected repositories.
-- **Branch rules**: `GET /repos/{repo}/rules/branches/main` (and a sample outside the allowed
-  patterns) must return the rules of section 3 with no bypass for the App; the row reads the
-  effective rules instead of trying a push to `main`.
+- **Identity and permissions**: the row mints an *unscoped* diagnostic token (no repository
+  list), so the response shows the installation's full grant, and enumerates
+  `GET /installation/repositories`. It fails unless the permissions are exactly section 2's
+  set (no `workflows`, no `administration`, no `secrets`) and the repositories are exactly the
+  configured ones; a repository the App was installed on by mistake shows up here.
+- **Branch and tag rules**: `GET /repos/{repo}/rules/branches/{branch}` returns the effective
+  rules for `main`, a branch outside the allowed patterns and a tag; the row checks that the
+  rules of section 3 apply. It cannot see bypass actors (that needs Administration access the
+  App does not have), so it does not claim to.
 - **Workflow changes are refused**: a probe pushes a commit that touches
   `.github/workflows/` to a fresh `bundle/doctor-probe-<random>` branch and expects GitHub to
   refuse it. If the push is accepted, the row deletes the branch and fails; any other
@@ -126,6 +138,12 @@ ambiguous; none infers a restriction from an error it did not provoke:
   (the all-zero-ref probe of `token-scope` suffices for this one: it only asks whether the
   repository is reachable).
 - **Key file**: readable by the loop user only.
+
+What the App cannot read is checked from the maintainer's side: `repo-settings.py check`,
+run with the maintainer's admin login, reads the ruleset definitions and fails unless no
+ruleset lists the App (or its owner's bot) among `bypass_actors`, and runs the secret and
+OIDC audit of section 4. `doctor` reports when that check last passed rather than repeating
+it with credentials it must not hold.
 
 ## Alternatives considered
 
@@ -182,5 +200,8 @@ on `pull_request` break until that secret moves into an environment, which is th
   ruleset must exclude the App from reviewers, or rely on code-owner review by the maintainer.
 - **[OPEN]** Push rulesets with file-path restrictions: availability on public repositories
   and on personal accounts (eduralph) must be checked; code-owner review is the fallback.
+- **[OPEN]** Immutable releases: availability on public repositories and personal accounts,
+  and whether the App's `Contents: write` can still edit release notes once a release is
+  immutable.
 - **[OPEN]** Where the App key lives for ADR-0021's driver container (secret manager versus a
   mounted file), to be settled with that ADR's pilot.
