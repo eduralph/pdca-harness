@@ -66,17 +66,21 @@ is a loud :class:`IntegrationError` that stops the run before the next wave buil
 broken base — unless its conflict is with bundles of its own wave merged before it (it
 merges cleanly onto the line as the wave found it, but not onto that line plus them): the
 flow's fold then holds just that bundle out of the line and names the bundles it conflicts
-with (``held_out``, #674). Mechanics are deterministic ``git`` subprocesses (no model).
+with (``held_out``, #674). On a wave a fold runs after, the flow applies that same rule at
+sign-off, to the commits publish would push, and refuses the accept that would add such a
+hold (:func:`same_wave_clash`, #782); the fold's own hold stays as the last check.
+Mechanics are deterministic ``git`` subprocesses (no model).
 """
 
 from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
 import subprocess
 import sys
 import time
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from pathlib import Path
 
 from . import brief, merged, publish, waves
@@ -136,6 +140,16 @@ class _Rewritten(IntegrationError):
     def __init__(self, message: str, name: str) -> None:
         super().__init__(message)
         self.name = name
+
+
+class _Unbuildable(IntegrationError):
+    """A bundle's would-be commit cannot be built for a reason that is the bundle's own
+    (#782, :func:`_would_be`): the ref publish cuts its branch from does not resolve to a
+    commit, or its ``patch.diff`` does not apply to that ref's tree (``git apply --check
+    --cached``). Publish runs those same steps, so it cannot push that bundle either.
+    :func:`same_wave_clash` leaves such a sibling out of its trial. For the bundle being
+    accepted it is a check that could not complete, as any other :class:`IntegrationError`
+    is. A failure of a later step is never this class: it is the tree's, not the bundle's."""
 
 
 def integration_branch(cfg: Config, base: str, batch: Iterable[str] | None = None) -> str:
@@ -201,6 +215,14 @@ def _git(repo: Path, *args: str) -> int:
     """Run ``git -C repo args`` quietly; return the exit code (no raise)."""
     return subprocess.run(["git", "-C", str(repo), *args],
                           capture_output=True, text=True).returncode
+
+
+def _git_stderr(repo: Path, *args: str) -> tuple[int, str]:
+    """Run ``git -C repo args`` quietly, as :func:`_git` does; return the exit code and what
+    git wrote to stderr, on one line — for a step whose failure should say why (#782: the
+    file in the way of a would-be commit's ``git apply``, :func:`_would_be`)."""
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    return r.returncode, " ".join(r.stderr.split())
 
 
 def _rev(repo: Path, ref: str) -> str | None:
@@ -748,6 +770,340 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
                 carried.update(took)   # pushed: the line now holds these heads (#633)
         result[(repo_spec, base)] = (branch, wt)
     return result
+
+
+def same_wave_clash(cfg: Config, d: Path, siblings: Sequence[Path], *,
+                    tip: str | None, batch: Collection[str] | None
+                    ) -> tuple[list[str], list[str]] | None:
+    """Whether accepting bundle ``d`` would add a same-wave hold to the :func:`fold` that
+    runs after its wave (#782): ``(partners, paths)`` if so, else None.
+
+    ``siblings``: the bundles of ``d``'s wave already accepted, each with a patch on ``d``'s
+    own target (the caller picks them: each target folds onto a line of its own). The rule is
+    the fold's (``held_out``, #674: :func:`_held_by`), applied to what that fold will merge:
+    each bundle's would-be commit — its ``patch.diff`` committed onto the commit publish cuts
+    its branch from (:func:`publish.cut_base`), built here on no branch and never pushed
+    (:func:`_would_be`). They are merged in the fold's order — name order within a wave —
+    onto ``pre``, the line as the fold after the wave finds it: ``tip``, the tip this run
+    last pushed (or carried) for the target, else ``<base_remote>/<base>``, where the run's
+    first fold of the target starts it. ``batch`` names the line's branch, as for
+    :func:`fold`.
+
+    A sibling publish will never push is no partner (the 2026-11-04 ruling): the fold never
+    merges it, so it is left out of the trial, named on stderr with why (:func:`_left_out`;
+    that line is the only record of it), and ``d`` is checked against the rest. Exactly
+    three tests decide that, each a read of the sibling's own inputs and none of the tree's
+    health: :func:`publish.cut_base` gives it no cut (no usable target, a ``Stacks on``
+    prerequisite with no published branch); after the fetch, its cut ref does not resolve to
+    a commit; or ``git apply --check --cached`` rejects its ``patch.diff`` on that ref's tree
+    — the two :class:`_Unbuildable` steps of :func:`_would_be`, which read the ref and the
+    patch alone. Any other step of a sibling's build that fails is the tree's or the
+    check's, and raises as below: a lock left behind, a tree half reset, or an ignored file
+    the reset keeps where a patch adds one must never read as "this sibling cannot be
+    built", which would drop every sibling and accept ``d`` unchecked. With no partner left
+    there is no trial, and None is returned once ``d``'s own commit is built. The stderr
+    line is printed only once the check has completed: a check that fails after it found
+    such a sibling refuses ``d`` as one that could not complete, which a line saying ``d``
+    was checked against the rest would contradict.
+
+    "Adds a hold" (the #395 ruling of 2026-10-23): the partners and ``d`` merged so have the
+    fold hold more bundles than the partners alone (:func:`_wave_holds`). Only a
+    :func:`_held_by` hold counts — a commit that does not merge onto ``pre`` alone conflicts
+    with the line, which the fold judges after publish (#747, :func:`_held_by_line`), so here
+    it is neither held nor merged. Whichever bundle was accepted first is kept, unless an
+    earlier override already has the fold holding a bundle of the wave: ``d`` is refused also
+    when it sorts first and the bundle its merge makes the fold hold is a sibling. The rule
+    counts holds, though. Once a ticked row has let through a bundle the fold holds, an
+    accept that only trades that hold for a hold of a bundle accepted earlier goes through
+    (the loophole the 2026-10-23 ruling accepts). ``partners``: for a newly held ``d``, the
+    siblings it conflicts with; for a newly held sibling, that sibling. ``paths``: the files
+    they conflict in. Both sorted, so one conflict always reads the same.
+
+    Runs in the target's shared integration worktree under its :func:`integ_lock`, entered
+    on an ``ExitStack`` as the flow's fold enters it (``flow._fold_lines``), after the fetch
+    a fold makes (:func:`_prepare_worktree`), each fetch tried twice (:func:`_fetch`): one
+    that fails once refuses no accept. Every exit, a raising one included, leaves the
+    tree on the line's branch at ``pre``, clean (:func:`_back_on`); nothing is pushed. Each
+    build also removes the files its apply added, ignored ones included (:func:`_would_be`),
+    so the check leaves nothing behind that a later check would find in its way.
+    Raises :class:`IntegrationError` when the check cannot complete: the lock, a fetch,
+    starting the line's branch, reading ``pre``, ``d``'s own would-be commit failing any of
+    its steps (its cut included, :class:`_Unbuildable`), a step of a sibling's build other
+    than the three tests above, a merge that fails with no conflicting path. Raises
+    :class:`IntegrationTreeError` / :class:`_LineBroken`, as the fold does (#631, #623), when
+    the tree cannot be put back — chained (``raise … from``) to the error already being
+    raised, if there was one, and saying in its own words what failed first
+    (:func:`_put_back_after`), however deep that was: a trial merge's own reset
+    (:func:`_trial`) chains it the same way."""
+    order = sorted([*siblings, d], key=lambda p: p.name)
+    repo_spec, base, _slug = publish._resolve_target(d)
+    cuts: dict[str, tuple[str, str]] = {}
+    left: dict[str, str] = {}     # sibling → why it is left out: said once the check completes
+    for x in order:
+        cut = publish.cut_base(cfg, x)
+        if cut is not None:
+            cuts[x.name] = cut
+            continue
+        cause = (f"publish would cut no branch for {x.name} (no usable target, or a "
+                 f"`Stacks on` prerequisite with no published branch)")
+        if x.name == d.name:
+            raise IntegrationError(f"{cause}, so the commit it would push cannot be built",
+                                   cause=cause)
+        left[x.name] = cause
+    order = [x for x in order if x.name in cuts]
+    repo = publish._checkout_path(cfg, repo_spec)
+    branch = integration_branch(cfg, base, batch)
+    start = tip or f"{cfg.base_remote}/{base}"
+    with contextlib.ExitStack() as locks:
+        wt = _integ_worktree(repo, base)
+        if not locks.enter_context(integ_lock(wt)):
+            cause = f"could not take the integration lock next to {wt.name}"
+            raise IntegrationError(f"{cause} — fix the checkout's parent directory, then "
+                                   f"re-run", cause=cause)
+        wt = _prepare_worktree(repo, cfg.base_remote, base,
+                               remotes=[r for r, _ref in cuts.values()], attempts=2)
+        _reset_tree(wt, "HEAD")
+        if _git(wt, "checkout", "-q", "-B", branch, start) != 0:
+            cause = f"could not start {branch} off {start} in {wt}"
+            raise IntegrationError(f"{cause} — check that checkout, then re-run", cause=cause)
+        pre = _rev(wt, "HEAD")
+        if pre is None:
+            cause = f"could not read the tip of {branch} in {wt}"
+            raise IntegrationTreeError(f"{cause} — check that checkout, then re-run",
+                                       cause=cause)
+        alone: dict[str, tuple[list[str], list[str]]] = {}
+        held: dict[str, tuple[list[str], list[str]]] = {}
+        try:
+            built: list[tuple[str, str]] = []
+            for x in order:
+                try:
+                    built.append((x.name, _would_be(wt, x, cuts[x.name][1])))
+                except _Unbuildable as exc:
+                    if x.name == d.name:
+                        raise
+                    left[x.name] = exc.cause
+            partners = [b for b in built if b[0] != d.name]
+            if partners:
+                _back_on(wt, branch, pre)
+                alone = _wave_holds(wt, branch, pre, partners)
+                _back_on(wt, branch, pre)
+                held = _wave_holds(wt, branch, pre, built)
+        except BaseException as exc:
+            _put_back_after(exc, lambda: _back_on(wt, branch, pre))
+            raise
+        _back_on(wt, branch, pre)
+    for name in sorted(left):
+        _left_out(d, name, left[name])
+    if len(held) <= len(alone):
+        return None
+    partner_names: set[str] = set()
+    paths: set[str] = set()
+    for name, (its, files) in held.items():
+        if name not in alone:
+            partner_names.update(its if name == d.name else [name])
+            paths.update(files)
+    return sorted(partner_names), sorted(paths)
+
+
+def _left_out(d: Path, name: str, cause: str) -> None:
+    """Say on stderr that sibling ``name`` is left out of bundle ``d``'s same-wave check, and
+    why (#782, :func:`same_wave_clash`, once that check has completed): publish cannot push
+    it, so the fold has nothing of it to merge. The only record of it: no §6 row, no
+    refusal."""
+    print(f"integrate: {name} is left out of {d.name}'s same-wave check — {cause}; so publish "
+          f"cannot push it as it stands, and the fold has nothing of it to merge. {d.name} was "
+          f"checked against the rest of its wave.", file=sys.stderr)
+
+
+def _would_be(wt: Path, d: Path, ref: str) -> str:
+    """The commit publish would push for bundle ``d`` (#782), made in ``wt`` on a detached
+    HEAD and never pushed: publish's own steps less the fetch and the push — resolve ``ref``
+    (:func:`publish.cut_base`), check it out, check that ``d``'s ``patch.diff`` applies to
+    its tree (``git apply --check --cached``, as publish's ``Onto branch`` path checks, but
+    against the index the checkout set), apply it, stage everything, commit. So it has the
+    parent and the tree of the branch publish pushes (the message differs, and no commit
+    hook runs).
+
+    Two failures are ``d``'s own, and raise :class:`_Unbuildable`: ``ref`` does not resolve
+    to a commit (``git rev-parse --verify <ref>^{commit}``), or ``git apply --check --cached``
+    rejects the patch on ``ref``'s tree. Publish fails on that patch at that ref too. Both
+    read only ``ref`` and the patch, never what the tree holds: ``wt`` keeps ignored files
+    (:func:`_reset_tree`), and one at a path the patch adds must not make ``d`` look
+    unbuildable. Every other failure — the tree that will not reset, the checkout of a ref
+    that resolves, listing what the patch adds, the apply after a passing check (a file left
+    in the tree where the patch adds one, say), ``add``, ``commit``, reading HEAD — is the
+    tree's, and raises a plain :class:`IntegrationError` (:class:`IntegrationTreeError` for
+    the reset). Each names the step; a failed apply also says what git said, which names the
+    file in its way. The caller puts the tree back.
+
+    What the apply adds is removed again, once the commit is made or a step after the check
+    failed (:func:`_remove_added`): each path the patch writes that was not in the tree
+    before it (:func:`_paths_added`), ignored ones included. ``git add --all`` leaves out a
+    file the patch adds that ``.gitignore`` covers, as publish's does, and the tree's reset
+    keeps ignored files, so without this the next check that builds ``d`` would find that
+    file in the way of its apply, and refuse. A file that was there before the apply is not
+    the check's, and stays: one in the way of the apply still fails it."""
+    def failed(what: str, kind: type[IntegrationError] = IntegrationError
+               ) -> IntegrationError:
+        cause = f"{d.name}'s would-be commit could not be built: {what}"
+        return kind(f"{cause} (in {wt}) — check that checkout and the bundle's patch, then "
+                    f"re-run", cause=cause)
+
+    patch = str((d / "patch.diff").resolve())
+    if _rev(wt, ref) is None:
+        raise failed(f"{ref}, where publish cuts its branch, does not resolve to a commit",
+                     _Unbuildable)
+    _reset_tree(wt, "HEAD")
+    if _git(wt, "checkout", "-q", "--detach", ref) != 0:
+        raise failed(f"could not check out {ref}")
+    # `--cached`: against the index the checkout just set to the ref's tree, so only the ref
+    # and the patch decide it. Against the tree, an ignored file the reset keeps, at a path
+    # the patch adds, would make it fail and leave the bundle out of the check.
+    if _git(wt, "apply", "--check", "--cached", patch) != 0:
+        raise failed(f"its patch.diff does not apply onto {ref}, where publish cuts its "
+                     f"branch", _Unbuildable)
+    added = _paths_added(wt, patch)
+    if added is None:
+        raise failed("`git apply --numstat` could not list the files its patch.diff writes")
+    try:
+        rc, said = _git_stderr(wt, "apply", patch)
+        if rc != 0:
+            raise failed(f"`git apply` failed onto {ref}, though `git apply --check --cached` "
+                         f"passed" + (f"; git said: {said}" if said else ""))
+        for args, what in ((("add", "--all"), "`git add --all` failed"),
+                           (("commit", "-q", "--no-verify", "-m",
+                             f"pdca-integrate: would-be commit of {d.name}"),
+                            "`git commit` failed")):
+            if _git(wt, *args) != 0:
+                raise failed(what)
+        head = _rev(wt, "HEAD")
+        if head is None:
+            cause = f"{d.name}'s would-be commit could not be read in {wt}"
+            raise IntegrationError(cause, cause=cause)
+    except BaseException as exc:
+        _put_back_after(exc, lambda: _remove_added(wt, d, added))
+        raise
+    _remove_added(wt, d, added)
+    return head
+
+
+def _paths_added(wt: Path, patch: str) -> list[str] | None:
+    """The paths applying ``patch`` in ``wt`` adds there (#782, :func:`_would_be`): each path
+    it writes — ``git apply --numstat -z`` names every file a patch creates or changes, a
+    renamed or copied one by its new name, a deleted one by its old — that is not in ``wt``
+    now, as a file, link or directory, tracked or not. Read before the apply, so a file that
+    is already there, ignored or not, is never counted as one the apply adds. None when git
+    cannot read the patch."""
+    r = subprocess.run(["git", "-C", str(wt), "apply", "--numstat", "-z", patch],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    paths = [row.split("\t", 2)[2] for row in r.stdout.split("\0") if row.count("\t") >= 2]
+    return [p for p in paths if not os.path.lexists(wt / p)]
+
+
+def _remove_added(wt: Path, d: Path, added: Sequence[str]) -> None:
+    """Remove from ``wt`` what building bundle ``d``'s would-be commit added there and left
+    untracked (#782, :func:`_would_be`): of ``added`` (:func:`_paths_added`), each path no
+    commit or index holds — ignored ones too, as ``git clean -x`` takes them, but only those
+    paths, read literally (``--literal-pathspecs``): never a blanket ``-x``, which would take
+    the re-gate's build caches with them. What the commit holds goes when the tree moves off
+    it. Raises :class:`IntegrationTreeError` when that ``git clean`` fails: the tree then
+    holds files the check made, which it cannot put back."""
+    if added and _git(wt, "--literal-pathspecs", "clean", "-q", "-ffdx", "--", *added) != 0:
+        cause = (f"could not remove the files building {d.name}'s would-be commit added in "
+                 f"{wt}")
+        raise IntegrationTreeError(f"{cause} — check that checkout (or remove it to have it "
+                                   f"recreated), then re-run", cause=cause)
+
+
+def _wave_holds(wt: Path, branch: str, pre: str, built: Sequence[tuple[str, str]]
+                ) -> dict[str, tuple[list[str], list[str]]]:
+    """What the fold's same-wave rule (#674) holds of ``built`` — ``(name, commit)`` in fold
+    order — merged one after another onto ``branch`` in ``wt``, checked out at ``pre``, as
+    :func:`fold` merges a wave (#782): a commit whose merge conflicts once others of
+    ``built`` are merged is held, never merged, exactly when :func:`_held_by` says so. One
+    that conflicts with ``pre`` itself is neither held nor merged (#747 is the fold's, after
+    publish). A merge that fails with no conflicting path is a failed git step and raises.
+    Leaves ``branch`` where the merges took it: the caller puts it back."""
+    held: dict[str, tuple[list[str], list[str]]] = {}
+    kept: list[tuple[str, str]] = []
+    for name, head in built:
+        rc, paths = _merge(wt, head, f"pdca-integrate: trial merge of {name}")
+        if rc == 0:
+            kept.append((name, head))
+        elif not paths:
+            cause = (f"could not try merging {name}'s would-be commit in {wt} — `git merge` "
+                     f"exited {rc} with no conflicting path")
+            raise IntegrationError(f"{cause}, so a git step failed: check that checkout, then "
+                                   f"re-run", cause=cause)
+        elif kept:
+            clash = _held_by(wt, branch, head, pre, kept)
+            if clash:
+                held[name] = clash
+    return held
+
+
+def _back_on(wt: Path, branch: str, at: str) -> None:
+    """Put ``wt`` back on ``branch`` at ``at``, clean (#782): after the same-wave check, or a
+    step of it, the line is where the check found it, whatever the step left — a merge, a
+    detached HEAD, untracked files. A tree that cannot be reset raises
+    :class:`IntegrationTreeError` (:func:`_reset_tree`); one that will not go back on
+    ``branch`` at ``at``, :class:`_LineBroken`. After a step that raised, the caller runs this
+    through :func:`_put_back_after`, so that error is not lost if this one fails too."""
+    _reset_tree(wt, "HEAD")
+    if (_git(wt, "checkout", "-q", branch) != 0 or _git(wt, "reset", "-q", "--hard", at) != 0
+            or _rev(wt, "HEAD") != at):
+        cause = f"could not put {branch} back at {at} in {wt} after the same-wave check"
+        raise _LineBroken(f"{cause} — check that checkout, then re-run", cause=cause)
+
+
+def _put_back_after(first: BaseException | None, put_back: Callable[[], None]) -> None:
+    """Run ``put_back`` — a step that puts the shared integration worktree back, raising an
+    :class:`IntegrationError` when it cannot (:class:`IntegrationTreeError`,
+    :class:`_LineBroken`: #631, #623) — after a step that raised ``first``, or that raised
+    nothing (``None``: its error is raised as it is). An error it raises while ``first`` was
+    being raised replaces ``first``, as a broken tree must reach the caller; so it is chained
+    to it (``raise … from``, #782) and its words end with what failed first
+    (:func:`_earlier`): the first failure is still reported, however many cleanups failed
+    after it. A ``first`` that is no ``Exception`` (a ``^C``) is never replaced: the tree is
+    put back if it goes, its error dropped if it does not, and the caller raises ``first`` on.
+    """
+    try:
+        put_back()
+    except IntegrationError as exc:
+        if first is None:
+            raise
+        if not isinstance(first, Exception):
+            return
+        then = _earlier(first)
+        kind = (_LineBroken if isinstance(exc, _LineBroken)
+                else IntegrationTreeError if isinstance(exc, IntegrationTreeError)
+                else IntegrationError)
+        raise kind(f"{exc}{then}", cause=f"{exc.cause}{then}") from first
+
+
+def _first_of(exc: BaseException) -> BaseException:
+    """The error the chain ``exc`` ends started with (#782): followed back through each
+    error's ``__cause__``, else its ``__context__`` (an error raised while handling it), to
+    one raised while no other was. ``exc`` itself when it was."""
+    seen = {id(exc)}
+    while True:
+        prev = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
+        if prev is None or id(prev) in seen:
+            return exc
+        seen.add(id(prev))
+        exc = prev
+
+
+def _earlier(first: BaseException) -> str:
+    """`` (after an earlier failure: <words>)``, which an error raised while ``first`` was
+    adds to its own words (#782, :func:`_put_back_after`): the words of the error that chain
+    started with (:func:`_first_of`) — an :class:`IntegrationError`'s ``cause``, else its
+    message, else its type — on one line."""
+    root = _first_of(first)
+    said = getattr(root, "cause", None) or str(root) or type(root).__name__
+    return f" (after an earlier failure: {' '.join(str(said).split())})"
 
 
 def _bundle_name(name: str) -> str:
@@ -2174,11 +2530,15 @@ def _trial(wt: Path, branch: str, onto: str, revs: Sequence[str], *,
     holds the worktree's lock (:func:`fold`). ``wins`` (#694): the index of the rev merged
     with its side winning every clash with what came before it (:func:`_merge_over`), so it
     never stops the trial. ``made`` (#747): when all merge cleanly, gets the commit the
-    trial ended on — on no branch, for a later trial to merge."""
+    trial ended on — on no branch, for a later trial to merge. A step that raises is still
+    followed by that reset; if the reset fails too, its error is chained to the step's
+    (``raise … from``) and names it (:func:`_put_back_after`, #782), so what failed first is
+    not lost behind the broken tree."""
     tip = _rev(wt, "HEAD")
     if tip is None:
         raise IntegrationTreeError(f"could not read the tip of {branch} in {wt} — check that "
                                    f"checkout, then re-run")
+    first: BaseException | None = None
     try:
         if _git(wt, "checkout", "-q", "--detach", onto) != 0:
             raise IntegrationTreeError(f"could not check out {onto} in {wt} to try a merge "
@@ -2199,11 +2559,22 @@ def _trial(wt: Path, branch: str, onto: str, revs: Sequence[str], *,
             made.append(_out(wt, "rev-parse", "--verify", "HEAD",
                              what="the commit a trial merge made").strip())
         return None, []
+    except BaseException as exc:
+        first = exc
+        raise
     finally:
-        _reset_tree(wt, "HEAD")
-        if _git(wt, "checkout", "-q", branch) != 0 or _rev(wt, "HEAD") != tip:
-            raise _LineBroken(f"could not put {branch} back at {tip} in {wt} after a trial "
-                              f"merge — check that checkout, then re-run")
+        _put_back_after(first, lambda: _off_trial(wt, branch, tip))
+
+
+def _off_trial(wt: Path, branch: str, tip: str) -> None:
+    """Put ``wt`` back on ``branch`` at ``tip``, clean, after a trial merge (:func:`_trial`):
+    reset the tree (:func:`_reset_tree`, :class:`IntegrationTreeError` when it fails), then
+    check ``branch`` out — which the trial never moved — and raise :class:`_LineBroken` when
+    that fails or does not land on ``tip``."""
+    _reset_tree(wt, "HEAD")
+    if _git(wt, "checkout", "-q", branch) != 0 or _rev(wt, "HEAD") != tip:
+        raise _LineBroken(f"could not put {branch} back at {tip} in {wt} after a trial "
+                          f"merge — check that checkout, then re-run")
 
 
 def _work(wt: Path, heads: Iterable[str | None], ends: Sequence[str], *,
@@ -2289,7 +2660,12 @@ def _reset_tree(wt: Path, rev: str) -> None:
     gate's clone, which a single ``-f`` skips and which blocks a later merge the same way).
     No ``-x``: an ignored file never makes a checkout or merge refuse — git overwrites it —
     so it cannot change a fold's result, and keeping it lets the re-gate reuse its build
-    caches. Raises :class:`IntegrationTreeError` when either step fails."""
+    caches. A ``git apply`` is the exception: an ignored file at a path the patch adds makes
+    it refuse ("already exists in working directory"). The one apply made in this tree, the
+    same-wave check's (#782, :func:`_would_be`), removes what it added itself, ignored files
+    included (:func:`_remove_added`); an ignored file anything else left at such a path
+    still fails that apply, and the check then does not complete. Raises
+    :class:`IntegrationTreeError` when either step fails."""
     for step in (("reset", "-q", "--hard", rev), ("clean", "-q", "-ffd")):
         if _git(wt, *step) != 0:
             raise IntegrationTreeError(
@@ -2316,7 +2692,9 @@ def _fetch(repo: Path, base_remote: str, remotes: Iterable[str] = (), *,
     between, before it counts as failed — 2 for the carried-branch checks, which fetch
     while no integration lock is held (:func:`_carried_tips` before a fold takes any,
     :func:`rewritten_carried` at the end of the run), where a concurrent git process
-    holding a ref lock in the same checkout can fail it once; 1 (no retry) everywhere
+    holding a ref lock in the same checkout can fail it once, and for the accept-time
+    same-wave check (:func:`same_wave_clash`, #782), which fetches on every accept that has
+    an accepted sibling, and whose failed fetch refuses that accept; 1 (no retry) everywhere
     else."""
     if not (repo / ".git").exists():
         raise IntegrationError(f"checkout not found at {repo}")
@@ -2335,11 +2713,12 @@ def _fetch(repo: Path, base_remote: str, remotes: Iterable[str] = (), *,
 
 
 def _prepare_worktree(repo: Path, base_remote: str, base: str,
-                      remotes: Iterable[str] = ()) -> Path:
-    """Create (or reuse) the integration worktree off the freshly-fetched base (:func:`_fetch`);
-    raise :class:`IntegrationError` if it can't be made (worktree isolation is required here
-    — unlike Do/Check, there is no in-place fallback that would still produce the branch)."""
-    _fetch(repo, base_remote, remotes)
+                      remotes: Iterable[str] = (), *, attempts: int = 1) -> Path:
+    """Create (or reuse) the integration worktree off the freshly-fetched base (:func:`_fetch`,
+    each fetch tried ``attempts`` times); raise :class:`IntegrationError` if it can't be made
+    (worktree isolation is required here — unlike Do/Check, there is no in-place fallback that
+    would still produce the branch)."""
+    _fetch(repo, base_remote, remotes, attempts=attempts)
     wt = _integ_worktree(repo, base)
     if not (wt / ".git").exists() and _git(repo, "worktree", "add", "--force",
                                            str(wt), f"{base_remote}/{base}") != 0:

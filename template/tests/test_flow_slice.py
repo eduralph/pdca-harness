@@ -1335,8 +1335,9 @@ class StackModeFlow(unittest.TestCase):
         """Patches for a NON-dry run: a non-stub publisher, the text pre-pass spied (no
         leaf; ``fail_texts`` bundle names fail it, as a failed draft/T4 does), publish spied
         (``fail_publish`` ids fail: rc 1, nothing recorded — the real path's failure
-        shape), and optionally the fold — and with it the other git step that merges pushed
-        branches, a bundle's own base (#727), answered with a branch named for it."""
+        shape), and optionally the fold — and with it the other git steps that merge pushed
+        branches: a bundle's own base (#727), answered with a branch named for it, and the
+        accept-time same-wave check (#782), answered with no conflict."""
         self.cfg.publisher = LeafConfig(mode="command", family="claude", interactive=True)
         real_publish = flow.publish.publish
 
@@ -1362,6 +1363,9 @@ class StackModeFlow(unittest.TestCase):
             stack.enter_context(mock.patch.object(
                 flow.integrate, "build_bundle_base",
                 lambda cfg, d, members, **kw: (f"pdca-integration/main-b{d.name}", "0" * 40)))
+            stack.enter_context(mock.patch.object(
+                flow.integrate, "same_wave_clash", lambda cfg, d, siblings, **kw: None,
+                create=True))
         return stack
 
     def test_each_later_fold_continues_the_tip_the_runs_last_fold_pushed(self) -> None:
