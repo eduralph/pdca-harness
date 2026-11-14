@@ -102,13 +102,19 @@ repositories of that owner's instances and targets.
   `doctor` fails when `signoff` is missing or names a bot (a `[bot]` name or a
   `noreply.github.com` bot address). The template's `dco` check requires a `Signed-off-by`
   whose email matches the commit author's, the rule common DCO checkers apply, and rejects
-  one that names a bot, so a commit signed off only by a bot cannot merge. The committer field
+  one that names a bot, so a commit signed off only by a bot cannot merge. Dependabot's PRs
+  are the one exception: the check accepts a commit with no sign-off when its author and
+  committer are Dependabot and the PR was opened by the Dependabot App (an authenticated
+  fact, unlike the commit fields); the maintainer's merge is the human certification there.
+  The committer field
   and the `Assisted-by` trailer are **advisory**: git identities are unsigned strings that
   whoever pushes can set, so a stolen App token could write any name and drop the trailer.
-  The authenticated record is GitHub's: which account opened each PR and pushed to its
-  branch (PR author, timeline and `performed_via_github_app`). The auditor reconciles each
-  merged PR's commits against that record and flags a PR opened by the agent App whose
-  commits lack the trailer, or claim a committer other than the bot. Commits carry the human's
+  GitHub records authenticated *who opened the PR*, not who pushed each commit. The
+  auditor's claim is therefore narrow: it flags a PR opened by the agent App whose commits
+  lack the trailer or claim a committer other than the bot. A commit the App pushes to a PR
+  someone else opened is not attributable from the PR data; the driver never pushes to a PR
+  it did not open, and per-push attribution would need webhook or audit-log retention, which
+  this proposal does not add. Commits carry the human's
   name without the human's signing key, so they stay unsigned; with GitHub's vigilant mode
   on they show as "Unverified", and the committer field and trailer are what mark them as the
   loop's. A ruleset that requires signed commits cannot be used on branches the loop pushes to.
@@ -399,7 +405,8 @@ user (the `doctor` secret-guard row, #959, reports it).
 
 The loop user holds **no ambient GitHub credential**: no `gh` login (`~/.config/gh/hosts.yml`),
 no `.git-credentials`, no credential helper or `http.*.extraHeader` in its global, system or
-any checkout's repository git configuration, no `GH_TOKEN` in its profile, no SSH key or
+any checkout's repository git configuration, no `GH_TOKEN` in its profile, no `~/.netrc` or
+`~/_netrc` (nor a `NETRC` variable pointing elsewhere), no SSH key or
 agent that GitHub accepts (`ssh -T git@github.com` must be refused), no `url.*.insteadOf` or
 `pushInsteadOf` rewrite, and every remote a plain `https://github.com/` URL with no
 credential in it. Otherwise a leaf or a compromised gate could skip the App and use an
@@ -601,7 +608,9 @@ agent App, and the row fails closed if it is not.
    `setup-loop-user.sh` and the App-token minting move into the template; the `doctor` rows
    ship with tests against a stub API.
 3. **Roll out** to the other instances through `copier update`, one owner at a time.
-4. An ADR records the decision; it supersedes ADR-0006's credential section in
+4. **Before acceptance**, the pilot records where ADR-0017's issue triage runs (approval
+   per run in its environment, or on the driver side) and the proposal is updated with it.
+5. An ADR records the decision; it supersedes ADR-0006's credential section in
    client-rust-pdca and ADR-0021 §4's deploy key.
 
 ## Security impact
@@ -653,4 +662,6 @@ on `pull_request` break until that secret moves into an environment, which is th
 
 ## Open questions
 
-None remain; question 4 was settled on 14.11.2026 (below, under decisions).
+None of design; question 4 was settled on 14.11.2026 (below, under decisions). One
+placement is left to the pilot and must be recorded before acceptance (graduation step 4):
+where ADR-0017's issue triage runs.
