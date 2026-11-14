@@ -1377,14 +1377,17 @@ class MergeResume(unittest.TestCase):
 
     def _rebuilt_and_its_publish_failed(self, *, marked: bool) -> Path:
         """P's PR is an earlier run's. This run rebuilds P in a non-final wave and its publish
-        pushes nothing, so the wave boundary attempts the old PR, on the old record. That is
-        red, so nothing merges; then the old head goes green for whatever run comes next."""
+        pushes nothing, so the wave boundary holds P (#864): it never attempts the old PR, on
+        the old record, so nothing is readied or merged; then the old head goes green for
+        whatever run comes next."""
         d = self._opened("P", marked=marked, rollup="fail")
         self._iterated(d)
         self._planned("E", "- **Depends on:** P\n")
         self._run(["P", "E"], stack=self._real_publish_bundle(lambda *a, **k: 1))
         self.assertIn("issue_P is COMPLETE but publish did not complete", self.err)
-        self.assertIn("flow: wave 0 did not merge; STOPPING", self.err)
+        self.assertIn("flow: issue_P pushed no branch this run", self.err)
+        self.assertNotIn("did not merge; STOPPING", self.err)
+        self.assertNotIn("ready issue_P", self.events)
         self.assertEqual(state.state(d), state.COMPLETE)
         self.pr["P"]["rollup"] = "pass"
         self.gh_calls.clear()
@@ -2179,6 +2182,147 @@ class MergeResume(unittest.TestCase):
                 self.assertIn(f"issue_D{int(stub)}", self.built, self.err)
                 self.assertEqual(self.gh_calls, [])
                 other.close()
+
+    # -- (#864) a member the run pushed no branch of is held at the wave boundary ----------
+
+    def _selective(self, *, fails: tuple[str, ...] = ("P",),
+                   skips: tuple[str, ...] = ()) -> list:
+        """The real ``_publish_bundle`` over a publish that fails before any push for each id
+        in ``fails``, skips each in ``skips`` (rc 0, no record: what publish does for a brief
+        with no target) and really pushes every other one (its PR open, draft, green), so a
+        sibling is a control, not a second held member. The bundle's brief is kept."""
+        def publishes(_cfg, iid, **_k):
+            if iid in fails:
+                return 1
+            if iid in skips:
+                return 0
+            d = self.cfg.bundle(iid)
+            text = (d / "brief.md").read_text(encoding="utf-8")
+            self.fx._publish(iid, {f"{iid}.txt": f"{iid}\n"})
+            (d / "brief.md").write_text(text, encoding="utf-8")
+            self.pr[iid] = {"state": "OPEN", "draft": True, "rollup": "pass"}
+            return 0
+        return self._real_publish_bundle(publishes)
+
+    def _p_q_e_f(self, *, rollup: str = "pass", opened: bool = True) -> None:
+        """P (an earlier run's PR, rebuilt by an iterate) and a fresh sibling Q in wave 0; E
+        depends on P and F on Q, both in wave 1."""
+        if opened:
+            self._iterated(self._opened("P", rollup=rollup))
+        else:
+            self._planned("P")
+        self._planned("Q")
+        self._planned("E", f"- **{PLAIN}:** P\n")
+        self._planned("F", f"- **{PLAIN}:** Q\n")
+
+    def _boundary_held(self, way_out: str) -> str:
+        """P was neither readied nor merged, ONE line names it with ``way_out``, E waits on it
+        with the existing `skipped` line, and the run went on: Q merged and F built after."""
+        self.assertNotIn("ready issue_P", self.events, self.err)
+        self.assertNotIn("merge issue_P", self.events, self.err)
+        for call in self.gh_calls:
+            self.assertFalse(call[2] in ("ready", "merge") and str(call[3]).endswith("/P"),
+                             call)
+        if "P" in self.pr:
+            self.assertTrue(self.pr["P"]["draft"])
+        if self.fx._has("fix/P"):
+            self.assertFalse(self._on_main("P"))
+        lines = [x for x in self.err.splitlines() if x.startswith("flow: issue_P pushed no branch")]
+        self.assertEqual(len(lines), 1, self.err)
+        self.assertIn("did not ready or merge it", lines[0])
+        self.assertIn("are held this run", lines[0])
+        self.assertIn(way_out, lines[0])
+        self.assertNotIn("did not merge; STOPPING", self.err)
+        self.assertIn("merge issue_Q", self.events, self.err)
+        self.assertTrue(self._on_main("Q"))
+        self.assertIn("issue_F", self.built, self.err)
+        self.assertLess(self.events.index("merge issue_Q"), self.events.index("build issue_F"))
+        self.assertEqual(self.results["F"], state.COMPLETE)
+        self.assertNotIn("issue_E", self.built)
+        self.assertEqual(self.results["E"], state.PLANNED)
+        skipped = [x for x in self.err.splitlines() if x.startswith("flow: issue_E ")]
+        self.assertEqual(skipped, ["flow: issue_E skipped — prerequisite(s) not ready (P); not "
+                                   "built on a base missing them."], self.err)
+        return lines[0]
+
+    def test_864_a_green_old_pr_of_an_unpushed_re_publish_is_held_not_merged(self):
+        # The bug: today the boundary readies P's earlier PR and, green, merges its old head.
+        self._p_q_e_f()
+        self._run(["P", "Q", "E", "F"], stack=self._selective())
+        line = self._boundary_held("close it, re-publish (`pdca publish P`) and merge the new "
+                                   "PR by hand, or merge that PR by hand as it stands")
+        self.assertIn("issue_P", line)
+        self.assertFalse(self._marker("P"))         # #839's marker: an unpushed P is not marked
+
+    def test_864_a_red_old_pr_of_an_unpushed_re_publish_is_held_without_a_stop(self):
+        self._p_q_e_f(rollup="fail")
+        self._run(["P", "Q", "E", "F"], stack=self._selective())
+        self._boundary_held("close it, re-publish (`pdca publish P`)")
+
+    def test_864_texts_that_failed_draft_hold_the_member_too(self):
+        self._p_q_e_f()
+        texts = mock.patch.object(publish, "draft_texts",
+                                  lambda _cfg, d, **_k: d.name != "issue_P")
+        self._run(["P", "Q", "E", "F"], stack=[*self._selective(fails=()), texts])
+        self.assertIn("issue_P — publish texts not ready", self.err)
+        self._boundary_held("close it, re-publish (`pdca publish P`)")
+
+    def test_864_a_first_publish_that_failed_is_held_with_no_record_way_out(self):
+        self._p_q_e_f(opened=False)
+        self._run(["P", "Q", "E", "F"], stack=self._selective())
+        self.assertFalse((self.cfg.bundle("P") / "publish.json").exists())
+        self._boundary_held("it has no PR on record; publish it (`pdca publish P`), merge the "
+                            "PR by hand, then re-run")
+
+    def test_864_a_member_with_no_target_is_held_naming_its_brief(self):
+        self._p_q_e_f(opened=False)
+        p = self.cfg.bundle("P")
+        (p / "brief.md").write_text("- **Slug:** p\n", encoding="utf-8")
+        self._run(["P", "Q", "E", "F"], stack=self._selective(fails=(), skips=("P",)))
+        self.assertFalse((p / "publish.json").exists())
+        self.assertNotIn("no usable Repo + branch target", self.err)   # no `_merge_one` refusal
+        self._boundary_held("its brief names no usable `Repo + branch target`; fix the brief, "
+                            "publish it (`pdca publish P`), merge the PR by hand, then re-run")
+
+    def test_864_a_dry_run_holds_nothing(self):
+        self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="stub")
+        self._p_q_e_f()
+        self._run(["P", "Q", "E", "F"], stack=self._selective())   # P's publish fails
+        self.assertNotIn("pushed no branch", self.err)
+        self.assertNotIn("skipped", self.err)
+        self.assertIn("issue_E", self.built, self.err)
+        self.assertIn("issue_F", self.built, self.err)
+        self.assertNotIn("ready issue_P", self.events)
+
+    def test_864_the_held_member_sets_the_exit_code(self):
+        self._p_q_e_f()
+        self.assertEqual(self._cli(["P", "Q", "F"], stack=self._selective()), 3, self.err)
+        self.assertIn("flow: issue_P pushed no branch this run", self.err)
+        self.assertNotIn("merge issue_P", self.events)
+        self.assertEqual(self.results["F"], state.COMPLETE)
+
+    def test_864_a_dependent_left_planned_by_the_hold_fails_the_run(self):
+        self._p_q_e_f()
+        self.assertEqual(self._cli(["P", "E"], stack=self._selective()), 1, self.err)
+        self.assertIn("flow: issue_P pushed no branch this run", self.err)
+        self.assertIn("flow: issue_E skipped — prerequisite(s) not ready (P)", self.err)
+        self.assertNotIn("merge issue_P", self.events)
+        self.assertEqual(self.results["E"], state.PLANNED)
+
+    def test_864_a_conflicts_with_partner_of_the_held_member_gets_merge_mode_words(self):
+        self._p_q_e_f()
+        self._planned("X", "- **Conflicts with:** P\n")   # name-higher: after P
+        self._run(["P", "Q", "X"], stack=self._selective())
+        self.assertNotIn("merge issue_P", self.events)
+        self.assertNotIn("issue_X", self.built, self.err)
+        self.assertEqual(self.results["X"], state.PLANNED)
+        lines = [x for x in self.err.splitlines() if x.startswith("flow: issue_X held")]
+        self.assertEqual(len(lines), 1, self.err)
+        self.assertIn("`Conflicts with` issue_P", lines[0])
+        self.assertIn("no PR of this run", lines[0])
+        self.assertIn("let a merge-mode run merge them", lines[0])
+        for wrong in ("line of this run", "carries them", "in the same `pdca flow <ids>`"):
+            self.assertNotIn(wrong, lines[0])
 
 
 if __name__ == "__main__":

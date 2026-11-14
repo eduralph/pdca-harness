@@ -966,6 +966,11 @@ wave builds on, via `[driver].wave_mode`:
   Needs merge rights on the base remote and relaxes STOP discipline for the
   batch; fails closed if a PR turns out non-mergeable. `[driver].merge_method`
   picks the merge strategy (`"merge"` / `"squash"` / `"rebase"`).
+  A member whose publish pushed no branch this run (its re-publish failed before
+  the push, its texts failed, or its brief names no target) is held, not
+  attempted: the wave boundary never readies or merges it, its PR is left as it
+  is, and the bundles that depend on it or are its `Conflicts with` partners are
+  held while the rest of the run goes on.
   A merge-mode run marks each PR it pushes and then tries to merge as a
   non-final wave (`"merge_eligible": true` in the bundle's `publish.json`, with a
   hash of its `patch.diff` in `"merge_eligible_patch"`, written before the first
