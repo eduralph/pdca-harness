@@ -125,7 +125,11 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
   cannot change, its tag name can never be reused once deleted, and GitHub records an
   attestation that `gh release verify` and `gh release verify-asset` check. Releases are
   created only by the maintainer or by a workflow on `main`, as a draft that gets its assets
-  before it is published. Immutability leaves a release's title and notes editable and the
+  before it is published, and **a tag is created together with its release** in that one step.
+  `Contents: write` lets the App publish a release on any existing tag that has none yet, and
+  under immutability its assets would then be locked in; with no tag ever left without a
+  release there is nothing to attach to, and `repo-settings.py check` flags any tag that has no
+  release. Immutability leaves a release's title and notes editable and the
   release deletable; with `Contents: write` the App could do either. That is accepted:
   downloads are trusted through the attestation, not the notes, and a deletion is visible in
   the audit log and cannot be replaced under the same tag.
@@ -160,9 +164,10 @@ ambiguous; none infers a restriction from an error it did not provoke:
   `GET /installation/repositories`. It fails unless the permissions are exactly section 2's
   set (no `workflows`, no `administration`, no `secrets`) and the repositories are exactly the
   configured ones; a repository the App was installed on by mistake shows up here.
-- **Branch and tag rules**: `GET /repos/{repo}/rules/branches/{branch}` returns the effective
-  rules for `main`, a branch outside the allowed patterns and a tag; the row checks that the
-  rules of section 3 apply. It cannot see bypass actors (that needs Administration access the
+- **Branch rules**: `GET /repos/{repo}/rules/branches/{branch}` returns the effective rules
+  for `main` and for a branch outside the allowed patterns; the row checks that the rules of
+  section 3 apply. That endpoint covers branches only; tag rules are checked from the
+  maintainer's side (below). It cannot see bypass actors (that needs Administration access the
   App does not have), so it does not claim to.
 - **Workflow changes are refused**: a probe pushes a commit that touches
   `.github/workflows/` to a fresh `bundle/doctor-probe-<random>` branch and expects GitHub to
@@ -174,8 +179,9 @@ ambiguous; none infers a restriction from an error it did not provoke:
 - **Key file**: readable by the loop user only.
 
 What the App cannot read is checked from the maintainer's side: `repo-settings.py check`,
-run with the maintainer's admin login, reads the ruleset definitions and fails unless no
-ruleset lists the App (or its owner's bot) among `bypass_actors`, and runs the secret and
+run with the maintainer's admin login, reads the ruleset definitions and fails unless the
+tag ruleset of section 3 targets `refs/tags/**` and no ruleset lists the App among
+`bypass_actors`, checks that immutable releases are on and that every tag has a release, and runs the secret and
 OIDC audit of section 4. `doctor` reports when that check last passed rather than repeating
 it with credentials it must not hold.
 
