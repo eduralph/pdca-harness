@@ -84,13 +84,27 @@ repositories of that owner's instances and targets.
 | Workflows | **none** | GitHub refuses a push that creates or changes `.github/workflows/**` |
 | Administration, Secrets, Environments, Actions, Pages, Members | **none** | no settings, protection, secrets or CI control |
 
+A second, **read-only auditor App** (`pdca-auditor`, one App installed on all three owners)
+checks the settings the agent App must not be able to read (section 6). It has no write
+permission of any kind, so its key can at most reveal how the repositories are configured and
+the *names* of their secrets, never the values:
+
+| Permission | Auditor | Reads |
+|---|---|---|
+| Administration | read | whether immutable releases are on (`GET /repos/{repo}/immutable-releases`) |
+| Secrets | read | names of repository secrets |
+| Environments | read | names of environment secrets |
+| Actions | read | environments and their protection rules |
+| Contents | read | workflow files for the audit of section 4, tags and releases |
+| Metadata | read | mandatory; also rulesets |
+
 ### 3. Rulesets and code owners (template `repo-settings.py`)
 
 Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
 
 - **Public repositories only.** Branch protection and rulesets are enforced on public
   repositories on every plan, but not on private repositories of a free personal account. The
-  App is therefore installed only where they are enforced; `repo-settings.py check` fails an
+  App is therefore installed only where they are enforced; `doctor` fails an
   installation that includes a repository where they are not. A private repository's loop
   keeps publishing from the maintainer's own login in `stack` mode, as today.
 - **`main` is reached only through a pull request.** No bypass for the App, required status
@@ -136,8 +150,8 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
   `enhancement/*`), `pdca-integration/*` for stacked batches (force-pushes allowed there, as
   `integrate.py` requires), `revert/*` for `pdca revert`, the bug track's branches, and
   `[records].branch` (default `records/*`) when records are published as pull requests, and
-  `pdca-doctor/*` for the probe of section 6. `doctor` warns when a configured pattern falls
-  outside the ruleset, so a renamed pattern fails before a publish does.
+  `pdca-doctor/*` for the probe of section 6. `doctor` **fails** when a configured pattern falls
+  outside the ruleset, so a renamed pattern blocks the run before a publish would fail.
 - **No push rulesets.** Rulesets that block file paths on push are not assumed. Instead:
   - Without the Workflows permission the App cannot change `.github/workflows/**`, so every
     guard whose logic is written inline in its workflow file is out of its reach as it is
@@ -164,7 +178,7 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
   before it is published, and **a tag is created together with its release** in that one step.
   `Contents: write` lets the App publish a release on any existing tag that has none yet, and
   under immutability its assets would then be locked in; with no tag ever left without a
-  release there is nothing to attach to, and `repo-settings.py check` flags any tag that has no
+  release there is nothing to attach to, and the auditor check (section 6) flags any tag that has no
   release.
 
   `Contents: write` also reaches **drafts**: while a draft waits for its assets, the App could
@@ -194,9 +208,11 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
   exchange its token for a cloud or model credential with no stored secret involved. The App
   starts workflows through more than pull requests: its pushes fire `push` and `create`
   triggers on its own branches, and its comments, labels and issues fire `issue_comment`,
-  `issues` and `pull_request_target`, and through them `workflow_run`.
+  `issues` and `pull_request_target`, and through them `workflow_run`; and `Contents: write`
+  lets it call `POST /repos/{repo}/dispatches`, which fires `repository_dispatch` with a
+  `client_payload` it chooses.
 - **Running from `main` is not the same as being trusted.** `pull_request_target`,
-  `workflow_run`, `issue_comment` and `issues` run the workflow file from `main`, so an
+  `workflow_run`, `issue_comment`, `issues` and `repository_dispatch` run the workflow file from `main`, so an
   environment limited to `main` and a trust policy pinned to `refs/heads/main` both admit
   them, even when the App caused the event. A job that holds a secret or `id-token: write`
   is therefore allowed only in one of two shapes:
@@ -218,7 +234,7 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
 - **A write-scoped `GITHUB_TOKEN` counts too.** The repository default is read-only, but a
   workflow's own `permissions:` block can raise it; such a job is treated like one holding a
   secret.
-- `repo-settings.py check` lists any repository-level secret, any workflow that reads a
+- The auditor check (section 6) lists any repository-level secret, any workflow that reads a
   secret outside an approval-gated environment, and every job with a secret,
   `id-token: write` or a write-scoped `GITHUB_TOKEN` that matches neither shape, flagging each forbidden pattern by line
   (head checkout, artifact download, event expression in `run:`).
@@ -233,18 +249,29 @@ the maintainer's account stay allowed and `doctor` keeps warning about them.
 ### 6. Proof in `doctor`, not trust
 
 Each row reads what GitHub actually grants and fails when the answer is missing or
-ambiguous; none infers a restriction from an error it did not provoke:
+ambiguous; none infers a restriction from an error it did not provoke. The rows run before
+every unattended run, so no proof is cached between runs.
+
+**With the agent App's own token** (it already has Metadata: read, which covers rulesets):
 
 - **Identity and permissions**: the row mints an *unscoped* diagnostic token (no repository
   list), so the response shows the installation's full grant, and enumerates
   `GET /installation/repositories`. It fails unless the permissions are exactly section 2's
-  set (no `workflows`, no `administration`, no `secrets`) and the repositories are exactly the
-  configured ones; a repository the App was installed on by mistake shows up here.
-- **Branch rules**: `GET /repos/{repo}/rules/branches/{branch}` returns the effective rules
-  for `main` and for a branch outside the allowed patterns; the row checks that the rules of
-  section 3 apply. That endpoint covers branches only; tag rules are checked from the
-  maintainer's side (below). It cannot see bypass actors (that needs Administration access the
-  App does not have), so it does not claim to.
+  set (no `workflows`, no `administration`, no `secrets`), the repositories are exactly the
+  configured ones, and every one of them is public (section 3); a repository the App was
+  installed on by mistake shows up here.
+- **Rules, including tags**: `GET /repos/{repo}/rules/branches/{branch}` returns the effective
+  rules for `main` and for a branch outside the allowed patterns, and
+  `GET /repos/{repo}/rulesets?includes_parents=true` with `GET …/rulesets/{id}` returns every
+  ruleset's target, enforcement and conditions. The row checks that section 3's branch and
+  tag rulesets exist, are `active`, and cover `main`, the driver namespaces and
+  `refs/tags/**`.
+- **No bypass for the App**: GitHub hides a ruleset's `bypass_actors` list from anyone without
+  write access to the ruleset, but every ruleset response carries `current_user_can_bypass`
+  for the caller. Asked with the agent App's token, it answers exactly the question that
+  matters: the row fails unless it is `never` for every ruleset, and fails as inconclusive
+  when the field is missing. Who *else* may bypass (the maintainer, say) is not this
+  proposal's concern and is not checked here.
 - **Workflow changes are refused**: a probe pushes a commit that touches
   `.github/workflows/` to a fresh `pdca-doctor/probe-<random>` branch and expects GitHub to
   refuse it. If the push is accepted, the row deletes the branch and fails; any other
@@ -252,18 +279,29 @@ ambiguous; none infers a restriction from an error it did not provoke:
 - **Reach**: repository access to a canary repository outside the installation is refused
   (the all-zero-ref probe of `token-scope` suffices for this one: it only asks whether the
   repository is reachable).
-- **Key file**: readable by the loop user only.
+- **Key files**: the agent and auditor keys are readable by the loop user only.
 
-What the App cannot read is checked from the maintainer's side: `repo-settings.py check`,
-run with the maintainer's admin login, reads the ruleset definitions and fails unless the
-tag ruleset of section 3 targets `refs/tags/**` and no ruleset lists the App among
-`bypass_actors`, checks that immutable releases are on and that every tag has a release, and runs the secret and
-OIDC audit of section 4. `doctor` cannot repeat it with credentials it must not hold, so the
-check writes its result (date, repository, the settings it read) to the instance state that `doctor`
-reads, and **an unattended run refuses to start** when that result is older than seven days
-or missing. The App cannot change any of these settings (it has no Administration
-permission), so between checks only the maintainer can loosen them; the expiry bounds how
-long such a mistake goes unnoticed.
+**With the auditor App's token**: first the same identity check as for the agent App, an
+unscoped token whose permissions must equal the auditor table of section 2 exactly (any write
+permission fails) and whose repositories must be exactly the configured ones. Then: immutable releases are on, every tag has a release, and
+the secret, OIDC and write-token audit of section 4 passes. Any failure blocks the run.
+
+**Independently, from n8n**: the same auditor checks run daily from n8n with the auditor
+key held as an n8n credential, and a failure is pushed to ntfy. This catches a loosened
+setting between runs and does not depend on the loop host, so a compromised loop host
+cannot hide one. n8n calls the GitHub API directly rather than running `repo-settings.py`;
+the checks are listed in one place (`repo-settings.py --list-checks`, as JSON) that both
+read, so the two cannot drift silently.
+
+`repo-settings.py check` with the maintainer's admin login remains for what only an admin
+can see, the full `bypass_actors` lists, and for applying settings. It is a maintenance
+tool, not a gate on runs.
+
+The checks rest on two API facts confirmed in GitHub's REST documentation on 14.11.2026:
+rulesets are readable with Metadata: read, while `bypass_actors` "is only returned if the
+user making the API request has write access to the ruleset". The documentation puts no
+such restriction on `current_user_can_bypass`; the pilot confirms that it is returned to the
+agent App, and the row fails closed if it is not.
 
 ## Alternatives considered
 
@@ -281,10 +319,13 @@ long such a mistake goes unnoticed.
 
 ## Graduation criteria
 
-1. **Pilot** on wyrd-pdca and its target wyrd: App installed, the instance's driver publishes
-   through it, rulesets and code owners applied, secrets moved into environments.
-   Done when a full flow (plan to publish) runs on the App token, and the `doctor` rows above
-   pass and are shown to fail on a token with workflow or admin rights.
+1. **Pilot** on wyrd-pdca and its target wyrd: agent App and auditor App installed, the
+   instance's driver publishes through the agent App, rulesets and code owners applied,
+   secrets moved into environments, and the daily n8n audit alerting through ntfy.
+   Done when a full flow (plan to publish) runs on the App token, the `doctor` rows above
+   pass and are shown to fail on a token with workflow or admin rights and on a ruleset that
+   lists the App as a bypass actor, and `current_user_can_bypass` is confirmed to reach the
+   agent App.
 2. **Template**: `repo-settings.py` applies the rulesets, `CODEOWNERS` matching `wave_mode`,
    immutable releases and the secret audit, and refuses an App installation on a repository
    without enforced branch protection; `docs-check` and `template-test` load their scripts
@@ -301,13 +342,16 @@ This narrows what an agent-controlled process can change; it adds no untrusted i
 private key becomes a new high-value, long-lived secret: it can mint tokens for every
 repository of its owner's installation (section 1), so it is stored for the loop user only,
 rotated on a schedule and revoked on exposure; one App per owner bounds a stolen key to one
-owner. The threat models (`docs/design/architecture/14-threat-model.md`,
+owner. The auditor App's key is read-only and reveals configuration and secret names, not
+values; it sits with the loop user and in n8n. The threat models (`docs/design/architecture/14-threat-model.md`,
 `.oss-scanner/threat_model.md`) get the credential boundary, the CI secret rule and the
 protected paths in the same change that lands step 2.
 
 What it does not change: prompt injection through issues, comments and model output stays
-possible; this proposal limits its reach to "push a bundle branch and open a pull request the
-maintainer reviews".
+possible. In `stack` mode this proposal limits its reach to "push a driver branch and open a
+pull request the maintainer reviews". In `merge` mode it also reaches "merge ordinary code
+into `main`" for non-final waves, as section 3 accepts; governing files still wait for the
+maintainer.
 
 ## Backward compatibility
 
