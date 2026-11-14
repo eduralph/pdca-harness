@@ -331,7 +331,10 @@ review aid, never the gate.
   environment then matches no policy. These policies live with the cloud provider, out of
   the auditor's reach; `repo-settings.py` prints the subjects the maintainer must pin, and
   the auditor checks the repository's OIDC subject template is the default, which includes
-  the environment.
+  the environment. Because GitHub cannot see them, installing the App requires the
+  maintainer to record, per repository, every cloud that trusts it and that each of its
+  policies matches only environment subjects (or that none trusts it); `pdca setup-identity`
+  refuses to install without that record and `doctor` shows its date.
 - **Privileged jobs build clean.** A job in an environment restores no Actions cache and
   downloads no artifact from another run: in `merge` mode an unprivileged run on `main` could
   have filled the cache with agent-merged output. Unlike the other workflow rules this one
@@ -380,6 +383,9 @@ review aid, never the gate.
 - **Code scanning.** With `security-events: write` such a workflow can upload or dismiss
   code-scanning results. Code scanning is not a merge gate here; the maintainer treats its
   alerts as advisory.
+- **Cloud-side OIDC policies.** Whether a cloud still trusts a ref-based or wildcard
+  subject is checked only by the maintainer's recorded assertion (section 4), not by any
+  automated row.
 - **Event-data injection on `main`.** Whether a reviewed job treats event text only as data
   is a property of reviewed code; the auditor flags known patterns (head checkout, an
   event-controlled expression outside `env:`, `actions/github-script` fed event data) but
