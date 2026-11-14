@@ -95,6 +95,12 @@
   repo's defect), `external` (not a defect in scope). `NO-NOTES` is a low-triage-signal
   flag, not an outcome. The close set is configurable per instance in `pdca.toml`
   `[driver].close_dispositions` — keep this list in step with it.>
+- **Duplicate of:** <optional, duplicate closes only: `#N`, the issue this one duplicates —
+  `pdca cleanup` then closes it as `duplicate` with a comment naming `#N`, not as `not planned`.
+  Delete the line otherwise.>
+- **Close when:** <optional, with `Duplicate of`: when `pdca cleanup --apply` may close it —
+  `now`, `PR #M merged`, or `#M closed` (closed as completed). With no condition, or one that
+  can no longer be met, cleanup only reports. Delete the line otherwise.>
 
 ## STOP discipline
 

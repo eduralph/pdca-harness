@@ -20,7 +20,9 @@ rebuilds; ``iterate-plan`` re-opens Plan) and bounded so a cycle can't spin fore
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import datetime
+import json
 import re
 import sys
 import threading
@@ -131,8 +133,25 @@ def _repair_unsignable(d: Path, *, action: str, today: str, why: str) -> str | N
     return REASSEMBLE if kept else None
 
 
+@dataclasses.dataclass(frozen=True)
+class _SameWave:
+    """What an accept is checked against in a wave the fold runs after (#782,
+    :func:`_same_wave_refused`). :func:`_drive_and_act` builds one for exactly the waves its
+    non-dry ``held_out`` fold follows — not the last wave, publishing on, stack mode, a
+    publisher that is not stubbed — and :func:`_drive_wave` hands it to both accept routes.
+    ``wave``: the bundles that ``_drive_wave`` call drives (its ``runnable``); ``k``: the
+    wave's index; ``folded_tips``: each target's tip this run last pushed (or carried), where
+    the fold after the wave starts that target's line; ``batch``: the ids that name the
+    run's line (:func:`integrate.integration_branch`)."""
+    wave: tuple[Path, ...]
+    k: int
+    folded_tips: Mapping[tuple[str, str], str | None]
+    batch: tuple[str, ...]
+
+
 def _apply_decision(
-    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool
+    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool,
+    same_wave: _SameWave | None = None,
 ) -> str | None:
     """Record the bundle's written sign-off decision under the C6 guard.
 
@@ -141,6 +160,15 @@ def _apply_decision(
     applied, ``None`` if no decision / unrecordable, :data:`REASSEMBLE` if a malformed
     SUMMARY was moved aside so a later beat can rebuild it, or ``"blocked"`` if an accept
     was refused because §6 NEEDS-HUMAN is still open. Pure deterministic code — no leaf.
+
+    ``same_wave`` (#782): the bundle is in a wave the fold runs after. An accept C6 lets
+    through is then refused the same way — ``"blocked"``, the bundle left AWAITING_SIGNOFF
+    with an open §6 row — when its change would conflict with a bundle of its wave already
+    accepted, or when that check cannot complete (:func:`_same_wave_refused`). And an
+    ``iterate-plan`` for a bundle with such a row still open is recorded in §9 but NOT
+    applied in this run (:func:`_park_replan`): re-planned now, it would be rebuilt in this
+    wave beside the bundle it was refused for. ``None`` (the single-issue flow, the last
+    wave, a dry-run, ``--no-publish``, merge mode): C6 alone, as before.
 
     ``apply_now`` advances the bundle immediately (single-issue ``flow``). The batch
     sweep passes ``apply_now=False`` so an ``iterate-do`` does NOT rebuild on the spot —
@@ -177,6 +205,15 @@ def _apply_decision(
     if action == "accept" and accept_blockers(d):
         print(f"flow: {d.name} — cannot accept, §6 NEEDS-HUMAN still open (C6)", file=sys.stderr)
         return "blocked"
+    # After C6, so the rows the human must clear are cleared first; before the record, so an
+    # accept whose change would conflict with an accepted sibling's — or one whose check did
+    # not complete — is refused, never recorded and undone (#782). The decision file stays,
+    # as for a C6 refusal.
+    if action == "accept" and same_wave is not None and _same_wave_refused(cfg, d, same_wave):
+        return "blocked"
+    # Read before anything below changes the bundle: an iterate-plan for a bundle that check
+    # refused, its row still open, is parked to the next run (#782).
+    park = (action == "iterate-plan" and same_wave is not None and _refusal_open(d))
     # The iterate rationale ("why rejected / what to change") rides §9 → the driver
     # folds it into the brief's carry-forward so the next iteration isn't blind.
     # §9's "Iteration delta" is a single line, so flatten a multi-line rationale.
@@ -203,6 +240,11 @@ def _apply_decision(
         if full:
             (d / state.SESSION_CARRY).write_text(full + "\n", encoding="utf-8")
     (d / leaves.SIGNOFF_DECISION).unlink(missing_ok=True)
+    # The one exception to applying an iterate-plan at once (#782): a bundle the same-wave
+    # check refused, its row still open. §9 holds the decision; the next run applies it.
+    if park:
+        _park_replan(d, same_wave)
+        return action
     # Apply now for single-issue flow; in the batch sweep apply an ``iterate-plan`` re-open
     # too — it only archives → UNPLANNED (no rebuild), so it can't interrupt the cheap-first
     # queue review, and the next pass's Plan pre-pass then re-plans it BEFORE the deferred
@@ -238,6 +280,382 @@ def accept_blockers(d: Path) -> list[str]:
     return signoff.open_needs_human(d / "SUMMARY.md")
 
 
+def _same_wave_refused(cfg: Config, d: Path, same_wave: _SameWave) -> bool:
+    """Whether bundle ``d``'s accept is refused because its change would conflict with a
+    bundle of its own wave already accepted, or because that check could not complete (#782)
+    — refused as C6 refuses one: an open §6 row, the bundle left AWAITING_SIGNOFF, so it is
+    not published, and nothing is accepted on a check that did not complete.
+
+    The siblings are the bundles of ``same_wave.wave`` that are COMPLETE now and have a patch
+    on ``d``'s target (:func:`_same_wave_siblings`); with none, nothing is checked and the
+    accept goes on. "Would conflict" is the fold's own rule, in the fold's order, on the
+    commits publish would push, merged onto the line the fold after the wave starts from
+    (:func:`integrate.same_wave_clash`). A sibling publish can never push (its would-be
+    commit cannot be built where publish cuts it) is no partner: that check leaves it out
+    and names it on stderr, and nothing here records it. A row already there and ticked for
+    that same conflict is the human's override, as C6 honours every tick: the accept goes on,
+    and the fold holds one of the two (#674). A check that does not complete — whatever
+    failed but a sibling's own unbuildable commit, the integration worktree left broken
+    included — refuses with a row of its own, whose tick means only "run the check again"
+    (:func:`_refuse_unchecked`). Neither row is a Check artifact: both live in SUMMARY §6
+    alone, so a SUMMARY reassembled later drops them and the next accept checks again."""
+    try:
+        siblings = _same_wave_siblings(d, same_wave)
+        if not siblings:
+            return False
+        target = publish._resolve_target(d)[:2]
+        clash = integrate.same_wave_clash(cfg, d, siblings,
+                                          tip=same_wave.folded_tips.get(target),
+                                          batch=same_wave.batch)
+    except Exception as exc:  # noqa: BLE001 — a check that did not complete never accepts
+        return _refuse_unchecked(d, exc)
+    if clash is None:
+        return False
+    return _refuse_conflict(d, same_wave, *clash)
+
+
+def _same_wave_siblings(d: Path, same_wave: _SameWave) -> list[Path]:
+    """The accepted siblings ``d``'s accept is checked against (#782): each other bundle of
+    the same :func:`_drive_wave` call's wave that is COMPLETE now and has a patch on ``d``'s
+    own ``(repo, base)`` target — what the fold carries (:func:`integrate._fold_candidates`)
+    — in name order. Nothing else: a finished id the pre-wave carry put on the line is part
+    of the line the check merges onto, never a sibling. Empty when ``d`` has no patch or no
+    target: the fold carries nothing of it."""
+    mine = integrate._fold_candidates([d])
+    if not mine:
+        return []
+    target = mine[0][1:3]
+    others = sorted((s for s in same_wave.wave
+                     if s.name != d.name and state.state(s) == state.COMPLETE),
+                    key=lambda p: p.name)
+    return [s for s, repo, base, _slug, _ref in integrate._fold_candidates(others)
+            if (repo, base) == target]
+
+
+def _same_wave_conflict_row(d: Path, partners: list[str], files: list[str]) -> str:
+    """The §6 row of a same-wave conflict (#782): keyed by its kind, the partners and the
+    files alone, so the same conflict found again is the same row."""
+    ids = ", ".join(p.removeprefix("issue_") for p in partners)
+    return (f"same-wave conflict: {d.name}'s change conflicts with "
+            f"{_conflict_partners(partners)}, accepted in its own wave, in {', '.join(files)} "
+            f"— not accepted, so it is not published. Either declare "
+            f"`Conflicts with: {ids}` in its brief and iterate-plan it (`pdca signoff "
+            f"{d.name.removeprefix('issue_')} --iterate-plan`, or in its sign-off session): "
+            f"the next `pdca flow` run re-plans it, so start that run once "
+            f"{_on_your_base(partners)}; or tick this row and accept it again to "
+            f"publish it anyway, and the fold holds one of them out of its line")
+
+
+def _same_wave_unchecked_row(d: Path) -> str:
+    """The §6 row of a same-wave check that could not complete (#782): keyed by its kind
+    alone — never by what failed, which stderr says — so every failure of it is one row."""
+    return (f"same-wave conflict check could not complete for {d.name} — not accepted, as "
+            f"nothing is accepted on a check that did not complete (stderr says what "
+            f"failed). Fix that, then tick this row and accept it again to run the check "
+            f"again: a tick here never accepts it without the check")
+
+
+def _on_your_base(partners: list[str]) -> str:
+    """``issue_10's change is on your base`` / ``the changes of issue_10, issue_12 are on your
+    base`` — when a re-planned bundle can be started (#782). Never a partner's PR: the
+    partner's publish may have failed, so it may have none (the 2026-11-04 ruling)."""
+    if len(partners) == 1:
+        return f"{partners[0]}'s change is on your base"
+    return f"the changes of {', '.join(partners)} are on your base"
+
+
+def _row_state(summary: Path, row: str) -> str:
+    """``"open"`` / ``"ticked"`` / ``""`` (absent) for ``row`` in the §6 C6 reads, matched as
+    :func:`signoff.ensure_needs_human_item` matches a row."""
+    want = " ".join(row.split()).casefold()
+
+    def has(rows: list[str]) -> bool:
+        return any(" ".join(r[len("- [ ]"):].split()).casefold() == want for r in rows)
+
+    if has(signoff.open_needs_human(summary)):
+        return "open"
+    return "ticked" if has(signoff.cleared_needs_human(summary)) else ""
+
+
+def _refuse_conflict(d: Path, same_wave: _SameWave, partners: list[str],
+                     files: list[str]) -> bool:
+    """Refuse bundle ``d``'s accept for a same-wave conflict with ``partners`` in ``files``
+    (#782): add the row saying so to §6, record the refusal for :func:`_drive_wave`, say so
+    on stderr. False — the accept goes on — only when that row is there and ticked: the
+    human's override."""
+    row = _same_wave_conflict_row(d, partners, files)
+    summary = d / "SUMMARY.md"
+    signoff.ensure_needs_human_item(summary, row)
+    why = (f"same-wave conflict: its change conflicts with {_conflict_partners(partners)}, "
+           f"accepted in wave {same_wave.k}, in {', '.join(files)}")
+    if _row_state(summary, row) == "ticked":
+        print(f"flow: {d.name} — {why}; accepted anyway, as its §6 row for that is ticked: "
+              f"the fold after wave {same_wave.k} holds one of them out of its line (#674)",
+              file=sys.stderr)
+        return False
+    ids = ", ".join(p.removeprefix("issue_") for p in partners)
+    step = (f"declare `Conflicts with: {ids}` in {d.name}'s brief and iterate-plan it (`pdca "
+            f"signoff {d.name.removeprefix('issue_')} --iterate-plan`, or in its sign-off "
+            f"session): the next `pdca flow` run re-plans it, so start that run once "
+            f"{_on_your_base(partners)}; or tick its §6 row and accept it again to "
+            f"publish it anyway")
+    _write_refusal(d, {"kind": "conflict", "row": row, "why": why, "step": step,
+                       "partners": partners, "files": files, "offered": 0})
+    print(f"flow: {d.name} — cannot accept: {why}; added that to §6 NEEDS-HUMAN, and it is "
+          f"not published. To go on: {step}.", file=sys.stderr)
+    return True
+
+
+def _refuse_unchecked(d: Path, exc: Exception) -> bool:
+    """Refuse bundle ``d``'s accept because the same-wave check could not complete (#782),
+    whatever failed — a fetch, a would-be commit, the integration worktree left broken. No
+    fallback lets it through: always True. The row is keyed by kind alone
+    (:func:`_same_wave_unchecked_row`), so a second failure with other words is the same
+    row; added if missing, and RE-OPENED if the human had ticked it
+    (:func:`signoff.reopen_needs_human_item`) — that tick asked for this retry, which failed
+    too. What failed goes to stderr only, the first failure of its chain included
+    (:func:`_failure`). A broken tree does not stop the run here, which would leave the
+    accepted siblings unpublished: the fold after the wave stops on it, as before, if it is
+    still broken then."""
+    row = _same_wave_unchecked_row(d)
+    summary = d / "SUMMARY.md"
+    if signoff.ensure_needs_human_item(summary, row):
+        how = "added that to §6 NEEDS-HUMAN"
+    elif signoff.reopen_needs_human_item(summary, row):
+        how = ("re-opened its §6 row: the tick asked for the check again, and it did not "
+               "complete again")
+    else:
+        how = "its §6 row stays open"
+    why = "the same-wave conflict check could not complete"
+    step = (f"fix what failed, then tick its §6 row and accept {d.name} again to run the "
+            f"check again")
+    _write_refusal(d, {"kind": "unchecked", "row": row, "why": why, "step": step,
+                       "partners": [], "files": [], "offered": 0})
+    broken = isinstance(exc, (integrate.IntegrationTreeError, integrate._LineBroken))
+    print(f"flow: {d.name} — cannot accept: {why} ({_failure(exc)}); nothing is accepted on "
+          f"a check that did not complete; {how}."
+          + (" The integration worktree was left in a state it could not put back: the fold "
+             "after this wave stops the run on it if it still is." if broken else "")
+          + f" To go on: {step}.", file=sys.stderr)
+    return True
+
+
+def _failure(exc: BaseException) -> str:
+    """What failed, on one line (#782): ``exc``'s words — an
+    :class:`integrate.IntegrationError`'s message, else the error's type and words — and,
+    when ``exc`` was raised while an earlier error was (a reset that failed after a failed
+    step, at any depth), the error that chain started with (``integrate._first_of``), unless
+    ``exc``'s words already end with it (``integrate._put_back_after`` adds them)."""
+    def words(e: BaseException) -> str:
+        said = " ".join((str(e) or "").split())
+        return said if isinstance(e, integrate.IntegrationError) else (
+            f"{type(e).__name__}: {said}" if said else type(e).__name__)
+
+    text = words(exc)
+    first = integrate._first_of(exc)
+    if first is not exc:
+        key = " ".join(str(getattr(first, "cause", None) or first).split())
+        if not key or key not in text:
+            text += f"; what failed first: {words(first)}"
+    return text
+
+
+def _write_refusal(d: Path, record: dict) -> None:
+    """Write bundle ``d``'s refused-accept record (#782, ``state.SAME_WAVE_REFUSAL``). One
+    that cannot be written is left out: the bundle is then offered a session every pass, as
+    after a plain C6 refusal."""
+    with contextlib.suppress(OSError):
+        (d / state.SAME_WAVE_REFUSAL).write_text(json.dumps(record, indent=2) + "\n",
+                                                 encoding="utf-8")
+
+
+def _refusal(d: Path) -> dict | None:
+    """Bundle ``d``'s refused-accept record (#782), or None: none, or one that does not
+    read as one (a hand-edited file is no record)."""
+    try:
+        rec = json.loads((d / state.SAME_WAVE_REFUSAL).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not (isinstance(rec, dict)
+            and all(isinstance(rec.get(k), str) for k in ("row", "why", "step"))
+            and type(rec.get("offered")) is int):
+        return None
+    return rec
+
+
+def _refusal_open(d: Path) -> bool:
+    """Whether bundle ``d`` has an open §6 row of the same-wave check (#782): its refusal
+    record's row is there, unticked."""
+    rec = _refusal(d)
+    try:
+        return rec is not None and _row_state(d / "SUMMARY.md", rec["row"]) == "open"
+    except Exception:  # noqa: BLE001 — a bundle that cannot be read has no open row here
+        return False
+
+
+def _session_offered(d: Path) -> None:
+    """Count, in ``d``'s refused-accept record, one sign-off session it was offered that ran
+    (#782): :func:`_drive_wave` calls this only once ``run_signoff_batch`` returned, so a
+    session that raised is not counted. No record: nothing to count."""
+    rec = _refusal(d)
+    if rec is not None:
+        _write_refusal(d, {**rec, "offered": rec["offered"] + 1})
+
+
+def _parked(d: Path) -> bool:
+    """Whether the wave offers bundle ``d`` no more sign-off sessions (#782): the same-wave
+    check refused its accept, the wave has offered it a session since, and it is still
+    AWAITING_SIGNOFF with that refusal's row open — the session recorded nothing that
+    settles it. A row the human ticked, or a new refusal (its count back at none), leaves it
+    offered; a plain C6 refusal has no record and is offered every pass, as before."""
+    rec = _refusal(d)
+    if rec is None or rec["offered"] < 1:
+        return False
+    try:
+        return state.state(d) == state.AWAITING_SIGNOFF and _refusal_open(d)
+    except Exception:  # noqa: BLE001 — a bundle that cannot be read is not parked
+        return False
+
+
+def _park_replan(d: Path, same_wave: _SameWave) -> None:
+    """Park bundle ``d``'s iterate-plan to the next run (#782). §9 has recorded it, so the
+    bundle is ITERATE_PLAN; it is not archived or re-planned here: the waves are set when
+    the run starts, so it would be rebuilt in this wave, beside the bundles it was refused
+    for, and checked again. The marker (``state.SAME_WAVE_PARKED``) keeps :func:`_drive_wave`
+    from building it and from waiting on it. The next run that drives it applies the
+    iterate-plan and re-plans it before it sets anything from its brief (:func:`_unpark`),
+    so the new brief sets that run's waves. A marker that cannot be written parks nothing:
+    the bundle is then re-planned in this run, as before."""
+    try:
+        (d / state.SAME_WAVE_PARKED).write_text(f"wave {same_wave.k}\n", encoding="utf-8")
+    except OSError:
+        return
+    print(f"flow: {d.name} — iterate-plan recorded, but not applied in this run: its accept "
+          f"was refused by the same-wave check and that §6 row is still open, so re-planned "
+          f"now it would be rebuilt in wave {same_wave.k} and checked again. The next `pdca "
+          f"flow` run that drives it re-plans it first, so its new brief sets that run's "
+          f"waves.", file=sys.stderr)
+
+
+def _unpark(cfg: Config, d: Path) -> bool:
+    """Apply bundle ``d``'s iterate-plan an earlier run parked (#782, :func:`_park_replan`)
+    as a run takes it on, before that run plans anything: the attempt archived
+    (``driver.run_issue``), so ``d`` is UNPLANNED and the run's Plan step re-plans it before
+    the run reads its brief — for its wave (``waves.compute_waves``), a merged prerequisite
+    it waits for (#647, :func:`_runnable`) and a base of its own (#727,
+    :func:`_bundle_bases`). True iff ``d`` is UNPLANNED now for that reason.
+
+    The marker is removed only once ``d`` is UNPLANNED. A re-open that fails (``run_issue``
+    raised, which :func:`_isolate` reports) leaves ``d`` ITERATE_PLAN with its marker, so it
+    stays parked: this run does not re-plan, build or wait on it (:func:`_replan_parked`), as
+    in the run that parked it, and the next run that drives it tries again. Removed
+    before the re-open, a failed one left ``d`` ITERATE_PLAN with no marker, and the wave's
+    build then re-planned and rebuilt it in a wave its OLD brief had set — what the park
+    exists to prevent. A marker on a bundle that is no longer ITERATE_PLAN when the run takes
+    it on (its iterate-plan applied another way since) is just removed. The caller holds
+    ``d``'s claim (#565)."""
+    marker = d / state.SAME_WAVE_PARKED
+    if not marker.exists():
+        return False
+    if state.state(d) != state.ITERATE_PLAN:
+        with contextlib.suppress(OSError):
+            marker.unlink()
+        return False
+    print(f"flow: {d.name} — applying the iterate-plan an earlier run recorded and parked "
+          f"(its accept was refused by the same-wave check): re-opening it for Plan before "
+          f"this run sets its waves", file=sys.stderr)
+    _isolate(d, "re-opening for Plan", lambda: driver.run_issue(d, cfg))
+    left = state.state(d)
+    if left != state.UNPLANNED:
+        if left == state.ITERATE_PLAN:
+            print(f"flow: {d.name} — not re-opened for Plan, so its iterate-plan stays parked: "
+                  f"this run does not re-plan, build or publish it, and the next `pdca flow` "
+                  f"run that drives it tries again", file=sys.stderr)
+        return False
+    with contextlib.suppress(OSError):
+        marker.unlink()
+    return True
+
+
+def _replan_unparked(cfg: Config, bundles: list[Path], *, csv: str | None,
+                     claims: drive_claim.Run | None) -> list[Path]:
+    """``bundles`` with each iterate-plan an earlier run parked among them applied
+    (:func:`_unpark`) and re-planned in ONE Plan session over those (#782) — for the intake
+    paths with no Plan pre-pass of their own: :func:`flow_batch`'s sweep and a split's
+    adopted children (:func:`_adopt_split_children`). :func:`flow_ids` un-parks its ids
+    before its own pre-pass instead, which re-plans them with the rest. Called once the run
+    holds their claims (#565) and before anything is levelled from their briefs. One the
+    planner leaves UNPLANNED has no brief: named, let go and left out, as an intake path
+    leaves out any bundle with no brief. A Plan session that raises leaves them all so, and
+    never stops the run — adoption can call this after earlier waves have published. One
+    whose re-open fails stays in, parked (:func:`_unpark`): the run neither builds nor waits
+    on it."""
+    reopened = [d for d in bundles if _unpark(cfg, d)]
+    if not reopened:
+        return bundles
+    ids = [d.name.removeprefix("issue_") for d in reopened]
+    try:
+        leaves.do_plan_batch(cfg, csv, ids=ids)
+    except Exception as exc:  # noqa: BLE001 — one failed Plan session never stops the run
+        print(f"flow: the Plan session re-planning {', '.join(d.name for d in reopened)} "
+              f"failed ({type(exc).__name__}: {exc})", file=sys.stderr)
+    left = [d for d in reopened if state.state(d) == state.UNPLANNED]
+    for d in left:
+        print(f"flow: {d.name} — no brief.md after its re-plan, NOT driven (brief it at Plan, "
+              f"then `pdca flow {d.name.removeprefix('issue_')}`)", file=sys.stderr)
+        if claims is not None:
+            claims.release(d)
+    return [d for d in bundles if d not in left]
+
+
+def _replan_parked(d: Path) -> bool:
+    """Whether bundle ``d``'s iterate-plan is parked to the next run (#782,
+    :func:`_park_replan`): the marker is there and it is still ITERATE_PLAN."""
+    try:
+        return (d / state.SAME_WAVE_PARKED).exists() and state.state(d) == state.ITERATE_PLAN
+    except Exception:  # noqa: BLE001 — a bundle that cannot be read is not parked
+        return False
+
+
+def _settled(d: Path) -> bool:
+    """Whether the wave has done all it will for bundle ``d``, which is not terminal (#782):
+    parked after its one more session (:func:`_parked`), or its iterate-plan parked to the
+    next run (:func:`_replan_parked`)."""
+    return _parked(d) or _replan_parked(d)
+
+
+def _same_wave_starts(wave: list[Path]) -> None:
+    """Ready the refused bundles of a wave for this run (#782), before anything is built: a
+    refused-accept record (``state.SAME_WAVE_REFUSAL``) has its count of sessions set back
+    to none, not deleted. So each run offers a refused bundle one session, then names it
+    with its step (:func:`_parked`); deleted, a later run would offer it one every pass. A
+    parked iterate-plan is applied earlier, as the run takes the bundle on (:func:`_unpark`)."""
+    for d in wave:
+        rec = _refusal(d)
+        if rec is not None and rec["offered"]:
+            _write_refusal(d, {**rec, "offered": 0})
+
+
+def _report_same_wave(wave: list[Path]) -> None:
+    """At the end of a wave, one stderr line per bundle of it the wave has done all it will
+    for (#782, :func:`_settled`), and that it is not published — never the pass budget,
+    which is not why it stopped: one parked after its one more session, with why its accept
+    was refused and the step; one whose iterate-plan is parked, with when it is re-planned."""
+    for d in wave:
+        rec = _refusal(d)
+        if _parked(d) and rec is not None:
+            print(f"flow: {d.name} [{state.AWAITING_SIGNOFF}] — not accepted: {rec['why']}; "
+                  f"the sign-off session it was offered since recorded nothing that settled "
+                  f"it, so this run offers it no more and it is NOT published. To go on: "
+                  f"{rec['step']}.", file=sys.stderr)
+        elif _replan_parked(d):
+            why = f": {rec['why']}" if rec is not None else ""
+            print(f"flow: {d.name} [{state.ITERATE_PLAN}] — not accepted{why}; its sign-off "
+                  f"chose iterate-plan, which this run does not apply, so it is NOT "
+                  f"published. The next `pdca flow` run that drives it re-plans it first.",
+                  file=sys.stderr)
+
+
 #: :func:`_apply_recorded_decision` outcome meaning "the bundle carries no decision, so it
 #: still owes a sign-off session". Deliberately distinct from every other outcome, because
 #: only this one may open a session: ``None`` means a decision WAS on disk but could not be
@@ -248,7 +666,8 @@ UNDECIDED = "undecided"
 
 
 def _apply_recorded_decision(
-    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool
+    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool,
+    same_wave: _SameWave | None = None,
 ) -> str | None:
     """Consume the decision the bundle **already carries**, before any session is offered.
 
@@ -276,11 +695,15 @@ def _apply_recorded_decision(
     or the record is dropped / the summary repaired and the bundle goes back to reassemble
     (:func:`_repair_unsignable`). Those paths stay reported — each already prints its own
     line naming this bundle and this action — but they must not be reported as an apply.
+
+    ``same_wave`` is handed to :func:`_apply_decision` (#782): an accept recorded before the
+    session is checked against the bundle's wave exactly as one written in it.
     """
     action = leaves.signoff_decision(d)
     if not action:
         return UNDECIDED
-    outcome = _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now)
+    outcome = _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now,
+                              same_wave=same_wave)
     if outcome == action:
         print(f"flow: {d.name} — applied the '{action}' sign-off decision already recorded "
               f"in the bundle; no new session", file=sys.stderr)
@@ -689,7 +1112,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
               on_line: Collection[str] | None = None,
               unbuilt: Collection[str] = frozenset(),
               merge_notes: Mapping[tuple[str, str, str], str] | None = None,
-              merge_busy: Collection[tuple[str, str, str]] = frozenset()
+              merge_busy: Collection[tuple[str, str, str]] = frozenset(),
+              noted: set[str] | None = None
               ) -> list[Path]:
     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
 
@@ -719,9 +1143,11 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     as merged there (:func:`_uncounted_squash`, #626), to drop the edge, since no wait ends
     that hold, and, when the bundle is cut from a line of this run that lacks the merge
     (:func:`_line_lacks_merge`), to delete that line too, since with the edge gone nothing
-    checks it. Where no such line was judged but a re-run may continue one, because the bundle
-    is held for something else too (the carry or fold that would give it a line failed, say),
-    it is told that line was not checked, and to delete it if it is there. It is told the same
+    checks it. Where no such line was judged (no recorded tip, the carry or fold failed, the
+    line was not trusted, a red re-gate) but a re-run may continue one — the bundle is on the
+    run's line by any seam, or held for a prerequisite this run left unbuilt — it is told that
+    line was not checked, and to delete it if it is there, held for anything else or not (#911).
+    "Not judged" and "not on the line" are separate facts. It is told the same
     of the line of a re-run naming a prerequisite it is told to name, which is another line.
     ``merge_notes`` is not ``None`` in merge mode (#839), where the run has no line at all, so
     no prerequisite is on one: a plain ``Depends on`` one waits whether or not the run was
@@ -731,10 +1157,19 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     line's. ``merge_busy`` is those of its keys whose prerequisite that step could not claim
     (another live run holds it, or no claim can be recorded): nothing has judged it, so
     whatever its record says it holds the dependent on a line of its own, with no ``gh`` read
-    and no way out read off the record. A dependent with no usable target of its own (publish
-    skips it) has no base to
+    and no way out read off the record. A merge counts only when the prerequisite's record
+    shows its PR was published from the ``patch.diff`` it holds now (``merged.merged_into``,
+    #865). One whose record counts for d's base but carries a digest of another patch (or a
+    patch that cannot be read) is an older attempt, whatever its PR's state: no merge of that PR
+    and no carry of its branch puts the accepted patch under d. In stack mode d is then named on
+    its own line with the step that can release it, to re-publish that prerequisite (closing an
+    open PR first, or rebuilding it on the base first when a merged older attempt changed the
+    same lines), never to name it in the run or to wait for that PR; in merge mode
+    :func:`_merge_way_out` gives the same step. A record with no digest at all is counted as
+    before, noted once per prerequisite in ``noted`` (:func:`_note_no_digest`; ``None``: each
+    time). A dependent with no usable target of its own (publish skips it) has no base to
     wait for: no #647 hold, and its ``Depends on (merged)`` keeps #186's answer — any merge
-    counts. A finished named
+    counts, but not one of an older attempt. A finished named
     id (an id the run was asked for that an earlier run finished, #646) is carried onto the
     line before wave 0 when it is clean (:func:`_carry_finished`); when it is not, it is
     named in ``held``, and a bundle whose plain ``Depends on`` names it is not ready (a
@@ -808,6 +1243,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
         squashed: list[tuple[str, str]] = []   # … not those: merged there, never counted (#626)
         stale: list[tuple[str, str, bool]] = []  # … of those, not on d's line: off_line's shape
         unjudged = False                         # … of those, no line was judged for d
+        unchecked = False                        # … d is on a line now, and it was not judged
+        older: list[tuple[str, str]] = []  # … not those: their PR is another patch's (#865)
         busy: list[str] = []       # could not be claimed before wave 0, so not judged (#839)
         for dep in deps:
             p = cfg.find_bundle(dep)
@@ -828,9 +1265,9 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                     busy.append(p.name)
                     continue
                 # Only a merge INTO d's base puts it there (#186 for `Depends on (merged)`,
-                # #647 for the plain edge above). With no target of d's own, #186's answer
-                # and its "not ready" line stand.
-                if merged.merged_into(cfg, dep, repo, base):
+                # #647 for the plain edge above), and only of the patch it holds now (#865).
+                # With no target of d's own, #186's answer and its "not ready" line stand.
+                if _released(cfg, dep, repo, base, noted):
                     # … and when d is cut from this run's line, that line must have it too
                     # (#655); a d on a base of its own, or on the real base, is built from
                     # the base as fetched, which must have it (#729). A close/no-fix prereq
@@ -862,7 +1299,10 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                     # The way out drops this edge, and only an edge makes a run check its
                     # line for the merge (above), so the line is judged here, once.
                     line = (lines or {}).get((repo, base))
-                    if line and line[1] and (on_line is None or d.name in on_line):
+                    # On a line now: one a seam keeps there (`on_line`), or, where none gets a
+                    # base of its own, every one once the target has a line.
+                    here = d.name in on_line if on_line is not None else line is not None
+                    if line and line[1] and here:
                         key = (p.name, repo, base)
                         if key not in lacks:
                             lacks[key] = _line_lacks_merge(cfg, dep, repo, line, views)
@@ -871,6 +1311,17 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                             stale.append((p.name, *lack))
                     else:
                         unjudged = True
+                        # No recorded tip, a failed carry or fold, an untrusted line, a red
+                        # re-gate: d is on a line this run did not check (#911).
+                        unchecked = unchecked or here
+                    continue
+                # Its PR is another patch's (#865): a carry would fold that older head, and a
+                # wait ends with a merge that does not count. Merge mode names it in the way
+                # out (`_merge_way_out`), on the plain line below.
+                way = "" if in_merge_mode else _older_attempt(
+                    p, repo, base, then=f"re-run once the new PR has merged into {base}")
+                if way:
+                    older.append((p.name, way))
                     continue
                 unmerged.append(p.name)
                 if cand and dep not in merged_deps and cand[0][1:3] == (repo, base):
@@ -893,6 +1344,11 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                   f"into {base} ({repo}), and no line of this run carries them; not built "
                   f"on a base missing them. To build it, {todo} until their PR merges into "
                   f"{base}, then re-run.", file=sys.stderr)
+        if older:
+            ways = "; ".join(f"{n}: {way}" for n, way in older)
+            print(f"flow: {d.name} held — prerequisite(s) {', '.join(n for n, _w in older)} not "
+                  f"merged into {base} ({repo}); not built on a base missing them. {ways}.",
+                  file=sys.stderr)
         if busy:
             ways = "; ".join(f"{n}: {(merge_notes or {})[n, repo, base]}" for n in busy)
             print(f"flow: {d.name} held — prerequisite(s) {', '.join(busy)} not known to be "
@@ -912,7 +1368,7 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                 step = (f"{drop} and, once this run ends, delete {branch} on origin, then "
                         f"re-run: the line {d.name} would build on, {branch} at "
                         f"{(tip or '')[:12]}, {has} the merge of {which}, {after}")
-            elif (unjudged and unmet) or carryable:
+            elif (unjudged and unmet) or carryable or unchecked:
                 branch = integrate.integration_branch(cfg, base, asked | set(carryable))
                 of = (f", the line of a re-run naming {', '.join(carryable)} too,"
                       if carryable else "")
@@ -975,10 +1431,112 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                   f"no line or base of this run holds that work; not built on a base missing "
                   f"it. To build it, wait until {p} is built, once what its hold line names is "
                   f"fixed, and its PR merges{into}, then re-run.", file=sys.stderr)
-        if (not unmet and not unmerged and not busy and not squashed and not off_line
-                and not off_base and not partners and not clashed and not unbuilt_partners):
+        if (not unmet and not unmerged and not older and not busy and not squashed
+                and not off_line and not off_base and not partners and not clashed
+                and not unbuilt_partners):
             runnable.append(d)
     return runnable
+
+
+def _released(cfg: Config, dep: str, repo: str, base: str, noted: set[str] | None) -> bool:
+    """``merged.merged_into``'s answer for prerequisite ``dep`` on ``repo`` @ ``base``, the one
+    release rule; on a yes, :func:`_note_no_digest` (#865)."""
+    if not merged.merged_into(cfg, dep, repo, base):
+        return False
+    _note_no_digest(cfg.find_bundle(dep), noted)
+    return True
+
+
+def _note_no_digest(p: Path, noted: set[str] | None) -> None:
+    """Note on stderr that prerequisite ``p``'s merged PR was counted without checking which
+    patch it holds, when its record carries no patch digest at all (``merged.for_this_patch``
+    ``None``) — once per prerequisite in ``noted`` (the names noted this run, by the no-PR
+    check's own note for such a record too, #926; ``None``: every time). Asked only after a
+    yes: a prerequisite that ships nothing merged nothing, so it gets no note. Its own
+    prefix, so a dependent's ``held`` line count is the same with it or without it. A
+    record written before #865 also gets the step for a ``p`` rebuilt after its
+    PR was published: re-publish it, or, when publish refuses that patch (it changes what the
+    merged PR changed, or cannot be read), rebuild ``p`` on its base, as :func:`_older_attempt`
+    words it for a hold. An ``Onto branch`` record (``"stacked"``) has no digest when it was
+    written before publish recorded one for it (#926), and counts only for a dependent with no
+    target of its own (``merged.merged_into``), so its note says that instead, with no step:
+    publish adds a commit only to a PR that is still open (``publish._publish_stacked``)."""
+    if noted is not None and p.name in noted:
+        return
+    rec = publish._publish_record(p)
+    if (merged.has_patch(p) is False or not isinstance(rec, dict) or not rec.get("pr_url")
+            or merged.for_this_patch(p, rec) is not None):
+        return
+    if noted is not None:
+        noted.add(p.name)
+    iid = p.name.removeprefix("issue_")
+    if rec.get("mode") == "stacked":
+        print(f"flow: note — {p.name}'s publish record is an `Onto branch` commit on another "
+              f"PR's branch ({rec.get('branch') or '?'}) with no patch digest (publish recorded "
+              f"none for one before #926), so whether that merged PR ({rec['pr_url']}) holds "
+              f"the accepted patch.diff is not checked; it counts as merged only for a "
+              f"dependent with no target of its own. "
+              f"If {p.name} was rebuilt after that commit was pushed, that PR holds an older "
+              f"attempt.", file=sys.stderr)
+        return
+    print(f"flow: note — {p.name}'s publish record carries no patch digest (it predates #865), "
+          f"so whether its merged PR ({rec['pr_url']}) holds the accepted patch.diff is not "
+          f"checked, and it counts as merged. If {p.name} was rebuilt after that PR was "
+          f"published, re-publish it (`pdca publish {iid}`); if publish refuses it (the accepted "
+          f"patch changes what that PR changed, or its patch.diff cannot be read), rebuild "
+          f"{p.name} on its base (`pdca signoff {iid} --iterate-do`), then accept and publish "
+          f"the rebuild.", file=sys.stderr)
+
+
+def _older_attempt(p: Path, repo: str, base: str, *, then: str) -> str:
+    """The way out for a dependent of prerequisite ``p`` whose PR is not known to hold the
+    ``patch.diff`` ``p`` holds now (#865), or "" when that is not why it is not merged: its
+    record counts for ``repo`` @ ``base`` (``merged.counts_into``) and carries a patch digest
+    that ``merged.for_this_patch`` rejects. Such a PR is an older attempt, whatever its state:
+    merging it does not release the dependent, so the step is to re-publish ``p`` and then
+    ``then`` (what releases the dependent once the new PR is up: a hand merge in merge mode,
+    the merge in stack mode). One ``gh`` read of the PR's state, made only for such a record,
+    words the step. An open one is closed first, as ``gh pr create`` fails while it is open. A
+    merged one stays on the base, so the re-publish adds the accepted patch on top of it, never
+    in its place; that patch was made on a base without it, so where the two change the same
+    lines, as a revised fix usually does, it no longer applies and publish refuses it. So the
+    step also says to rebuild ``p`` on the base first then (an iterate, whose Do is cut from
+    the base as it is now), and accept and publish that. A state that cannot be read may be
+    either, and gets both. A ``patch.diff`` that cannot be read (``merged.has_patch`` ``None``,
+    or no hash) is named as that, with no read. Publish could not push that file, so the step
+    is to restore it, which may be all it takes, or, if it is lost, to rebuild ``p`` the same
+    way."""
+    rec = publish._publish_record(p)
+    if (not isinstance(rec, dict) or not rec.get("pr_url")
+            or not merged.counts_into(rec, repo, base)
+            or merged.for_this_patch(p, rec) is not False):
+        return ""
+    iid = p.name.removeprefix("issue_")
+    again = f"re-publish (`pdca publish {iid}`)"
+    rebuild = f"(`pdca signoff {iid} --iterate-do`), then accept and publish the rebuild"
+    if merged.has_patch(p) is None or merged.patch_hash(p) is None:
+        return (f"its patch.diff cannot be read, so its PR is not known to hold the accepted "
+                f"patch and does not count as merged; restore that file, then re-run, or, if it "
+                f"is lost, close the PR if it is open, rebuild {p.name} on {base} {rebuild}, and "
+                f"{then}")
+    pr = merged.pr_state(str(rec["pr_url"]))
+    st = pr[0] if pr is not None else None
+    other = "its PR was published for a different patch.diff"
+    none = "and the accepted patch.diff has no PR"
+    applies = (f"the accepted patch no longer applies to {base} (it changes what the older "
+               f"attempt changed), publish refuses it: rebuild {p.name} on {base} first "
+               f"{rebuild}")
+    if st == "MERGED":
+        return (f"{other}, so its merge put an older attempt on {base}, which does not count, "
+                f"{none}; {again} so the accepted patch lands on {base} as well, and {then}. "
+                f"If {applies}")
+    if st == "OPEN":
+        return (f"{other}, so its head is an older attempt, whose merge would not count, {none}; "
+                f"close it, {again} and {then}")
+    if st == "CLOSED":
+        return f"{other} and is closed, so it is an older attempt, {none}; {again} and {then}"
+    return (f"{other}, so it is an older attempt, whose merge would not count, {none}; close it "
+            f"if it is open, {again} and {then}. If it has merged and {applies}")
 
 
 def _uncounted_squash(cfg: Config, p: Path, repo_spec: str, base: str,
@@ -990,9 +1548,11 @@ def _uncounted_squash(cfg: Config, p: Path, repo_spec: str, base: str,
     the merge commit is on the base, not that the base still has the change: it cannot see a
     later revert. Else "". Stack mode only: merge mode picks its own merge method. Not in a
     dry-run, which fetches nothing here. The caller asks once :func:`merged.merged_into` has
-    said no, so a record that counts means a PR not merged, which costs no read. Fail-closed:
-    a checkout that cannot be fetched or a git failure is "", and the caller's plain hold
-    stands."""
+    said no, so a record that counts means a PR not merged, or one merged but published for
+    another patch.diff (#865), and either costs no read: "" leaves the second to the caller's
+    older-attempt hold (:func:`_older_attempt`), since dropping the edge would build the
+    dependent on that older attempt. Fail-closed: a checkout that cannot be fetched or a git
+    failure is "", and the caller's plain hold stands."""
     rec = publish._publish_record(p)
     if (cfg.wave_mode != "stack" or cfg.publisher.mode == "stub" or not isinstance(rec, dict)
             or merged.counts_into(rec, repo_spec, base)):
@@ -1473,7 +2033,12 @@ _CARRY_HINTS = {
                      "{name}), then re-issue",
     "line_conflict": "rebuild {name} on a base that holds the work it conflicts with, then "
                      "re-issue",
+    # No PR holds its accepted patch (#926, `_NO_PR_CARRY`): its hold line gives the step.
+    "no_pr": "take the step that line gives, then re-issue",
 }
+# Why the carry holds a finished id the run's no-PR check held (#926): the hold line
+# `flow_ids` printed for it before the run began says why, and gives the step.
+_NO_PR_CARRY = "no PR holds its accepted patch (its hold line above says why)"
 # Each hint above that names a squash or rebase merge (#626) → the one its dependents get.
 _SQUASH_HINTS = {"squashed": "built_on_squashed", "squashed_drop": "built_on_squashed_drop",
                  "built_on_squashed": "built_on_squashed",
@@ -1598,14 +2163,21 @@ def _merge_way_out(cfg: Config, name: str, dependent: str, repo: str, base: str)
     ``merged.merged_into`` judges the record, so the advice follows what it will answer. An
     ``Onto branch`` record never counts as merged, and a record for another base or repo does
     not count on this one, whatever becomes of the PR: merging by hand cannot release the
-    dependent, so the way out is to land the work and drop the edge. Only a PR on record for
+    dependent, so the way out is to land the work and drop the edge. A PR on record for this
+    base that was published for another patch.diff (#865) is an older attempt: its merge never
+    counts either, open, closed or merged, so the way out is to re-publish and merge the new PR
+    by hand (:func:`_older_attempt`: the old one closed first, since ``gh pr create`` fails
+    while it is open and the record would then name no PR at all; a merged one rebuilt on the
+    base first when the accepted patch no longer applies on top of it), never to merge or
+    reopen this one, and re-publishing writes a record with no marker. So is a record with a
+    digest whose ``patch.diff`` cannot be read: the step there is to restore that file, or
+    rebuild. For such a patch only a record with no digest (or one whose digest is the file's
+    bytes, which are just not text) reaches the hand merge below, since
+    ``merged.merged_into`` counts that merge. Only another PR on record for
     this base can be merged out of the hold, a closed one once it is reopened, and only a
     marked, open one the walk would take (:func:`_merge_prereqs`) can be left to a later run.
-    One published for another patch is not that, and re-publishing writes a record with no
-    marker, so a human merges either way: the new PR (the old one closed first, since ``gh pr
-    create`` fails while it is open and the record would then name no PR at all), or this one
-    as it stands. A prerequisite of a prerequisite may not have finished its own cycle at all,
-    so that comes first."""
+    A prerequisite of a prerequisite may not have finished its own cycle at all, so that comes
+    first."""
     iid = name.removeprefix("issue_")
     p = cfg.find_bundle(iid)
     st = state.state(p)
@@ -1631,6 +2203,9 @@ def _merge_way_out(cfg: Config, name: str, dependent: str, repo: str, base: str)
     if not merged.counts_into(rec, repo, base):
         return (f"its PR is on record for {rec.get('base') or '?'} ({rec.get('repo') or '?'}), "
                 f"so its merge does not count as one into {base}; {land}")
+    older = _older_attempt(p, repo, base, then="merge the new PR by hand, then re-run")
+    if older:
+        return older
     pr = merged.pr_state(str(rec["pr_url"]))
     if pr is not None and pr[0] == "CLOSED":
         return (f"its PR is closed, so no merge-mode run merges it; reopen it and merge it by "
@@ -1642,17 +2217,20 @@ def _merge_way_out(cfg: Config, name: str, dependent: str, repo: str, base: str)
         why = "it has no readable brief.md" if own is None else f"its brief does not target {base}"
         return f"no merge-mode run merges it for {dependent} ({why}), so {by_hand}"
     if merged.has_patch(p) is None:
+        # A record with no digest, or with the digest of these very bytes (not text, but what
+        # its PR was published from): a hand merge counts for it (#865). Any other digest is
+        # an older attempt, above, which a hand merge does not release.
         return (f"no merge-mode run merges it for {dependent} (its patch.diff cannot be read), "
                 f"so {by_hand}")
     if not merged.marked_for_this_patch(p, rec):
-        return (f"its PR was published for a different patch.diff, so its head may be an older "
-                f"attempt and no merge-mode run merges it; close it, re-publish "
-                f"(`pdca publish {iid}`) and merge the new PR by hand, or merge this PR by hand "
-                f"as it stands, then re-run")
+        # A marker with no hash: a hash for another patch is an older attempt, above.
+        return (f"no merge-mode run merges it for {dependent} (its mark names no patch.diff), "
+                f"so {by_hand}")
     return f"let a merge-mode run merge it (it is marked), or {by_hand}"
 
 
-def _merge_prereqs(cfg: Config, bundles: list[Path], claims: drive_claim.Run | None = None
+def _merge_prereqs(cfg: Config, bundles: list[Path], claims: drive_claim.Run | None = None,
+                   noted: set[str] | None = None
                    ) -> tuple[dict[tuple[str, str, str], str], set[tuple[str, str, str]]]:
     """Before wave 0 of a publishing merge-mode run, merge the marked prerequisites the drive
     set waits for (#839) — the merge-mode analogue of :func:`_carry_finished`. Returns what
@@ -1695,7 +2273,12 @@ def _merge_prereqs(cfg: Config, bundles: list[Path], claims: drive_claim.Run | N
     and all the hold costs is a re-run. Claims the walk took are let go when it ends, because
     this run writes nothing to those bundles again and must not hold up another run's
     dependents of them for the rest of its life. A bundle this run already held (the drive
-    set) stays held. ``None`` — a library call — claims nothing."""
+    set) stays held. ``None`` — a library call — claims nothing.
+
+    A prerequisite's own prerequisite counts as merged by the same rule as a dependent's
+    (:func:`_released`, #865): the merge of an older attempt does not, and the note names it
+    with the re-publish step (:func:`_merge_way_out`). ``noted`` is the run's, as
+    :func:`_runnable` takes it."""
     order: dict[str, tuple[Path, tuple[str, str]]] = {}     # deepest first: name → …
     reach: dict[str, list[str]] = {}    # prerequisite name → the drive-set bundles waiting
     taken: dict[tuple[str, tuple[str, str]], bool] = {}     # (name, target) → takes()'s answer
@@ -1760,7 +2343,7 @@ def _merge_prereqs(cfg: Config, bundles: list[Path], claims: drive_claim.Run | N
         blockers = list(dict.fromkeys(
             cfg.find_bundle(dep).name for dep in waves.declared_deps(p / "brief.md")
             if (cfg.find_bundle(dep).name, repo, base) in busy
-            or not merged.merged_into(cfg, dep, repo, base)))
+            or not _released(cfg, dep, repo, base, noted)))
         if blockers:
             ways = "; ".join(f"{q}: " + (notes.get((q, repo, base))
                                          or _merge_way_out(cfg, q, name, repo, base))
@@ -1797,7 +2380,8 @@ def _merge_prereqs(cfg: Config, bundles: list[Path], claims: drive_claim.Run | N
 def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
                     batch: list[str], integ: dict[tuple[str, str], str],
                     folded_tips: dict[tuple[str, str], str | None], held: set[str],
-                    finished_heads: dict[str, str] | None = None) -> None:
+                    finished_heads: dict[str, str] | None = None,
+                    no_pr: Collection[str] = frozenset()) -> None:
     """Before wave 0, put a re-issued run's finished named ids on its line (#646).
 
     ``finished`` (:func:`_finished_named`) are ids the run was asked for that an earlier run
@@ -1854,6 +2438,13 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
     dependents wait, but it has no line of its own (it has no PR to judge): the held id's
     line names, among the bundles it holds, those that reach it through one.
 
+    ``no_pr`` (#926) names the finished ids the run's no-PR check held (:func:`_no_pr`): no
+    PR holds their accepted patch, so the branch on record may hold an earlier attempt. Such
+    an id is not clean, whatever its PR's state, which is not read: it is never carried, and
+    it holds what any not-clean id holds — its plain ``Depends on`` dependents and the
+    finished ids built on it — as an ``"unpushed"`` bundle holds its dependents in the run
+    that accepted it (#593). Its line points at its hold line, which gives the step.
+
     ``finished_heads`` (#747), filled in place: each finished id carried onto a line the
     run uses → the head the fold put there. The in-run folds may pin a conflict on one of
     them (:func:`integrate.fold`); they never merge it or check it for a rewrite."""
@@ -1882,6 +2473,9 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
             repo, tip = integrate.carry_view(cfg, tgt[0], line, [
                 cands[d.name][2][0] for d in ids if cands[d.name][2]])
             for d in ids:
+                if d.name in no_pr:     # no PR holds its accepted patch (#926): not clean
+                    why[d.name] = (_NO_PR_CARRY, "no_pr")
+                    continue
                 try:
                     v = _finished_head(cfg, d, cands[d.name][2], repo, base_ref, tip)
                 except integrate.IntegrationError as exc:
@@ -2083,7 +2677,7 @@ def _lineage_children(record: dict) -> list[str]:
     return [c.strip() for c in value if isinstance(c, str) and c.strip()]
 
 
-def _terminal_hint(d: Path, s: str) -> str:
+def _terminal_hint(d: Path, s: str, *, no_pr: bool = False) -> str:
     """What an operator can DO about a bundle the drive set skipped as terminal, or ``""``.
 
     One hint, on the one shared path (issue #468). Both ``pdca flow <id>`` and ``pdca flow
@@ -2097,6 +2691,10 @@ def _terminal_hint(d: Path, s: str) -> str:
     (independent optional edges, ``children`` iff split — ``split.py:392``), so the key's
     mere PRESENCE suppresses the destructive advice; only the ability to NAME the children
     depends on the value being usable (:func:`_lineage_children`).
+
+    ``no_pr`` (#926): :func:`flow_ids` has just held ``d`` because its accepted patch is on
+    no PR, and printed the hold line with the way out (:func:`_check_no_pr`). The ``rm -rf``
+    advice is then dropped, since the fix is to publish the accepted work, not to delete it.
     """
     record = split.read_lineage(d) or {}
     if "children" in record:
@@ -2119,8 +2717,212 @@ def _terminal_hint(d: Path, s: str) -> str:
                 "otherwise rename notes.json away — e.g. to notes.superseded-by-reopen.json "
                 "— so the next Plan re-fetches the fresh thread) to plan it again.")
     if s == state.COMPLETE:
-        return f"already complete — nothing to run. To redo it: rm -rf {d}"
+        return "" if no_pr else f"already complete — nothing to run. To redo it: rm -rf {d}"
     return ""
+
+
+#: The ``holds`` reason of an accepted bundle whose accepted patch is on no PR against its
+#: target (#926, :func:`_no_pr`). ``cli._results_rc`` reads it as a hold: exit 3.
+NO_PR_HOLD = "no-pr"
+
+
+@dataclasses.dataclass
+class _NoPrCheck:
+    """One run's no-PR check (#926), shared by every reader of the run that reaches a bundle:
+    :func:`flow_ids`' terminal filter, :func:`_adoptable` and the end of
+    :func:`_drive_and_act`, each through :func:`_check_no_pr`. ``answers`` maps each bundle
+    name the check has read to :func:`_no_pr`'s answer ("" = on its PR), so a bundle two
+    readers reach is read and held once. ``noted`` is the run's set of bundles whose record
+    with no patch digest stderr has had a note about: the one set :func:`_note_no_digest`
+    keeps too (#865), so such a record gets one ``flow: note`` line a run, from whichever
+    reader reaches it first."""
+    answers: dict[str, str] = dataclasses.field(default_factory=dict)
+    noted: set[str] = dataclasses.field(default_factory=set)
+
+
+def _publish_cmd(cfg: Config, d: Path, target: tuple[str, str, str | None]) -> str:
+    """``pdca publish <id>`` for accepted bundle ``d``, as a no-PR hold gives it (#926), with
+    what publish needs first where the files show it would refuse ``d`` as it stands, in the
+    order publish refuses:
+
+    - a hand-declared ``Stacks on`` parent with no branch publish can chain onto
+      (``publish._stack_base_branch``, the reader publish's refusal uses): one archived to
+      ``completed/``, as publish reads an active parent only (``publish._stacks_on_branch``,
+      as the scheduler takes no archived ``Stacks on`` parent, ``waves.check_dep_graph``),
+      though the check judges ``d``'s PR against the branch that parent published
+      (``publish.pr_target``); or one whose record names no branch at all.
+    - merge mode's base guard (#411, ``publish.merge_base_refusal``), which opens no PR
+      against a branch another bundle produced: a ``Stacks on`` parent's, a recorded stack
+      base, or a target base another bundle published.
+
+    For an ``Onto branch`` it says what publish needs that only the host can show: an open PR
+    whose head is that branch, which publish adds its commit to and refuses without
+    (``publish._publish_stacked``). Never raises: a precondition that cannot be read is left
+    out, and publish's own refusal then names it."""
+    cmd = f"`pdca publish {d.name.removeprefix('issue_')}`"
+    kind, _repo, base = target
+    try:
+        if kind == "stacked":
+            onto = brief.onto_branch(d / "brief.md")
+            return (f"{cmd} (it adds a commit to the open PR whose head is "
+                    f"{onto[1] if onto else base}, and refuses while none is: open that PR "
+                    f"first, or drop the `Onto branch` from the brief for a PR of its own)")
+        parents = brief.stacks_on(d / "brief.md")
+        unchained = bool(parents) and not publish._stack_base_branch(cfg, d)
+        archived = unchained and bool(publish._stacks_on_branch(cfg, d, archived=True))
+        refusal = publish.merge_base_refusal(cfg, d)
+    except Exception:  # noqa: BLE001 — the step's wording never fails the check
+        return cmd
+    drop = "or drop that `Stacks on` from the brief"
+    needs: list[str] = []       # each refusal, in publish's order, with its way out
+    if unchained:
+        p = parents[0]
+        needs.append(f"its `Stacks on` parent {p} is archived, and publish chains a PR only onto "
+                     f"an active parent's branch: move {cfg.find_bundle(p)} back to "
+                     f"{cfg.bundle(p)}, {drop}" if archived else
+                     f"no publish record of its `Stacks on` parent {p} names a branch: publish "
+                     f"{p} (or restore its publish.json), {drop}")
+    if refusal:
+        # A `Stacks on` PR chained onto its parent's branch, or else publish's own refusal as
+        # it prints it, with its way out (`publish.MERGE_BASE_FIX`).
+        needs.append("merge mode opens no PR against a `Stacks on` parent's branch (#411): set "
+                     f'`[driver].wave_mode = "stack"`, {drop}' if kind == "stacked-pr" else
+                     refusal.removeprefix("publish: ").rstrip("."))
+    return f"{cmd} (publish refuses it as it stands: {'; and '.join(needs)})" if needs else cmd
+
+
+def _no_pr(cfg: Config, d: Path, *, pushed: Collection[str] | None = None,
+           noted: set[str] | None = None) -> str:
+    """Why accepted bundle ``d``'s accepted patch is on no PR against its target (#926), and
+    the step to take, or "" when it is, or when there is nothing to put on one: ``d`` is not
+    COMPLETE, ships no patch (a close / no-fix, ``publish.py``'s own early exit) or names no
+    usable target (publish skips it). Reads files only — never ``gh``.
+
+    ``pushed`` is the run's set of bundles whose publish pushed this run (``_publish_bundle``,
+    #593), for a bundle the run accepted; ``None`` for one an earlier run accepted (a re-run).
+    A bundle the run accepted and did not push has no PR of this patch, whatever its record
+    says: an iterate keeps the earlier attempt's ``publish.json``. Otherwise the record
+    (``publish.json``) must exist, name a PR (``pr_url``), be for the target the brief gives
+    now (``publish.pr_target``) and be for the ``patch.diff`` the bundle holds now: every
+    patch digest it carries must be that patch's (``merged.for_this_patch``, #865 — the PR's
+    own ``patch_digest``, and a merge-mode marker's, #839). A record with no digest at all was
+    written before publish recorded one: trusted, and on a re-run said on stderr, once a run
+    when ``noted`` is the run's set (:class:`_NoPrCheck`). That is the one exception.
+    Fail-closed: a brief, record or ``patch.diff`` that cannot be read is held, and so is a
+    hand-declared ``Stacks on`` whose parent has no branch on record, since the base its PR
+    belongs on is then not known.
+
+    The step a hold gives is ``pdca publish <id>``, with what publish needs first where the
+    files show it would refuse ``d`` as it stands (:func:`_publish_cmd`), or none, for a
+    parent with no branch, which publish refuses. A record that names no PR may still be on
+    one this check cannot see (it never asks the host): a PR opened by hand, or an earlier
+    attempt's PR still open on the same branch, for which ``gh pr create`` opens no second
+    one. Its line says so, and that the step then is to put that PR's URL in the record's
+    ``pr_url``. A refusal only the host, the target checkout or a gate can show (T4, host
+    CI, a line tip a later run replaced, a patch that no longer applies) is publish's own
+    line to name."""
+    iid = d.name.removeprefix("issue_")
+    try:
+        if state.state(d) != state.COMPLETE:
+            return ""
+        shipped = merged.has_patch(d)
+        target = publish.pr_target(cfg, d) if shipped is not False else None
+        if target is None:
+            return ""
+        kind, repo, base = target
+        parent = brief.stacks_on(d / "brief.md")[0] if kind == "stacked-pr" else ""
+    except Exception as exc:  # noqa: BLE001 — a bundle that cannot be read is not clean
+        return (f"it could not be checked ({type(exc).__name__}: {exc}). Fix what that names, "
+                f"then re-run.")
+    if shipped is None:
+        return ("its patch.diff cannot be read, so no PR is known to hold it. Restore that "
+                "file, then re-run.")
+    if base is None:
+        return (f"its brief stacks it on {parent} (`Stacks on`), but no publish record of "
+                f"{parent} names a branch, so the base its PR belongs on is not known, and "
+                f"publish refuses it. Publish {parent} (or restore its publish.json), or drop "
+                f"that `Stacks on` from the brief, then re-run.")
+
+    def step() -> str:
+        return f"Publish it with {_publish_cmd(cfg, d, target)}, then re-run."
+
+    if pushed is not None and d.name not in pushed:
+        return f"this run accepted it, but no publish of it completed this run. {step()}"
+    if not (d / "publish.json").exists():
+        return f"it has no publish record (publish.json). {step()}"
+    rec = publish._publish_record(d)
+    if not isinstance(rec, dict):
+        return f"its publish record (publish.json) cannot be read. {step()}"
+    url = rec.get("pr_url")
+    if not isinstance(url, str) or not url:
+        if kind == "stacked":     # publish records an `Onto branch` commit only with its PR
+            return f"its publish record names no PR. {step()}"
+        branch = rec.get("branch")
+        branch = branch if isinstance(branch, str) and branch else "its branch"
+        opened = (f"a PR from {branch} into {base} is open (one opened by hand, or an earlier "
+                  f"attempt's)")
+        if merged.for_this_patch(d, rec):
+            return (f"its publish pushed the accepted patch.diff to {branch}, but its record "
+                    f"names no PR. If {opened}, `gh pr create` opens no second one, and that "
+                    f"PR holds the patch: put its URL in publish.json's `pr_url`, then re-run. "
+                    f"If none is, publish it with {_publish_cmd(cfg, d, target)}, then re-run.")
+        return (f"its publish record names no PR. {step()} If {opened}, `gh pr create` opens no "
+                f"second one, but the publish pushes the accepted patch.diff to {branch} "
+                f"first: then put that PR's URL in publish.json's `pr_url`, and re-run.")
+    if not publish.on_pr_target(rec, target):
+        where = {"stacked": " (its `Onto branch`)",
+                 "stacked-pr": " (the branch its `Stacks on` parent published)"}.get(kind, "")
+        return (f"its PR ({url}) is for {rec.get('repo', repo) or '?'} @ "
+                f"{rec.get('base') or '?'}, but its brief now targets {repo} @ {base}{where}. "
+                f"{step()}")
+    fits = merged.for_this_patch(d, rec)
+    if fits is False:
+        if kind == "stacked":
+            return (f"the PR its commit went onto ({url}) holds an earlier attempt, not the "
+                    f"accepted patch.diff. {step()}")
+        return (f"its PR ({url}) was published from another patch.diff than the accepted one "
+                f"(an earlier attempt). {step()} While that PR is open, the publish pushes the "
+                f"accepted patch.diff to its branch, but `gh pr create` opens no second PR for "
+                f"it: then put that PR's URL back in publish.json's `pr_url`, and re-run (or "
+                f"close that PR first, for a new one). If that PR has merged and publish "
+                f"refuses the accepted patch (it changes what the earlier attempt changed), "
+                f"rebuild {d.name} on its base first (`pdca signoff {iid} --iterate-do`), then "
+                f"accept and publish the rebuild.")
+    if fits is None and pushed is None and (noted is None or d.name not in noted):
+        if noted is not None:
+            noted.add(d.name)
+        cmd = _publish_cmd(cfg, d, target)
+        again = (f"If {d.name} was rebuilt after its commit went onto that PR, publish it with "
+                 f"{cmd}." if kind == "stacked" else
+                 f"If {d.name} was rebuilt after that PR was published, re-publish it with "
+                 f"{cmd}; if publish refuses it (the accepted patch changes what that PR "
+                 f"changed), rebuild {d.name} on its base (`pdca signoff {iid} --iterate-do`), "
+                 f"then accept and publish the rebuild.")
+        print(f"flow: note — {d.name}'s publish record ({url}) has no patch digest (it was "
+              f"written before publish recorded one), so whether that PR holds the accepted "
+              f"patch.diff cannot be confirmed; it is trusted. {again}", file=sys.stderr)
+    return ""
+
+
+def _check_no_pr(cfg: Config, d: Path, run: _NoPrCheck, *,
+                 pushed: Collection[str] | None = None) -> str:
+    """:func:`_no_pr` for ``d``, once per run: ``run`` is the run's one :class:`_NoPrCheck`,
+    which every reader shares, so a bundle two of them reach is read, held and noted once. A
+    bundle on no PR gets its hold line here, the first time."""
+    if d.name not in run.answers:
+        why = run.answers[d.name] = _no_pr(cfg, d, pushed=pushed, noted=run.noted)
+        if why:
+            print(f"flow: {d.name} held — its accepted patch is on no PR against its target: "
+                  f"{why}", file=sys.stderr)
+    return run.answers[d.name]
+
+
+def _no_pr_holds(holds: dict[str, str] | None, run: _NoPrCheck | None) -> None:
+    """Write each bundle :func:`_check_no_pr` held into the caller's ``holds`` (#926), keyed as
+    the results map is: the one writer of a ``"no-pr"`` hold."""
+    if holds is not None and run is not None:
+        holds.update({n.replace("issue_", ""): NO_PR_HOLD
+                      for n, why in sorted(run.answers.items()) if why})
 
 
 def _warn_abandoned(bundles: list[Path], *, why: str) -> None:
@@ -2397,7 +3199,8 @@ def _admit(cfg: Config, d: Path, claims: drive_claim.Run | None) -> bool:
 
 
 def _adoptable(cfg: Config, parent: Path, *, known: set[str],
-               refused: list[tuple[str, str, str]]) -> tuple[list[Path], list[Path]]:
+               refused: list[tuple[str, str, str]],
+               no_pr: _NoPrCheck | None = None) -> tuple[list[Path], list[Path]]:
     """The children of ``parent`` this run can drive, and the ones to WALK THROUGH —
     ``([], [])`` unless it split.
 
@@ -2449,6 +3252,11 @@ def _adoptable(cfg: Config, parent: Path, *, known: set[str],
     attributed to the parent that actually declared them — rather than by a second reader of
     the same lineage record. It is a pair, not one list, because the two are different
     claims: the first is work this run takes on, the second is a bundle to ASK about.
+
+    A child already terminal is not adopted, but with ``no_pr`` (the run's no-PR check, where
+    it publishes for real) a COMPLETE one is checked as a named id is (:func:`_check_no_pr`,
+    #926): one whose accepted patch is on no PR is held, as ``pdca flow <child>`` would hold
+    it, since re-running the parent is how that child is reached.
     """
     if not _is_split_parent(parent):
         return [], []
@@ -2539,6 +3347,8 @@ def _adoptable(cfg: Config, parent: Path, *, known: set[str],
             else:
                 print(f"flow: {d.name} — child of {parent.name} NOT adopted: already "
                       f"terminal ({s})", file=sys.stderr)
+                if no_pr is not None:
+                    _check_no_pr(cfg, d, no_pr)     # accepted, on no PR: held (#926)
             continue
         out.append(d)
     return sorted(out, key=lambda p: p.name), sorted(walk, key=lambda p: p.name)
@@ -2614,7 +3424,8 @@ def _refused_child(claims: drive_claim.Run, parent: Path, child: Path) -> bool:
 def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
                           wave_list: list[list[Path]], bundles: list[Path],
                           batch_names: set[str], named: frozenset[str],
-                          claims: drive_claim.Run | None = None) -> None:
+                          claims: drive_claim.Run | None = None,
+                          no_pr: _NoPrCheck | None = None) -> None:
     """Splice the children of any bundle in ``candidates`` that has split into the waves
     AFTER ``k``, and announce each child's REAL wave. ``k`` is the wave just driven; ``-1``
     is the pre-pass over the run's adoption SEEDS (#473) — ids the operator named whose
@@ -2692,6 +3503,9 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
     command to resume it, and that command must not be refused by the run that has just
     stopped driving it. ``None`` (a library call) claims nothing.
 
+    ``no_pr`` is the run's no-PR check (#926), handed to :func:`_adoptable` for the children
+    it finds already COMPLETE; ``None`` checks none.
+
     Two things this deliberately does NOT do, both visible in a run and neither a
     consequence anyone should have to rediscover from the code:
 
@@ -2728,7 +3542,7 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
         # `_isolate` returns None iff the read RAISED: that candidate then contributes
         # neither children nor a walk-through, and the run carries on (its own report).
         got = _isolate(parent, "split adoption", lambda parent=parent: _adoptable(
-            cfg, parent, known=batch_names | taken, refused=refused))
+            cfg, parent, known=batch_names | taken, refused=refused, no_pr=no_pr))
         kids, onward = got or ([], [])
         if claims is not None:
             # Claimed only now, once `_adoptable` has vouched for each child (#565): a
@@ -2736,6 +3550,9 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
             kids = [c for c in kids if not _refused_child(claims, parent, c)]
         # Only now, with the claim held: a child adopted into the run has a brief (#597).
         kids = [c for c in kids if _admit(cfg, c, claims)]
+        # …and one whose iterate-plan an earlier run parked (#782) is re-planned before the
+        # reschedule below levels it, so its new brief sets its wave.
+        kids = _replan_unparked(cfg, kids, csv=None, claims=claims)
         to_examine += onward      # a generation that already closed is walked THROUGH
         if kids:
             taken |= {c.name for c in kids}
@@ -2828,7 +3645,7 @@ def _pass_pool(allowance: int, wave_list: list[list[Path]]) -> int:
 
 
 def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
-                max_passes: int | None = None) -> int:
+                max_passes: int | None = None, same_wave: _SameWave | None = None) -> int:
     """Drive ONE wave's bundles to all-terminal (COMPLETE / DISCONTINUED) with iteration,
     then the cheap-first sign-off restricted to the wave. Publishing and folding are the
     caller's. The pass loop mirrors the prior single-batch driver: build-all
@@ -2849,14 +3666,32 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
     would hand the next (possibly adopted) wave a budget the operator never allowed. Both
     are pinned — ``test_a_wave_that_runs_its_allowance_out_still_charges_the_run_pool``,
     ``test_a_wave_that_stalls_charges_the_run_pool_for_what_it_spent``. Defaults to
-    ``cfg.max_passes`` (``[driver].max_passes``)."""
+    ``cfg.max_passes`` (``[driver].max_passes``).
+
+    ``same_wave`` (#782): this is a wave the fold runs after (:func:`_drive_and_act` builds
+    it). Both accept routes — the pre-apply and the post-session apply — then refuse an
+    accept whose change would conflict with an accepted bundle of the wave, or whose check
+    did not complete (:func:`_same_wave_refused`). Whether or not it is given, a bundle such
+    a refusal left with its row open is offered ONE more session; when that one records
+    nothing that settles it, the wave stops offering it (:func:`_parked`), ends once its
+    other bundles are terminal, and names it with the refusal and its step
+    (:func:`_report_same_wave`) — never with the pass budget, which it would otherwise spin
+    to. A session is counted only once ``run_signoff_batch`` returns, and the count is set
+    back to none as each run's wave starts (:func:`_same_wave_starts`), so each run offers it
+    one. A plain C6 refusal has no such record and is offered a session every pass, as
+    before. An iterate-plan its session records instead is parked to the next run
+    (:func:`_park_replan`): the wave neither builds nor waits on it, and the next run that
+    drives it re-plans it before it sets that run's waves (:func:`_unpark`)."""
     max_passes = cfg.max_passes if max_passes is None else max_passes
     names = {b.name for b in wave}
+    _same_wave_starts(wave)
     used = 0
     for _ in range(max_passes):
         used += 1
         before = [state.state(d) for d in wave]
-        _build_all(cfg, wave)
+        # A bundle whose iterate-plan is parked to the next run is not planned, so not
+        # built, in this one (#782): it would be rebuilt beside the bundles it was refused for.
+        _build_all(cfg, [d for d in wave if not _replan_parked(d)])
         # Before the human sees the queue, take the bundles whose findings are purely
         # implementation-level off it (#264): they become ITERATE_DO, drop out of
         # `awaiting_signoff`, and the next pass's build-all rebuilds them — exactly as a
@@ -2868,7 +3703,10 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
                 if _isolate(d, "auto-iterate", lambda d=d: _maybe_auto_iterate(
                         cfg, d, by=by, today=today, apply_now=False)):
                     auto_iterated = True
-        pending = [e.bundle for e in queue.awaiting_signoff(cfg) if e.bundle.name in names]
+        # A bundle the same-wave check refused that has had its one more session is left
+        # out (#782, `_parked`): nothing it carries can settle it this wave.
+        pending = [e.bundle for e in queue.awaiting_signoff(cfg)
+                   if e.bundle.name in names and not _parked(e.bundle)]
         if not pending:
             # A fired auto-iterate IS progress, even though it leaves the bundle in the state
             # the pass began in (PR #270 review). A bundle already ITERATE_DO gets rebuilt by
@@ -2882,8 +3720,11 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
             # AWAITING_SIGNOFF, and it reaches the human through `pending`.
             if not auto_iterated and [state.state(d) for d in wave] == before:
                 # Genuinely stuck (all terminal / planner declined an UNPLANNED) — but an
-                # ITERATE_* bundle here is progress the driver can no longer make.
-                _warn_abandoned(wave, why="a full pass made no progress")
+                # ITERATE_* bundle here is progress the driver can no longer make. One the
+                # same-wave check settled is named with its own step instead (#782).
+                _warn_abandoned([d for d in wave if not _settled(d)],
+                                why="a full pass made no progress")
+                _report_same_wave(wave)
                 return used
             continue    # progress (e.g. an iterate-plan re-open) — give it another pass
         # Read before asking (issue #453). A pending bundle may already carry a decision from
@@ -2900,7 +3741,8 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
         for d in pending:
             applied = _isolate(d, "applying the recorded sign-off decision",
                                lambda d=d: _apply_recorded_decision(
-                                   cfg, d, by=by, today=today, apply_now=False))
+                                   cfg, d, by=by, today=today, apply_now=False,
+                                   same_wave=same_wave))
             if applied in (UNDECIDED, "blocked"):
                 needing_session.append(d)
         for chunk in _chunks(needing_session, SIGNOFF_BATCH_SIZE):
@@ -2910,19 +3752,29 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
                 print(f"flow: sign-off session over {[b.name for b in chunk]} failed "
                       f"({type(exc).__name__}: {exc}); applying decisions written so far",
                       file=sys.stderr)
+            else:
+                # A session that ran is the one more a same-wave refusal is offered (#782); a
+                # dropped one is not, and is offered again. Counted before the apply below,
+                # so a new refusal it brings gets one more session of its own.
+                for d in chunk:
+                    _session_offered(d)
             for d in chunk:
                 _isolate(d, "sign-off", lambda d=d: _apply_decision(
-                    cfg, d, by=by, today=today, apply_now=False))
-        if all(state.state(d) in _TERMINAL for d in wave):
+                    cfg, d, by=by, today=today, apply_now=False, same_wave=same_wave))
+        if all(state.state(d) in _TERMINAL or _settled(d) for d in wave):
+            _report_same_wave(wave)
             return used
     # Budget spent with work still in flight. An `iterate-do` recorded on the last allowed
     # pass defers its rebuild to "the next pass's build-all" — which never comes. The
     # allowance is named as THIS WAVE's (#469): once a run adopts, a later wave gets what is
     # left of the run's pool, and "exhausted after 1 pass(es); raise [driver].max_passes"
     # while that setting reads 20 is a contradiction to the operator it is addressed to.
-    _warn_abandoned(wave, why=f"pass budget exhausted after {max_passes} pass(es) — this "
-                             f"wave's allowance out of the run's pool; raise "
-                             f"[driver].max_passes / PDCA_MAX_PASSES / --max-passes")
+    # A bundle the same-wave check settled is not waiting on the budget (#782).
+    _warn_abandoned([d for d in wave if not _settled(d)],
+                    why=f"pass budget exhausted after {max_passes} pass(es) — this "
+                        f"wave's allowance out of the run's pool; raise "
+                        f"[driver].max_passes / PDCA_MAX_PASSES / --max-passes")
+    _report_same_wave(wave)
     return used
 
 
@@ -3102,6 +3954,7 @@ def _drive_and_act(
     claims: drive_claim.Run | None = None,
     batch: Collection[str] | None = None,
     holds: dict[str, str] | None = None,
+    no_pr_checked: _NoPrCheck | None = None,
 ) -> dict[str, str]:
     """Drive a set of in-flight bundles through the full cycle to Act, in waves.
 
@@ -3156,12 +4009,28 @@ def _drive_and_act(
     integration line: ``"unpushed"`` for one that pushed no branch (#593) and ``"conflict"``
     for one whose branch conflicts with a same-wave bundle merged before it (#674), or with
     bundles already on the line that explain the whole clash (#747). Such a bundle is
-    COMPLETE in the returned map, which therefore cannot say it was held.
+    COMPLETE in the returned map, which therefore cannot say it was held. On a wave the
+    fold runs after, the same-wave kind is found at sign-off instead (#782,
+    :func:`_same_wave_refused`): such a bundle is not accepted, so it is AWAITING_SIGNOFF in
+    the map — unfinished, not held — and the fold holds one only when the human overrode
+    that refusal, or a branch changed after its accept.
     ``"base"`` (#738) for one held before it was built, because its own base could not be
     built (:func:`_bundle_bases`): not driven this run — PLANNED in the map, for one not
-    built yet — and named on stderr with the cause and the fix. ``cli._flow`` reads this to
-    exit 3 instead of 0 (``cli._results_rc``). It also names each bundle whose carried
-    branch was rewritten after the run's last fold read it (#695,
+    built yet — and named on stderr with the cause and the fix.
+    ``"no-pr"`` (#926, :func:`_no_pr`) for an accepted bundle whose accepted patch is on no
+    PR against its target, judged at the end of the run for each bundle it accepted (with
+    the run's ``pushed`` set), in any wave mode, and for each COMPLETE split child an
+    adoption reaches: no record, no ``pr_url``, a record for another patch or target, or —
+    for one this run accepted — no push this run. A bundle the fold held ``"unpushed"`` keeps
+    that one hold. Only where the run publishes for real: ``--no-publish`` and a stub
+    publisher check nothing. ``no_pr_checked`` is the check the caller has begun
+    (:func:`flow_ids`' terminal filter, :class:`_NoPrCheck`): the run goes on with that same
+    one (:func:`_check_no_pr`), so a bundle the caller checked is not read, held or noted
+    again, and its ``noted`` set is the run's (:func:`_note_no_digest`). ``None``: the run
+    starts its own. A finished named id that check held is not carried before wave 0: the
+    bundles whose plain ``Depends on`` names it wait (:func:`_carry_finished`).
+    ``cli._flow`` reads this to exit 3 instead of 0 (``cli._results_rc``). It also names each
+    bundle whose carried branch was rewritten after the run's last fold read it (#695,
     :func:`_report_late_rewrites`), a branch a base's refusal named included:
     ``"rewritten"``, or ``"unchecked"`` for each carried branch that end-of-run check could
     not judge — either one makes ``cli._flow`` exit 1, ahead of any hold. ``None`` — nobody
@@ -3236,6 +4105,12 @@ def _drive_and_act(
     offered = _offered_by_seeds(cfg, list(adopt_seeds)) if adopt_seeds else frozenset()
     # validates (raises) + levels the batch
     wave_list = waves.compute_waves(cfg, bundles, offered=offered)
+    # The no-PR check (#926): each bundle it has read → why its accepted patch is on no PR
+    # ("" = it is not). Only where the run publishes for real: a dry run (stub publisher) and
+    # --no-publish ask nothing and report nothing missing. The caller's own check when it has
+    # one (`flow_ids`' terminal filter), so each bundle is read, held and noted once a run.
+    no_pr = ((no_pr_checked if no_pr_checked is not None else _NoPrCheck())
+             if do_publish and cfg.publisher.mode != "stub" else None)
     # Recovery (#473): a seed is an id the operator named whose bundle was ALREADY terminal
     # on a split, so an earlier run's children may still be sitting where it left them.
     # `k=-1` makes `wave_list[k+1:]` the WHOLE schedule — the children are levelled in front
@@ -3244,7 +4119,7 @@ def _drive_and_act(
     if adopt_seeds:
         _adopt_split_children(cfg, list(adopt_seeds), k=-1, wave_list=wave_list,
                               bundles=bundles, batch_names=batch_names, named=named,
-                              claims=claims)
+                              claims=claims, no_pr=no_pr)
         # The seed itself is terminal — nothing here drives it — and this is the ONE point
         # at which this run reads it. Held until now so no second run could split or
         # re-parent it half-way through the read; let go the moment the read is done, so
@@ -3258,11 +4133,14 @@ def _drive_and_act(
             # driven, or every child was refused and named above). There is no schedule, so
             # there is nothing to drive, sweep, publish or Act on — the quiet no-op naming a
             # finished bundle has always been. The seeds' own dispositions are `flow_ids`'
-            # `skipped` map, which is what the caller reports.
+            # `skipped` map, which is what the caller reports. A COMPLETE child the pre-pass
+            # found on no PR is still the run's hold (#926).
+            _no_pr_holds(holds, no_pr)
             return {}
     # A re-issued run's finished named ids (#646): carried onto the line before wave 0 when
     # clean, else named in `held_finished`, which holds only their plain `Depends on`
-    # dependents. Only where a fold would run: stack mode, publishing on.
+    # dependents. Only where a fold would run: stack mode, publishing on. One the no-PR check
+    # held (#926) is not clean: no PR holds its accepted patch, so its branch is no base.
     held_finished: set[str] = set()
     # Each finished id the carry put on the line → the head it put there (#747): an in-run
     # fold may pin a bundle's conflict on one, as on a bundle it took itself.
@@ -3271,7 +4149,9 @@ def _drive_and_act(
     if do_publish and cfg.wave_mode != "merge":
         _carry_finished(cfg, bundles, finished,
                         batch=run_batch, integ=integ, folded_tips=folded_tips,
-                        held=held_finished, finished_heads=finished_heads)
+                        held=held_finished, finished_heads=finished_heads,
+                        no_pr=({n for n, why in no_pr.answers.items() if why}
+                               if no_pr is not None else frozenset()))
     # `wave_list` is iterated by a LIST iterator on purpose (#469): adoption splices the
     # recomputed remainder into `wave_list[k+1:]` after wave k drives, and the iterator —
     # which simply indexes forward — picks the new tail up. So "how many waves are left" is
@@ -3291,8 +4171,13 @@ def _drive_and_act(
     # only reads state: a merge can wait `merge_wait_secs` and changes the host.
     merge_notes: dict[tuple[str, str, str], str] | None = None
     merge_busy: set[tuple[str, str, str]] = set()
+    # Prerequisites whose merge this run counted with no patch digest to check, each noted
+    # once however many dependents it releases (#865, `_note_no_digest`). Where the no-PR
+    # check runs, its own set (#926): a record with no digest that it trusted has had its one
+    # note, and one this set already holds gets none from the check.
+    noted: set[str] = no_pr.noted if no_pr is not None else set()
     if merge_mode:
-        merge_notes, merge_busy = (_merge_prereqs(cfg, bundles, claims) if hold_unmerged
+        merge_notes, merge_busy = (_merge_prereqs(cfg, bundles, claims, noted) if hold_unmerged
                                    else ({}, set()))
     requested = set(named) | {cfg.bundle(str(i).removeprefix("issue_")).name
                               for i in (batch or ())}
@@ -3333,7 +4218,7 @@ def _drive_and_act(
                              # and the bundles cut from it (#729).
                              lines={tgt: (branch, folded_tips.get(tgt))
                                     for tgt, branch in integ.items()},
-                             on_line=on_line, unbuilt=held_base)
+                             on_line=on_line, unbuilt=held_base, noted=noted)
         if not runnable:
             continue
         # The pool, read off the schedule as it stands NOW — so a splice below has already
@@ -3410,8 +4295,20 @@ def _drive_and_act(
         # is smaller — the second term is the admission rule again, applied to the wave that
         # was let in (#469); with the pool covering the live schedule (#473) it can only bite
         # if a wave came to spend more than it was handed.
+        # On a wave the fold below runs after — its own condition for a non-dry `held_out`:
+        # not the last wave, publishing on, stack mode, a publisher that is not stubbed — an
+        # accept that would add a same-wave hold to that fold, or whose check of that did not
+        # complete, is refused at sign-off (#782), so no accepted bundle of the wave goes
+        # without a PR for that reason. The check merges onto the line as that fold will
+        # find it: `folded_tips` (the carry's, or an earlier wave's fold), else the base.
+        # The fold keeps its own hold (#674) for an override, or a branch that changed after
+        # its accept.
+        same_wave = (_SameWave(wave=tuple(runnable), k=k, folded_tips=dict(folded_tips),
+                               batch=tuple(run_batch))
+                     if (k < len(wave_list) - 1 and do_publish and not merge_mode
+                         and cfg.publisher.mode != "stub") else None)
         spent += _drive_wave(cfg, runnable, by=by, today=today,
-                             max_passes=min(allowance, budget - spent))
+                             max_passes=min(allowance, budget - spent), same_wave=same_wave)
         # A bundle that SPLIT during this wave hands its children back to the run that
         # caused the split (#469), spliced into the waves AFTER this one — instead of
         # ending with the parent terminal, the children PLANNED, and the operator
@@ -3419,7 +4316,8 @@ def _drive_and_act(
         # the `_pass_pool` read at the top of the NEXT iteration (#473); `spent` is untouched
         # here and never anywhere else — a bound, not a reset.
         _adopt_split_children(cfg, runnable, k=k, wave_list=wave_list, bundles=bundles,
-                              batch_names=batch_names, named=named, claims=claims)
+                              batch_names=batch_names, named=named, claims=claims,
+                              no_pr=no_pr)
         complete = [d for d in sorted(runnable, key=lambda p: p.name)
                     if state.state(d) == state.COMPLETE]
         _audit_wave_overlap(complete)
@@ -3546,6 +4444,15 @@ def _drive_and_act(
     _warn_stranded_split_children(cfg, bundles, adopt_seeds)
     # Each bundle a fold held for a conflict, again, with the step to take (#674, #747).
     _report_conflict_holds(cfg, held_conflict)
+    # Each bundle this run accepted whose accepted patch is on no PR against its target
+    # (#926): its `gh pr create` failed after the push, it was not pushed at all (its texts
+    # failed T4 — in the last wave, where no fold holds it, too), or it was published for
+    # another patch or target. In any wave mode: merge mode's merge runs only for a non-final
+    # wave. One the fold already held "unpushed" keeps that one hold and its one line.
+    if no_pr is not None:
+        for d in accepted:
+            if d.name not in held_unpushed:
+                _check_no_pr(cfg, d, no_pr, pushed=pushed)
     # A carried branch rewritten after the run's last fold read it (#695) — after Act on
     # purpose, so the window covers it too (Act never re-decides a bundle's disposition).
     # Only where a fold ran: `carried_heads` is filled by a stack-mode fold that pushed, so
@@ -3565,6 +4472,7 @@ def _drive_and_act(
     # fails the run (exit 1, `cli._results_rc`), so it is written last: it outranks a hold.
     if holds is not None:
         holds.update({n.replace("issue_", ""): "unpushed" for n in sorted(held_unpushed)})
+        _no_pr_holds(holds, no_pr)
         holds.update({n.replace("issue_", ""): "conflict" for n in held_conflict})
         holds.update({n.replace("issue_", ""): "base" for n in sorted(held_base)})
         holds.update({n.replace("issue_", ""): why for n, why in late.items()})
@@ -3662,7 +4570,9 @@ def flow_batch(
     run holds it, or its claim cannot be recorded — is named and left alone, and the rest of
     the batch is driven. One the scheduler then holds is let go again at once, since this
     run will not drive it. The Plan session itself runs BEFORE any of this, and is not
-    fenced: see :mod:`drive_claim`.
+    fenced: see :mod:`drive_claim`. A swept bundle whose iterate-plan an earlier run parked
+    (#782) is re-planned once it is claimed, in a Plan session of its own, before the sweep
+    is scheduled (:func:`_replan_unparked`).
 
     ``claims`` also holds :func:`drive_claim.sweep_marker` for the SPAN of this call (#566):
     from here until every in-flight bundle has been claimed or excluded, so
@@ -3705,6 +4615,10 @@ def flow_batch(
                 print("flow: nothing to drive — this run could not claim any in-flight "
                       "bundle (each is named above).", file=sys.stderr)
                 return {}
+        # After the claim too (#565), and before anything below reads a brief: an
+        # iterate-plan an earlier run parked (#782) is applied and re-planned now, so the
+        # new brief is the one the run schedules.
+        bundles = _replan_unparked(cfg, bundles, csv=csv, claims=claims)
         # After the claim, never in the state filter above (#565): a briefless bundle past Do
         # is given its brief or named and left out — never written while another run holds
         # it, and never driven without one (#597).
@@ -3784,7 +4698,10 @@ def flow_ids(
     (planner skipped them) and terminal ids (COMPLETE / DISCONTINUED) are left alone —
     except that an id terminal on a ``split`` is ALSO handed to :func:`_drive_and_act` as an
     **adoption seed** (#473), so a run named after a parent whose children an earlier run
-    stranded drives those children instead of only re-printing the hint at them.
+    stranded drives those children instead of only re-printing the hint at them. An id
+    whose iterate-plan an earlier run parked (#782) is re-opened for Plan just before the
+    pre-pass (:func:`_unpark`), so the pre-pass re-plans it with the rest and its new brief
+    sets the run.
 
     Returns ``{issue_id: state}`` for **every id it was given** (issue #468), driven or
     skipped — a skipped id's disposition is its state on disk, the same value
@@ -3805,8 +4722,12 @@ def flow_ids(
     has read it (:func:`_drive_and_act`). The rest reach adoption through
     :func:`_drive_and_act`.
 
-    ``holds`` is handed to :func:`_drive_and_act` unchanged (#693); an id skipped here is
-    never held.
+    ``holds`` is handed to :func:`_drive_and_act` (#693). An id skipped here is held in one
+    case (#926): COMPLETE, where the run publishes for real, with its accepted patch on no PR
+    against its target (:func:`_no_pr`) — ``"no-pr"``, its hold line printed in place of
+    :func:`_terminal_hint`, written to ``holds`` with the run's other no-PR holds
+    (:func:`_no_pr_holds`). So the same ``pdca flow <ids>`` that left it there exits 3 on
+    every re-run until it is published.
     """
     today = today or datetime.date.today().isoformat()
 
@@ -3826,6 +4747,11 @@ def flow_ids(
             # the bundle stays RESOLVED and the drive-set filter below skips it with
             # its own terminal note — loud, never a silent "planned" claim.
 
+    # An iterate-plan an earlier run parked (#782) is applied first: the bundle is then
+    # UNPLANNED, so the pre-pass below re-plans it with the rest, and its new brief is the one
+    # `_drive_and_act` sets the run's waves, merge waits (#647) and own bases (#727) from.
+    for iid in ids:
+        _unpark(cfg, cfg.bundle(iid))
     # Optional Plan pre-pass (#65): brief the UNPLANNED ids in one shared session, before
     # the drive set is filtered, so the un-briefed ones become drivable. A csv enables it too.
     if plan_missing or csv:
@@ -3839,6 +4765,11 @@ def flow_ids(
     bundles: list[Path] = []
     skipped: dict[str, str] = {}   # asked for, not driven — still gets a disposition (#468)
     seeds: list[Path] = []       # terminal on a split — examined for stranded kids (#473)
+    # The no-PR check of a finished id (#926), where the run publishes for real: each bundle
+    # it read → why it is on no PR ("" = it is not), and the run's set of no-digest notes.
+    # Handed on to `_drive_and_act`, which goes on with it, so a bundle read here is not read
+    # or noted again by an adoption or a prerequisite's merge (#865).
+    no_pr = _NoPrCheck() if do_publish and cfg.publisher.mode != "stub" else None
     for iid in ids:
         d = cfg.bundle(iid)
         s = state.state(d)
@@ -3850,7 +4781,11 @@ def flow_ids(
             continue
         if s in _TERMINAL:
             print(f"flow: {d.name} — already terminal ({s}), skipped", file=sys.stderr)
-            hint = _terminal_hint(d, s)   # the ONE recovery advice, both CLI shapes (#468)
+            # An accepted bundle whose accepted patch is on no PR is held, not finished
+            # (#926): its hold line, with the way out, stands in for the hint's `rm -rf`. The
+            # hold reaches the caller's exit code through `holds` (`_no_pr_holds`).
+            held = no_pr is not None and bool(_check_no_pr(cfg, d, no_pr))
+            hint = _terminal_hint(d, s, no_pr=held)   # the ONE recovery advice (#468)
             if hint:
                 print(f"  {hint}", file=sys.stderr)
             skipped[iid] = s
@@ -3883,6 +4818,7 @@ def flow_ids(
             continue
         bundles.append(d)
     if not bundles and not seeds:
+        _no_pr_holds(holds, no_pr)    # nothing to drive: the filter's holds are the run's
         return skipped
     bundles.sort(key=lambda p: p.name)
     # The batch is the ids AS ASKED FOR (#591), skipped ones included, so a re-issued run
@@ -3891,7 +4827,7 @@ def flow_ids(
     return skipped | _drive_and_act(cfg, bundles, adopt_seeds=seeds, do_publish=do_publish,
                                     do_act=do_act, by=by, today=today,
                                     max_passes=max_passes, claims=claims,
-                                    batch=list(ids), holds=holds)
+                                    batch=list(ids), holds=holds, no_pr_checked=no_pr)
 
 
 def _bundle_dirs(cfg: Config) -> set[str]:

@@ -64,6 +64,25 @@ MERGE_REMARKS = "merge-remarks.json"
 # attempt via DOWNSTREAM_OF_BRIEF below.
 SESSION_CARRY = "session-carry-forward"
 
+# An accept the flow refused at sign-off (#782, ``flow._same_wave_refused``): in a wave the
+# fold runs after, the bundle's change would conflict with a bundle of its own wave already
+# accepted, or the check of that could not complete. Records the §6 row the refusal put in,
+# why and the step, and how many sign-off sessions the wave has offered the bundle since —
+# so the wave offers it ONE more session, not one every pass (``flow._parked``). Set back to
+# none, not deleted, as each run's wave starts. About THIS attempt's patch, so it is archived
+# with it via DOWNSTREAM_OF_BRIEF below: a rebuilt attempt starts with no record.
+SAME_WAVE_REFUSAL = "same-wave-refusal.json"
+
+# A bundle whose sign-off chose iterate-plan while a refusal of the same-wave check (#782)
+# still had its §6 row open: §9 records the iterate-plan, but the flow does not archive or
+# re-plan it in that run, where it would be rebuilt beside the bundles it was refused for
+# (``flow._apply_decision``). The next run that drives it archives the attempt (UNPLANNED),
+# only then removes this marker, and re-plans it before it reads its brief for anything
+# (``flow._unpark``); an archive that fails leaves the marker, so that run keeps it parked
+# too. Deliberately NOT in DOWNSTREAM_OF_BRIEF: it must outlive the run that wrote it, and
+# the archive must not take it.
+SAME_WAVE_PARKED = "same-wave-replan-parked"
+
 # The reviewer leaf's captured-error tail (#138): each failed attempt's record is written
 # as that attempt happens (#540) and the record is SETTLED once the attempts are spent —
 # which makes it, SETTLED, the discriminator (#369) between a reviewer that ran-and-failed
@@ -154,6 +173,9 @@ DOWNSTREAM_OF_BRIEF = [
     # by Do or Check, but it describes THIS attempt's PR: archived with that attempt, so a
     # rebuild never sits beside remarks its new patch may already answer.
     MERGE_REMARKS,
+    # A refused accept's record (#782): about THIS attempt's patch, so it goes with it, and
+    # the count of sessions offered since starts over for the rebuilt attempt.
+    SAME_WAVE_REFUSAL,
 ]
 
 # Cycle artifacts matched by pattern rather than name. ONE definition, read by both

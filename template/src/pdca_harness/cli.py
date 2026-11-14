@@ -172,9 +172,12 @@ def main(argv: list[str] | None = None) -> int:
         epilog="exit status: 0 every bundle finished (with one id, a stop for sign-off counts "
                "too); 1 a bundle did not finish, or the run could not start; 2 bad input (a "
                "bad pdca.toml, no ids, an unschedulable dependency graph); 3 every bundle "
-               "finished, but a fold held an accepted bundle out of the run's integration "
-               "line (it pushed no branch, or it conflicts with a same-wave bundle), so that "
-               "work is on no line of the run (#693).")
+               "finished, but the run held one: a fold held an accepted bundle out of the "
+               "run's integration line (it pushed no branch, or it conflicts with a same-wave "
+               "bundle), so that work is on no line of the run (#693), or an accepted bundle's "
+               "accepted patch is on no PR against its target (#926), checked for each "
+               "bundle the run accepted and each finished id it names, so the same command "
+               "exits 3 again until that bundle is published.")
     p_flow.add_argument("issue_ids", nargs="*", help="issue ids; 1 → single cycle, N → batch; 0 + --from-csv → plan a batch from the export")
     p_flow.add_argument("--from-csv", help="tracker export to seed the interactive Plan of unbriefed ids")
     p_flow.add_argument("--from-briefs", type=Path, help="init any missing bundle from DIR/<id>.md before driving")
@@ -635,10 +638,10 @@ def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run
             shutil.copyfile(src, d / "brief.md")
 
     do_publish, do_act = not args.no_publish, not args.no_act
-    # The bundles a fold of this run held out of its line (#693), and those whose carried
-    # branch was rewritten after its last fold, or could not be checked for that (#695),
-    # filled by the drive: they read COMPLETE in the results map, so the exit code needs
-    # this beside it.
+    # The bundles a fold of this run held out of its line (#693), those whose accepted patch
+    # is on no PR (#926), and those whose carried branch was rewritten after its last fold,
+    # or could not be checked for that (#695), filled by the drive: they read COMPLETE in the
+    # results map, so the exit code needs this beside it.
     holds: dict[str, str] = {}
 
     if not ids:  # batch the planner picks from the export
@@ -690,7 +693,8 @@ _FLOW_OK = (state.COMPLETE, state.RESOLVED)
 
 
 #: Exit code of a flow run whose every bundle finished, or was held: held out of its line
-#: once finished (#693), or held before it was built, its own base not buildable (#738).
+#: once finished (#693), held with its accepted patch on no PR (#926), or held before it was
+#: built, its own base not buildable (#738).
 _RC_HELD = 3
 
 #: The ``holds`` reason of a bundle held before it was built, because its own base could
@@ -722,11 +726,18 @@ def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
       line — it pushed no branch (#593, ``"unpushed"``) or its branch conflicts with a
       same-wave bundle merged before it (#674, ``"conflict"``). Such a bundle is COMPLETE
       in the map, so the map alone read it as success while its work is on no line of the
-      run. Or a bundle was held before it was built, because its own base could not be
-      built (#738, ``"base"``): it is not COMPLETE in the map (PLANNED, for one not built
-      yet), but held, with the cause and the fix named on stderr — not failed. 3 lets a
-      script or CI job tell that run from a clean one without parsing stderr. ``holds`` is
-      the collector ``_flow`` passes to :func:`flow.flow_ids` / :func:`flow.flow_batch`.
+      run. Or an accepted bundle's accepted patch is on no PR against its target (#926,
+      ``"no-pr"``): its PR was never opened (whatever left its record with no ``pr_url``),
+      it was accepted and not pushed this run, or its record is for another patch or
+      target. That is judged at the end of a run for each bundle it accepted, and on a
+      re-run for each COMPLETE id it names (``flow.flow_ids``) or split child it reaches,
+      so the same command exits 3 until the PR is opened; a record from before patch
+      digests is trusted there, with a note. Or a bundle was held before it was built,
+      because its own base could not be built (#738, ``"base"``): it is not COMPLETE in the
+      map (PLANNED, for one not built yet), but held, with the cause and the fix named on
+      stderr — not failed. 3 lets a script or CI job tell that run from a clean one without
+      parsing stderr. ``holds`` is the collector ``_flow`` passes to :func:`flow.flow_ids` /
+      :func:`flow.flow_batch`.
     - **0** — every bundle reached a successful terminal and nothing was held.
 
     An EMPTY map — nothing was asked for, or nothing driven — is 0: a no-op is not a

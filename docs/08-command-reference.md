@@ -22,7 +22,8 @@ installed.
 - **Bare `pdca` is `pdca status`.** The dashboard is the default command.
 - **Exit codes** are a contract: **0** did what it says; **1** a bundle or a
   check did not pass, or the command refused to act; **2** bad input (config, an
-  unknown id, an unschedulable graph). `pdca flow` adds **3** — see below.
+  unknown id, an unschedulable graph). `pdca flow` adds **3**, a run that held a
+  bundle — see below.
 - **`<id>`** is a tracker issue id as it appears in `results/issue_<id>/`.
   Several commands take none and then act on every bundle that fits.
 
@@ -88,9 +89,15 @@ Re-issuing the same command resumes a run that stopped.
 **Exit status**, from the tool's own help: **0** every bundle finished (with
 one id, a stop for sign-off counts too); **1** a bundle did not finish, or the
 run could not start; **2** bad input (a bad `pdca.toml`, no ids, an
-unschedulable dependency graph); **3** every bundle finished, but a fold held an
-accepted bundle out of the run's integration line (it pushed no branch, or it
-conflicts with a same-wave bundle), so that work is on no line of the run.
+unschedulable dependency graph); **3** every bundle finished, but the run held
+one: a fold held an accepted bundle out of the run's integration line (it pushed
+no branch, or it conflicts with a same-wave bundle), so that work is on no line
+of the run, or an accepted bundle's accepted patch is on no PR against its
+target, checked for each bundle the run accepted and each finished id it names,
+so the same command exits 3 again until that bundle is published
+([07](07-crosscutting.md#waves-in-execution)). That re-check belongs to
+`pdca flow <ids>`: a `--from-csv` sweep resumes in-flight bundles only and never
+sees a COMPLETE one.
 
 Covered in: [index](README.md#the-whole-cycle-in-one-command), [03](03-plan.md#how-to-use),
 [07](07-crosscutting.md#waves-in-execution).
