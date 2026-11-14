@@ -140,7 +140,9 @@ the *names* of their secrets, never the values:
 
 ### 3. Rulesets and code owners (template `repo-settings.py`)
 
-Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
+Everything here works on GitHub's free plan; PDCA cannot assume a paid one. `main` in this
+proposal means the instance's `[project].default_branch` (default `main`); `repo-settings.py`,
+the environment policies and the `doctor` rows all take the name from there.
 
 - **Public repositories only.** Branch protection and rulesets are enforced on public
   repositories on every plan, but not on private repositories of a free personal account. The
@@ -178,7 +180,9 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
   hooks the leaves and gates run with (`agents/**`, `engine/**`, `process/**`, `templates/**`),
   every instruction file an agent tool reads at any depth, including the ones that take
   precedence over `AGENTS.md` (`**/AGENTS*.md`, which covers `AGENTS.override.md`,
-  `**/CLAUDE*.md`, `**/.claude/**`, `**/.codex/**`), and every document those prompts tell the agents to obey (`docs/**` and
+  `**/CLAUDE*.md`, `**/GEMINI*.md`, `**/.claude/**`, `**/.codex/**`, `**/.gemini/**`, and
+  the instruction and settings paths of every other family `families.py` configures, which
+  `doctor` takes from that registry so a new family cannot be missed), and every document those prompts tell the agents to obey (`docs/**` and
   `PCDA/**` in an instance, which today covers `docs/INTEGRATION.md`, `docs/principles.md`,
   `docs/fork-discipline.md` and `PCDA/quality-cycle.md`). Without this, a merged PR could
   change the driver that holds the App key, switch off a gate or rewrite the agents'
@@ -188,7 +192,8 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
   every path *those* files name, until nothing new appears, and fails when any file in that
   closure is not covered by `CODEOWNERS`. In a
   target repository the set is its `.github/**`, `CODEOWNERS`, the same instruction files
-  at any depth (`**/AGENTS*.md`, `**/CLAUDE*.md`, `**/.claude/**`, `**/.codex/**`) with the
+  at any depth (`**/AGENTS*.md`, `**/CLAUDE*.md`, `**/GEMINI*.md`, `**/.claude/**`,
+  `**/.codex/**`, `**/.gemini/**`) with the
   transitive closure of the files they name, and the implementation of its required checks:
   CI configuration, build and test-runner configuration and scripts, not the application
   source those checks build and test (that is the ordinary code `merge` mode merges).
@@ -215,6 +220,12 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
   since an empty prefix would open every branch name to the App. `doctor` **fails** when a
   configured pattern falls outside the ruleset, so a renamed pattern blocks the run before a
   publish would fail.
+
+  **Dependabot** keeps its branches through a separate ruleset on `dependabot/**` whose only
+  bypass actor, besides the maintainer, is the Dependabot App (an `Integration` with
+  GitHub's fixed Dependabot App id); the agent App's ruleset excludes nothing, so
+  `dependabot/**` stays closed to the agent App. Dependabot's PRs then reach `main` through
+  the same pull-request rule as any other.
 - **No push rulesets.** Rulesets that block file paths on push are not assumed. Instead:
   - Without the Workflows permission the App cannot change `.github/workflows/**`, so every
     guard whose logic is written inline in its workflow file is out of its reach as it is
@@ -424,9 +435,11 @@ every unattended run, so no proof is cached between runs.
   answer, a network error included, fails the row. Each agent App is created
   as a private App by the owner it serves, so GitHub refuses installation anywhere else; the
   auditor Apps are checked the same way.
-- **Identity and permissions**: the row mints an *unscoped* diagnostic token (no repository
-  list), so the response shows the installation's full grant, and enumerates
-  `GET /installation/repositories`. It fails unless the permissions are exactly section 2's
+- **Identity and permissions**: the minter mints an *unscoped* diagnostic token (no
+  repository list), so the response shows the installation's full grant, and enumerates
+  `GET /installation/repositories` itself; it returns only the permissions and the repository
+  list to `doctor`, never the token, which would reach every repository of the installation
+  and bypass the per-loop allowlist. It fails unless the permissions are exactly section 2's
   set (no `workflows`, no `administration`, no `secrets`), the repositories are exactly the
   configured ones, and every one of them is public (section 3); a repository the App was
   installed on by mistake shows up here.
@@ -526,7 +539,8 @@ The run fails when that set differs from the manifest, on either side.
 `repo-settings.py check` with the maintainer's admin login remains for what only an admin
 can see: the full `bypass_actors` lists. It fails unless every ruleset's only bypass actor
 is the maintainer (the repository admin role, or the organization admin), with no
-`Integration` (GitHub Actions or any App) and no `DeployKey`. It runs when an App is first
+`Integration` (GitHub Actions or any App) and no `DeployKey`; the one exception is the
+Dependabot App on the `dependabot/**` ruleset of section 3, and only there. It runs when an App is first
 installed, and `repo-settings.py apply` runs it after every ruleset change it makes;
 `doctor` shows the date of the last pass. Only an admin can change a ruleset, so between
 those checks only the maintainer can add a bypass actor; that residual is accepted.
