@@ -47,19 +47,28 @@ write access, which can change workflow files.
 
 ## Design
 
-### 1. Identity: one GitHub App, one installation per owner
+### 1. Identity: one GitHub App per owner
 
-A GitHub App (working name `pdca-bot`) is installed on each owner the loops write to
-(getwyrd, Ralphovi, eduralph), each installation limited to the repositories of that
-owner's instances and targets.
+Each owner the loops write to (getwyrd, Ralphovi, eduralph) gets its **own** GitHub App
+(working names `pdca-bot-getwyrd`, …), installed only on that owner and limited to the
+repositories of that owner's instances and targets.
 
-- The driver mints an **installation token** per run from the App's private key; it expires
-  after one hour, so no long-lived GitHub credential is on disk.
-- The private key is readable only by the loop's OS user (section 4). Model leaves and gates
-  never see it or a token (ADR-0007's sandbox rules stand).
-- Commits and pull requests appear as `pdca-bot[bot]`, never as the maintainer, so rulesets
-  can name the agent and review rules can require a human.
-- The App replaces the personal token of ADR-0006 and the deploy key of ADR-0021 §4.
+- **The private key is the long-lived credential.** It signs the JWT that mints installation
+  tokens for every installation of its App, so its reach is exactly that App's installation:
+  one owner's listed repositories, with the permissions of section 2. One App per owner keeps
+  a stolen key from reaching the other owners. The key is readable only by the loop's OS user
+  (section 5), rotated on a schedule (GitHub allows two active keys, so rotation has no gap),
+  and revoked in the App settings if exposed.
+- **Tokens are short-lived.** The driver mints an installation token per run, scoped down to
+  the repositories that run touches; it expires after one hour and is never written to disk.
+  Model leaves and gates see neither key nor token (ADR-0007's sandbox rules stand).
+- **The bot is the author.** A token only authenticates the push and the API calls; the
+  commit object keeps whatever identity git is configured with. The driver therefore commits
+  with the App's bot identity (`user.name` `pdca-bot-<owner>[bot]`, `user.email`
+  `<bot-user-id>+pdca-bot-<owner>[bot]@users.noreply.github.com`, passed with `git -c`) and
+  signs off with the same identity, so commits, pull requests and DCO trailers all name the
+  agent. Rulesets can then name it, and review rules can require a human.
+- The Apps replace the personal token of ADR-0006 and the deploy key of ADR-0021 §4.
 
 ### 2. Permissions
 
@@ -100,16 +109,23 @@ the maintainer's account stay allowed and `doctor` keeps warning about them.
 
 ### 6. Proof in `doctor`, not trust
 
-Rows that ask GitHub what the credential can do, as `token-scope` does today:
+Each row reads what GitHub actually grants and fails when the answer is missing or
+ambiguous; none infers a restriction from an error it did not provoke:
 
-- the token belongs to the App, not to a person;
-- it can push a `bundle/*` branch to the instance and target repositories, and cannot push to
-  `main`, to a branch outside the allowed patterns, or a change to `.github/workflows/**`;
-- it cannot reach a canary repository outside the installation;
-- the private key file is readable by the loop user only.
-
-Each probe uses a ref that cannot exist (an all-zero commit, as `token-scope` does), so nothing
-is ever written.
+- **Identity and permissions**: the installation token's response lists its permissions and
+  repositories; the row fails unless they are exactly section 2's set (no `workflows`, no
+  `administration`, no `secrets`) and the expected repositories.
+- **Branch rules**: `GET /repos/{repo}/rules/branches/main` (and a sample outside the allowed
+  patterns) must return the rules of section 3 with no bypass for the App; the row reads the
+  effective rules instead of trying a push to `main`.
+- **Workflow changes are refused**: a probe pushes a commit that touches
+  `.github/workflows/` to a fresh `bundle/doctor-probe-<random>` branch and expects GitHub to
+  refuse it. If the push is accepted, the row deletes the branch and fails; any other
+  response fails as inconclusive. Nothing is left behind on success.
+- **Reach**: repository access to a canary repository outside the installation is refused
+  (the all-zero-ref probe of `token-scope` suffices for this one: it only asks whether the
+  repository is reachable).
+- **Key file**: readable by the loop user only.
 
 ## Alternatives considered
 
@@ -140,10 +156,11 @@ is ever written.
 
 ## Security impact
 
-This narrows what an agent-controlled process can change; it adds no untrusted input. The App
-private key becomes a new high-value secret (it can mint tokens for every installation of
-that owner): it is stored for the loop user only, rotated on a schedule, and its installation
-is limited to the listed repositories. The threat models (`docs/design/architecture/14-threat-model.md`,
+This narrows what an agent-controlled process can change; it adds no untrusted input. Each App's
+private key becomes a new high-value, long-lived secret: it can mint tokens for every
+repository of its owner's installation (section 1), so it is stored for the loop user only,
+rotated on a schedule and revoked on exposure; one App per owner bounds a stolen key to one
+owner. The threat models (`docs/design/architecture/14-threat-model.md`,
 `.oss-scanner/threat_model.md`) get the credential boundary, the CI secret rule and the
 protected paths in the same change that lands step 2.
 
@@ -165,7 +182,5 @@ on `pull_request` break until that secret moves into an environment, which is th
   ruleset must exclude the App from reviewers, or rely on code-owner review by the maintainer.
 - **[OPEN]** Push rulesets with file-path restrictions: availability on public repositories
   and on personal accounts (eduralph) must be checked; code-owner review is the fallback.
-- **[OPEN]** One App for all three owners, or one per owner, so that a stolen key reaches only
-  one owner's repositories.
 - **[OPEN]** Where the App key lives for ADR-0021's driver container (secret manager versus a
   mounted file), to be settled with that ADR's pilot.
