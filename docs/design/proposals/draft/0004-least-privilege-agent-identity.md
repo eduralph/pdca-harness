@@ -416,9 +416,12 @@ every unattended run, so no proof is cached between runs.
 
 - **Installations**: the key can mint tokens for every installation of its App, not only
   the one in use, so the row first lists `GET /app/installations` with the App's JWT and fails
-  unless there is exactly one installation, on the expected owner, and reads the App's own
-  metadata (`GET /app`) to confirm it is private (`public: false`), because a public App with
-  one installation today can gain another tomorrow. Each agent App is created
+  unless there is exactly one installation, on the expected owner, and confirms the App is
+  private, because a public App with one installation today can gain another tomorrow. The
+  App object carries no visibility field, so the row takes the slug from `GET /app` (JWT)
+  and requires an **unauthenticated** `GET /apps/<slug>` to answer 404: GitHub serves a
+  public App's page to anyone and a private App's only to authenticated callers. Any other
+  answer, a network error included, fails the row. Each agent App is created
   as a private App by the owner it serves, so GitHub refuses installation anywhere else; the
   auditor Apps are checked the same way.
 - **Identity and permissions**: the row mints an *unscoped* diagnostic token (no repository
@@ -465,17 +468,21 @@ repositories) rather than a live one:
 
 - **Workflow changes are refused** (`pdca setup-identity --probe`, not `doctor`): a probe pushes a commit that adds an inert workflow
   (triggered only by `workflow_dispatch`, with a single job guarded by `if: false`) to a
-  fresh `pdca-doctor/probe-<random>` branch and expects GitHub to refuse it. The branch name
-  is written to the instance state **before** the push and cleared only once
-  `git ls-remote` shows it absent, so a crash at any point leaves an obligation that the next
-  run resolves (query, delete, confirm) before it starts. If the push is
+  fresh `pdca-doctor/probe-<random>` branch and expects GitHub to refuse it. Before any
+  write, `git ls-remote` must show the branch absent (otherwise another name is drawn). The
+  branch name and the probe commit's OID are then written to the instance state **before**
+  the push and cleared only once `git ls-remote` shows the branch absent, so a crash at any
+  point leaves an obligation that the next run resolves before it starts. Cleanup deletes the
+  branch only while its remote OID equals the journaled probe commit, with a lease
+  (`git push --force-with-lease=<ref>:<oid> --delete`); a branch at any other commit was not
+  made by the probe and is reported for the maintainer, never deleted. If the push is
   accepted, the row fails, deletes the branch (the ruleset allows the App to delete
   `pdca-doctor/*`), retries the deletion up to three times and confirms with
   `git ls-remote` that the branch is gone. If it is still there, the row fails with the
   branch name to remove by hand, and records it in the instance state, so every later run refuses
   to start until it is gone. Any other response, a timeout or a lost reply
   included, fails as inconclusive and takes the same path: query the remote for the branch,
-  delete it if it exists, and record it if it cannot be removed. Nothing is left behind on
+  delete it if it exists at the probe commit, and record it if it cannot be removed. Nothing is left behind on
   success.
 
 **With the auditor App's token**: first the same identity check as for the agent App, an
