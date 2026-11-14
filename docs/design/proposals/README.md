@@ -21,6 +21,7 @@ is filed here as a proposal; its acceptance produces an ADR.
 | [0001](accepted/0001-approach-review-2026-10.md) | pdca-harness — approach review (Oct 2026) | accepted 2026-10-15 | [#709](https://github.com/eduralph/pdca-harness/issues/709) |
 | [0002](accepted/0002-target-architecture.md) | Target architecture and migration order | accepted 2026-10-15 | [#709](https://github.com/eduralph/pdca-harness/issues/709); steps [#711](https://github.com/eduralph/pdca-harness/issues/711), [#712](https://github.com/eduralph/pdca-harness/issues/712), [#716](https://github.com/eduralph/pdca-harness/issues/716), [#713](https://github.com/eduralph/pdca-harness/issues/713), [#714](https://github.com/eduralph/pdca-harness/issues/714), [#715](https://github.com/eduralph/pdca-harness/issues/715) |
 | [0003](draft/0003-bug-track.md) | Bug track — implementation plan | draft | [#850](https://github.com/eduralph/pdca-harness/issues/850) |
+| [0004](draft/0004-least-privilege-agent-identity.md) | Least-privilege identity for the agents | draft | [#960](https://github.com/eduralph/pdca-harness/issues/960) |
 
 ## Decisions taken at acceptance
 
