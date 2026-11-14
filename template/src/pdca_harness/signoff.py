@@ -215,6 +215,42 @@ def ensure_needs_human_item(summary_path: Path, item: str) -> bool:
     return True
 
 
+def reopen_needs_human_item(summary_path: Path, item: str) -> bool:
+    """Turn the ticked ``- [x] <item>`` row of §6 back into ``- [ ] <item>``; True iff it did.
+
+    The ONE deliberate exception to "a tick is the human's final clearance", which C6 and
+    :func:`ensure_needs_human_item` honour for every other row. It exists for a single row:
+    the flow's "same-wave conflict check could not complete" row (#782,
+    ``flow._same_wave_refused``). A tick there asks the next accept to run that check again;
+    it never means "accept without the check". So when the retried check fails again, the
+    flow re-opens the row, and the accept stays refused until a check completes. Nothing
+    else calls this, and no other row is ever re-opened.
+
+    Reads and writes the §6 C6 reads (:func:`_needs_human_section`: the last §6 block) and
+    changes only that row's box, found by line position as :func:`ensure_needs_human_item`
+    finds a row, matched on the same whitespace- and case-insensitive text. A summary with
+    no §6, or no such ticked row (absent, or open already), is not touched: False.
+    """
+    if not summary_path.exists():
+        return False
+    lines = summary_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    span = _section_span(lines, NEEDS_HUMAN_HEADING, last=True)
+    if span is None:
+        return False
+    start, end = span
+    want = " ".join(item.split()).casefold()
+    for i in range(start + 1, end):
+        line = lines[i]
+        body = line.lstrip()
+        for box in ("- [x]", "- [X]"):
+            if (body.startswith(box)
+                    and " ".join(body[len(box):].split()).casefold() == want):
+                lines[i] = line[:len(line) - len(body)] + "- [ ]" + body[len(box):]
+                summary_path.write_text("".join(lines), encoding="utf-8")
+                return True
+    return False
+
+
 def unrecordable(summary_path: Path) -> str:
     """Why a sign-off cannot be written into this summary, or ``""`` when it can.
 
