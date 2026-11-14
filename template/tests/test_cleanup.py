@@ -624,5 +624,235 @@ class GuardsAndScope(CleanupBase):
         self.assertIn("completed", close)
 
 
+class DuplicateClose(CleanupBase):
+    """#671: a duplicate close/no-fix bundle closes as a duplicate of a named issue, and
+    only once its recorded `Close when` condition holds; otherwise it is report-only."""
+
+    def _dup(self, iid: str = "40", *, marker: str | None = "duplicate",
+             fields: str = "- **Duplicate of:** #41\n- **Close when:** now\n") -> Path:
+        d = self._staged(iid, signoff_action="accept", patch="   \n")
+        if marker is not None:
+            (d / "close-disposition").write_text(marker + "\n", encoding="utf-8")
+        with (d / "brief.md").open("a", encoding="utf-8") as f:
+            f.write(fields)
+        self.issue_states[iid] = _OPEN
+        self.assertEqual(state.state(d), state.COMPLETE)
+        return d
+
+    def _assert_one_duplicate_close(self, iid: str = "40", target: str = "#41") -> list[str]:
+        muts = self._mutations()
+        self.assertEqual(len(muts), 1, muts)
+        close = muts[0]
+        self.assertEqual(close[1:4], ["issue", "close", iid])
+        i = close.index("--reason")
+        self.assertEqual(close[i + 1], "duplicate")
+        self.assertNotIn("not planned", close)
+        body = close[close.index("--comment") + 1]
+        self.assertIn(target, body)
+        return close
+
+    # (1) target + condition met ---------------------------------------------------
+    def test_close_when_now_closes_as_duplicate_naming_the_target(self) -> None:
+        self._dup()
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self._assert_one_duplicate_close()
+
+    def test_dry_run_is_a_would_line_naming_the_target(self) -> None:
+        self._dup()
+        rc, out, _err = self._run()
+        self.assertEqual(rc, 0)
+        line = next(ln for ln in out.splitlines() if ln.startswith("issue_40"))
+        self.assertIn("would:", line)
+        self.assertIn("#41", line)
+        self.assertEqual(self._mutations(), [])
+
+    def test_tracker_comment_is_followed_by_the_generated_text(self) -> None:
+        d = self._dup()
+        (d / "tracker-comment.md").write_text("Hand note.\n", encoding="utf-8")
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        close = self._assert_one_duplicate_close()
+        body = close[close.index("--comment") + 1]
+        self.assertTrue(body.startswith("Hand note."), body)
+        self.assertIn("#41", body.split("Hand note.", 1)[1])
+
+    def test_pr_merged_condition_closes_once_the_pr_is_merged(self) -> None:
+        self._dup(fields="- **Duplicate of:** #41\n- **Close when:** PR #52 merged\n")
+        self.pr_states["52"] = "MERGED"
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self._assert_one_duplicate_close()
+        pr_view = [c for c in self.gh_calls if c[1:4] == ["pr", "view", "52"]]
+        self.assertTrue(pr_view and "--repo" in pr_view[0])   # a bare number needs --repo
+
+    def test_issue_closed_condition_closes_once_it_is_completed(self) -> None:
+        self._dup(fields="- **Duplicate of:** #41\n- **Close when:** #53 closed\n")
+        self.issue_states["53"] = _CLOSED
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self._assert_one_duplicate_close()
+
+    def test_likely_close_marker_with_a_duplicate_field_is_a_duplicate(self) -> None:
+        # `likely-close — duplicate of #463` writes the marker `likely-close`.
+        self._dup(marker="likely-close")
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self._assert_one_duplicate_close()
+
+    # (2) condition not yet met ----------------------------------------------------
+    def test_open_pr_condition_waits_then_closes_once_merged(self) -> None:
+        self._dup(fields="- **Duplicate of:** #41\n- **Close when:** PR #52 merged\n")
+        self.pr_states["52"] = "OPEN"
+        rc, out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._mutations(), [])
+        line = next(ln for ln in out.splitlines() if ln.startswith("issue_40"))
+        self.assertIn("not yet met", line)
+        self.assertIn("PR #52", line)
+        self.pr_states["52"] = "MERGED"
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self._assert_one_duplicate_close()
+
+    def test_open_issue_condition_waits_then_closes_once_completed(self) -> None:
+        self._dup(fields="- **Duplicate of:** #41\n- **Close when:** #53 closed\n")
+        self.issue_states["53"] = _OPEN
+        rc, out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._mutations(), [])
+        line = next(ln for ln in out.splitlines() if ln.startswith("issue_40"))
+        self.assertIn("not yet met", line)
+        self.assertIn("#53", line)
+        self.issue_states["53"] = _CLOSED
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self._assert_one_duplicate_close()
+
+    # (3) condition can no longer be met ------------------------------------------
+    def test_pr_closed_unmerged_needs_a_human(self) -> None:
+        self._dup(fields="- **Duplicate of:** #41\n- **Close when:** PR #52 merged\n")
+        self.pr_states["52"] = "CLOSED"
+        rc, out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._mutations(), [])
+        self.assertIn("can no longer be met", out)
+        self.assertIn("human decision", out)
+
+    def test_issue_closed_not_planned_needs_a_human(self) -> None:
+        self._dup(fields="- **Duplicate of:** #41\n- **Close when:** #53 closed\n")
+        self.issue_states["53"] = _CLOSED_NP
+        rc, out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._mutations(), [])
+        self.assertIn("can no longer be met", out)
+        self.assertIn("human decision", out)
+
+    # (4) no condition recorded ---------------------------------------------------
+    def test_no_close_when_is_report_only_and_says_how_to_close(self) -> None:
+        self._dup(fields="- **Duplicate of:** #41\n")
+        rc, out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._mutations(), [])
+        line = next(ln for ln in out.splitlines() if ln.startswith("issue_40"))
+        self.assertIn("#41", line)
+        self.assertIn("Close when:** now", line)
+
+    # (5) duplicate marker with no usable target ----------------------------------
+    def test_duplicate_marker_without_a_target_is_report_only(self) -> None:
+        self._dup(fields="- **Close when:** now\n")
+        rc, out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._mutations(), [])
+        self.assertIn("duplicate target is not recorded", out)
+        self.assertIn("Duplicate of:** #N", out)
+
+    def test_duplicate_target_that_is_not_a_number_is_report_only(self) -> None:
+        self._dup(fields="- **Duplicate of:** the other issue\n- **Close when:** now\n")
+        rc, out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._mutations(), [])
+        self.assertIn("is not an issue number", out)
+
+    # unknown never acts ------------------------------------------------------------
+    def test_unreadable_condition_state_is_report_only(self) -> None:
+        self._dup(fields="- **Duplicate of:** #41\n- **Close when:** PR #52 merged\n")
+        # pr_states lacks "52" → gh fails → unknown
+        rc, out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._mutations(), [])
+        self.assertIn("could not be read", out)
+
+    def test_unrecognized_condition_is_report_only(self) -> None:
+        self._dup(fields="- **Duplicate of:** #41\n- **Close when:** next week\n")
+        rc, out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._mutations(), [])
+        self.assertIn("is not one of", out)
+
+    # a target or condition that names the bundle's own issue -----------------------
+    def test_target_naming_the_issue_itself_is_report_only(self) -> None:
+        # A copy-paste slip: closing it would post "a duplicate of #40" on #40 itself.
+        # `042` is issue 42 too, so the check compares numbers, not strings.
+        self._dup("40", fields="- **Duplicate of:** #40\n- **Close when:** now\n")
+        self._dup("42", fields="- **Duplicate of:** 042\n- **Close when:** now\n")
+        rc, out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._mutations(), [])
+        for iid in ("40", "42"):
+            line = next(ln for ln in out.splitlines() if ln.startswith(f"issue_{iid}"))
+            self.assertIn("names this issue itself", line)
+            self.assertIn("Duplicate of:** #N", line)
+
+    def test_condition_naming_the_issue_itself_needs_a_human(self) -> None:
+        # `#40 closed` on issue 40 waits on an issue that is open whenever this row runs;
+        # `PR #42 merged` on issue 42 names a PR that cannot exist (issues and PRs share
+        # one number sequence), so asking gh would only read as "unknown, retry later".
+        # Neither can ever be met, so both go to a human.
+        self._dup("40", fields="- **Duplicate of:** #41\n- **Close when:** #40 closed\n")
+        self._dup("42", fields="- **Duplicate of:** #41\n- **Close when:** PR #42 merged\n")
+        rc, out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._mutations(), [])
+        self.assertEqual([c for c in self.gh_calls if c[1:3] == ["pr", "view"]], [])
+        for iid in ("40", "42"):
+            line = next(ln for ln in out.splitlines() if ln.startswith(f"issue_{iid}"))
+            self.assertIn("names this issue itself", line)
+            self.assertIn("can never be met", line)
+            self.assertIn("human decision", line)
+
+    # other close classes are unchanged ------------------------------------------
+    def test_wontfix_marker_without_a_target_still_closes_not_planned(self) -> None:
+        self._dup(marker="wontfix", fields="")
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        close = self._closes()[0]
+        self.assertIn("not planned", close)
+
+    def test_template_placeholders_left_unfilled_still_close_not_planned(self) -> None:
+        # The common shape the two new template fields create: a non-duplicate close brief
+        # written from brief.md.tpl that leaves `Duplicate of` / `Close when` as their `<…>`
+        # placeholders. They must read as absent, so each bundle still closes as not
+        # planned. Read from the real template, so a reworded placeholder is covered too.
+        tpl = (TEMPLATES / "brief.md.tpl").read_text(encoding="utf-8")
+        for line in ("- **Duplicate of:** <", "- **Close when:** <"):
+            self.assertTrue(line in tpl, f"brief.md.tpl has no `{line}…` placeholder line")
+        authored = "".join("- **Slug:** s\n" if ln.startswith("- **Slug:**") else ln
+                           for ln in tpl.splitlines(keepends=True))
+        # `likely-close` too: a filled `Duplicate of` makes it a duplicate, a placeholder must not.
+        markers = {"40": "wontfix", "42": "by-design", "44": "likely-close"}
+        for iid, marker in markers.items():
+            d = self._dup(iid, marker=marker, fields="")
+            (d / "brief.md").write_text(authored, encoding="utf-8")
+            self.assertEqual(state.state(d), state.COMPLETE)
+        rc, _out, _err = self._run(apply=True)
+        self.assertEqual(rc, 0)
+        closes = self._mutations()
+        self.assertEqual(sorted(c[3] for c in closes), sorted(markers), closes)
+        for close in closes:
+            self.assertEqual(close[1:3], ["issue", "close"])
+            self.assertEqual(close[close.index("--reason") + 1], "not planned")
+
+
 if __name__ == "__main__":
     unittest.main()
