@@ -74,26 +74,39 @@ repositories of that owner's instances and targets.
   the model provider's key it needs (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) stays, in its own PID namespace
   so it cannot read other processes' environments (section 5; ADR-0007's sandbox rules
   stand).
-- **The bot is the author; a human signs off.** A token only authenticates the push and the
-  API calls; the commit object keeps whatever identity git is configured with. The driver
-  commits with the App's bot identity as author and committer (`pdca-bot-<owner>[bot]`,
-  `<bot-user-id>+pdca-bot-<owner>[bot]@users.noreply.github.com`, passed with `git -c`), so
-  commits and pull requests show that the agent produced them.
+- **The human is the author and signs off; the bot commits.** A token only authenticates the
+  push and the API calls; the commit object keeps whatever identity git is configured with.
+  The person who runs the loop sets the design, scope and acceptance, answers for the output
+  and certifies the Developer Certificate of Origin; a bot can do none of this and cannot hold
+  copyright. So that person is the commit **author**, and the `Signed-off-by` trailer names
+  the same person. Both come from a required `[publisher].signoff = "Name <email>"` in
+  `pdca.toml`. The App's bot identity is the **committer** (`pdca-bot-<owner>[bot]`,
+  `<bot-user-id>+pdca-bot-<owner>[bot]@users.noreply.github.com`), so the history still
+  records which machine identity made and pushed each commit; GitHub shows these as
+  "authored by <human>, committed by pdca-bot-<owner>". Every driver commit also carries an
+  `Assisted-by: pdca-harness (<model>)` trailer that marks agent involvement without claiming
+  authorship (not `Co-authored-by`, which would).
 
-  The **DCO sign-off is never the bot's.** A bot cannot hold copyright or certify the
-  Developer Certificate of Origin; the person who runs the loop and answers for its output
-  does. So the `Signed-off-by` trailer always names that human, taken from a required
-  `[publisher].signoff = "Name <email>"` in `pdca.toml`. Because `git commit -s` and
-  `git merge --signoff` take the trailer from the *committer*, which is now the bot, the
-  driver stops using them and adds the trailer explicitly at every commit site: publish,
-  records and revert commit with `git commit --trailer "Signed-off-by: <signoff>"`, and the
-  integration merges run `git merge --no-ff --no-commit` followed by that same `git commit`
-  (`git merge` itself has no `--trailer` option; `--no-ff` keeps a fast-forward from leaving
-  nothing to commit). The driver records the line's tip before the merge and, if the commit
-  step fails, runs `git merge --abort` and resets to that tip, so no half-made merge is left
-  for the next fold. `doctor` fails when `signoff` is missing or names a bot (a `[bot]`
-  name or a `noreply.github.com` bot address), and the template's `dco` check rejects a
-  `Signed-off-by` that names a bot, so a commit signed off only by a bot cannot merge.
+  The driver passes the identities per command with `git -c` and the `GIT_AUTHOR_*` and
+  `GIT_COMMITTER_*` variables, never through the checkout's config. Because `git commit -s`
+  and `git merge --signoff` take the trailer from the *committer*, which is now the bot, the
+  driver stops using them and adds the trailers explicitly at every commit site: publish,
+  records and revert commit with `git commit --trailer "Signed-off-by: <signoff>" --trailer
+  "Assisted-by: ..."`, and the integration merges run `git merge --no-ff --no-commit`
+  followed by that same `git commit` (`git merge` itself has no `--trailer` option; `--no-ff`
+  keeps a fast-forward from leaving nothing to commit). The driver records the line's tip
+  before the merge and, if the commit step fails, runs `git merge --abort` and resets to that
+  tip, so no half-made merge is left for the next fold.
+
+  `doctor` fails when `signoff` is missing or names a bot (a `[bot]` name or a
+  `noreply.github.com` bot address). The template's `dco` check requires a `Signed-off-by`
+  whose email matches the commit author's, the rule common DCO checkers apply, and rejects
+  one that names a bot, so a commit signed off only by a bot cannot merge. Agent commits are
+  identified by their committer, not their author: the auditor fails on a commit committed
+  by `pdca-bot-<owner>[bot]` that lacks the `Assisted-by` trailer. Commits carry the human's
+  name without the human's signing key, so they stay unsigned; with GitHub's vigilant mode
+  on they show as "Unverified", and the committer field and trailer are what mark them as the
+  loop's. A ruleset that requires signed commits cannot be used on branches the loop pushes to.
 - The Apps replace the personal token of ADR-0006 and the deploy key of ADR-0021 §4.
 
 ### 2. Permissions
@@ -532,8 +545,9 @@ agent App, and the row fails closed if it is not.
 2. **Template**: `repo-settings.py` applies the rulesets, `CODEOWNERS` matching `wave_mode`,
    immutable releases and the secret audit, and refuses an App installation on a repository
    without enforced branch protection; `docs-check`, `render-check` and `template-test` load
-   their checker closure from the base commit; the `dco` check rejects bot sign-offs, and every
-   driver commit site signs off with `[publisher].signoff` instead of `-s`/`--signoff`;
+   their checker closure from the base commit; the `dco` check requires a sign-off matching
+   the author and rejects bot sign-offs, and every driver commit site authors and signs off as `[publisher].signoff` (instead of
+   `-s`/`--signoff`), commits as the bot and adds the `Assisted-by` trailer;
    `setup-loop-user.sh` and the App-token minting move into the template; the `doctor` rows
    ship with tests against a stub API.
 3. **Roll out** to the other instances through `copier update`, one owner at a time.
