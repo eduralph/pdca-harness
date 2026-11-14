@@ -56,21 +56,44 @@ repositories of that owner's instances and targets.
 - **The private key is the long-lived credential.** It signs the JWT that mints installation
   tokens for every installation of its App, so its reach is exactly that App's installation:
   one owner's listed repositories, with the permissions of section 2. One App per owner keeps
-  a stolen key from reaching the other owners. The key is readable only by the loop's OS user
-  (section 5), rotated on a schedule (GitHub allows two active keys, so rotation has no gap),
+  a stolen key from reaching the other owners. The key is readable only by a separate key
+  user, never by the loop user that runs the driver and its model leaves (section 5), rotated on a schedule (GitHub allows two active keys, so rotation has no gap),
   and revoked in the App settings if exposed.
 - **Tokens are short-lived.** The driver mints installation tokens just in time, scoped down
   to the repositories the run touches, and keeps them only in memory. A token lives one hour
   while a bundle runs for hours (the median was 6.1 hours in proposal 0001), so the driver's
   GitHub client mints a fresh one before each authenticated call once the current one is
   older than 50 minutes; a call that still meets an expired token re-mints once and retries.
-  Model leaves and gates see neither key nor token (ADR-0007's sandbox rules stand).
-- **The bot is the author.** A token only authenticates the push and the API calls; the
-  commit object keeps whatever identity git is configured with. The driver therefore commits
-  with the App's bot identity (`user.name` `pdca-bot-<owner>[bot]`, `user.email`
-  `<bot-user-id>+pdca-bot-<owner>[bot]@users.noreply.github.com`, passed with `git -c`) and
-  signs off with the same identity, so commits, pull requests and DCO trailers all name the
-  agent. Rulesets can then name it, and review rules can require a human.
+  Model leaves and gates are not handed key or token. The driver never puts the token in its
+  own environment: git gets it from a credential helper, invoked with
+  `-c credential.helper= -c credential.helper=<driver helper>` so that the empty entry resets
+  any system, global or repository helper that could otherwise store the token, and each
+  `gh` call gets `GH_TOKEN` in that one subprocess's environment only. Every leaf starts with an environment scrubbed
+  of GitHub and git credentials (`GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`,
+  `GITHUB_ENTERPRISE_TOKEN`, `GIT_ASKPASS`, `GIT_CONFIG_*`, the minter socket's path), while
+  the model provider's key it needs (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) stays, in its own PID namespace
+  so it cannot read other processes' environments (section 5; ADR-0007's sandbox rules
+  stand).
+- **The bot is the author; a human signs off.** A token only authenticates the push and the
+  API calls; the commit object keeps whatever identity git is configured with. The driver
+  commits with the App's bot identity as author and committer (`pdca-bot-<owner>[bot]`,
+  `<bot-user-id>+pdca-bot-<owner>[bot]@users.noreply.github.com`, passed with `git -c`), so
+  commits and pull requests show that the agent produced them.
+
+  The **DCO sign-off is never the bot's.** A bot cannot hold copyright or certify the
+  Developer Certificate of Origin; the person who runs the loop and answers for its output
+  does. So the `Signed-off-by` trailer always names that human, taken from a required
+  `[publisher].signoff = "Name <email>"` in `pdca.toml`. Because `git commit -s` and
+  `git merge --signoff` take the trailer from the *committer*, which is now the bot, the
+  driver stops using them and adds the trailer explicitly at every commit site: publish,
+  records and revert commit with `git commit --trailer "Signed-off-by: <signoff>"`, and the
+  integration merges run `git merge --no-ff --no-commit` followed by that same `git commit`
+  (`git merge` itself has no `--trailer` option; `--no-ff` keeps a fast-forward from leaving
+  nothing to commit). The driver records the line's tip before the merge and, if the commit
+  step fails, runs `git merge --abort` and resets to that tip, so no half-made merge is left
+  for the next fold. `doctor` fails when `signoff` is missing or names a bot (a `[bot]`
+  name or a `noreply.github.com` bot address), and the template's `dco` check rejects a
+  `Signed-off-by` that names a bot, so a commit signed off only by a bot cannot merge.
 - The Apps replace the personal token of ADR-0006 and the deploy key of ADR-0021 §4.
 
 ### 2. Permissions
@@ -112,7 +135,8 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
   installation that includes a repository where they are not. A private repository's loop
   keeps publishing from the maintainer's own login in `stack` mode, as today.
 - **`main` is reached only through a pull request.** No bypass for the App, required status
-  checks from `.github/required-checks.txt`, and **code-owner review** as the review rule, with
+  checks from `.github/required-checks.txt` with the strict policy (the PR must be up to date
+  with `main`, so every check reruns on the current base), and **code-owner review** as the review rule, with
   no general approval count. `CODEOWNERS` names the maintainer; only users and teams can be
   code owners, so the App can never satisfy that review, whether or not GitHub counts an
   App's approval as a review. The rule also sets **dismiss stale approvals on push**, so a
@@ -172,8 +196,12 @@ Everything here works on GitHub's free plan; PDCA cannot assume a paid one.
   `enhancement/*`), `pdca-integration/*` for stacked batches (force-pushes allowed there, as
   `integrate.py` requires), `revert/*` for `pdca revert`, the bug track's branches, and
   `[records].branch` (default `records/*`) when records are published as pull requests, and
-  `pdca-doctor/*` for the probe of section 6. `doctor` **fails** when a configured pattern falls
-  outside the ruleset, so a renamed pattern blocks the run before a publish would fail.
+  `pdca-doctor/*` for the probe of section 6. Every configured pattern must start with a
+  fixed, non-empty prefix ending in `/` (`fix/`, not `{id}-{slug}`) that overlaps neither
+  `main` nor another protected name; `repo-settings.py` refuses to apply a ruleset otherwise,
+  since an empty prefix would open every branch name to the App. `doctor` **fails** when a
+  configured pattern falls outside the ruleset, so a renamed pattern blocks the run before a
+  publish would fail.
 - **No push rulesets.** Rulesets that block file paths on push are not assumed. Instead:
   - Without the Workflows permission the App cannot change `.github/workflows/**`, so every
     guard whose logic is written inline in its workflow file is out of its reach as it is
@@ -245,13 +273,15 @@ review aid, never the gate.
   visible to a repository the App is installed on (an organization secret cannot be put
   behind an environment). Every environment that holds a secret has a deployment policy that
   admits only `main` (or, for `release`, only `v*` tags), so a job on a driver branch gets
-  nothing however its file is written. An environment additionally **requires the
-  maintainer's approval** unless every job that can use it runs only maintainer-reviewed
-  code: code under `.github/**` (code-owned in both modes, section 3) and actions pinned by
-  commit SHA. Issue triage (ADR-0017) is such a job: it hands issue text to a model call.
-  In `merge` mode, any environment whose jobs build or run ordinary repository code requires
-  approval, since the App merges ordinary code into `main`; approving a run approves the
-  exact commit it runs on.
+  nothing however its file is written. Every such environment also **requires the
+  maintainer's approval**, with no exception. A deployment policy alone is not enough: any
+  workflow token with `actions: write`, including one from an old commit on a driver branch,
+  can re-run an earlier run whose ref was `main`, and the re-run passes the policy while
+  executing that earlier commit's workflow. GitHub asks for approval again on every run
+  and re-run of a job in a protected environment, and the request names the commit; the
+  maintainer approves only runs on the current `main` head or on the tag being released.
+  This costs ADR-0017's issue triage its automatic run: it either waits for approval or
+  moves to the driver side, where the loop already holds a model key; the pilot decides.
 - **OIDC trusts environments, not refs.** Any job, on any branch, can request an OIDC token.
   So every cloud trust policy pins the subject to an environment
   (`repo:<owner>/<repo>:environment:<name>`), never to a branch or to `ref:refs/heads/main`:
@@ -264,9 +294,9 @@ review aid, never the gate.
 - **Privileged jobs build clean.** A job in an environment restores no Actions cache and
   downloads no artifact from another run: in `merge` mode an unprivileged run on `main` could
   have filled the cache with agent-merged output. Unlike the other workflow rules this one
-  is a real gate: deployment policies admit only `main` (and `v*` tags), so only the current,
-  code-owned workflow files on `main` and on release tags can reach an environment, and the
-  auditor reads exactly those. It fails on any environment job that uses `actions/cache`,
+  is a real gate: deployment policies admit only `main` (and `v*` tags) and every run needs
+  the maintainer's approval for the current head, so only the code-owned workflow files on
+  `main` and on release tags reach an environment, and the auditor reads exactly those. It fails on any environment job that uses `actions/cache`,
   a `setup-*` action with caching on, or `download-artifact` with a `run-id`.
 - **What the workflow token can still do.** The repository default for `GITHUB_TOKEN` is
   read-only, but a workflow file can raise it, and an old commit's file can too. Every
@@ -317,8 +347,42 @@ review aid, never the gate.
 ### 5. The local side
 
 As in client-rust-pdca, generalized: one OS user per unattended loop (`setup-loop-user.sh`
-moves into the template), holding the App key, the pipx tools, and the secret guard
-activated as that user (the `doctor` secret-guard row, #959, reports it). Attended runs from
+moves into the template), holding the pipx tools and the secret guard activated as that
+user (the `doctor` secret-guard row, #959, reports it).
+
+The loop user holds **no ambient GitHub credential**: no `gh` login (`~/.config/gh/hosts.yml`),
+no `.git-credentials`, no credential helper or `http.*.extraHeader` in its global or system
+git configuration, no `GH_TOKEN` in its profile. Otherwise a leaf or a compromised gate could
+skip the App and use an older, broader personal token. Migration removes them (existing loop
+users hold the ADR-0006 personal token today), and `doctor` fails on any it finds, checking
+from a probe leaf and a probe gate as well as from the driver.
+
+The App keys do **not** live with the loop user. The model leaves run as that user, and a
+sandbox that limits writes and network (Codex `workspace-write`, for one) does not hide
+readable files, so a prompt-injected leaf could read a key in the loop user's home. The keys
+belong to a second OS user (`<loop>-keys`) that runs a small token minter. The driver asks it
+over a Unix socket for an installation token and gets back only that token, valid one hour,
+for repositories on the minter's own per-loop allowlist (a file owned by the key user, so
+the caller cannot widen it); the minter logs every request. For `doctor` it also answers the
+checks that need the App's JWT (`GET /app`, `GET /app/installations`) and returns their
+results, never the JWT.
+
+**What the key user protects, and what it does not.** The loop user runs code the target
+repository controls: gates run its tests and builds, and git runs its hooks, outside any leaf
+sandbox. So the loop user is treated as possibly compromised, and anything it can do counts
+as something an attacker can do, including asking the minter for a one-hour token for the
+allowlisted repositories. That token's reach is exactly the App's, which sections 3 and 4
+fence on GitHub's side; those fences, not the hiding of the token, are the security
+boundary. What the key user keeps out of reach is the **key**: a long-lived credential that
+would otherwise outlast the compromise, mint tokens for every repository of the
+installation, and could be used from anywhere.
+
+As defence in depth, model leaves do not reach the minter at all: every leaf runs in its own
+mount and PID namespace (bubblewrap, as Claude Code's sandbox already uses) in which the
+socket's directory, the key user's files and the driver's processes do not exist. `doctor`
+checks this by starting a probe leaf the way the driver starts real ones and failing if that
+leaf can see the socket or any other process. Under the backends of the bug-track runner, this minter is the Podman secret
+or Secret Manager holder of decision Q4. Attended runs from
 the maintainer's account stay allowed and `doctor` keeps warning about them.
 
 ### 6. Proof in `doctor`, not trust
@@ -348,9 +412,12 @@ every unattended run, so no proof is cached between runs.
   ruleset's target, enforcement and conditions. The row checks that section 3's branch and
   tag rulesets exist, are `active`, cover `main` and `refs/tags/**`, and carry **every rule**
   section 3 requires (pull request with code-owner review and stale-approval dismissal,
-  required status checks on `main`; creation, update and deletion restrictions on tags and
-  on every branch that is neither a driver namespace nor `main`, which is left to its
-  pull-request rule so that `merge` mode's merges can land without a bypass), compared rule by rule with their parameters, since a ruleset with
+  required status checks on `main` with the strict "up to date with the base" policy, so a
+  green result from an older checker cannot carry over after `main` moves; creation, update
+  and deletion restrictions on tags and on every branch that is neither a driver namespace
+  nor `main`; and for `main` itself, in `stack` mode, the update restriction whose only
+  bypass actor is the maintainer, while `merge` mode leaves `main` to its pull-request rule
+  so its merges can land without a bypass), compared rule by rule with their parameters, since a ruleset with
   the right conditions but a missing rule has nothing to bypass, and that the
   namespaces the App may write are **exactly** the derived list of section 3: it compares the
   ruleset's include and exclude conditions with that list and fails on any extra pattern (a
@@ -367,7 +434,8 @@ every unattended run, so no proof is cached between runs.
 - **Reach**: repository access to a canary repository outside the installation is refused
   (the all-zero-ref probe of `token-scope` suffices for this one: it only asks whether the
   repository is reachable).
-- **Key files**: the agent and auditor keys are readable by the loop user only.
+- **Key files**: the agent and auditor keys are owned by the key user and unreadable to the
+  loop user (`doctor`, running as the loop user, fails if it can open either).
 
 `doctor` itself stays read-only, as it is today. The one check that has to write runs
 separately, when an App is installed and whenever its permissions change, against a
@@ -390,10 +458,11 @@ repositories) rather than a live one:
 unscoped token whose permissions must equal the auditor table of section 2 exactly (any write
 permission fails) and whose repositories must be exactly the configured ones. Then:
 the settings of sections 3 and 4: immutable releases are on, every release is immutable,
-published by `github-actions[bot]` and attested by the release workflow, and every tag
-older than an hour has one; no repository secret and no visible organization secret; every
-environment with a secret has the deployment policy and, where section 4 requires it, the
-approval rule; the OIDC subject template is the default; "Allow GitHub Actions to create
+published by `github-actions[bot]` and attested by the release workflow, and every release
+tag (`v*`) older than an hour has one (other tags need none, and any release the App put on
+one fails the publisher and attestation checks); no repository secret and no visible organization secret; every
+environment, whether it holds a secret or not, has the deployment policy and, where
+section 4 requires it, the approval rule; the OIDC subject template is the default; "Allow GitHub Actions to create
 and approve pull requests" is off; no persistent self-hosted runner is available; and the
 review aids of section 4 report nothing new on `main`. Any failure blocks the run.
 
@@ -463,7 +532,8 @@ agent App, and the row fails closed if it is not.
 2. **Template**: `repo-settings.py` applies the rulesets, `CODEOWNERS` matching `wave_mode`,
    immutable releases and the secret audit, and refuses an App installation on a repository
    without enforced branch protection; `docs-check`, `render-check` and `template-test` load
-   their checker closure from the base commit;
+   their checker closure from the base commit; the `dco` check rejects bot sign-offs, and every
+   driver commit site signs off with `[publisher].signoff` instead of `-s`/`--signoff`;
    `setup-loop-user.sh` and the App-token minting move into the template; the `doctor` rows
    ship with tests against a stub API.
 3. **Roll out** to the other instances through `copier update`, one owner at a time.
@@ -474,10 +544,11 @@ agent App, and the row fails closed if it is not.
 
 This narrows what an agent-controlled process can change; it adds no untrusted input. Each App's
 private key becomes a new high-value, long-lived secret: it can mint tokens for every
-repository of its owner's installation (section 1), so it is stored for the loop user only,
-rotated on a schedule and revoked on exposure; one App per owner bounds a stolen key to one
-owner. The auditor App's key is read-only and reveals configuration and secret names, not
-values; it sits with the loop user and in n8n. The threat models (`docs/design/architecture/14-threat-model.md`,
+repository of its owner's installation (section 1), so it is held by a separate key user
+behind a token minter that leaves cannot reach (section 5), rotated on a schedule and revoked
+on exposure; one App per owner bounds a stolen key to one owner. The auditor App's key is
+read-only and reveals configuration and secret names, not values; it is held by the same key
+user and, for the daily audit, in n8n. The threat models (`docs/design/architecture/14-threat-model.md`,
 `.oss-scanner/threat_model.md`) get the credential boundary, the CI secret rule and the
 protected paths in the same change that lands step 2.
 
