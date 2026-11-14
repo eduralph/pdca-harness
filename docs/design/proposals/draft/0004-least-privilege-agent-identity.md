@@ -293,6 +293,11 @@ review aid, never the gate.
   executing that earlier commit's workflow. GitHub asks for approval again on every run
   and re-run of a job in a protected environment, and the request names the commit; the
   maintainer approves only runs on the current `main` head or on the tag being released.
+  Approval is also the **review boundary** for what the job executes: a privileged job
+  builds and runs the whole tree, not only its workflow file. In `stack` mode every `main`
+  commit passed the maintainer's review. In `merge` mode, App PRs before the final wave can
+  merge unreviewed source, so the maintainer approves an environment run only on a commit
+  their final-wave review covered, and never on a `main` head that holds App merges after it.
   This costs ADR-0017's issue triage its automatic run: it either waits for approval or
   moves to the driver side, where the loop already holds a model key; the pilot decides.
 - **OIDC trusts environments, not refs.** Any job, on any branch, can request an OIDC token.
@@ -364,9 +369,12 @@ moves into the template), holding the pipx tools and the secret guard activated 
 user (the `doctor` secret-guard row, #959, reports it).
 
 The loop user holds **no ambient GitHub credential**: no `gh` login (`~/.config/gh/hosts.yml`),
-no `.git-credentials`, no credential helper or `http.*.extraHeader` in its global or system
-git configuration, no `GH_TOKEN` in its profile. Otherwise a leaf or a compromised gate could
-skip the App and use an older, broader personal token. Migration removes them (existing loop
+no `.git-credentials`, no credential helper or `http.*.extraHeader` in its global, system or
+any checkout's repository git configuration, no `GH_TOKEN` in its profile, no SSH key or
+agent that GitHub accepts (`ssh -T git@github.com` must be refused), no `url.*.insteadOf` or
+`pushInsteadOf` rewrite, and every remote a plain `https://github.com/` URL with no
+credential in it. Otherwise a leaf or a compromised gate could skip the App and use an
+older, broader personal token or deploy key. Migration removes them (existing loop
 users hold the ADR-0006 personal token today), and `doctor` fails on any it finds, checking
 from a probe leaf and a probe gate as well as from the driver.
 
@@ -457,7 +465,10 @@ repositories) rather than a live one:
 
 - **Workflow changes are refused** (`pdca setup-identity --probe`, not `doctor`): a probe pushes a commit that adds an inert workflow
   (triggered only by `workflow_dispatch`, with a single job guarded by `if: false`) to a
-  fresh `pdca-doctor/probe-<random>` branch and expects GitHub to refuse it. If the push is
+  fresh `pdca-doctor/probe-<random>` branch and expects GitHub to refuse it. The branch name
+  is written to the instance state **before** the push and cleared only once
+  `git ls-remote` shows it absent, so a crash at any point leaves an obligation that the next
+  run resolves (query, delete, confirm) before it starts. If the push is
   accepted, the row fails, deletes the branch (the ruleset allows the App to delete
   `pdca-doctor/*`), retries the deletion up to three times and confirms with
   `git ls-remote` that the branch is gone. If it is still there, the row fails with the
