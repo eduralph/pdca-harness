@@ -73,3 +73,4 @@ frontmatter, and both sides of every supersession agree. Run
 | [0019](0019-supersession.md) | How a frozen document is superseded | — | Proposed |
 | [0020](0020-bug-track.md) | Bug track: reported bugs are reproduced as a red test before any fix, verified where the stranger's code never ran, and accepted by merging a bundle pull request | — | Proposed |
 | [0021](0021-bug-track-runner.md) | Bug-track jobs run in containers on one disposable runner per batch; the driver runs in an operator's container and holds no leaf credential | — | Proposed |
+| [0022](0022-flight-claims.md) | A bundle in flight is claimed by a leased ref in the instance repository; its progress is read from that claim | — | Proposed |
