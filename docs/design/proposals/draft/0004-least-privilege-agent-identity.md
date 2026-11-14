@@ -95,7 +95,8 @@ repositories of that owner's instances and targets.
   "Assisted-by: ..."`, and the integration merges run `git merge --no-ff --no-commit`
   followed by that same `git commit` (`git merge` itself has no `--trailer` option; `--no-ff`
   keeps a fast-forward from leaving nothing to commit). The driver records the line's tip
-  before the merge and, if the commit step fails, runs `git merge --abort` and resets to that
+  before the merge and, if either the merge or the commit step fails, runs `git merge --abort`
+  and resets to that
   tip, so no half-made merge is left for the next fold.
 
   `doctor` fails when `signoff` is missing or names a bot (a `[bot]` name or a
@@ -314,8 +315,12 @@ review aid, never the gate.
   Approval is also the **review boundary** for what the job executes: a privileged job
   builds and runs the whole tree, not only its workflow file. In `stack` mode every `main`
   commit passed the maintainer's review. In `merge` mode, App PRs before the final wave can
-  merge unreviewed source, so the maintainer approves an environment run only on a commit
-  their final-wave review covered, and never on a `main` head that holds App merges after it.
+  merge unreviewed source, and those merges sit in the final PR's base, not its
+  diff. So the maintainer approves an environment run only after a **cumulative** review of
+  `main` from the last commit they approved for a privileged run up to the commit asking
+  for approval, and never on a head that holds App merges after it. `pdca` records the last
+  approved commit and prints the range to review (`compare/<last-approved>...<sha>`), so the
+  review covers the whole range, not the final PR alone.
   This costs ADR-0017's issue triage its automatic run: it either waits for approval or
   moves to the driver side, where the loop already holds a model key; the pilot decides.
 - **OIDC trusts environments, not refs.** Any job, on any branch, can request an OIDC token.
