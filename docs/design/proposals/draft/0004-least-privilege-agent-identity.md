@@ -550,7 +550,8 @@ review aid, never the gate.
     attempt, so n8n records the run's current `run_attempt` each time it sees the run
     waiting, and counts an approval for that attempt only when, between two polls, the run
     leaves the waiting state for that same attempt and the approval history gains a new
-    entry by the maintainer. A re-run is a new attempt that waits, and needs approval, again.
+    entry by the maintainer whose `state` is `approved` for the `release` or line
+    environment; a `rejected` entry leaves the baseline where it was. A re-run is a new attempt that waits, and needs approval, again.
   - Once n8n has recorded an attempt as approved by the maintainer this way, it advances
     that line's baseline to the commit. It only moves forward along the line's
     history: a commit that is not a descendant of the stored baseline is not taken.
@@ -591,7 +592,7 @@ review aid, never the gate.
   not only the environment job itself: every action any of those jobs uses is
   pinned to a full commit SHA and every container image to a digest, since a tag such as
   `owner/action@v1` or `image:latest` can be moved after the maintainer reviewed and
-  approved; the auditor fails on any other reference in an environment job. What a pinned
+  approved; the auditor fails on any other reference in **any job** of such a workflow. What a pinned
   action fetches at run time is beyond that check and is the review's to catch (known
   limits).
 - **Privileged jobs run only on events the maintainer controls.** A job in an environment
@@ -954,7 +955,11 @@ IDs differ from that record: a `v*` branch policy put in place of the `v*` tag p
 a new ID, and it also compares each policy's current name with the recorded pattern, since
 a policy edited in place (`main` renamed to `*`) keeps its ID; the OIDC subject uses the immutable format and otherwise the default template; "Allow GitHub Actions to create
 and approve pull requests" is off; no persistent self-hosted runner is available; and the
-review aids of section 4 report nothing new on `main`. Any failure blocks the run.
+review aids of section 4 report nothing new. All workflow-content checks (triggers,
+permissions, pins, caches, artifacts, the review aids) run on every ref an environment
+admits: the heads of `main` and every listed target branch, and the commit of every
+release tag that has no release yet, since a divergent `release/1.x` could otherwise carry
+a workflow `main` does not. Any failure blocks the run.
 
 Turning immutability on protects only releases published afterwards; older ones keep
 `immutable: false`, and `Contents: write` can still replace their assets. A digest snapshot
@@ -1038,8 +1043,9 @@ those checks only the maintainer can add a bypass actor; that residual is accept
 
 The checks rest on two API facts confirmed in GitHub's REST documentation on 14.11.2026:
 rulesets are readable with Metadata: read, while `bypass_actors` "is only returned if the
-user making the API request has write access to the ruleset". The documentation puts no
-such restriction on `current_user_can_bypass`; the pilot confirms that it is returned to the
+user making the API request has write access to the ruleset". The same documentation lists `current_user_can_bypass` in the ruleset response schema
+(enum `always`, `pull_requests_only`, `never`, `exempt`; checked again on 15.11.2026)
+and puts no such restriction on it; the pilot confirms that it is returned to the
 agent App, and the row fails closed if it is not.
 
 ## Alternatives considered
