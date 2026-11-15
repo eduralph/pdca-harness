@@ -960,13 +960,16 @@ every unattended run, so no proof is cached between runs.
   arbitrary JavaScript and no probe can show what it grants, or when an
   executable it can run carries any file capability outside a short allowlist (`cap_net_raw`, `cap_net_bind_service`): a list of dangerous
   ones would always miss one (`cap_setuid`, `cap_setfcap`, `cap_sys_module` each lead to
-  root). Finally, nothing root or the key user runs may be writable by the loop user: the
+  root). Finally, nothing root or the key user runs may be writable by the loop user, and since
+  no scan can prove what a job loads at run time, this rests on two checkable parts. The
   root host check lists every path the loop user can write (its UID and groups, outside
-  `/proc` and `/sys`) and fails when a system or key-user service, timer, cron job or
-  login script executes, sources or loads anything at or under such a path, or when the
-  loop user can write anywhere outside its home, its loop's working directories and the
-  shared temporary directories; a group-writable `/usr/local/bin/backup` that a root timer
-  runs is as good as root.
+  `/proc` and `/sys`) and fails when that reaches anywhere outside its home, its loop's
+  working directories and the shared temporary directories, so a group-writable
+  `/usr/local/bin/backup` fails directly. And every job that runs as root or the key user
+  (systemd units and timers, cron entries, login scripts) is on a root-owned manifest the
+  maintainer records at setup with each definition's checksum, having reviewed that none
+  reads from the loop user's directories; a new or changed one fails until the
+  maintainer reviews and records it. The loop host is dedicated, so that list stays short.
 
 `doctor` itself stays read-only, as it is today. The one check that has to write runs
 separately, when an App is installed and whenever its permissions change, against a
@@ -1034,8 +1037,9 @@ alike: Dependabot's secrets reach any workflow run for a Dependabot PR (and its 
 re-runs), which in `merge` mode can run agent-merged source before any review, so private
 registry credentials for Dependabot are not used on repositories the App is installed on;
 and no credential in an Actions **variable**, since variables are readable by every
-workflow run, an old one on a driver branch included: the auditor reads every repository
-and visible organization variable (Variables: read) and fails on any that is not on an
+workflow run, an old one on a driver branch included: the auditor reads every repository,
+visible organization and environment variable (Variables: read, and Environments: read for
+`/repos/{repo}/environments/{name}/variables`) and fails on any that is not on an
 allowlist the maintainer records (name and a hash of the value, each attested as not a
 credential), so a new or changed variable fails until the maintainer has looked at it;
 pattern matching alone would miss an opaque token or a plain password; every
