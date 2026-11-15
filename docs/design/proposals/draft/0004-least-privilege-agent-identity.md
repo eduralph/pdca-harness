@@ -794,7 +794,10 @@ The App keys do **not** live with the loop user. The model leaves run as that us
 sandbox that limits writes and network (Codex `workspace-write`, for one) does not hide
 readable files, so a prompt-injected leaf could read a key in the loop user's home. The keys
 belong to a second OS user (`<loop>-keys`) that runs a small token minter. The driver asks it
-over a Unix socket for an agent-App installation token and gets back only that token, valid one hour,
+over a Unix socket (in a directory owned by the key user, group the loop's own group
+with only the loop user in it, mode `0750`, the socket `0660`; the minter also checks the
+caller's UID with `SO_PEERCRED` against its loop and refuses any other, so one loop cannot
+draw tokens from another's minter) for an agent-App installation token and gets back only that token, valid one hour,
 for repositories on the minter's own per-loop allowlist (a file owned by the key user, so
 the caller cannot widen it); the minter logs every request. The minter is **not** one of the
 loop user's pipx tools: it is installed root-owned outside the loop user's home (its own
@@ -959,7 +962,13 @@ authored by `github-actions[bot]`, complete against its attested manifest and at
 the release workflow (section 3), and every release tag (`v*`) has a release within an hour
 of the time n8n **first saw** the tag. GitHub records no creation time for a ref and an
 annotated tag's date is whatever the client wrote, so n8n keeps its own first-seen time
-per tag from its few-minute poll; `doctor`, which has no such store, checks only that
+per tag from its few-minute poll. The minter and `doctor` need two pieces of that n8n
+state (tags overdue for a release, and the run attempts n8n recorded as approved), which
+GitHub cannot reconstruct and the loop user must not be trusted to relay. So the minter
+fetches them itself from an n8n webhook that only it can call (a shared secret held by
+the key user and in n8n), over TLS, as a document stamped with n8n's time and the
+poll it came from; it refuses to mint when the fetch fails or the document is older than
+two hours, and passes the verdicts on to `doctor`. With that state, the check is that
 every `v*` tag n8n has listed as overdue has a release (other tags need none, and any
 release the App put on one fails the author, manifest and attestation checks); no repository secret and no visible organization secret, for Actions and for Dependabot
 alike: Dependabot's secrets reach any workflow run for a Dependabot PR (and its manual
