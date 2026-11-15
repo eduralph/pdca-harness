@@ -93,7 +93,9 @@ repositories of that owner's instances and targets.
   `GIT_TERMINAL_PROMPT=0`, with `GIT_ASKPASS`, `SSH_ASKPASS` and every command-scope
   configuration variable (`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`,
   `GIT_CONFIG_VALUE_*`) removed from its environment, so an inherited header or URL rewrite
-  cannot ride along, and with `-c core.askPass= -c credential.interactive=false`, so git has no prompt or askpass
+  cannot ride along, and with every tracing variable removed too (`GIT_TRACE*`,
+  `GIT_CURL_VERBOSE`, `GIT_TRACE_REDACT`, and for `gh` `GH_DEBUG`), since curl tracing with
+  redaction off writes the `Authorization` header, token included, to a log, and with `-c core.askPass= -c credential.interactive=false`, so git has no prompt or askpass
   program to try after the helper. When the minter fails or refuses, the helper answers
   `quit=1`, which ends git's credential lookup, and the call fails; the driver stops the
   run rather than retrying with anything else. Remotes are plain `https://` URLs (section
@@ -190,9 +192,13 @@ repositories of that owner's instances and targets.
   with GitHub's "Update branch" in rebase mode, which keeps each commit's author and
   `Signed-off-by` and so passes the `dco` check. A rebase that conflicts is aborted and the
   PR reported, never pushed half-done. The driver records the branch's tip before the
-  rebase, and when the push fails or its result is unclear (a lease race, a network error,
-  a ruleset refusal) it resets the local branch to that tip and re-reads the remote
-  head before anything else touches the branch. `gh pr update-branch` is no longer used.
+  rebase and the rebased tip after it, persists both in the instance state, and when the
+  push fails or its result is unclear (a lease race, a network error, a ruleset refusal)
+  it reads the remote head and acts on what it finds: the rebased tip means the push
+  landed, so the local branch moves there and the state records success; the old tip
+  means it did not, so the local branch is reset to it; anything else means another
+  writer, so the run stops and reports the PR. Nothing touches the branch until that is
+  settled. `gh pr update-branch` is no longer used.
 
   `doctor` fails when `signoff` is missing or names a bot (a name, or an email's local part,
   ending in `[bot]`; a human's private `<id>+<login>@users.noreply.github.com` address is
@@ -690,7 +696,7 @@ older, broader personal token or deploy key. Migration removes them (existing lo
 users hold the ADR-0006 personal token today), and `doctor` fails on any it finds, checking
 from a probe leaf and a probe gate as well as from the driver. For the driver it reads the
 live environment of the running service (`/proc/<pid>/environ` of the unit), not only the
-profile, and fails on any `GIT_CONFIG_*`, askpass or token variable there. Because `gh` can also keep a
+profile, and fails on any `GIT_CONFIG_*`, askpass, tracing or token variable there. Because `gh` can also keep a
 login under `GH_CONFIG_DIR`, `XDG_CONFIG_HOME` or the system keyring, `doctor` checks the
 effective store rather than one file: `gh auth status --no-refresh` (a plain `gh auth status`
 refreshes an expiring token, which would extend the very login it is looking for), run as the loop user with its own
@@ -752,13 +758,17 @@ every unattended run, so no proof is cached between runs.
   `GET /installation/repositories` itself; it returns only the permissions and the repository
   list to `doctor`, never the token, which would reach every repository of the installation
   and bypass the per-loop allowlist. It fails unless the permissions are exactly section 2's
-  set (no `workflows`, no `administration`, no `secrets`), the repositories are exactly the
-  configured ones, and every one of them is public (section 3); a repository the App was
+  set (no `workflows`, no `administration`, no `secrets`), the repositories are exactly
+  the **owner-wide** set (the union of every loop's repositories for this owner, kept in a
+  key-side file of the key user that the maintainer edits), and every one of them is
+  public (section 3); a repository the App was
   installed on by mistake shows up here. The installation's `repository_selection` must be
   `selected`: an "All repositories" installation that happens to cover exactly the
   configured set today would gain every repository the owner creates tomorrow.
 - **Minter allowlist**: the minter returns its effective per-loop allowlist, and the row
-  fails unless it equals this loop's configured repositories exactly; an entry for another
+  fails unless it equals this loop's configured repositories exactly and is a subset of
+  the owner-wide set; the installation covers every loop of the owner, but each loop's
+  tokens reach only its own repositories; an entry for another
   loop's repository would otherwise let this loop mint tokens there, unseen by the
   installation check.
 - **Rules, including tags**: `GET /repos/{repo}/rules/branches/{branch}` returns the effective
