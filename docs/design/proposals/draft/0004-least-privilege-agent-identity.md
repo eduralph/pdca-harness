@@ -275,7 +275,9 @@ the environment policies and the `doctor` rows all take the name from there.
   that cannot accept it stay in `stack` mode, or add `tests/**` to `merge` mode's governing
   set, so that any PR touching a test waits for the maintainer.
 - **Driver branches**: a branch ruleset lets the App create and update only the namespaces
-  the driver itself uses, and refuses every other branch name to it. `repo-settings.py`
+  the driver itself uses, and refuses every other branch name to it, except `main` and the
+  listed target branches, which carry `main`'s pull-request ruleset instead (so `merge`
+  mode can merge a non-final PR into `release/1.x` the same way as into `main`). `repo-settings.py`
   derives the list from the instance's configuration rather than hard-coding it: the prefixes
   of `[publisher].fix_branch_pattern` and `feature_branch_pattern` (defaults `fix/*`,
   `enhancement/*`), `pdca-integration/*` for stacked batches (force-pushes allowed there, as
@@ -394,13 +396,19 @@ review aid, never the gate.
   table, per repository and environment), which neither the loop user nor any GitHub token
   can write:
 
-  - The maintainer sets the first baseline when the App is installed.
+  - Baselines are kept **per line**: one for `main` and one for each listed target branch
+    (`[publisher].target_branches`, section 3), per environment. A run on a branch uses
+    that branch's baseline; a release tag uses the baseline of the target branch whose
+    history contains the tagged commit, and a tag on no listed branch gets no range and is
+    flagged. Parallel release lines such as `release/1.x` and `release/2.x` therefore each
+    advance on their own.
+  - The maintainer sets each first baseline when the App is installed.
   - n8n polls for waiting runs every few minutes (`GET …/actions/runs?status=waiting` and
     `…/pending_deployments`, Actions: read), and for each one sends the range to review,
     `compare/<baseline>...<sha>`, through ntfy.
   - Once GitHub shows the run approved by the maintainer (`GET …/actions/runs/{id}/approvals`),
-    n8n advances the baseline to that commit. It only moves forward along `main`'s history: a
-    commit that is not a descendant of the stored baseline is not taken.
+    n8n advances that line's baseline to the commit. It only moves forward along the line's
+    history: a commit that is not a descendant of the stored baseline is not taken.
   - Each poll also compares the store with GitHub's approval and deployment history. A
     recorded approval that GitHub no longer shows, or an approved run still listed that n8n
     never saw, is a **discontinuity**: n8n alerts, keeps its own baseline, and marks the environment so that
@@ -429,9 +437,11 @@ review aid, never the gate.
 - **Privileged jobs build clean.** A job in an environment restores no Actions cache and
   downloads no artifact from another run: in `merge` mode an unprivileged run on `main` could
   have filled the cache or an artifact with agent-merged output. Two parts are enforced:
-  every environment job declares `permissions:` without `actions: read`, so its
+  every environment job declares `permissions:` with `actions: none` (neither `read` nor
+  `write`, since write includes read; a job without its own `permissions:` block fails too,
+  as it would inherit the workflow's), so its
   `GITHUB_TOKEN` cannot fetch another run's artifacts by any route (`gh run download`, the
-  REST API, a custom action), and the auditor fails on a job that declares otherwise. The
+  REST API, a custom action), and the auditor fails on a job whose effective Actions permission is anything else. The
   cache is not fenced that way, because cache restore uses the runner's own token whatever
   the job's permissions; there, and for downloads through a credential the job is handed,
   the rule is the maintainer's review. Every line such a job runs is on `main` or a release
@@ -492,9 +502,10 @@ review aid, never the gate.
   and no setting stops an old workflow from requesting `discussions: write`. The accepted
   residual is that such a run can edit or delete discussions and comments. It is detected,
   not prevented, and recovery is manual: the n8n auditor keeps a copy of every discussion
-  and comment in its own store (Discussions: read), fetching what changed since its last
-  poll (ordered by `updatedAt`) on the same few-minute schedule as the approval poll, with a
-  full snapshot daily. Polling sees that an object vanished, not who removed it, so n8n
+  and comment in its own store (Discussions: read), on the same few-minute schedule as the
+  approval poll: each poll fetches the content of what changed since the last one (ordered
+  by `updatedAt`) and lists the IDs of every discussion and comment, which it compares with
+  its store, because a deletion leaves no `updatedAt` change or tombstone to find. Polling sees that an object vanished, not who removed it, so n8n
   alerts through ntfy on **every** deletion and on every edit whose last editor is
   `github-actions[bot]` or the agent App. The auditor is read-only, so it restores
   nothing itself: the alert carries the saved content and the maintainer reposts it. Content created or
@@ -607,8 +618,8 @@ every unattended run, so no proof is cached between runs.
   section 3 requires (pull request with code-owner review and stale-approval dismissal,
   required status checks on `main` with the strict "up to date with the base" policy, so a
   green result from an older checker cannot carry over after `main` moves; creation, update
-  and deletion restrictions on tags and on every branch that is neither a driver namespace
-  nor `main`; and for `main` itself, in `stack` mode, the update restriction whose only
+  and deletion restrictions on tags and on every branch that is neither a driver namespace,
+  `main` nor a listed target branch; and for `main` itself, in `stack` mode, the update restriction whose only
   bypass actor is the maintainer, while `merge` mode leaves `main` to its pull-request rule
   so its merges can land without a bypass), compared rule by rule with their parameters, since a ruleset with
   the right conditions but a missing rule has nothing to bypass, and that the
