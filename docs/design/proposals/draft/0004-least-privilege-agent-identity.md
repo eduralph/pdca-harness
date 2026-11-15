@@ -252,6 +252,7 @@ key is treated as a confidentiality incident, not a harmless one (see the securi
 |---|---|---|
 | Administration | read | immutable releases, the Actions workflow-permission settings, and repository self-hosted runners |
 | Organization: Self-hosted runners | read | organization runners available to the repository (getwyrd, Ralphovi) |
+| Pages | read | the Pages build type (`GET /repos/{repo}/pages`), for the Pages rule of section 4 |
 | Pull requests | read | PR authors, commits, `merge_commit_sha` and timelines, for the DCO and attribution checks of section 1 |
 | Organization: Members | read | the organization's owners (`GET /orgs/{org}/members?role=admin`), for the sole-owner check of section 6 |
 | Secrets | read | names of repository secrets, and of organization secrets visible to the repository (`GET /repos/{repo}/actions/organization-secrets`) |
@@ -575,7 +576,7 @@ review aid, never the gate.
   | `pull-requests`, `issues` | "Allow GitHub Actions to create and approve pull requests" off; code-owner review | editing, closing and reopening issues and PRs, retargeting a PR's base, editing and deleting comments, labels, marking a draft ready; it cannot approve. In `stack` mode it cannot merge (only the maintainer can update `main`); in `merge` mode it can merge a PR that touches no governing file once the required checks pass, the same reach the App has there (known limits) |
   | `discussions` | nothing on GitHub's side (Discussions stay on: the project's discussions happen there) | editing or deleting discussions and comments; see known limits |
   | `id-token` | trust policies pinned to fenced environments | none |
-  | `attestations` | consumers verify `--source-ref refs/tags/<tag>`, the signer workflow and a `push` trigger | an attestation from a branch run, which that check rejects; deleting a release's attestations, which the auditor reports as missing and the maintainer restores by re-running the release workflow for that tag (with approval) |
+  | `attestations` | consumers verify `--source-ref refs/tags/<tag>`, the signer workflow and a `push` trigger | an attestation from a branch run, which that check rejects; deleting a release's attestations, which the auditor reports as missing. Rebuilding may not reproduce the same bytes, so the release workflow has a second, approval-gated job that downloads the immutable release's existing assets, checks them against the release's attested `SHA256SUMS` manifest (whose own attestation must still exist) and attests those exact bytes again; if the manifest's attestation is gone too, the release is retired (marked in its notes, superseded by the next version) and recorded, and the auditor stops failing on it |
   | `deployments` | environment deployment policies | deployment records without access |
   | `pages` | Pages is published from a **branch** (`main`, `/docs` or another protected branch), not by an Actions deployment: for an Actions-based site the `github-pages` environment is optional, so an old workflow without it could deploy. The auditor fails on a repository whose Pages build type is `workflow`, unless the maintainer has recorded that repository as an accepted exception | for a recorded exception, a site deployment from an old workflow (known limit) |
   | `actions` | none available | known limit: disable workflows, cancel or delete runs and artifacts |
@@ -863,7 +864,13 @@ Turning immutability on protects only releases published afterwards; older ones 
 checked now and then cannot close that, since an asset can be swapped and restored between
 two checks. So before the agent App is installed on a repository, every mutable release there
 is either republished, which makes it immutable, or deleted, and the auditor fails on any
-mutable release from then on. `repo-settings.py` lists the releases concerned when the
+mutable release from then on. Releases older than the switch to tag-push releases cannot
+meet the rest of the audit (their author is the maintainer, and they have no manifest or
+provenance), whether they are mutable or already immutable. They are **grandfathered**:
+`repo-settings.py` records their IDs and asset digests at installation, the author,
+manifest and provenance checks apply only to releases not in that record, and the
+auditor fails if a recorded release's assets or digests change or a recorded release is
+mutable. `repo-settings.py` lists the releases concerned when the
 setting is switched on (for the existing repositories, 14.11.2026).
 
 **Independently, from n8n**: the same auditor checks run daily from n8n with the auditor
