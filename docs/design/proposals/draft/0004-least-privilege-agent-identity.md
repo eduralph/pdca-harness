@@ -348,7 +348,13 @@ the environment policies and the `doctor` rows all take the name from there.
   `doctor` and `repo-settings.py check` read `wave_mode` and **fail** when `CODEOWNERS` does
   not cover the set its mode requires; the driver re-reads `CODEOWNERS` from the PR's own base
   branch before every merge (GitHub applies the base branch's file, so `main` and each listed
-  target branch are checked separately) and refuses to merge while it is short.
+  target branch are checked separately) and refuses to merge while it is short. Coverage is judged on the file GitHub actually
+  uses, not on a local parse: the check takes the first of `.github/CODEOWNERS`,
+  `CODEOWNERS` and `docs/CODEOWNERS` that exists on that branch (GitHub's order), requires
+  it to be under GitHub's 3 MB limit, and requires
+  `GET /repos/{repo}/codeowners/errors?ref=<branch>` (Contents: read) to report no
+  errors, since GitHub ignores a file that is too large and any entry it cannot parse or
+  whose owner it cannot resolve.
 
   `merge` mode trusts the agent with ordinary code by definition: a non-final wave can change
   an existing test's assertions and reach `main` without review, to be seen only when the
@@ -844,8 +850,11 @@ every unattended run, so no proof is cached between runs.
   sudo rule at all), when it belongs to `sudo`, `wheel`, `disk`, `docker`, `lxd`,
   `libvirt` or `incus` (or any group that owns a privileged daemon socket or a block
   device), when it can open any block device or the socket of a rootful Docker, Podman,
-  LXD or libvirt daemon, or when an executable it can run carries any file capability
-  outside a short allowlist (`cap_net_raw`, `cap_net_bind_service`): a list of dangerous
+  LXD or libvirt daemon, when a setuid or setgid executable on the host is not
+  owned by an installed package and verified unmodified by the package manager
+  (`dpkg --verify` or `rpm -V`), a stray one being as good as root, when a polkit rule
+  grants the loop user or its groups any action without authentication, or when an
+  executable it can run carries any file capability outside a short allowlist (`cap_net_raw`, `cap_net_bind_service`): a list of dangerous
   ones would always miss one (`cap_setuid`, `cap_setfcap`, `cap_sys_module` each lead to
   root).
 
