@@ -91,15 +91,21 @@ repositories of that owner's instances and targets.
 
   **Git configuration is not trusted either.** A leaf can write the checkout's `.git/config`
   or the loop user's `~/.gitconfig` at any time after `doctor` ran, for example a
-  `url.*.insteadOf` that redirects the push to another host. So every authenticated driver
-  git call runs with `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL` set to a driver-owned
-  file, with `HOME` pointed at a fresh empty directory created for that call and `NETRC`
+  `url.*.insteadOf` that redirects the push to another host. So **every** driver git call,
+  authenticated or not (a commit runs hooks and trailer commands outside the leaf's
+  namespace just as a push does), runs with `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL`
+  set to a root-owned, read-only file installed with the harness (a file the loop user
+  could write would be no better than `~/.gitconfig`), with `HOME` pointed at a fresh empty directory created for that call and `NETRC`
   removed (git's HTTP layer reads `$HOME/.netrc` on its own, apart from any helper, so a
   `.netrc` a gate writes after `doctor` ran is never seen), pushes to an explicit `https://github.com/<owner>/<repo>.git` URL rather than a
-  named remote, and is preceded by a check of the checkout's repository configuration that
-  refuses any `url.*`, `http.*`, `credential.*`, `core.askPass`, `core.sshCommand`,
-  `core.hooksPath`, `core.fsmonitor`, `filter.*`, `diff.*.textconv`, `diff.external`,
-  `merge.*.driver`, `gpg.*` or `include*` entry, since each names a program git would run.
+  named remote, and is preceded by a check of the checkout's repository configuration (`.git/config`
+  and any `config.worktree`) against an **allowlist**: only the keys a plain clone writes
+  and the driver itself sets (`core.repositoryformatversion`, `core.filemode`, `core.bare`,
+  `core.logallrefupdates`, `extensions.worktreeconfig`, `remote.<name>.url` and
+  `.fetch`, `branch.<name>.remote` and `.merge`) are accepted, and any other key fails the
+  call. A denylist would have to name every key that makes git run a program or contact a
+  host (`trailer.*.cmd`, `filter.*`, `core.fsmonitor`, `url.*`, `http.*` and more), and
+  would fail open on the first one it missed.
   Hooks are taken out of the checkout's hands too: a leaf that can write `.git/config` can
   also drop an executable into `.git/hooks/`, and the driver's git would run it outside the
   leaf's namespace, next to the minter. So every driver git call sets `core.hooksPath` to a
@@ -233,7 +239,8 @@ the environment policies and the `doctor` rows all take the name from there.
   (default: only `main`), and the driver refuses a brief whose target is not listed there
   before writing anything. No bypass for the App, required status
   checks from `.github/required-checks.txt` with the strict policy (the PR must be up to date
-  with `main`, so every check reruns on the current base), and **code-owner review** as the review rule, with
+  with its base branch, `main` or the listed target it merges into, so every check reruns
+  on the current base), and **code-owner review** as the review rule, with
   no general approval count. `CODEOWNERS` names the maintainer; only users and teams can be
   code owners, so the App can never satisfy that review, whether or not GitHub counts an
   App's approval as a review. The rule also sets **dismiss stale approvals on push**, so a
@@ -421,8 +428,9 @@ review aid, never the gate.
   `main` and on the listed target branches passed the maintainer's review. In `merge` mode, App PRs before the final wave can
   merge unreviewed source, and those merges sit in the final PR's base, not its
   diff. So the maintainer approves an environment run only after a **cumulative** review of
-  `main` from the last commit they approved for a privileged run up to the commit asking
-  for approval, and never on a head that holds App merges after it. The baseline must come
+  the run's line (`main`, the listed target branch it runs on, or the line a release tag
+  maps to) from the last commit they approved for a privileged run on that line up to the
+  commit asking for approval, and never on a head that holds App merges after it. The baseline must come
   from outside both the loop user, which may be compromised, and GitHub's run and
   deployment records, which an old workflow with `actions: write` or `deployments: write`
   can delete or inactivate. So the **n8n auditor keeps it in its own store** (an n8n data
