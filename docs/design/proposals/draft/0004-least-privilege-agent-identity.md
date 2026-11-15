@@ -290,6 +290,7 @@ key is treated as a confidentiality incident, not a harmless one (see the securi
 | Organization: Members | read | the organization's owners (`GET /orgs/{org}/members?role=admin`), for the sole-owner check of section 6 |
 | Secrets | read | names of repository secrets, and of organization secrets visible to the repository (`GET /repos/{repo}/actions/organization-secrets`) |
 | Environments | read | names of environment secrets |
+| Variables | read | repository Actions variables and organization variables visible to the repository, scanned for credentials |
 | Dependabot secrets | read | names of the repository's Dependabot secrets, and of organization Dependabot secrets visible to it |
 | Organization: Organization dependabot secrets | read | which organization Dependabot secrets are visible to the repository (getwyrd, Ralphovi) |
 | Actions | read | environments and their protection rules; waiting runs, pending deployments and their approvals (the approval baseline of section 4) |
@@ -922,9 +923,12 @@ every unattended run, so no proof is cached between runs.
   sudo rule at all), when it belongs to `sudo`, `wheel`, `disk`, `docker`, `lxd`,
   `libvirt` or `incus` (or any group that owns a privileged daemon socket or a block
   device), when it can open any block device or the socket of a rootful Docker, Podman,
-  LXD or libvirt daemon, when a setuid or setgid executable on the host is not
-  owned by an installed package and verified unmodified by the package manager
-  (`dpkg --verify` or `rpm -V`), a stray one being as good as root, when a polkit rule
+  LXD or libvirt daemon, when the host's setuid and setgid files differ from a
+  root-owned manifest the maintainer records at setup (path, owner, group, mode and
+  checksum of each; a package update re-records it through the same step) in any of those
+  fields, or any set-ID file appears that the manifest lacks, a stray one or a
+  `chmod u+s` on `/bin/bash` being as good as root (`dpkg --verify` alone checks content,
+  not mode), when a polkit rule
   grants the loop user or its groups any action without authentication, or when an
   executable it can run carries any file capability outside a short allowlist (`cap_net_raw`, `cap_net_bind_service`): a list of dangerous
   ones would always miss one (`cap_setuid`, `cap_setfcap`, `cap_sys_module` each lead to
@@ -994,7 +998,11 @@ every `v*` tag n8n has listed as overdue has a release (other tags need none, an
 release the App put on one fails the author, manifest and attestation checks); no repository secret and no visible organization secret, for Actions and for Dependabot
 alike: Dependabot's secrets reach any workflow run for a Dependabot PR (and its manual
 re-runs), which in `merge` mode can run agent-merged source before any review, so private
-registry credentials for Dependabot are not used on repositories the App is installed on; every
+registry credentials for Dependabot are not used on repositories the App is installed on;
+and no credential in an Actions **variable**, since variables are readable by every
+workflow run, an old one on a driver branch included: the auditor reads every repository
+and visible organization variable (Variables: read) and fails when a value matches the
+secret guard's gitleaks rules; every
 environment, whether it holds a secret or not, has the deployment policy and, where
 section 4 requires it, the approval rule. The policy list API returns a policy's name but
 not whether it matches branches or tags, so `repo-settings.py` records the IDs of the
