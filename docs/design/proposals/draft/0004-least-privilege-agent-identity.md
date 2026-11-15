@@ -1052,6 +1052,11 @@ role, and, for an organization, on any owner other than the maintainer. Pending
 invitations count as granted: the check also lists the repository's invitations
 (Administration: read) and the organization's (Members: read) and fails on any that would
 grant write or more, or ownership, since an invitee can accept in the middle of a run.
+Teams are excluded outright rather than inspected: a team's membership changes through
+team invitations and team maintainers, out of the repository's view, so the check also
+lists the repository's teams (`GET /repos/{repo}/teams`, Metadata: read) and fails on any
+team with write, maintain, admin or a custom role there; the maintainer's own access comes
+from ownership, not a team.
 
 Machine writers count too, since they are not collaborators. The auditor lists the
 repository's deploy keys on every run (Administration: read) and fails on any with write
