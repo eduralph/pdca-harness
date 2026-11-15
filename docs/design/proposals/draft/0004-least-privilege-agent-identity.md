@@ -134,10 +134,15 @@ repositories of that owner's instances and targets.
 
   The same applies where `merge` mode brings a PR that fell behind up to date: today the
   driver calls `gh pr update-branch`, which makes GitHub write a merge commit with no human
-  author or sign-off, and the `dco` check would reject it. The driver instead merges the
-  base into the PR branch locally, the same way (`git merge --no-ff --no-commit`, then a
-  commit with the configured author, bot committer and both trailers), and pushes it;
-  `gh pr update-branch` is no longer used.
+  author or sign-off, and the `dco` check would reject it. A local merge of the base would
+  not work either: when the base gained a workflow change, pushing that merge commit
+  counts as a workflow edit, which the App's token may not make. The driver therefore
+  **rebases** the PR branch onto the new base: each commit is re-created with its author,
+  trailers and the bot as committer, none of them changes a workflow file relative to its
+  new parent, and the driver pushes with `--force-with-lease` to the commit it rebased from.
+  The driver namespaces allow force-pushes for this, as `pdca-integration/*` already does;
+  the push dismisses stale approvals as usual. A rebase that conflicts is aborted and the PR
+  reported, never pushed half-done. `gh pr update-branch` is no longer used.
 
   `doctor` fails when `signoff` is missing or names a bot (a `[bot]` name or a
   `noreply.github.com` bot address). The template's `dco` check requires a `Signed-off-by`
@@ -286,7 +291,8 @@ the environment policies and the `doctor` rows all take the name from there.
   `repo-settings.py` refuses to install the App while a listed target does not exist yet. `repo-settings.py`
   derives the list from the instance's configuration rather than hard-coding it: the prefixes
   of `[publisher].fix_branch_pattern` and `feature_branch_pattern` (defaults `fix/*`,
-  `enhancement/*`), `pdca-integration/*` for stacked batches (force-pushes allowed there, as
+  `enhancement/*`; force-pushes allowed, for the rebase that refreshes a PR in section 1),
+  `pdca-integration/*` for stacked batches (force-pushes allowed there, as
   `integrate.py` requires), `revert/*` for `pdca revert`, the bug track's branches, and
   `[records].branch` (default `records/*`) when records are published as pull requests, and
   `pdca-doctor/*` for the probe of section 6. Every configured pattern must start with a
@@ -409,9 +415,12 @@ review aid, never the gate.
 
   - Baselines are kept **per line**: one for `main` and one for each listed target branch
     (`[publisher].target_branches`, section 3), per environment. A run on a branch uses
-    that branch's baseline; a release tag uses the baseline of the target branch whose
-    history contains the tagged commit, and a tag on no listed branch gets no range and is
-    flagged. Parallel release lines such as `release/1.x` and `release/2.x` therefore each
+    that branch's baseline. A release tag's line is never guessed from ancestry, since one
+    commit can be reachable from several lines: `[publisher].release_lines` maps tag
+    patterns to lines (default: every `v*` tag to `main`; for example `v1.*` to
+    `release/1.x`), the most specific pattern decides, and n8n uses that line's baseline.
+    A tag that matches no pattern, or whose commit is not on its mapped line, gets no range
+    and is flagged. Parallel release lines such as `release/1.x` and `release/2.x` therefore each
     advance on their own.
   - The maintainer sets each first baseline when the App is installed.
   - n8n polls for waiting runs every few minutes (`GET …/actions/runs?status=waiting` and
@@ -435,13 +444,14 @@ review aid, never the gate.
   moves to the driver side, where the loop already holds a model key; the pilot decides.
 - **OIDC trusts environments, not refs.** Any job, on any branch, can request an OIDC token.
   So every cloud trust policy pins the subject to an environment
-  (`repo:<owner>/<repo>:environment:<name>`, or the immutable form with owner and
-  repository IDs that GitHub uses for some repositories), never to a branch or to `ref:refs/heads/main`:
+  (`repo:<owner>/<repo>:environment:<name>`) and, because that default subject names the
+  repository and a renamed or re-created repository could reuse the name, also requires the
+  numeric `repository_owner_id` and `repository_id` claims, as ADR-0017's federation rule
+  already does; never to a branch or to `ref:refs/heads/main`:
   `pull_request_target`, `issue_comment` and `workflow_run` jobs also carry `main` as their
   ref, even when the App caused the event. A token from a job outside a protected
   environment then matches no policy. These policies live with the cloud provider, out of
-  the auditor's reach; `repo-settings.py` prints the subjects the maintainer must pin, taking the format from
-  what GitHub reports for the repository rather than building the name-only form, and
+  the auditor's reach; `repo-settings.py` prints the subject and the two ID claims the maintainer must pin, and
   the auditor checks the repository's OIDC subject template is the default, which includes
   the environment. Because GitHub cannot see them, installing the App requires the
   maintainer to record, per repository, every cloud that trusts it and that each of its
@@ -481,7 +491,10 @@ review aid, never the gate.
   | `security-events` | none available | known limit: upload or dismiss code-scanning results |
 
 - **No persistent self-hosted runners** are available to a repository the App is installed
-  on, at repository or organization level. A job on such a runner runs App-controlled code
+  on, at repository or organization level. Enterprise-level runner groups are out of the
+  auditor's reach (their API takes no App token), so the App is not installed in an
+  organization that belongs to an enterprise account; `pdca setup-identity` asks the
+  maintainer to confirm that, and the known limits record it. A job on such a runner runs App-controlled code
   on that host, and a runner group cannot be restricted by branch on a personal account.
   GitHub-hosted runners only, or ephemeral runners rebuilt for every job holding no
   credentials.
@@ -524,6 +537,9 @@ review aid, never the gate.
   nothing itself: the alert carries the saved content and the maintainer reposts it. Content created or
   edited and then deleted between two polls was never copied and is lost; the window is
   the poll interval, and closing it would need webhook events kept outside GitHub.
+- **Enterprise runners.** The auditor cannot see enterprise runner groups; the rule that
+  the App is not installed under an enterprise account rests on the maintainer's
+  confirmation.
 - **Cloud-side OIDC policies.** Whether a cloud still trusts a ref-based or wildcard
   subject is checked only by the maintainer's recorded assertion (section 4), not by any
   automated row.
@@ -782,7 +798,14 @@ agent App, and the row fails closed if it is not.
 
 ## Security impact
 
-This narrows what an agent-controlled process can change; it adds no untrusted input. Each App's
+This narrows what an agent-controlled process can change. It adds one untrusted input: the
+minter's Unix socket, which accepts requests from the loop user (possibly compromised,
+section 5) into a key-holding service under another OS user. The protocol is a fixed,
+versioned schema with a small set of request types (mint for a listed repository, run the
+named `doctor` checks), size and rate limits per request, repository names checked
+against the allowlist before any API call, no path, command or URL taken from the request,
+and tests for malformed and oversized requests; the minter answers anything else with a
+refusal and logs it. Each App's
 private key becomes a new high-value, long-lived secret: it can mint tokens for every
 repository of its owner's installation (section 1), so it is held by a separate key user
 behind a token minter that leaves cannot reach (section 5), rotated on a schedule and revoked
