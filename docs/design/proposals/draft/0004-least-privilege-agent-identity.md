@@ -436,6 +436,11 @@ the environment policies and the `doctor` rows all take the name from there.
   - Without the Workflows permission the App cannot change `.github/workflows/**`, so every
     guard whose logic is written inline in its workflow file is out of its reach as it is
     (in the project template: `docs-immutability`, `dco`, `require-linked-issue`).
+    A fix that itself changes `.github/workflows/**` therefore cannot be published by the
+    App at all. The driver detects that before writing anything (the patch touches a path
+    under `.github/workflows/`), publishes nothing and records the fix as needing the
+    maintainer, who publishes it from their own login in an attended run; no half-made
+    branch or local publication state is left for the next fold.
   - Code-owner review covers all of `.github/**` in both modes, so a change to a script a
     workflow runs (for example `.github/docs-check/*.py`) always needs the maintainer.
   - Required checks that run scripts take them from the base commit, not from the pull
@@ -525,7 +530,9 @@ review aid, never the gate.
   trust or deploys Pages, has a deployment policy that admits only `main` and the
   listed target branches (`[publisher].target_branches`, protected like `main`, section 3)
   or, for `release`, only `v*` tags, so a job on a driver branch gets nothing however its file is
-  written. Every environment also **requires the maintainer's approval**, with no exception. Each environment also sets `can_admins_bypass: false`: by default GitHub lets an
+  written. Every environment also **requires the maintainer's approval**, with no exception. Each environment also sets `prevent_self_review: false`, since the maintainer
+  is the only reviewer and also the one who pushes tags and dispatches runs (with it on,
+  such runs would wait for ever), and `can_admins_bypass: false`: by default GitHub lets an
   administrator start waiting jobs past the protection rules, which would release secrets
   and OIDC tokens with no approval recorded and no cumulative review. A deployment policy alone is not enough: any
   workflow token with `actions: write`, including one from an old commit on a driver branch,
@@ -1018,7 +1025,7 @@ allowlist the maintainer records (name and a hash of the value, each attested as
 credential), so a new or changed variable fails until the maintainer has looked at it;
 pattern matching alone would miss an opaque token or a plain password; every
 environment, whether it holds a secret or not, has the deployment policy and, where
-section 4 requires it, the approval rule, with `can_admins_bypass` false. The policy list API returns a policy's name but
+section 4 requires it, the approval rule, with `prevent_self_review` and `can_admins_bypass` false. The policy list API returns a policy's name but
 not whether it matches branches or tags, so `repo-settings.py` records the IDs of the
 policies it created (with their type) and the auditor fails when an environment's policy
 IDs differ from that record: a `v*` branch policy put in place of the `v*` tag policy has
