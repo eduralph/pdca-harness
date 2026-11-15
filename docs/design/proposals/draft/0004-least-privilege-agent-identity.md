@@ -102,8 +102,12 @@ repositories of that owner's instances and targets.
   and any `config.worktree`) against an **allowlist**: only the keys a plain clone writes
   and the driver itself sets (`core.repositoryformatversion`, `core.filemode`, `core.bare`,
   `core.logallrefupdates`, `extensions.worktreeconfig`, `remote.<name>.url` and
-  `.fetch`, `branch.<name>.remote` and `.merge`) are accepted, and any other key fails the
-  call. A denylist would have to name every key that makes git run a program or contact a
+  `.fetch`, `branch.<name>.remote` and `.merge`) are accepted, each only with its exact expected
+  value (`remote.origin.url` the repository's `https://github.com/<owner>/<repo>.git`,
+  `remote.origin.fetch` git's default refspec, `branch.<name>.remote` `origin` and
+  `.merge` `refs/heads/<name>`, the `core.*` values a clone writes), and any other key or
+  value fails the call. Driver fetches also name the URL and refspec explicitly, like
+  pushes, so even a value the check accepted is not what steers them. A denylist would have to name every key that makes git run a program or contact a
   host (`trailer.*.cmd`, `filter.*`, `core.fsmonitor`, `url.*`, `http.*` and more), and
   would fail open on the first one it missed.
   Hooks are taken out of the checkout's hands too: a leaf that can write `.git/config` can
@@ -449,8 +453,12 @@ review aid, never the gate.
     advance on their own.
   - The maintainer sets each first baseline when the App is installed.
   - n8n polls for waiting runs every few minutes (`GET …/actions/runs?status=waiting` and
-    `…/pending_deployments`, Actions: read), and for each one sends the range to review,
-    `compare/<baseline>...<sha>`, through ntfy.
+    `…/pending_deployments`, Actions: read), and for each one sends the range to review
+    through ntfy: the exact command for a complete local diff
+    (`git fetch` then `git diff <baseline> <sha>`), which is the review reference, and the
+    `compare/<baseline>...<sha>` page only as a convenience. The web page caps a diff at 300
+    files and truncates large files, so when the range exceeds what it renders, the notice
+    says so and the maintainer reviews from the local diff only.
   - Once GitHub shows the run approved by the maintainer (`GET …/actions/runs/{id}/approvals`),
     n8n advances that line's baseline to the commit. It only moves forward along the line's
     history: a commit that is not a descendant of the stored baseline is not taken.
@@ -509,11 +517,19 @@ review aid, never the gate.
   | `id-token` | trust policies pinned to fenced environments | none |
   | `attestations` | consumers verify `--source-ref refs/tags/<tag>` and the signer workflow | an attestation from a branch run, which that check rejects |
   | `deployments` | environment deployment policies | deployment records without access |
-  | `pages` | the `github-pages` environment's deployment policy (`main` only) | none |
+  | `pages` | the `github-pages` environment's deployment policy (`main` and the listed target branches, like every environment) | none |
   | `actions` | none available | known limit: disable workflows, cancel or delete runs and artifacts |
   | `statuses`, `checks` | none available | known limit: fake status checks |
   | `packages` | none available | known limit |
   | `security-events` | none available | known limit: upload or dismiss code-scanning results |
+  | `artifact-metadata` | none available | known limit: create or alter artifact storage and deployment records; no PDCA check relies on them |
+  | `code-quality` | none available | known limit: upload code-quality and coverage reports; no required check reads them |
+  | `copilot-requests` | none available | known limit: spend Copilot requests billed to an organization, where its billing policy allows it; personal accounts are unaffected |
+
+  This is GitHub's complete scope list as of 15.11.2026 (`actions` through
+  `vulnerability-alerts`, whose only levels are `read` and `none`). A scope GitHub adds
+  later is unfenced until this table and the auditor's manifest add it; the auditor's check
+  manifest records the list it was written against.
 
 - **No persistent self-hosted runners** are available to a repository the App is installed
   on, at repository or organization level. Enterprise-level runner groups are out of the
