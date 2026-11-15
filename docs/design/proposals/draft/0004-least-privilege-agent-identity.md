@@ -1229,8 +1229,9 @@ check is never left depending on an environment.
   `wave_mode = "merge"` in an instance rewrites that instance's `AGENTS.md` for it, so
   that the written rules describe what the loop actually does. The harness repository's
   own STOP convention is unchanged; this proposal fences `merge` mode where it is used
-  and does not introduce it. `doctor` fails when `wave_mode = "merge"` and the instance's
-  `AGENTS.md` has no `## Merge mode` section, the marker that the rewrite happened.
+  and does not introduce it. No check judges the rewrite, since whether prose matches the
+  loop's behaviour is not something a tool can decide; `AGENTS.md` is a governing file, so
+  the rewrite, like any change to it, waits for the maintainer's code-owner review.
 
 - **App approvals** (was open): the review rule is code-owner review, which an App cannot
   satisfy, so whether GitHub counts an App's approval no longer matters. The App keeps the
