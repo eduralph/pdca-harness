@@ -187,8 +187,9 @@ repositories of that owner's instances and targets.
   `Signed-off-by` and so passes the `dco` check. A rebase that conflicts is aborted and the
   PR reported, never pushed half-done. `gh pr update-branch` is no longer used.
 
-  `doctor` fails when `signoff` is missing or names a bot (a `[bot]` name or a
-  `noreply.github.com` bot address). The template's `dco` check requires a `Signed-off-by`
+  `doctor` fails when `signoff` is missing or names a bot (a name, or an email's local part,
+  ending in `[bot]`; a human's private `<id>+<login>@users.noreply.github.com` address is
+  fine and can match the author like any other). The template's `dco` check requires a `Signed-off-by`
   whose email matches the commit author's, the rule common DCO checkers apply, and rejects
   one that names a bot, so a commit signed off only by a bot cannot merge. Dependabot's PRs
   are the one exception: when the PR was opened by the Dependabot App (an authenticated
@@ -668,8 +669,14 @@ connection and requiring it to fail at the network level, judged by the output, 
 exit status (a successful `ssh -T git@github.com` also exits 1). A relay on another port
 could still carry SSH, so the firewall is not the boundary; GitHub's side is: no key a loop
 user could hold has write access, because the auditor fails on any deploy key with write
-(section 6), and migration removes every SSH key of the old setup from the maintainer's
-GitHub account that ever lived on the loop host, no `url.*.insteadOf` or
+(section 6), and no key on the maintainer's GitHub account is reachable
+by the loop user. `pdca setup-identity` lists the account's SSH keys (`GET /user/keys`,
+with the maintainer's login) and asks, for each, where its private half lives; it refuses
+to continue until every key whose private half is on the loop host is either removed from
+the account or kept in a home directory the loop user cannot read, and no agent socket of
+the maintainer's is reachable from the loop user, both of which `doctor` re-checks as the
+loop user (opening the maintainer's `~/.ssh` and any `SSH_AUTH_SOCK` must fail). Keys of
+the old setup are removed from the account outright, no `url.*.insteadOf` or
 `pushInsteadOf` rewrite, and every remote a plain `https://github.com/` URL with no
 credential in it. Otherwise a leaf or a compromised gate could skip the App and use an
 older, broader personal token or deploy key. Migration removes them (existing loop
@@ -871,7 +878,10 @@ repository role with "Edit repository rules" could add GitHub Actions as a bypas
 without being an admin. So this check, and the auditor on every run (collaborators are
 readable with Metadata: read), list every collaborator with their permission and role name
 and fail on anyone other than the maintainer with write, maintain, admin or any custom
-role, and, for an organization, on any owner other than the maintainer.
+role, and, for an organization, on any owner other than the maintainer. Pending
+invitations count as granted: the check also lists the repository's invitations
+(Administration: read) and the organization's (Members: read) and fails on any that would
+grant write or more, or ownership, since an invitee can accept in the middle of a run.
 
 Machine writers count too, since they are not collaborators. The auditor lists the
 repository's deploy keys on every run (Administration: read) and fails on any with write
