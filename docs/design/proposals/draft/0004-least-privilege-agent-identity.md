@@ -272,6 +272,8 @@ key is treated as a confidentiality incident, not a harmless one (see the securi
 | Organization: Members | read | the organization's owners (`GET /orgs/{org}/members?role=admin`), for the sole-owner check of section 6 |
 | Secrets | read | names of repository secrets, and of organization secrets visible to the repository (`GET /repos/{repo}/actions/organization-secrets`) |
 | Environments | read | names of environment secrets |
+| Dependabot secrets | read | names of the repository's Dependabot secrets, and of organization Dependabot secrets visible to it |
+| Organization: Organization dependabot secrets | read | which organization Dependabot secrets are visible to the repository (getwyrd, Ralphovi) |
 | Actions | read | environments and their protection rules; waiting runs, pending deployments and their approvals (the approval baseline of section 4) |
 | Deployments | read | deployment history, compared with the approval baseline of section 4 |
 | Contents | read | workflow files for the audit of section 4, tags and releases |
@@ -583,7 +585,10 @@ review aid, never the gate.
   maintainer to record, per repository, every cloud that trusts it and that each of its
   policies matches only environment subjects (or that none trusts it); `pdca setup-identity`
   refuses to install without that record and `doctor` shows its date.
-- **Privileged jobs run only pinned code.** Every action an environment job uses is
+- **Privileged jobs run only pinned code**, and so does everything that feeds them. A
+  privileged job can take same-run artifacts or `needs.*.outputs` from other jobs of its
+  workflow, so the rule covers **every job of a workflow that defines an environment job**,
+  not only the environment job itself: every action any of those jobs uses is
   pinned to a full commit SHA and every container image to a digest, since a tag such as
   `owner/action@v1` or `image:latest` can be moved after the maintainer reviewed and
   approved; the auditor fails on any other reference in an environment job. What a pinned
@@ -937,7 +942,10 @@ of the time n8n **first saw** the tag. GitHub records no creation time for a ref
 annotated tag's date is whatever the client wrote, so n8n keeps its own first-seen time
 per tag from its few-minute poll; `doctor`, which has no such store, checks only that
 every `v*` tag n8n has listed as overdue has a release (other tags need none, and any
-release the App put on one fails the author, manifest and attestation checks); no repository secret and no visible organization secret; every
+release the App put on one fails the author, manifest and attestation checks); no repository secret and no visible organization secret, for Actions and for Dependabot
+alike: Dependabot's secrets reach any workflow run for a Dependabot PR (and its manual
+re-runs), which in `merge` mode can run agent-merged source before any review, so private
+registry credentials for Dependabot are not used on repositories the App is installed on; every
 environment, whether it holds a secret or not, has the deployment policy and, where
 section 4 requires it, the approval rule. The policy list API returns a policy's name but
 not whether it matches branches or tags, so `repo-settings.py` records the IDs of the
