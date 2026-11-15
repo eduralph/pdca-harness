@@ -149,6 +149,7 @@ the *names* of their secrets, never the values:
 | Actions | read | environments and their protection rules |
 | Contents | read | workflow files for the audit of section 4, tags and releases |
 | Attestations | read | the provenance attestations of release assets (`gh attestation verify`) |
+| Discussions | read | the daily discussions snapshot of section 4 |
 | Metadata | read | mandatory; also rulesets |
 
 ### 3. Rulesets and code owners (template `repo-settings.py`)
@@ -361,7 +362,8 @@ review aid, never the gate.
   | Scope | Fenced by | Residual |
   |---|---|---|
   | `contents` | rulesets on `main`, tags and non-driver branches (no bypass for GitHub Actions) | driver branches, which the App can write anyway |
-  | `pull-requests`, `issues`, `discussions` | "Allow GitHub Actions to create and approve pull requests" off; code-owner review | comments and labels, as the App |
+  | `pull-requests`, `issues` | "Allow GitHub Actions to create and approve pull requests" off; code-owner review | comments and labels, as the App |
+  | `discussions` | nothing on GitHub's side (Discussions stay on: the project's discussions happen there) | editing or deleting discussions and comments; see known limits |
   | `id-token` | trust policies pinned to fenced environments | none |
   | `attestations` | consumers verify `--source-ref refs/tags/<tag>` and the signer workflow | an attestation from a branch run, which that check rejects |
   | `deployments` | environment deployment policies | deployment records without access |
@@ -395,6 +397,12 @@ review aid, never the gate.
 - **Code scanning.** With `security-events: write` such a workflow can upload or dismiss
   code-scanning results. Code scanning is not a merge gate here; the maintainer treats its
   alerts as advisory.
+- **Discussions.** Discussions stay enabled because the project's discussions happen there,
+  and no setting stops an old workflow from requesting `discussions: write`. The accepted
+  residual is that such a run can edit or delete discussions and comments. It is detected
+  and recoverable, not prevented: the n8n auditor snapshots every discussion and comment
+  daily (Discussions: read) into its own store, alerts through ntfy on any edit or deletion
+  made by `github-actions[bot]` or the agent App, and the snapshot restores what was lost.
 - **Cloud-side OIDC policies.** Whether a cloud still trusts a ref-based or wildcard
   subject is checked only by the maintainer's recorded assertion (section 4), not by any
   automated row.
