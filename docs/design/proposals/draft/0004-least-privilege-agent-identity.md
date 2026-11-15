@@ -268,8 +268,9 @@ the environment policies and the `doctor` rows all take the name from there.
   source those checks build and test (that is the ordinary code `merge` mode merges).
 
   `doctor` and `repo-settings.py check` read `wave_mode` and **fail** when `CODEOWNERS` does
-  not cover the set its mode requires; the driver re-reads `CODEOWNERS` from `main` before
-  every merge and refuses to merge while it is short.
+  not cover the set its mode requires; the driver re-reads `CODEOWNERS` from the PR's own base
+  branch before every merge (GitHub applies the base branch's file, so `main` and each listed
+  target branch are checked separately) and refuses to merge while it is short.
 
   `merge` mode trusts the agent with ordinary code by definition: a non-final wave can change
   an existing test's assertions and reach `main` without review, to be seen only when the
@@ -279,7 +280,10 @@ the environment policies and the `doctor` rows all take the name from there.
 - **Driver branches**: a branch ruleset lets the App create and update only the namespaces
   the driver itself uses, and refuses every other branch name to it, except `main` and the
   listed target branches, which carry `main`'s pull-request ruleset instead (so `merge`
-  mode can merge a non-final PR into `release/1.x` the same way as into `main`). `repo-settings.py`
+  mode can merge a non-final PR into `release/1.x` the same way as into `main`). That
+  ruleset also restricts their **creation**, with the maintainer as the only bypass actor,
+  because the pull-request rule governs updates, not a branch's first push; and
+  `repo-settings.py` refuses to install the App while a listed target does not exist yet. `repo-settings.py`
   derives the list from the instance's configuration rather than hard-coding it: the prefixes
   of `[publisher].fix_branch_pattern` and `feature_branch_pattern` (defaults `fix/*`,
   `enhancement/*`), `pdca-integration/*` for stacked batches (force-pushes allowed there, as
@@ -340,8 +344,13 @@ the environment policies and the `doctor` rows all take the name from there.
   is no manual asset upload, because a manually uploaded asset would carry no attestation.
 
   `Contents: write` still lets the App create or publish a release on that tag in the
-  seconds before the workflow does, or touch a draft. That can be detected, not prevented:
-  the auditor fails on any release not published by `github-actions[bot]` and on any asset
+  seconds before the workflow does, or publish the workflow's draft early, before all its
+  assets are attached. The release API names only a release's creator (`author`), not who
+  published it, so publication by the workflow cannot be proven; what the auditor checks
+  instead is completeness and provenance. The release workflow builds every asset first and
+  attests a manifest (`SHA256SUMS`) that lists them all, and the auditor fails on a release
+  whose author is not `github-actions[bot]`, that lacks the attested manifest, whose assets
+  differ from the manifest in either direction, or that holds any asset
   without a provenance attestation from the release workflow at that tag, and consumers
   verify with `gh attestation verify --signer-workflow <release workflow>
   --source-ref refs/tags/<tag>`, which an asset the App supplied cannot pass. Because
@@ -426,11 +435,13 @@ review aid, never the gate.
   moves to the driver side, where the loop already holds a model key; the pilot decides.
 - **OIDC trusts environments, not refs.** Any job, on any branch, can request an OIDC token.
   So every cloud trust policy pins the subject to an environment
-  (`repo:<owner>/<repo>:environment:<name>`), never to a branch or to `ref:refs/heads/main`:
+  (`repo:<owner>/<repo>:environment:<name>`, or the immutable form with owner and
+  repository IDs that GitHub uses for some repositories), never to a branch or to `ref:refs/heads/main`:
   `pull_request_target`, `issue_comment` and `workflow_run` jobs also carry `main` as their
   ref, even when the App caused the event. A token from a job outside a protected
   environment then matches no policy. These policies live with the cloud provider, out of
-  the auditor's reach; `repo-settings.py` prints the subjects the maintainer must pin, and
+  the auditor's reach; `repo-settings.py` prints the subjects the maintainer must pin, taking the format from
+  what GitHub reports for the repository rather than building the name-only form, and
   the auditor checks the repository's OIDC subject template is the default, which includes
   the environment. Because GitHub cannot see them, installing the App requires the
   maintainer to record, per repository, every cloud that trusts it and that each of its
