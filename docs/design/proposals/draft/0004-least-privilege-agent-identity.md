@@ -414,10 +414,11 @@ review aid, never the gate.
   can re-run an earlier run whose ref was `main`, and the re-run passes the policy while
   executing that earlier commit's workflow. GitHub asks for approval again on every run
   and re-run of a job in a protected environment, and the request names the commit; the
-  maintainer approves only runs on the current `main` head or on the tag being released.
+  maintainer approves only runs on the current head of the line the run belongs to (`main`
+  or a listed target branch) or on the tag being released.
   Approval is also the **review boundary** for what the job executes: a privileged job
-  builds and runs the whole tree, not only its workflow file. In `stack` mode every `main`
-  commit passed the maintainer's review. In `merge` mode, App PRs before the final wave can
+  builds and runs the whole tree, not only its workflow file. In `stack` mode every commit on
+  `main` and on the listed target branches passed the maintainer's review. In `merge` mode, App PRs before the final wave can
   merge unreviewed source, and those merges sit in the final PR's base, not its
   diff. So the maintainer approves an environment run only after a **cumulative** review of
   `main` from the last commit they approved for a privileged run up to the commit asking
@@ -728,9 +729,13 @@ auditor key. The checks: first the same identity check as for the agent App, an
 unscoped token whose permissions must equal the auditor table of section 2 exactly (any write
 permission fails) and whose repositories must be exactly the configured ones. Then:
 the settings of sections 3 and 4: immutable releases are on, every release is immutable,
-published by `github-actions[bot]` and attested by the release workflow, and every release
-tag (`v*`) older than an hour has one (other tags need none, and any release the App put on
-one fails the publisher and attestation checks); no repository secret and no visible organization secret; every
+authored by `github-actions[bot]`, complete against its attested manifest and attested by
+the release workflow (section 3), and every release tag (`v*`) has a release within an hour
+of the time n8n **first saw** the tag. GitHub records no creation time for a ref and an
+annotated tag's date is whatever the client wrote, so n8n keeps its own first-seen time
+per tag from its few-minute poll; `doctor`, which has no such store, checks only that
+every `v*` tag n8n has listed as overdue has a release (other tags need none, and any
+release the App put on one fails the author, manifest and attestation checks); no repository secret and no visible organization secret; every
 environment, whether it holds a secret or not, has the deployment policy and, where
 section 4 requires it, the approval rule; the OIDC subject template is the default; "Allow GitHub Actions to create
 and approve pull requests" is off; no persistent self-hosted runner is available; and the
@@ -849,7 +854,9 @@ not protect, and pushing a branch whose old workflows run with their own `GITHUB
 scopes, which reach the residuals of section 4's table and known limits (Actions runs,
 discussions, packages, commit statuses, code-scanning data). None of that reaches `main`,
 a release tag, an environment secret or a cloud credential. In `merge` mode it also
-reaches "merge ordinary code into `main`" for non-final waves, as section 3 accepts;
+reaches "merge ordinary code into `main` or a listed target branch" for any PR that touches
+no governing file, the final wave's included, since GitHub does not enforce wave position
+(section 3);
 governing files still wait for the maintainer. The threat-model update of step 2 lists
 this reach in full.
 
