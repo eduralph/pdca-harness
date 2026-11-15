@@ -620,9 +620,13 @@ review aid, never the gate.
   not only the environment job itself: every action any of those jobs uses is
   pinned to a full commit SHA and every container image to a digest, since a tag such as
   `owner/action@v1` or `image:latest` can be moved after the maintainer reviewed and
-  approved; the auditor fails on any other reference in **any job** of such a workflow. What a pinned
-  action fetches at run time is beyond that check and is the review's to catch (known
-  limits).
+  approved; the auditor fails on any other reference in **any job** of such a workflow. Code fetched
+  at run time is pinned the same way: package installs in such a workflow use a lockfile
+  with hashes (`pip install --require-hashes`, `npm ci`, `cargo --locked`), tools are
+  downloaded only with a checksum the workflow states, and the auditor flags unpinned
+  installs it recognises. What a pinned action or a tool fetches beyond that is not
+  provable by a check and is the review's to catch; section 4's known limits record it as
+  an accepted path for secret exfiltration.
 - **Privileged jobs run only on events the maintainer controls.** A job in an environment
   may only be triggered by `push`, a tag push, `schedule` or `workflow_dispatch`, the last
   only without inputs and only when the maintainer started it: an old workflow with
@@ -757,8 +761,11 @@ review aid, never the gate.
 - **Old personal tokens are revoked by hand.** A maintainer token left in a file the loop
   user can read would bypass every App boundary. No API lists a user's tokens, so their
   revocation at migration rests on the maintainer (section 5).
-- **Run-time fetches of pinned actions.** An action pinned by SHA can still download code
-  when it runs; only the review of that action keeps such a fetch out of a privileged job.
+- **Run-time fetches in privileged workflows.** An action pinned by SHA, or a build tool,
+  can still download code when it runs, beyond what lockfiles and stated checksums cover.
+  A compromised upstream package reached that way runs with the job's secrets or OIDC
+  token; only the review of the workflow and its dependencies keeps such a fetch out, and
+  this is an accepted path for secret exfiltration.
 - **App keys are counted by hand.** No API lists an App's private keys, so that the key
   user holds the only one rests on the maintainer comparing fingerprints on the App
   settings page at setup and at each rotation (section 1).
@@ -1192,7 +1199,8 @@ behind a token minter that leaves cannot reach (section 5), rotated on a schedul
 on exposure; one App per owner bounds a stolen key to one owner. The auditor App's key is
 read-only and reveals configuration, secret names (not values), and through `Actions: read`
 the repositories' workflow logs and artifacts, which can carry secret-derived data GitHub's
-log masking misses, so it is handled with the same care as the agent key; it is held by the same key
+log masking misses, and through `Variables: read` the plaintext value of every repository
+and visible organization variable, a credential stored there by mistake included, so it is handled with the same care as the agent key; it is held by the same key
 user and, for the daily audit, in n8n. The threat models (`docs/design/architecture/14-threat-model.md`,
 `.oss-scanner/threat_model.md`) get the credential boundary, the CI secret rule and the
 protected paths in the same change that lands step 2.
