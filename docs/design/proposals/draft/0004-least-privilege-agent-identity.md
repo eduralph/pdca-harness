@@ -669,7 +669,15 @@ review aid, never the gate.
   on that host, and a runner group cannot be restricted by branch on a personal account.
   **GitHub-hosted runners only**: the runner APIs do not say whether a self-hosted runner
   registered as ephemeral, so the auditor could not tell an ephemeral one from a
-  persistent one, and it fails on any self-hosted runner at all.
+  persistent one, and it fails on any self-hosted runner at all. Listing runners is not
+  enough on its own, since a runner scale set (Actions Runner Controller) can idle at zero
+  runners and appear only once a matching job is queued. For an organization the auditor
+  therefore also lists the runner groups (`GET /orgs/{org}/actions/runner-groups`,
+  Organization: Self-hosted runners read) and fails on any group whose settings admit the
+  repository, through `allows_public_repositories` or its repository list, whether or
+  not it has runners right now. A scale set registered to the repository itself shows in
+  no group API, so `pdca setup-identity` asks the maintainer to confirm there is none, and
+  the known limits record that.
 
 **Known limits** (accepted; the pilot shows whether any needs more):
 
@@ -732,6 +740,8 @@ review aid, never the gate.
 - **App keys are counted by hand.** No API lists an App's private keys, so that the key
   user holds the only one rests on the maintainer comparing fingerprints on the App
   settings page at setup and at each rotation (section 1).
+- **Repository-level runner scale sets** idle at zero runners are invisible to the runner
+  APIs; that none exists rests on the maintainer's confirmation at setup.
 - **Enterprise runners.** The auditor cannot see enterprise runner groups; the rule that
   the App is not installed under an enterprise account rests on the maintainer's
   confirmation.
@@ -1054,7 +1064,7 @@ invitations count as granted: the check also lists the repository's invitations
 grant write or more, or ownership, since an invitee can accept in the middle of a run.
 Teams are excluded outright rather than inspected: a team's membership changes through
 team invitations and team maintainers, out of the repository's view, so the check also
-lists the repository's teams (`GET /repos/{repo}/teams`, Metadata: read) and fails on any
+lists the repository's teams (`GET /repos/{repo}/teams`, Administration: read) and fails on any
 team with write, maintain, admin or a custom role there; the maintainer's own access comes
 from ownership, not a team.
 
