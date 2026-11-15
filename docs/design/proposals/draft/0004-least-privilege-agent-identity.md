@@ -934,9 +934,13 @@ every unattended run, so no proof is cached between runs.
   checksum of each; a package update re-records it through the same step) in any of those
   fields, or any set-ID file appears that the manifest lacks, a stray one or a
   `chmod u+s` on `/bin/bash` being as good as root (`dpkg --verify` alone checks content,
-  not mode), when the host's polkit rule files
-  (`/etc/polkit-1/rules.d`, `/usr/share/polkit-1/rules.d`) differ from a root-owned
-  manifest of approved files and checksums the maintainer records at setup, since a rule is
+  not mode), when the host's polkit configuration differs from a
+  root-owned manifest of approved files and checksums the maintainer records at setup:
+  every authorization source polkit reads, the JavaScript rules (`/etc/polkit-1/rules.d`,
+  `/usr/share/polkit-1/rules.d`), the action definitions whose defaults can allow without
+  authentication (`/usr/share/polkit-1/actions/*.policy`) and, where the legacy backend is
+  installed, `localauthority` (`*.pkla`), and an authorization source outside that list
+  fails the check, since a rule is
   arbitrary JavaScript and no probe can show what it grants, or when an
   executable it can run carries any file capability outside a short allowlist (`cap_net_raw`, `cap_net_bind_service`): a list of dangerous
   ones would always miss one (`cap_setuid`, `cap_setfcap`, `cap_sys_module` each lead to
