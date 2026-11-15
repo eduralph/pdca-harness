@@ -525,7 +525,9 @@ review aid, never the gate.
   trust or deploys Pages, has a deployment policy that admits only `main` and the
   listed target branches (`[publisher].target_branches`, protected like `main`, section 3)
   or, for `release`, only `v*` tags, so a job on a driver branch gets nothing however its file is
-  written. Every environment also **requires the maintainer's approval**, with no exception. A deployment policy alone is not enough: any
+  written. Every environment also **requires the maintainer's approval**, with no exception. Each environment also sets `can_admins_bypass: false`: by default GitHub lets an
+  administrator start waiting jobs past the protection rules, which would release secrets
+  and OIDC tokens with no approval recorded and no cumulative review. A deployment policy alone is not enough: any
   workflow token with `actions: write`, including one from an old commit on a driver branch,
   can re-run an earlier run whose ref was `main`, and the re-run passes the policy while
   executing that earlier commit's workflow. GitHub asks for approval again on every run
@@ -1006,7 +1008,7 @@ allowlist the maintainer records (name and a hash of the value, each attested as
 credential), so a new or changed variable fails until the maintainer has looked at it;
 pattern matching alone would miss an opaque token or a plain password; every
 environment, whether it holds a secret or not, has the deployment policy and, where
-section 4 requires it, the approval rule. The policy list API returns a policy's name but
+section 4 requires it, the approval rule, with `can_admins_bypass` false. The policy list API returns a policy's name but
 not whether it matches branches or tags, so `repo-settings.py` records the IDs of the
 policies it created (with their type) and the auditor fails when an environment's policy
 IDs differ from that record: a `v*` branch policy put in place of the `v*` tag policy has
