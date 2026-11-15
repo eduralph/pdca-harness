@@ -68,9 +68,21 @@ repositories of that owner's instances and targets.
   own environment: git gets it from a credential helper, invoked with
   `-c credential.helper= -c credential.helper=<driver helper>` so that the empty entry resets
   any system, global or repository helper that could otherwise store the token, and each
-  `gh` call gets `GH_TOKEN` in that one subprocess's environment only. Every leaf starts with an environment scrubbed
+  `gh` call gets `GH_TOKEN` in that one subprocess's environment only, with `GH_CONFIG_DIR`
+  set to an empty directory so no stored login can stand in for it.
+
+  **Authentication never falls back.** Every driver git call runs with
+  `GIT_TERMINAL_PROMPT=0`, with `GIT_ASKPASS` and `SSH_ASKPASS` removed from its environment
+  and `-c core.askPass= -c credential.interactive=false`, so git has no prompt or askpass
+  program to try after the helper. When the minter fails or refuses, the helper answers
+  `quit=1`, which ends git's credential lookup, and the call fails; the driver stops the
+  run rather than retrying with anything else. Remotes are plain `https://` URLs (section
+  5), so no SSH path exists to fall back to. Every leaf starts with an environment scrubbed
   of GitHub and git credentials (`GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`,
-  `GITHUB_ENTERPRISE_TOKEN`, `GIT_ASKPASS`, `GIT_CONFIG_*`, the minter socket's path), while
+  `GITHUB_ENTERPRISE_TOKEN`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_CONFIG_*`, the minter
+  socket's path), with `GH_CONFIG_DIR` pinned to an empty, read-only directory (so neither
+  `~/.config/gh`, an `XDG_CONFIG_HOME` elsewhere nor a profile setting can supply a stored
+  login) and `GIT_TERMINAL_PROMPT=0`, while
   the model provider's key it needs (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) stays, in its own PID namespace
   so it cannot read other processes' environments (section 5; ADR-0007's sandbox rules
   stand).
@@ -146,7 +158,7 @@ the *names* of their secrets, never the values:
 | Organization: Self-hosted runners | read | organization runners available to the repository (getwyrd, Ralphovi) |
 | Secrets | read | names of repository secrets, and of organization secrets visible to the repository (`GET /repos/{repo}/actions/organization-secrets`) |
 | Environments | read | names of environment secrets |
-| Actions | read | environments and their protection rules |
+| Actions | read | environments and their protection rules; waiting runs, pending deployments and their approvals (the approval baseline of section 4) |
 | Contents | read | workflow files for the audit of section 4, tags and releases |
 | Attestations | read | the provenance attestations of release assets (`gh attestation verify`) |
 | Discussions | read | the daily discussions snapshot of section 4 |
@@ -328,11 +340,24 @@ review aid, never the gate.
   diff. So the maintainer approves an environment run only after a **cumulative** review of
   `main` from the last commit they approved for a privileged run up to the commit asking
   for approval, and never on a head that holds App merges after it. The baseline must come
-  from outside the loop user, which may be compromised: the last approved commit is taken
-  from GitHub's own deployment history for the environment (the latest deployment the
-  maintainer approved), and the n8n auditor, which runs outside the loop user, sends the
-  range to review (`compare/<last-approved>...<sha>`) through ntfy when an approval is
-  pending. The maintainer reviews against that range, never one `pdca` prints, so the review
+  from outside both the loop user, which may be compromised, and GitHub's run and
+  deployment records, which an old workflow with `actions: write` or `deployments: write`
+  can delete or inactivate. So the **n8n auditor keeps it in its own store** (an n8n data
+  table, per repository and environment), which neither the loop user nor any GitHub token
+  can write:
+
+  - The maintainer sets the first baseline when the App is installed.
+  - n8n polls for waiting runs every few minutes (`GET …/actions/runs?status=waiting` and
+    `…/pending_deployments`, Actions: read), and for each one sends the range to review,
+    `compare/<baseline>...<sha>`, through ntfy.
+  - Once GitHub shows the run approved by the maintainer (`GET …/actions/runs/{id}/approvals`),
+    n8n advances the baseline to that commit. It only moves forward along `main`'s history: a
+    commit that is not a descendant of the stored baseline is not taken.
+  - Each poll also compares the store with GitHub's approval and deployment history. A
+    recorded approval that GitHub no longer shows, or an approved run n8n never saw, is a
+    **discontinuity**: n8n alerts, keeps its own baseline, and marks the environment so that
+    every later ntfy notice for it says to withhold approval until the maintainer has looked
+    and reset the baseline by hand. The maintainer reviews against that range, never one `pdca` prints, so the review
   covers the whole range, not the final PR alone.
   This costs ADR-0017's issue triage its automatic run: it either waits for approval or
   moves to the driver side, where the loop already holds a model key; the pilot decides.
@@ -426,7 +451,11 @@ agent that GitHub accepts (`ssh -T git@github.com` must be refused), no `url.*.i
 credential in it. Otherwise a leaf or a compromised gate could skip the App and use an
 older, broader personal token or deploy key. Migration removes them (existing loop
 users hold the ADR-0006 personal token today), and `doctor` fails on any it finds, checking
-from a probe leaf and a probe gate as well as from the driver.
+from a probe leaf and a probe gate as well as from the driver. Because `gh` can also keep a
+login under `GH_CONFIG_DIR`, `XDG_CONFIG_HOME` or the system keyring, `doctor` checks the
+effective store rather than one file: `gh auth status`, run as the loop user with its own
+profile's environment, must report no login, and the loop user has no keyring daemon
+holding one (no Secret Service item for `gh:github.com`).
 
 The App keys do **not** live with the loop user. The model leaves run as that user, and a
 sandbox that limits writes and network (Codex `workspace-write`, for one) does not hide
