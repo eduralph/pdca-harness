@@ -103,9 +103,11 @@ repositories of that owner's instances and targets.
   `noreply.github.com` bot address). The template's `dco` check requires a `Signed-off-by`
   whose email matches the commit author's, the rule common DCO checkers apply, and rejects
   one that names a bot, so a commit signed off only by a bot cannot merge. Dependabot's PRs
-  are the one exception: the check accepts a commit with no sign-off when its author and
-  committer are Dependabot and the PR was opened by the Dependabot App (an authenticated
-  fact, unlike the commit fields); the maintainer's merge is the human certification there.
+  are the one exception: when the PR was opened by the Dependabot App (an authenticated
+  fact, unlike the commit fields), the check accepts commits authored by `dependabot[bot]`
+  with whatever committer and sign-off they carry (today `GitHub <noreply@github.com>` and
+  `Signed-off-by: dependabot[bot] <support@github.com>`); the maintainer's merge is the
+  human certification there. A bot sign-off is accepted in that case and in no other.
   The committer field
   and the `Assisted-by` trailer are **advisory**: git identities are unsigned strings that
   whoever pushes can set, so a stolen App token could write any name and drop the trailer.
@@ -324,9 +326,13 @@ review aid, never the gate.
   merge unreviewed source, and those merges sit in the final PR's base, not its
   diff. So the maintainer approves an environment run only after a **cumulative** review of
   `main` from the last commit they approved for a privileged run up to the commit asking
-  for approval, and never on a head that holds App merges after it. `pdca` records the last
-  approved commit and prints the range to review (`compare/<last-approved>...<sha>`), so the
-  review covers the whole range, not the final PR alone.
+  for approval, and never on a head that holds App merges after it. The baseline must come
+  from outside the loop user, which may be compromised: the last approved commit is taken
+  from GitHub's own deployment history for the environment (the latest deployment the
+  maintainer approved), and the n8n auditor, which runs outside the loop user, sends the
+  range to review (`compare/<last-approved>...<sha>`) through ntfy when an approval is
+  pending. The maintainer reviews against that range, never one `pdca` prints, so the review
+  covers the whole range, not the final PR alone.
   This costs ADR-0017's issue triage its automatic run: it either waits for approval or
   moves to the driver side, where the loop already holds a model key; the pilot decides.
 - **OIDC trusts environments, not refs.** Any job, on any branch, can request an OIDC token.
