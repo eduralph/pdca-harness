@@ -1166,13 +1166,7 @@ agent App, and the row fails closed if it is not.
 3. **Roll out** to the other instances through `copier update`, one owner at a time.
 4. **Before acceptance**, the pilot records where ADR-0017's issue triage runs (approval
    per run in its environment, or on the driver side) and the proposal is updated with it.
-5. **Before acceptance**, `AGENTS.md`'s STOP convention ("no code path marks a PR ready
-   or merges it, except the live tool") is reconciled with `merge` mode, which exists today
-   as an opt-in instance setting (`template/pdca.toml.jinja`) and which this proposal fences
-   rather than introduces: either the convention names `merge` mode in instances as its
-   second exception, or `merge` mode is removed. The maintainer decides; until then this
-   proposal's `merge`-mode rules describe how it would be fenced, not an endorsement of it.
-6. An ADR records the decision; it supersedes ADR-0006's credential section in
+5. An ADR records the decision; it supersedes ADR-0006's credential section in
    client-rust-pdca and ADR-0021 §4's deploy key.
 
 ## Security impact
@@ -1228,6 +1222,15 @@ PR check and a post-merge job on `main` in an environment, or loses the secret; 
 check is never left depending on an environment.
 
 ## Decisions taken while drafting
+
+- **`merge` mode and `AGENTS.md`** (decided 15.11.2026): `merge` mode works differently from
+  the STOP discipline by nature, since its driver merges non-final waves itself, and it
+  stays. Switching it on is therefore not a configuration change alone: whoever sets
+  `wave_mode = "merge"` in an instance rewrites that instance's `AGENTS.md` for it, so
+  that the written rules describe what the loop actually does. The harness repository's
+  own STOP convention is unchanged; this proposal fences `merge` mode where it is used
+  and does not introduce it. `doctor` fails when `wave_mode = "merge"` and the instance's
+  `AGENTS.md` has no `## Merge mode` section, the marker that the rewrite happened.
 
 - **App approvals** (was open): the review rule is code-owner review, which an App cannot
   satisfy, so whether GitHub counts an App's approval no longer matters. The App keeps the
