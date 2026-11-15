@@ -673,7 +673,7 @@ review aid, never the gate.
   | `id-token` | trust policies pinned to fenced environments | none |
   | `attestations` | consumers verify `--source-ref refs/tags/<tag>`, the signer workflow and a `push` trigger | an attestation from a branch run, which that check rejects; deleting a release's attestations, which the auditor reports as missing. Rebuilding may not reproduce the same bytes, so the release workflow has a second, approval-gated job that downloads the immutable release's existing assets, checks them against the release's attested `SHA256SUMS` manifest (whose own attestation must still exist) and attests those exact bytes again; if the manifest's attestation is gone too, the release is retired (marked in its notes, superseded by the next version) and recorded, and the auditor stops failing on it |
   | `deployments` | environment deployment policies | deployment records without access |
-  | `pages` | Pages is published from a **branch** (`main`, `/docs` or another protected branch), not by an Actions deployment: for an Actions-based site the `github-pages` environment is optional, so an old workflow without it could deploy. The auditor fails on a repository whose Pages build type is `workflow`, unless the maintainer has recorded that repository as an accepted exception | for a recorded exception, a site deployment from an old workflow (known limit) |
+  | `pages` | Pages is published from a **branch** (`main`, `/docs` or another protected branch), not by an Actions deployment: for an Actions-based site the `github-pages` environment is optional, so an old workflow without it could deploy. The auditor fails on a repository whose Pages build type is `workflow`, unless the maintainer has recorded that repository as an accepted exception | a workflow token with `pages: write` may be able to change the Pages settings themselves (switch the build type or point the source at a driver branch) and so publish a changed site; the auditor (Pages: read) reports any change of build type or source on its next poll, and for a recorded exception, a deployment from an old workflow; both are site-integrity residuals with no credential behind them (known limits) |
   | `actions` | none available | known limit: disable workflows, cancel or delete runs and artifacts |
   | `statuses`, `checks` | none available | known limit: fake status checks |
   | `packages` | none available | known limit |
@@ -769,6 +769,9 @@ review aid, never the gate.
 - **App keys are counted by hand.** No API lists an App's private keys, so that the key
   user holds the only one rests on the maintainer comparing fingerprints on the App
   settings page at setup and at each rotation (section 1).
+- **Pages settings and content.** An old workflow with `pages: write` may change where a
+  site is built from and publish something else; Pages holds no credential, the auditor
+  detects the settings change, and the maintainer restores the site.
 - **Repository-level runner scale sets** idle at zero runners are invisible to the runner
   APIs; that none exists rests on the maintainer's confirmation at setup.
 - **Enterprise runners.** The auditor cannot see enterprise runner groups; the rule that
@@ -899,6 +902,14 @@ every unattended run, so no proof is cached between runs.
   installed on by mistake shows up here. The installation's `repository_selection` must be
   `selected`: an "All repositories" installation that happens to cover exactly the
   configured set today would gain every repository the owner creates tomorrow.
+- **Where the records live.** Everything the checks compare against (the variable
+  allowlist, the deployment-policy IDs, the grandfathered releases, the host manifests,
+  the owner-wide repository set, the per-loop allowlists and the key and App-manager
+  attestation) is stored owned by the key user or by root, outside every directory the
+  loop user can write; `repo-settings.py` and `pdca setup-identity` write them from the
+  maintainer's login through `sudo -u <owner>-keys` (root for the host manifests), never as
+  the loop user, and the minter refuses to run while any of them is writable by the loop
+  user.
 - **Minter allowlist**: the minter returns its effective per-loop allowlist, and the row
   fails unless it equals this loop's configured repositories exactly and is a subset of
   the owner-wide set; the installation covers every loop of the owner, but each loop's
@@ -967,9 +978,11 @@ every unattended run, so no proof is cached between runs.
   working directories and the shared temporary directories, so a group-writable
   `/usr/local/bin/backup` fails directly. And every job that runs as root or the key user
   (systemd units and timers, cron entries, login scripts) is on a root-owned manifest the
-  maintainer records at setup with each definition's checksum, having reviewed that none
+  maintainer records at setup with the checksum of each definition and of every executable
+  and script it names, having reviewed that none
   reads from the loop user's directories; a new or changed one fails until the
-  maintainer reviews and records it. The loop host is dedicated, so that list stays short.
+  maintainer reviews and records it. The loop host is dedicated, so that list stays short. What those
+  scripts load beyond the files they name is the maintainer's review, recorded with them.
 
 `doctor` itself stays read-only, as it is today. The one check that has to write runs
 separately, when an App is installed and whenever its permissions change, against a
