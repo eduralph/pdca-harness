@@ -97,8 +97,15 @@ repositories of that owner's instances and targets.
   removed (git's HTTP layer reads `$HOME/.netrc` on its own, apart from any helper, so a
   `.netrc` a gate writes after `doctor` ran is never seen), pushes to an explicit `https://github.com/<owner>/<repo>.git` URL rather than a
   named remote, and is preceded by a check of the checkout's repository configuration that
-  refuses any `url.*`, `http.*`, `credential.*`, `core.askPass`, `core.sshCommand` or
-  `include*` entry. The helper is the last line: it runs with `credential.useHttpPath=true`
+  refuses any `url.*`, `http.*`, `credential.*`, `core.askPass`, `core.sshCommand`,
+  `core.hooksPath`, `core.fsmonitor`, `filter.*`, `diff.*.textconv`, `diff.external`,
+  `merge.*.driver`, `gpg.*` or `include*` entry, since each names a program git would run.
+  Hooks are taken out of the checkout's hands too: a leaf that can write `.git/config` can
+  also drop an executable into `.git/hooks/`, and the driver's git would run it outside the
+  leaf's namespace, next to the minter. So every driver git call sets `core.hooksPath` to a
+  root-owned directory holding only the hooks the driver runs (the secret guard's
+  pre-commit, installed there from a reviewed copy), and the checkout's own hooks
+  directory is never used. The helper is the last line: it runs with `credential.useHttpPath=true`
   and hands out a token only for host `github.com` and a path in the loop's repository
   allowlist, answering `quit=1` to anything else, so a redirect that slips past the check
   fails without the token leaving the machine. Every leaf starts with an environment scrubbed
@@ -140,12 +147,16 @@ repositories of that owner's instances and targets.
   author or sign-off, and the `dco` check would reject it. A local merge of the base would
   not work either: when the base gained a workflow change, pushing that merge commit
   counts as a workflow edit, which the App's token may not make. The driver therefore
-  **rebases** the PR branch onto the new base: each commit is re-created with its author,
-  trailers and the bot as committer, none of them changes a workflow file relative to its
-  new parent, and the driver pushes with `--force-with-lease` to the commit it rebased from.
-  The driver namespaces allow force-pushes for this, as `pdca-integration/*` already does;
-  the push dismisses stale approvals as usual. A rebase that conflicts is aborted and the PR
-  reported, never pushed half-done. `gh pr update-branch` is no longer used.
+  **rebases** the PR branch onto the new base when the base gained no workflow change since
+  the branch's merge base: each commit is re-created with its author, trailers and the bot
+  as committer, and the driver pushes with `--force-with-lease` to the commit it rebased
+  from. The driver namespaces allow force-pushes for this, as `pdca-integration/*` already
+  does; the push dismisses stale approvals as usual. When the base **did** gain a workflow
+  change, GitHub refuses even the rebased push to a token without the Workflows permission,
+  so the driver does not try: it reports the PR as needing the maintainer, who refreshes it
+  with GitHub's "Update branch" in rebase mode, which keeps each commit's author and
+  `Signed-off-by` and so passes the `dco` check. A rebase that conflicts is aborted and the
+  PR reported, never pushed half-done. `gh pr update-branch` is no longer used.
 
   `doctor` fails when `signoff` is missing or names a bot (a `[bot]` name or a
   `noreply.github.com` bot address). The template's `dco` check requires a `Signed-off-by`
@@ -541,6 +552,11 @@ review aid, never the gate.
   nothing itself: the alert carries the saved content and the maintainer reposts it. Content created or
   edited and then deleted between two polls was never copied and is lost; the window is
   the poll interval, and closing it would need webhook events kept outside GitHub.
+- **The auditor can be switched off with its own key.** Any App's JWT can suspend or
+  delete its own installation, so a stolen auditor key can stop the audit. Both sides fail
+  closed on that: `doctor`'s installation check fails when the auditor installation is
+  missing or suspended, and n8n alerts through ntfy whenever a run cannot mint its token or
+  finish, so silence never reads as a pass.
 - **Enterprise runners.** The auditor cannot see enterprise runner groups; the rule that
   the App is not installed under an enterprise account rests on the maintainer's
   confirmation.
@@ -607,8 +623,9 @@ As defence in depth, model leaves do not reach the minter at all: every leaf run
 mount and PID namespace (bubblewrap, as Claude Code's sandbox already uses) in which the
 socket's directory, the key user's files and the driver's processes do not exist. `doctor`
 checks this by starting a probe leaf the way the driver starts real ones and failing if that
-leaf can see the socket or any other process. Under the backends of the bug-track runner, this minter is the Podman secret
-or Secret Manager holder of decision Q4. Attended runs from
+leaf can see the socket or any other process. Under the backends of the bug-track runner the same split holds (decision Q4): the
+key sits with a minter running under its own identity, and the driver receives only
+tokens from it. Attended runs from
 the maintainer's account stay allowed and `doctor` keeps warning about them.
 
 ### 6. Proof in `doctor`, not trust
@@ -859,10 +876,13 @@ check is never left depending on an environment.
 - **Immutable releases** (was open): available on every plan. Switched on for all 25 public,
   non-fork, non-archived repositories of getwyrd, Ralphovi and eduralph on 14.11.2026;
   `repo-settings.py` keeps them on. Editable notes and deletable releases are accepted (section 3).
-- **App key location for the bug-track driver** (was open): the key goes only to the driver,
-  never into the job VM, and is stored by the driver's backend. On a local host it is a
-  Podman secret (or systemd credential) readable only by the driver's container; on Google
-  Cloud it is a Secret Manager secret readable only by the driver's service account. Once a
+- **App key location for the bug-track driver** (was open, revised with section 5): the key
+  never goes into the job VM, and not to the driver either: as on a loop host, it is held by
+  a minter running under its own identity, and the driver receives only repository-scoped,
+  permission-scoped one-hour tokens from it. On a local host the minter is its own
+  container (or systemd service) that alone can read the key as a Podman secret or systemd
+  credential; on Google Cloud it runs under its own service account, the only one that can
+  read the key's Secret Manager secret. Once a
   model-key gateway exists, a shared token broker that hands the driver short-lived
   installation tokens replaces both, so no backend holds the key. ADR-0021 is to be
   superseded by a backend-neutral decision (a disposable job VM on a dedicated host); this
