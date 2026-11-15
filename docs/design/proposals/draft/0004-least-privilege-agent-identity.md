@@ -290,7 +290,7 @@ key is treated as a confidentiality incident, not a harmless one (see the securi
 | Organization: Members | read | the organization's owners (`GET /orgs/{org}/members?role=admin`), for the sole-owner check of section 6 |
 | Secrets | read | names of repository secrets, and of organization secrets visible to the repository (`GET /repos/{repo}/actions/organization-secrets`) |
 | Environments | read | names of environment secrets |
-| Variables | read | repository Actions variables and organization variables visible to the repository, scanned for credentials |
+| Variables | read | repository Actions variables and organization variables visible to the repository, compared with the maintainer's allowlist |
 | Dependabot secrets | read | names of the repository's Dependabot secrets, and of organization Dependabot secrets visible to it |
 | Organization: Organization dependabot secrets | read | which organization Dependabot secrets are visible to the repository (getwyrd, Ralphovi) |
 | Actions | read | environments and their protection rules; waiting runs, pending deployments and their approvals (the approval baseline of section 4) |
@@ -1001,8 +1001,10 @@ re-runs), which in `merge` mode can run agent-merged source before any review, s
 registry credentials for Dependabot are not used on repositories the App is installed on;
 and no credential in an Actions **variable**, since variables are readable by every
 workflow run, an old one on a driver branch included: the auditor reads every repository
-and visible organization variable (Variables: read) and fails when a value matches the
-secret guard's gitleaks rules; every
+and visible organization variable (Variables: read) and fails on any that is not on an
+allowlist the maintainer records (name and a hash of the value, each attested as not a
+credential), so a new or changed variable fails until the maintainer has looked at it;
+pattern matching alone would miss an opaque token or a plain password; every
 environment, whether it holds a secret or not, has the deployment policy and, where
 section 4 requires it, the approval rule. The policy list API returns a policy's name but
 not whether it matches branches or tags, so `repo-settings.py` records the IDs of the
