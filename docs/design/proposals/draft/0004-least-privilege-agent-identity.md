@@ -324,7 +324,12 @@ the environment policies and the `doctor` rows all take the name from there.
   the files under `agents/**`, it collects every repository path they name, then
   every path *those* files name, until nothing new appears, and fails when any file in that
   closure is not covered by `CODEOWNERS`. A path counts as named when it appears literally,
-  as a Markdown link or a backticked repository path; that is the only reference syntax
+  as a Markdown link or a backticked repository path. Symlinks are followed too: a governed
+  path that is a symlink, at any level of its directories, puts its resolved in-repository
+  target into the closure, recursively, and `doctor` fails when that target is not covered
+  by `CODEOWNERS` (a symlink pointing outside the repository fails outright), since
+  otherwise a PR could change the governing content through the target without touching
+  any governed path. Literal names are the only reference syntax
   instruction files may use. An indirect reference (a path held in a variable or an
   environment setting, or built at run time) cannot be followed, so instruction files must
   not use one: they are themselves governing files, so adding one needs the maintainer's
@@ -612,6 +617,13 @@ review aid, never the gate.
   workflow can ready and merge such a PR itself, the final wave's included; governing files
   still wait for the maintainer. This is the same reach `merge` mode already gives the App,
   and the cumulative review before any privileged run (section 4) is what catches it.
+- **Privileged runs' logs and artifacts are readable.** Any workflow that requests
+  `actions: read`, an old one on a driver branch included, can download the logs and
+  artifacts of an approved environment run. So privileged jobs upload no artifacts (the
+  auditor flags `upload-artifact` in an environment job), register every credential they
+  derive with `::add-mask::` before use, and print no secret-derived data; what masking
+  misses in a log stays readable, and the review that precedes approval is where a job
+  that leaks is caught.
 - **Cache poisoning of privileged jobs.** Cache restore uses the runner's token, so no
   permission keeps an environment job from restoring a cache an unprivileged `main` run
   wrote. Only the maintainer's review of the job keeps it out; the auditor's pattern scan
@@ -1008,7 +1020,9 @@ editing or deleting releases the immutability rule and the auditor do
 not protect, and pushing a branch whose old workflows run with their own `GITHUB_TOKEN`
 scopes, which reach the residuals of section 4's table and known limits (Actions runs,
 discussions, packages, commit statuses, code-scanning data). None of that reaches `main`,
-a release tag, an environment secret or a cloud credential. In `merge` mode it also
+a release tag, an environment secret or a cloud credential directly; what a privileged run
+leaves behind is the exception, as such a workflow can request `actions: read` and read
+that run's logs and artifacts (section 4's known limits). In `merge` mode it also
 reaches "merge ordinary code into `main` or a listed target branch" for any PR that touches
 no governing file, the final wave's included, since GitHub does not enforce wave position
 (section 3);
