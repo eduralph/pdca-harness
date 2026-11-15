@@ -349,7 +349,9 @@ the environment policies and the `doctor` rows all take the name from there.
   hooks the leaves and gates run with (`agents/**`, `engine/**`, `process/**`, `templates/**`),
   every instruction file an agent tool reads at any depth, including the ones that take
   precedence over `AGENTS.md` (`**/AGENTS*.md`, which covers `AGENTS.override.md`,
-  `**/CLAUDE*.md`, `**/GEMINI*.md`, `**/.claude/**`, `**/.codex/**`, `**/.gemini/**`, and
+  `**/CLAUDE*.md`, `**/GEMINI*.md`, `**/.claude/**`, `**/.codex/**`, `**/.gemini/**`, the
+  directory entries themselves (`**/.claude`, `**/.codex`, `**/.gemini`, so adding one as a
+  symlink is a governed change too), and
   the instruction and settings paths of every other family `families.py` configures, which
   `doctor` takes from that registry so a new family cannot be missed), and every document those prompts tell the agents to obey (`docs/**` and
   `PCDA/**` in an instance, which today covers `docs/INTEGRATION.md`, `docs/principles.md`,
@@ -376,7 +378,8 @@ the environment policies and the `doctor` rows all take the name from there.
   is the maintainer's to find; section 4's known limits record this. In a
   target repository the set is its `.github/**`, `CODEOWNERS`, the same instruction files
   at any depth (`**/AGENTS*.md`, `**/CLAUDE*.md`, `**/GEMINI*.md`, `**/.claude/**`,
-  `**/.codex/**`, `**/.gemini/**`) with the
+  `**/.codex/**`, `**/.gemini/**`, and the entries `**/.claude`, `**/.codex`,
+  `**/.gemini` themselves) with the
   transitive closure of the files they name, and the implementation of its required checks:
   CI configuration, build and test-runner configuration and scripts, not the application
   source those checks build and test (that is the ordinary code `merge` mode merges).
@@ -384,7 +387,10 @@ the environment policies and the `doctor` rows all take the name from there.
   `doctor` and `repo-settings.py check` read `wave_mode` and **fail** when `CODEOWNERS` does
   not cover the set its mode requires; the driver re-reads `CODEOWNERS` from the PR's own base
   branch before every merge (GitHub applies the base branch's file, so `main` and each listed
-  target branch are checked separately) and refuses to merge while it is short. Coverage is judged on the file GitHub actually
+  target branch are checked separately) and refuses to merge while it is short. It also inspects the PR's tree before merging and
+  refuses, in `merge` mode, any PR that adds or changes a symlink anywhere: a new symlink
+  can turn an ordinary directory into a governed one, which `CODEOWNERS` patterns written
+  for the target cannot see, so such a PR waits for the maintainer. Coverage is judged on the file GitHub actually
   uses, not on a local parse: the check takes the first of `.github/CODEOWNERS`,
   `CODEOWNERS` and `docs/CODEOWNERS` that exists on that branch (GitHub's order), requires
   it to be under GitHub's 3 MB limit, and requires
@@ -809,9 +815,12 @@ user could hold has write access, because the auditor fails on any deploy key wi
 (section 6), and no key on the maintainer's GitHub account is reachable
 by the loop user. `pdca setup-identity` lists the account's SSH keys (`GET /user/keys`,
 with the maintainer's login) and asks, for each, where its private half lives; it refuses
-to continue until every key whose private half is on the loop host is either removed from
-the account or kept in a home directory the loop user cannot read, and no agent socket of
-the maintainer's is reachable from the loop user, both of which `doctor` re-checks as the
+to continue until every key whose private half **is or ever was** on the loop host is
+removed from the account (rotated: a new key made elsewhere replaces it), since a
+forgotten backup copy somewhere the loop user can read cannot be ruled out by any check;
+in practice the loop runs on a host where the maintainer's own keys never were, or the
+maintainer rotates those keys once. No agent socket of the maintainer's may be reachable
+from the loop user either, both of which `doctor` re-checks as the
 loop user (opening the maintainer's `~/.ssh` and any `SSH_AUTH_SOCK` must fail). Keys of
 the old setup are removed from the account outright, no `url.*.insteadOf` or
 `pushInsteadOf` rewrite, and every remote a plain `https://github.com/` URL with no
