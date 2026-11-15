@@ -79,7 +79,19 @@ repositories of that owner's instances and targets.
   program to try after the helper. When the minter fails or refuses, the helper answers
   `quit=1`, which ends git's credential lookup, and the call fails; the driver stops the
   run rather than retrying with anything else. Remotes are plain `https://` URLs (section
-  5), so no SSH path exists to fall back to. Every leaf starts with an environment scrubbed
+  5), so no SSH path exists to fall back to.
+
+  **Git configuration is not trusted either.** A leaf can write the checkout's `.git/config`
+  or the loop user's `~/.gitconfig` at any time after `doctor` ran, for example a
+  `url.*.insteadOf` that redirects the push to another host. So every authenticated driver
+  git call runs with `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL` set to a driver-owned
+  file, pushes to an explicit `https://github.com/<owner>/<repo>.git` URL rather than a
+  named remote, and is preceded by a check of the checkout's repository configuration that
+  refuses any `url.*`, `http.*`, `credential.*`, `core.askPass`, `core.sshCommand` or
+  `include*` entry. The helper is the last line: it runs with `credential.useHttpPath=true`
+  and hands out a token only for host `github.com` and a path in the loop's repository
+  allowlist, answering `quit=1` to anything else, so a redirect that slips past the check
+  fails without the token leaving the machine. Every leaf starts with an environment scrubbed
   of GitHub and git credentials (`GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`,
   `GITHUB_ENTERPRISE_TOKEN`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_CONFIG_*`, the minter
   socket's path), with `GH_CONFIG_DIR` pinned to an empty, read-only directory (so neither
@@ -247,8 +259,10 @@ the environment policies and the `doctor` rows all take the name from there.
   `main` nor another protected name; `repo-settings.py` refuses to apply a ruleset otherwise,
   since an empty prefix would open every branch name to the App. A brief's `Onto branch`
   (stacking on an existing PR, #54) is published by the App only when that head lies in one
-  of these namespaces on a repository the App is installed on; any other head, such as
-  `origin/feature/x` or a branch on a third remote, is refused by the driver before it
+  of these namespaces on a repository the App is installed on **and** its open PR was
+  opened by this App (the PR's author, an authenticated fact), so the App never pushes to a
+  PR a human or another bot opened and the attribution rule of section 1 holds; any other head, such as
+  `origin/feature/x`, a branch on a third remote or another author's PR, is refused by the driver before it
   writes anything, with a message to publish that fix from the maintainer's login, so the
   path fails closed instead of meeting a ruleset rejection mid-publish. `doctor` **fails** when a
   configured pattern falls outside the ruleset, so a renamed pattern blocks the run before a
@@ -437,9 +451,13 @@ review aid, never the gate.
 - **Discussions.** Discussions stay enabled because the project's discussions happen there,
   and no setting stops an old workflow from requesting `discussions: write`. The accepted
   residual is that such a run can edit or delete discussions and comments. It is detected
-  and recoverable, not prevented: the n8n auditor snapshots every discussion and comment
-  daily (Discussions: read) into its own store, alerts through ntfy on any edit or deletion
-  made by `github-actions[bot]` or the agent App, and the snapshot restores what was lost.
+  and mostly recoverable, not prevented: the n8n auditor keeps a copy of every discussion
+  and comment in its own store (Discussions: read), fetching what changed since its last
+  poll (ordered by `updatedAt`) on the same few-minute schedule as the approval poll, with a
+  full snapshot daily; it alerts through ntfy on any edit or deletion made by
+  `github-actions[bot]` or the agent App, and restores from its copy. Content created or
+  edited and then deleted between two polls was never copied and is lost; the window is
+  the poll interval, and closing it would need webhook events kept outside GitHub.
 - **Cloud-side OIDC policies.** Whether a cloud still trusts a ref-based or wildcard
   subject is checked only by the maintainer's recorded assertion (section 4), not by any
   automated row.
