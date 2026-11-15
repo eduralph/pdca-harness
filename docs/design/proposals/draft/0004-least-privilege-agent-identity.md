@@ -323,7 +323,10 @@ the environment policies and the `doctor` rows all take the name from there.
   `doctor` follows references transitively: starting from every instruction file above and
   the files under `agents/**`, it collects every repository path they name, then
   every path *those* files name, until nothing new appears, and fails when any file in that
-  closure is not covered by `CODEOWNERS`. A path counts as named when it appears literally,
+  closure is not covered by `CODEOWNERS`. `CODEOWNERS` itself, and every directory on its
+  path, must be a regular tree entry, never a symlink: GitHub reads the file at its fixed
+  path without following symlinks, so a symlinked `CODEOWNERS` would protect nothing while
+  a `doctor` that followed it would believe otherwise. A path counts as named when it appears literally,
   as a Markdown link or a backticked repository path. Symlinks are followed too: a governed
   path that is a symlink, at any level of its directories, puts its resolved in-repository
   target into the closure, recursively, and `doctor` fails when that target is not covered
@@ -437,7 +440,14 @@ the environment policies and the `doctor` rows all take the name from there.
   tag whose older copy of that workflow lacked the environment. So the release workflow is
   triggered by tag pushes only (no `workflow_dispatch`), and the auditor and the documented
   consumer check also require the attestation certificate's build trigger to be `push`,
-  read from `gh attestation verify --format json`; only the maintainer can push a tag. Because
+  read from `gh attestation verify --format json`; only the maintainer can push a tag. A
+  trigger alone is not enough either, since an old workflow with `actions: write` can
+  re-run a historical tag-push run, which keeps its original event, ref and SHA. So the
+  auditor also binds each attestation to an approved run: the certificate names the run
+  and attempt that signed it, and that attempt must be one n8n recorded as approved by the
+  maintainer in the `release` environment (section 4's approval poll); an attestation from
+  any other attempt fails. Migration deletes the tags of releases it deletes, so no old tag
+  is left whose historical run could be re-run. Because
   immutability would lock such a release, the response is to delete it and release under
   the next version number.
 
@@ -556,7 +566,9 @@ review aid, never the gate.
   has another trigger, and every approval notice names the run's event so the maintainer
   refuses any other. ADR-0017's issue triage, triggered by `issues`, is the pilot decision
   above: it runs without an environment or moves to the driver side.
-- **Privileged jobs build clean.** A job in an environment restores no Actions cache and
+- **Privileged jobs build clean.** A job in an environment neither restores nor saves an
+  Actions cache (a cache it saved on `main` could carry secret-derived output, and driver
+  branches can restore `main`'s caches) and
   downloads no artifact from another run: in `merge` mode an unprivileged run on `main` could
   have filled the cache or an artifact with agent-merged output. Two parts are enforced:
   every environment job declares `permissions:` with `actions: none` (neither `read` nor
@@ -568,9 +580,9 @@ review aid, never the gate.
   the job's permissions; there, and for downloads through a credential the job is handed,
   the rule is the maintainer's review. Every line such a job runs is on `main` or a release
   tag and inside the cumulative review that precedes approval, and that review rejects any
-  cache restore or cross-run download in a privileged job. The auditor flags the known
-  spellings (`actions/cache`, a `setup-*` action with caching on, `download-artifact` with a
-  `run-id`) as an aid; it cannot prove their absence, so section 4's known limits list it.
+  cache restore, cache save or cross-run download in a privileged job. The auditor flags
+  the known spellings (`actions/cache`, `actions/cache/restore`, `actions/cache/save`, a
+  `setup-*` action with caching on, `download-artifact` with a `run-id`) as an aid; it cannot prove their absence, so section 4's known limits list it.
 - **What the workflow token can still do.** The repository default for `GITHUB_TOKEN` is
   read-only, but a workflow file can raise it, and an old commit's file can too. Every
   writable scope is therefore accounted for:
@@ -817,7 +829,12 @@ every unattended run, so no proof is cached between runs.
 - **Key files**: the agent and auditor keys are owned by the key user and unreadable to the
   loop user (`doctor`, running as the loop user, fails if it can open either), and nothing
   the minter's unit executes or imports (unit file, interpreter, virtual environment,
-  `PYTHONPATH`, working directory) is writable by the loop user.
+  `PYTHONPATH`, working directory) is writable by the loop user. Nor does the loop user
+  hold anything root-equivalent, which would reach the key regardless of file modes:
+  `doctor` fails when `sudo -n true` succeeds for it, when it belongs to `sudo`, `wheel`,
+  `docker`, `lxd`, `libvirt` or `incus` (or any group that owns a privileged daemon
+  socket), or when it can open the socket of a rootful Docker, Podman, LXD or libvirt
+  daemon.
 
 `doctor` itself stays read-only, as it is today. The one check that has to write runs
 separately, when an App is installed and whenever its permissions change, against a
