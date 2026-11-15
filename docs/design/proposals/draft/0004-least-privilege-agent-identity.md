@@ -161,7 +161,9 @@ repositories of that owner's instances and targets.
   no sign-off, as common DCO checkers already exempt merge commits. The exemption is
   narrow and checked against an authenticated fact: the `dco` check and the auditor accept
   a commit without sign-off only when it is the `merge_commit_sha` GitHub reports for a
-  merged pull request into that branch; any other unsigned commit fails. `squash` would
+  merged pull request into that branch **and** has two parents (for a rebase merge,
+  `merge_commit_sha` names the last rebased content commit, which needs its sign-off like
+  any other); any other unsigned commit fails. `squash` would
   instead write a new commit under the PR author's name from the PR title and body, so
   `merge` mode accepts only `merge_method = "merge"` or `"rebase"`, and `repo-settings.py`
   refuses `squash`. The driver records the line's tip
@@ -403,7 +405,9 @@ the environment policies and the `doctor` rows all take the name from there.
   instead is completeness and provenance. The release workflow builds every asset first and
   attests a manifest (`SHA256SUMS`) that lists them all, and the auditor fails on a release
   whose author is not `github-actions[bot]`, that lacks the attested manifest, whose assets
-  differ from the manifest in either direction, or that holds any asset
+  differ from the manifest in either direction (the manifest itself excluded from that
+  comparison, since it cannot list its own checksum; it needs its own provenance
+  attestation instead), or that holds any asset
   without a provenance attestation from the release workflow at that tag, and consumers
   verify with `gh attestation verify --signer-workflow <release workflow>
   --source-ref refs/tags/<tag>`, which an asset the App supplied cannot pass. Because
@@ -512,6 +516,14 @@ review aid, never the gate.
   maintainer to record, per repository, every cloud that trusts it and that each of its
   policies matches only environment subjects (or that none trusts it); `pdca setup-identity`
   refuses to install without that record and `doctor` shows its date.
+- **Privileged jobs run only on events the maintainer controls.** A job in an environment
+  may only be triggered by `push`, a tag push, `workflow_dispatch` or `schedule`. Events
+  such as `pull_request_target`, `issue_comment` or `workflow_run` report `main` as their
+  ref even when the App caused them, and carry PR heads or event text the cumulative
+  review never saw. The auditor fails on any workflow that defines an environment job and
+  has another trigger, and every approval notice names the run's event so the maintainer
+  refuses any other. ADR-0017's issue triage, triggered by `issues`, is the pilot decision
+  above: it runs without an environment or moves to the driver side.
 - **Privileged jobs build clean.** A job in an environment restores no Actions cache and
   downloads no artifact from another run: in `merge` mode an unprivileged run on `main` could
   have filled the cache or an artifact with agent-merged output. Two parts are enforced:
@@ -633,8 +645,12 @@ user (the `doctor` secret-guard row, #959, reports it).
 The loop user holds **no ambient GitHub credential**: no `gh` login (`~/.config/gh/hosts.yml`),
 no `.git-credentials`, no credential helper or `http.*.extraHeader` in its global, system or
 any checkout's repository git configuration, no `GH_TOKEN` in its profile, no `~/.netrc` or
-`~/_netrc` (nor a `NETRC` variable pointing elsewhere), no SSH key or
-agent that GitHub accepts (`ssh -T git@github.com` must be refused), no `url.*.insteadOf` or
+`~/_netrc` (nor a `NETRC` variable pointing elsewhere), no SSH path
+to GitHub at all: a key in a file the loop user can read anywhere, not only in `~/.ssh`,
+would be found by no file check, so the host's firewall drops outgoing SSH (port 22, and
+443 to `ssh.github.com`) for the loop user's UID, and `doctor` checks it by attempting the
+connection and requiring it to fail at the network level, judged by the output, not the
+exit status (a successful `ssh -T git@github.com` also exits 1), no `url.*.insteadOf` or
 `pushInsteadOf` rewrite, and every remote a plain `https://github.com/` URL with no
 credential in it. Otherwise a leaf or a compromised gate could skip the App and use an
 older, broader personal token or deploy key. Migration removes them (existing loop
