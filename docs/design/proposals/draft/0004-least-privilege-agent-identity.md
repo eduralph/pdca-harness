@@ -57,8 +57,14 @@ repositories of that owner's instances and targets.
   tokens for every installation of its App, so its reach is exactly that App's installation:
   one owner's listed repositories, with the permissions of section 2. One App per owner keeps
   a stolen key from reaching the other owners. The key is readable only by a separate key
-  user, never by the loop user that runs the driver and its model leaves (section 5), rotated on a schedule (GitHub allows two active keys, so rotation has no gap),
-  and revoked in the App settings if exposed.
+  user, never by the loop user that runs the driver and its model leaves (section 5), rotated on a schedule (GitHub allows several active keys, so rotation has no gap),
+  and revoked in the App settings if exposed. The key user holds the App's **only** key:
+  GitHub offers no API that lists an App's keys, so `pdca setup-identity` and every
+  rotation print the minter key's SHA-256 fingerprint for the maintainer to compare with
+  the App settings page, which must show that key alone (two during a rotation). The App
+  is registered by the maintainer's account, or by an organization whose only owner is the
+  maintainer and which has no App managers, so no one else can add a key; section 4's
+  known limits record that this check is manual.
 - **Tokens are short-lived.** The driver mints installation tokens just in time, scoped down
   to the repositories the run touches and to **exactly** section 2's permissions (the
   minter names them in every token request, so a grant the installation gained by mistake,
@@ -552,8 +558,9 @@ review aid, never the gate.
   organization that belongs to an enterprise account; `pdca setup-identity` asks the
   maintainer to confirm that, and the known limits record it. A job on such a runner runs App-controlled code
   on that host, and a runner group cannot be restricted by branch on a personal account.
-  GitHub-hosted runners only, or ephemeral runners rebuilt for every job holding no
-  credentials.
+  **GitHub-hosted runners only**: the runner APIs do not say whether a self-hosted runner
+  registered as ephemeral, so the auditor could not tell an ephemeral one from a
+  persistent one, and it fails on any self-hosted runner at all.
 
 **Known limits** (accepted; the pilot shows whether any needs more):
 
@@ -598,6 +605,9 @@ review aid, never the gate.
   closed on that: `doctor`'s installation check fails when the auditor installation is
   missing or suspended, and n8n alerts through ntfy whenever a run cannot mint its token or
   finish, so silence never reads as a pass.
+- **App keys are counted by hand.** No API lists an App's private keys, so that the key
+  user holds the only one rests on the maintainer comparing fingerprints on the App
+  settings page at setup and at each rotation (section 1).
 - **Enterprise runners.** The auditor cannot see enterprise runner groups; the rule that
   the App is not installed under an enterprise account rests on the maintainer's
   confirmation.
@@ -742,7 +752,10 @@ repositories) rather than a live one:
 
 - **Workflow changes are refused** (`pdca setup-identity --probe`, not `doctor`): a probe pushes a commit that adds an inert workflow
   (triggered only by `workflow_dispatch`, with a single job guarded by `if: false`) to a
-  fresh `pdca-doctor/probe-<random>` branch and expects GitHub to refuse it. Before any
+  fresh `pdca-doctor/probe-<random>` branch and expects GitHub to refuse it. The push is a
+  conditional creation (`git push --force-with-lease=refs/heads/<branch>:`, an empty
+  expected value meaning the ref must not exist), so if anyone else created the name in
+  between, the push fails instead of moving their branch. Before any
   write, `git ls-remote` must show the branch absent (otherwise another name is drawn). The
   branch name and the probe commit's OID are then written to the instance state **before**
   the push and cleared only once `git ls-remote` shows the branch absent, so a crash at any
@@ -812,9 +825,17 @@ is the maintainer, with no
 `Integration` (GitHub Actions or any App) and no `DeployKey`; the one exception is the
 Dependabot App on the `dependabot/**` ruleset of section 3, and only there. A role
 bypass (repository admin, or organization admin) is accepted only when the maintainer is
-the only one holding it: the check lists the repository's collaborators with admin
-permission and, for an organization, its owners, and fails on anyone else, since a role
-bypass covers everyone in the role. It runs when an App is first
+the only one holding it, since a role bypass covers everyone in the role.
+
+The App is installed only on repositories where the maintainer is the **only human with
+write access**: otherwise anyone with write could push to an App-opened PR's branch (the
+driver namespaces cannot be made App-exclusive, as GitHub's restriction rules admit only
+bypass actors) and have `merge` mode merge it under the App's name, and a custom
+repository role with "Edit repository rules" could add GitHub Actions as a bypass actor
+without being an admin. So this check, and the auditor on every run (collaborators are
+readable with Metadata: read), list every collaborator with their permission and role name
+and fail on anyone other than the maintainer with write, maintain, admin or any custom
+role, and, for an organization, on any owner other than the maintainer. It runs when an App is first
 installed, and `repo-settings.py apply` runs it after every ruleset change it makes;
 `doctor` shows the date of the last pass. Only an admin can change a ruleset, so between
 those checks only the maintainer can add a bypass actor; that residual is accepted.
