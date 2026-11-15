@@ -844,9 +844,10 @@ every unattended run, so no proof is cached between runs.
   sudo rule at all), when it belongs to `sudo`, `wheel`, `disk`, `docker`, `lxd`,
   `libvirt` or `incus` (or any group that owns a privileged daemon socket or a block
   device), when it can open any block device or the socket of a rootful Docker, Podman,
-  LXD or libvirt daemon, or when an executable it can run carries a capability that
-  bypasses file permissions (`cap_dac_override`, `cap_dac_read_search`, `cap_sys_admin`,
-  `cap_sys_ptrace`).
+  LXD or libvirt daemon, or when an executable it can run carries any file capability
+  outside a short allowlist (`cap_net_raw`, `cap_net_bind_service`): a list of dangerous
+  ones would always miss one (`cap_setuid`, `cap_setfcap`, `cap_sys_module` each lead to
+  root).
 
 `doctor` itself stays read-only, as it is today. The one check that has to write runs
 separately, when an App is installed and whenever its permissions change, against a
@@ -881,9 +882,10 @@ to `doctor` only a verdict per manifest check ID (pass, fail, inconclusive) and 
 of what failed, so a compromised loop user that talks to the socket gets no auditor token,
 no logs, no artifacts and no general API access. The minter does not leave enforcement
 to the caller either, since the loop user may be compromised and could skip `doctor`: it
-runs these auditor checks itself when a run starts and again at least every hour, and
-refuses to mint agent tokens while any of them fails, so a lost approval rule or a
-self-hosted runner that appears stops token issue, not only the `doctor` report. The n8n audit holds its own copy of the
+runs these auditor checks, and the agent-token rows above (installation, permissions,
+rules, `current_user_can_bypass`), itself when a run starts and again at least every
+hour, and refuses to mint agent tokens while any of them fails, so a lost approval rule,
+a self-hosted runner that appears or the App added as a bypass actor stops token issue, not only the `doctor` report. The n8n audit holds its own copy of the
 auditor key. The checks: first the same identity check as for the agent App, an
 unscoped token whose permissions must equal the auditor table of section 2 exactly (any write
 permission fails) and whose repositories must be exactly the configured ones. Then:
