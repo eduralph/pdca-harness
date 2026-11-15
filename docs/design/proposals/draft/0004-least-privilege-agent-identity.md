@@ -238,6 +238,7 @@ key is treated as a confidentiality incident, not a harmless one (see the securi
 |---|---|---|
 | Administration | read | immutable releases, the Actions workflow-permission settings, and repository self-hosted runners |
 | Organization: Self-hosted runners | read | organization runners available to the repository (getwyrd, Ralphovi) |
+| Pull requests | read | PR authors, commits, `merge_commit_sha` and timelines, for the DCO and attribution checks of section 1 |
 | Organization: Members | read | the organization's owners (`GET /orgs/{org}/members?role=admin`), for the sole-owner check of section 6 |
 | Secrets | read | names of repository secrets, and of organization secrets visible to the repository (`GET /repos/{repo}/actions/organization-secrets`) |
 | Environments | read | names of environment secrets |
@@ -517,7 +518,12 @@ review aid, never the gate.
   policies matches only environment subjects (or that none trusts it); `pdca setup-identity`
   refuses to install without that record and `doctor` shows its date.
 - **Privileged jobs run only on events the maintainer controls.** A job in an environment
-  may only be triggered by `push`, a tag push, `workflow_dispatch` or `schedule`. Events
+  may only be triggered by `push`, a tag push, `schedule` or `workflow_dispatch`, the last
+  only without inputs and only when the maintainer started it: an old workflow with
+  `actions: write` can dispatch a workflow on `main` too. The approval notice names the
+  run's `triggering_actor`, and the maintainer approves a dispatched run only when that is
+  themselves; the auditor fails on an environment job in a workflow whose
+  `workflow_dispatch` declares inputs. Events
   such as `pull_request_target`, `issue_comment` or `workflow_run` report `main` as their
   ref even when the App caused them, and carry PR heads or event text the cumulative
   review never saw. The auditor fails on any workflow that defines an environment job and
@@ -618,6 +624,9 @@ review aid, never the gate.
   closed on that: `doctor`'s installation check fails when the auditor installation is
   missing or suspended, and n8n alerts through ntfy whenever a run cannot mint its token or
   finish, so silence never reads as a pass.
+- **Apps on a personal account are reviewed by hand.** No API lists the Apps a user has
+  installed, so the rule that no other App holds write access to the repositories rests on
+  the maintainer's review at setup (section 6).
 - **App keys are counted by hand.** No API lists an App's private keys, so that the key
   user holds the only one rests on the maintainer comparing fingerprints on the App
   settings page at setup and at each rotation (section 1).
@@ -856,13 +865,19 @@ role, and, for an organization, on any owner other than the maintainer.
 
 Machine writers count too, since they are not collaborators. The auditor lists the
 repository's deploy keys on every run (Administration: read) and fails on any with write
-access. Other GitHub Apps are not visible to an installation token, so `repo-settings.py
-check`, with the maintainer's login, lists every App installation that covers the
-repository (the organization's installations, or the maintainer's own) and fails on any
-other than the agent App, the auditor App and GitHub's Dependabot that holds Contents,
-Pull requests, Administration or Workflows write; such an App could push to an App-opened
-branch or edit the rulesets. Only the account owner can install an App, so between these
-checks only the maintainer can add one, the same accepted residual as for bypass actors. It runs when an App is first
+access. Other GitHub Apps are not visible to an installation token. For an organization,
+`repo-settings.py check`, with the maintainer's login, lists every installation
+(`GET /orgs/{org}/installations`) and fails on any App other than the agent App, the
+auditor App and GitHub's Dependabot that covers the repository and holds **any** write
+or admin permission, repository or organization level: an allowlist of read-only grants,
+not a list of dangerous ones, since combinations such as Organization secrets write with
+Actions write (add the repository to a secret, re-run an old workflow) are as harmful as
+Contents write. For a personal account GitHub offers no API that lists the Apps a user
+installed, so the same rule is a step of `pdca setup-identity`: the maintainer reviews the
+account's installed Apps (Settings, Applications) and confirms, and section 4's known
+limits record that this is manual. Only the account owner can install an App, so between
+these checks only the maintainer can add one, the same accepted residual as for bypass
+actors. It runs when an App is first
 installed, and `repo-settings.py apply` runs it after every ruleset change it makes;
 `doctor` shows the date of the last pass. Only an admin can change a ruleset, so between
 those checks only the maintainer can add a bypass actor; that residual is accepted.
