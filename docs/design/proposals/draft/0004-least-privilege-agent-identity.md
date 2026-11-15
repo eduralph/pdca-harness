@@ -60,7 +60,10 @@ repositories of that owner's instances and targets.
   user, never by the loop user that runs the driver and its model leaves (section 5), rotated on a schedule (GitHub allows two active keys, so rotation has no gap),
   and revoked in the App settings if exposed.
 - **Tokens are short-lived.** The driver mints installation tokens just in time, scoped down
-  to the repositories the run touches, and keeps them only in memory. A token lives one hour
+  to the repositories the run touches and to **exactly** section 2's permissions (the
+  minter names them in every token request, so a grant the installation gained by mistake,
+  such as `workflows` or `administration`, never reaches a token; it also runs the
+  installation check of section 6 itself before minting and refuses while that fails), and keeps them only in memory. A token lives one hour
   while a bundle runs for hours (the median was 6.1 hours in proposal 0001), so the driver's
   GitHub client mints a fresh one before each authenticated call once the current one is
   older than 50 minutes; a call that still meets an expired token re-mints once and retries.
@@ -418,9 +421,10 @@ review aid, never the gate.
     that branch's baseline. A release tag's line is never guessed from ancestry, since one
     commit can be reachable from several lines: `[publisher].release_lines` maps tag
     patterns to lines (default: every `v*` tag to `main`; for example `v1.*` to
-    `release/1.x`), the most specific pattern decides, and n8n uses that line's baseline.
-    A tag that matches no pattern, or whose commit is not on its mapped line, gets no range
-    and is flagged. Parallel release lines such as `release/1.x` and `release/2.x` therefore each
+    `release/1.x`). A tag must match **exactly one** pattern; there is no precedence to
+    get wrong, so the default `v*` entry has to be narrowed (for example to `v[2-9]*`) when a
+    line takes `v1.*`. n8n uses that line's baseline. A tag that matches no pattern or more
+    than one, or whose commit is not on its mapped line, gets no range and is flagged. Parallel release lines such as `release/1.x` and `release/2.x` therefore each
     advance on their own.
   - The maintainer sets each first baseline when the App is installed.
   - n8n polls for waiting runs every few minutes (`GET …/actions/runs?status=waiting` and
