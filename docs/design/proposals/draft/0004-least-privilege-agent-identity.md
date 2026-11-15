@@ -126,9 +126,11 @@ repositories of that owner's instances and targets.
   A check made before a git call cannot protect that call if a leaf can rewrite the config
   in between. So the driver never runs git in a repository a leaf can write: it keeps its
   own clone, whose git directory lies outside every leaf's mount namespace, and takes a
-  leaf's work into it by fetching the leaf's commits from the leaf's worktree as plain
-  objects (a local fetch reads none of the source repository's configuration that runs
-  programs). The configuration check above still runs on the driver's clone. It is not
+  leaf's work into it as a **bundle file**: the leaf writes `git bundle create` output, and
+  the driver verifies and fetches from that file. A fetch from the leaf's repository itself
+  would not do, since the `git upload-pack` it starts reads that repository's
+  configuration and can run programs from it (`core.alternateRefsCommand`, for one),
+  outside the leaf's namespace; a bundle is a plain file with no configuration. The configuration check above still runs on the driver's clone. It is not
   a boundary against the loop user itself: a gate, or a daemon a gate leaves behind, runs
   as that user, can rewrite the driver's clone and can reach the minter directly, which is
   why section 5 treats the loop user as possibly compromised and puts the boundary on
@@ -541,8 +543,14 @@ review aid, never the gate.
     `compare/<baseline>...<sha>` page only as a convenience. The web page caps a diff at 300
     files and truncates large files, so when the range exceeds what it renders, the notice
     says so and the maintainer reviews from the local diff only.
-  - Once GitHub shows the run approved by the maintainer (`GET …/actions/runs/{id}/approvals`),
-    n8n advances that line's baseline to the commit. It only moves forward along the line's
+  - Approvals are tracked **per run attempt**. GitHub's approval history
+    (`GET …/actions/runs/{id}/approvals`) keeps the run ID across re-runs and names no
+    attempt, so n8n records the run's current `run_attempt` each time it sees the run
+    waiting, and counts an approval for that attempt only when, between two polls, the run
+    leaves the waiting state for that same attempt and the approval history gains a new
+    entry by the maintainer. A re-run is a new attempt that waits, and needs approval, again.
+  - Once n8n has recorded an attempt as approved by the maintainer this way, it advances
+    that line's baseline to the commit. It only moves forward along the line's
     history: a commit that is not a descendant of the stored baseline is not taken.
   - Each poll also compares the store with GitHub's approval and deployment history. A
     recorded approval that GitHub no longer shows, or an approved run still listed that n8n
@@ -559,14 +567,17 @@ review aid, never the gate.
   moves to the driver side, where the loop already holds a model key; the pilot decides.
 - **OIDC trusts environments, not refs.** Any job, on any branch, can request an OIDC token.
   So every cloud trust policy pins the subject to an environment
-  (`repo:<owner>/<repo>:environment:<name>`) and, because that default subject names the
-  repository and a renamed or re-created repository could reuse the name, also requires the
-  numeric `repository_owner_id` and `repository_id` claims, as ADR-0017's federation rule
-  already does; never to a branch or to `ref:refs/heads/main`:
+  in GitHub's **immutable** format, which carries the owner and repository IDs
+  (`repo:<owner>@<owner-id>/<repo>@<repo-id>:environment:<name>`), so a renamed or
+  re-created repository cannot reuse the name. Repositories created, renamed or transferred
+  after 15.07.2026 use that format by default; older ones are opted in (repository or
+  organization OIDC setting) by `repo-settings.py` before the App is installed. Policies
+  may additionally require the `repository_owner_id` and `repository_id` claims, as
+  ADR-0017's federation rule already does; never to a branch or to `ref:refs/heads/main`:
   `pull_request_target`, `issue_comment` and `workflow_run` jobs also carry `main` as their
   ref, even when the App caused the event. A token from a job outside a protected
   environment then matches no policy. These policies live with the cloud provider, out of
-  the auditor's reach; `repo-settings.py` prints the subject and the two ID claims the maintainer must pin, and
+  the auditor's reach; `repo-settings.py` prints the immutable subject (and the two ID claims) the maintainer must pin, and
   the auditor checks the repository's OIDC subject template is the default, which includes
   the environment. Because GitHub cannot see them, installing the App requires the
   maintainer to record, per repository, every cloud that trusts it and that each of its
@@ -933,7 +944,7 @@ not whether it matches branches or tags, so `repo-settings.py` records the IDs o
 policies it created (with their type) and the auditor fails when an environment's policy
 IDs differ from that record: a `v*` branch policy put in place of the `v*` tag policy has
 a new ID, and it also compares each policy's current name with the recorded pattern, since
-a policy edited in place (`main` renamed to `*`) keeps its ID; the OIDC subject template is the default; "Allow GitHub Actions to create
+a policy edited in place (`main` renamed to `*`) keeps its ID; the OIDC subject uses the immutable format and otherwise the default template; "Allow GitHub Actions to create
 and approve pull requests" is off; no persistent self-hosted runner is available; and the
 review aids of section 4 report nothing new on `main`. Any failure blocks the run.
 
