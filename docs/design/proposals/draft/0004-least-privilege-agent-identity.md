@@ -122,6 +122,14 @@ repositories of that owner's instances and targets.
   pushes, so even a value the check accepted is not what steers them. A denylist would have to name every key that makes git run a program or contact a
   host (`trailer.*.cmd`, `filter.*`, `core.fsmonitor`, `url.*`, `http.*` and more), and
   would fail open on the first one it missed.
+
+  A check made before a git call cannot protect that call if a leaf can rewrite the config
+  in between. So the driver never runs git in a repository a leaf can write: it keeps its
+  own clone, whose git directory lies outside every leaf's mount namespace, and takes a
+  leaf's work into it by fetching the leaf's commits from the leaf's worktree as plain
+  objects (a local fetch reads none of the source repository's configuration that runs
+  programs). The configuration check above still runs on the driver's clone, against
+  anything else running as the loop user.
   Hooks are taken out of the checkout's hands too: a leaf that can write `.git/config` can
   also drop an executable into `.git/hooks/`, and the driver's git would run it outside the
   leaf's namespace, next to the minter. So every driver git call sets `core.hooksPath` to a
@@ -559,6 +567,12 @@ review aid, never the gate.
   maintainer to record, per repository, every cloud that trusts it and that each of its
   policies matches only environment subjects (or that none trusts it); `pdca setup-identity`
   refuses to install without that record and `doctor` shows its date.
+- **Privileged jobs run only pinned code.** Every action an environment job uses is
+  pinned to a full commit SHA and every container image to a digest, since a tag such as
+  `owner/action@v1` or `image:latest` can be moved after the maintainer reviewed and
+  approved; the auditor fails on any other reference in an environment job. What a pinned
+  action fetches at run time is beyond that check and is the review's to catch (known
+  limits).
 - **Privileged jobs run only on events the maintainer controls.** A job in an environment
   may only be triggered by `push`, a tag push, `schedule` or `workflow_dispatch`, the last
   only without inputs and only when the maintainer started it: an old workflow with
@@ -681,6 +695,8 @@ review aid, never the gate.
 - **Old personal tokens are revoked by hand.** A maintainer token left in a file the loop
   user can read would bypass every App boundary. No API lists a user's tokens, so their
   revocation at migration rests on the maintainer (section 5).
+- **Run-time fetches of pinned actions.** An action pinned by SHA can still download code
+  when it runs; only the review of that action keeps such a fetch out of a privileged job.
 - **App keys are counted by hand.** No API lists an App's private keys, so that the key
   user holds the only one rests on the maintainer comparing fingerprints on the App
   settings page at setup and at each rotation (section 1).
@@ -1032,7 +1048,13 @@ agent App, and the row fails closed if it is not.
 3. **Roll out** to the other instances through `copier update`, one owner at a time.
 4. **Before acceptance**, the pilot records where ADR-0017's issue triage runs (approval
    per run in its environment, or on the driver side) and the proposal is updated with it.
-5. An ADR records the decision; it supersedes ADR-0006's credential section in
+5. **Before acceptance**, `AGENTS.md`'s STOP convention ("no code path marks a PR ready
+   or merges it, except the live tool") is reconciled with `merge` mode, which exists today
+   as an opt-in instance setting (`template/pdca.toml.jinja`) and which this proposal fences
+   rather than introduces: either the convention names `merge` mode in instances as its
+   second exception, or `merge` mode is removed. The maintainer decides; until then this
+   proposal's `merge`-mode rules describe how it would be fenced, not an endorsement of it.
+6. An ADR records the decision; it supersedes ADR-0006's credential section in
    client-rust-pdca and ADR-0021 §4's deploy key.
 
 ## Security impact
