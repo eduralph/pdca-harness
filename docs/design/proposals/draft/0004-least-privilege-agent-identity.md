@@ -128,8 +128,13 @@ repositories of that owner's instances and targets.
   own clone, whose git directory lies outside every leaf's mount namespace, and takes a
   leaf's work into it by fetching the leaf's commits from the leaf's worktree as plain
   objects (a local fetch reads none of the source repository's configuration that runs
-  programs). The configuration check above still runs on the driver's clone, against
-  anything else running as the loop user.
+  programs). The configuration check above still runs on the driver's clone. It is not
+  a boundary against the loop user itself: a gate, or a daemon a gate leaves behind, runs
+  as that user, can rewrite the driver's clone and can reach the minter directly, which is
+  why section 5 treats the loop user as possibly compromised and puts the boundary on
+  GitHub's side. Against a leaf, which runs in its own namespace, the separate clone is the
+  boundary. As defence in depth, every gate runs in a transient systemd scope that is
+  stopped when the gate ends, so no process it started outlives it.
   Hooks are taken out of the checkout's hands too: a leaf that can write `.git/config` can
   also drop an executable into `.git/hooks/`, and the driver's git would run it outside the
   leaf's namespace, next to the minter. So every driver git call sets `core.hooksPath` to a
@@ -962,7 +967,11 @@ and alerts instead of auditing when any verdict differs. Vectors alone would not
 that one side simply lacks, so a **check manifest** (one ID per check, in the repository next
 to the vectors) is the shared definition: every manifest ID must have at least one passing and
 one failing vector, which the harness's CI enforces, and each side reports the IDs it ran.
-The run fails when that set differs from the manifest, on either side.
+The run fails when that set differs from the manifest, on either side. The vectors and
+the manifest live under one path (`audit/`) that is part of the governing set in both
+modes and named explicitly in `CODEOWNERS`, which `doctor` verifies like any other
+governed path; otherwise a `merge`-mode PR could merge a shortened manifest or weakened
+verdicts, and n8n would validate itself against them.
 
 `repo-settings.py check` with the maintainer's admin login remains for what only an admin
 can see: the full `bypass_actors` lists. It fails unless every ruleset's only bypass actor
