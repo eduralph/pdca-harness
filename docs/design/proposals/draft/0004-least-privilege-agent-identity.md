@@ -130,6 +130,13 @@ repositories of that owner's instances and targets.
   and resets to that
   tip, so no half-made merge is left for the next fold.
 
+  The same applies where `merge` mode brings a PR that fell behind up to date: today the
+  driver calls `gh pr update-branch`, which makes GitHub write a merge commit with no human
+  author or sign-off, and the `dco` check would reject it. The driver instead merges the
+  base into the PR branch locally, the same way (`git merge --no-ff --no-commit`, then a
+  commit with the configured author, bot committer and both trailers), and pushes it;
+  `gh pr update-branch` is no longer used.
+
   `doctor` fails when `signoff` is missing or names a bot (a `[bot]` name or a
   `noreply.github.com` bot address). The template's `dco` check requires a `Signed-off-by`
   whose email matches the commit author's, the rule common DCO checkers apply, and rejects
@@ -195,7 +202,13 @@ the environment policies and the `doctor` rows all take the name from there.
   App is therefore installed only where they are enforced; `doctor` fails an
   installation that includes a repository where they are not. A private repository's loop
   keeps publishing from the maintainer's own login in `stack` mode, as today.
-- **`main` is reached only through a pull request.** No bypass for the App, required status
+- **`main` is reached only through a pull request.** It cannot be deleted or force-pushed
+  (the ruleset carries deletion and non-fast-forward restrictions, needed because the
+  configured base need not be GitHub's undeletable repository default). The same ruleset
+  covers every other branch a brief may target (`Repo + branch target`, such as
+  `release/1.x`): `repo-settings.py` takes them from `[publisher].target_branches`
+  (default: only `main`), and the driver refuses a brief whose target is not listed there
+  before writing anything. No bypass for the App, required status
   checks from `.github/required-checks.txt` with the strict policy (the PR must be up to date
   with `main`, so every check reruns on the current base), and **code-owner review** as the review rule, with
   no general approval count. `CODEOWNERS` names the maintainer; only users and teams can be
@@ -236,7 +249,13 @@ the environment policies and the `doctor` rows all take the name from there.
   `doctor` follows references transitively: starting from every instruction file above and
   the files under `agents/**`, it collects every repository path they name, then
   every path *those* files name, until nothing new appears, and fails when any file in that
-  closure is not covered by `CODEOWNERS`. In a
+  closure is not covered by `CODEOWNERS`. A path counts as named when it appears literally,
+  as a Markdown link or a backticked repository path; that is the only reference syntax
+  instruction files may use. An indirect reference (a path held in a variable or an
+  environment setting, or built at run time) cannot be followed, so instruction files must
+  not use one: they are themselves governing files, so adding one needs the maintainer's
+  review, and the review rubric rejects it. One already present when the App is installed
+  is the maintainer's to find; section 4's known limits record this. In a
   target repository the set is its `.github/**`, `CODEOWNERS`, the same instruction files
   at any depth (`**/AGENTS*.md`, `**/CLAUDE*.md`, `**/GEMINI*.md`, `**/.claude/**`,
   `**/.codex/**`, `**/.gemini/**`) with the
@@ -469,6 +488,10 @@ review aid, never the gate.
 - **Cloud-side OIDC policies.** Whether a cloud still trusts a ref-based or wildcard
   subject is checked only by the maintainer's recorded assertion (section 4), not by any
   automated row.
+- **Indirect references in instruction files.** The governing-set closure follows only
+  literal paths (section 3). An indirect reference already present when the App is
+  installed, or one the maintainer misses in review, leaves its target outside
+  `CODEOWNERS` without `doctor` noticing.
 - **Event-data injection on `main`.** Whether a reviewed job treats event text only as data
   is a property of reviewed code; the auditor flags known patterns (head checkout, an
   event-controlled expression outside `env:`, `actions/github-script` fed event data) but
@@ -504,7 +527,10 @@ readable files, so a prompt-injected leaf could read a key in the loop user's ho
 belong to a second OS user (`<loop>-keys`) that runs a small token minter. The driver asks it
 over a Unix socket for an installation token and gets back only that token, valid one hour,
 for repositories on the minter's own per-loop allowlist (a file owned by the key user, so
-the caller cannot widen it); the minter logs every request. For `doctor` it also answers the
+the caller cannot widen it); the minter logs every request. The minter is **not** one of the
+loop user's pipx tools: it is installed root-owned outside the loop user's home (its own
+virtual environment under `/opt`, its systemd unit and its interpreter included), so
+nothing the loop user can write is ever executed as the key user. For `doctor` it also answers the
 checks that need the App's JWT (`GET /app`, `GET /app/installations`) and returns their
 results, never the JWT.
 
@@ -581,7 +607,9 @@ every unattended run, so no proof is cached between runs.
   (the all-zero-ref probe of `token-scope` suffices for this one: it only asks whether the
   repository is reachable).
 - **Key files**: the agent and auditor keys are owned by the key user and unreadable to the
-  loop user (`doctor`, running as the loop user, fails if it can open either).
+  loop user (`doctor`, running as the loop user, fails if it can open either), and nothing
+  the minter's unit executes or imports (unit file, interpreter, virtual environment,
+  `PYTHONPATH`, working directory) is writable by the loop user.
 
 `doctor` itself stays read-only, as it is today. The one check that has to write runs
 separately, when an App is installed and whenever its permissions change, against a
@@ -647,9 +675,13 @@ The run fails when that set differs from the manifest, on either side.
 
 `repo-settings.py check` with the maintainer's admin login remains for what only an admin
 can see: the full `bypass_actors` lists. It fails unless every ruleset's only bypass actor
-is the maintainer (the repository admin role, or the organization admin), with no
+is the maintainer, with no
 `Integration` (GitHub Actions or any App) and no `DeployKey`; the one exception is the
-Dependabot App on the `dependabot/**` ruleset of section 3, and only there. It runs when an App is first
+Dependabot App on the `dependabot/**` ruleset of section 3, and only there. A role
+bypass (repository admin, or organization admin) is accepted only when the maintainer is
+the only one holding it: the check lists the repository's collaborators with admin
+permission and, for an organization, its owners, and fails on anyone else, since a role
+bypass covers everyone in the role. It runs when an App is first
 installed, and `repo-settings.py apply` runs it after every ruleset change it makes;
 `doctor` shows the date of the last pass. Only an admin can change a ruleset, so between
 those checks only the maintainer can add a bypass actor; that residual is accepted.
