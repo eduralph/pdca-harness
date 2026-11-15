@@ -236,6 +236,7 @@ key is treated as a confidentiality incident, not a harmless one (see the securi
 |---|---|---|
 | Administration | read | immutable releases, the Actions workflow-permission settings, and repository self-hosted runners |
 | Organization: Self-hosted runners | read | organization runners available to the repository (getwyrd, Ralphovi) |
+| Organization: Members | read | the organization's owners (`GET /orgs/{org}/members?role=admin`), for the sole-owner check of section 6 |
 | Secrets | read | names of repository secrets, and of organization secrets visible to the repository (`GET /repos/{repo}/actions/organization-secrets`) |
 | Environments | read | names of environment secrets |
 | Actions | read | environments and their protection rules; waiting runs, pending deployments and their approvals (the approval baseline of section 4) |
@@ -835,7 +836,17 @@ repository role with "Edit repository rules" could add GitHub Actions as a bypas
 without being an admin. So this check, and the auditor on every run (collaborators are
 readable with Metadata: read), list every collaborator with their permission and role name
 and fail on anyone other than the maintainer with write, maintain, admin or any custom
-role, and, for an organization, on any owner other than the maintainer. It runs when an App is first
+role, and, for an organization, on any owner other than the maintainer.
+
+Machine writers count too, since they are not collaborators. The auditor lists the
+repository's deploy keys on every run (Administration: read) and fails on any with write
+access. Other GitHub Apps are not visible to an installation token, so `repo-settings.py
+check`, with the maintainer's login, lists every App installation that covers the
+repository (the organization's installations, or the maintainer's own) and fails on any
+other than the agent App, the auditor App and GitHub's Dependabot that holds Contents,
+Pull requests, Administration or Workflows write; such an App could push to an App-opened
+branch or edit the rulesets. Only the account owner can install an App, so between these
+checks only the maintainer can add one, the same accepted residual as for bypass actors. It runs when an App is first
 installed, and `repo-settings.py apply` runs it after every ruleset change it makes;
 `doctor` shows the date of the last pass. Only an admin can change a ruleset, so between
 those checks only the maintainer can add a bypass actor; that residual is accepted.
