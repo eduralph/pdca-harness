@@ -245,7 +245,12 @@ the environment policies and the `doctor` rows all take the name from there.
   `pdca-doctor/*` for the probe of section 6. Every configured pattern must start with a
   fixed, non-empty prefix ending in `/` (`fix/`, not `{id}-{slug}`) that overlaps neither
   `main` nor another protected name; `repo-settings.py` refuses to apply a ruleset otherwise,
-  since an empty prefix would open every branch name to the App. `doctor` **fails** when a
+  since an empty prefix would open every branch name to the App. A brief's `Onto branch`
+  (stacking on an existing PR, #54) is published by the App only when that head lies in one
+  of these namespaces on a repository the App is installed on; any other head, such as
+  `origin/feature/x` or a branch on a third remote, is refused by the driver before it
+  writes anything, with a message to publish that fix from the maintainer's login, so the
+  path fails closed instead of meeting a ruleset rejection mid-publish. `doctor` **fails** when a
   configured pattern falls outside the ruleset, so a renamed pattern blocks the run before a
   publish would fail.
 
@@ -356,10 +361,15 @@ review aid, never the gate.
     n8n advances the baseline to that commit. It only moves forward along `main`'s history: a
     commit that is not a descendant of the stored baseline is not taken.
   - Each poll also compares the store with GitHub's approval and deployment history. A
-    recorded approval that GitHub no longer shows, or an approved run n8n never saw, is a
-    **discontinuity**: n8n alerts, keeps its own baseline, and marks the environment so that
+    recorded approval that GitHub no longer shows, or an approved run still listed that n8n
+    never saw, is a **discontinuity**: n8n alerts, keeps its own baseline, and marks the environment so that
     every later ntfy notice for it says to withhold approval until the maintainer has looked
-    and reset the baseline by hand. The maintainer reviews against that range, never one `pdca` prints, so the review
+    and reset the baseline by hand. An approved run that completes and is deleted, together
+    with its deployment, between two polls leaves no trace the list APIs show, so the check
+    cannot see it; the baseline then simply does not advance, and the next notice shows a
+    longer range than needed, never a shorter one. Detecting that case would need webhook or
+    audit-log events kept outside GitHub, which this proposal does not add.
+  The maintainer reviews against that range, never one `pdca` prints, so the review
   covers the whole range, not the final PR alone.
   This costs ADR-0017's issue triage its automatic run: it either waits for approval or
   moves to the driver side, where the loop already holds a model key; the pilot decides.
@@ -673,18 +683,29 @@ user and, for the daily audit, in n8n. The threat models (`docs/design/architect
 protected paths in the same change that lands step 2.
 
 What it does not change: prompt injection through issues, comments and model output stays
-possible. In `stack` mode this proposal limits its reach to "push a driver branch and open a
-pull request the maintainer reviews". In `merge` mode it also reaches "merge ordinary code
-into `main`" for non-final waves, as section 3 accepts; governing files still wait for the
-maintainer.
+possible. A compromised loop user can obtain an App token for its allowlisted repositories
+and so has the App's whole grant there, not only its branches: in `stack` mode that is
+pushing driver branches and opening pull requests the maintainer reviews, writing issues,
+comments and labels, editing or deleting releases the immutability rule and the auditor do
+not protect, and pushing a branch whose old workflows run with their own `GITHUB_TOKEN`
+scopes, which reach the residuals of section 4's table and known limits (Actions runs,
+discussions, packages, commit statuses, code-scanning data). None of that reaches `main`,
+a release tag, an environment secret or a cloud credential. In `merge` mode it also
+reaches "merge ordinary code into `main`" for non-final waves, as section 3 accepts;
+governing files still wait for the maintainer. The threat-model update of step 2 lists
+this reach in full.
 
 ## Backward compatibility
 
 Instances keep working on a personal token or the maintainer's login until they switch; the
 publisher takes the credential from configuration. Rulesets and code owners change what the
 maintainer must review, not what the loop produces. Workflows that read a repository secret
-on `pull_request` break until that secret moves into an environment, which is the point; the
-`doctor` row names them first.
+on `pull_request` break, and moving the secret into an environment does not bring them back:
+environments admit only `main` and release tags and need approval, so a PR check can never
+reach one. The `doctor` row names these workflows first, and migration rewrites each before
+the App is installed: a required check that needs a secret is split into an unprivileged
+PR check and a post-merge job on `main` in an environment, or loses the secret; a required
+check is never left depending on an environment.
 
 ## Decisions taken while drafting
 
