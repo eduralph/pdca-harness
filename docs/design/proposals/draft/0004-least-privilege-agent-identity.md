@@ -147,7 +147,18 @@ repositories of that owner's instances and targets.
   records and revert commit with `git commit --trailer "Signed-off-by: <signoff>" --trailer
   "Assisted-by: ..."`, and the integration merges run `git merge --no-ff --no-commit`
   followed by that same `git commit` (`git merge` itself has no `--trailer` option; `--no-ff`
-  keeps a fast-forward from leaving nothing to commit). The driver records the line's tip
+  keeps a fast-forward from leaving nothing to commit).
+
+  One commit is made by GitHub, not the driver: the merge commit `gh pr merge` creates in
+  `merge` mode with the default `merge_method = "merge"`. It carries no content of its own
+  (its tree is the merge of two reviewed or checked parents) and no authorship, so it gets
+  no sign-off, as common DCO checkers already exempt merge commits. The exemption is
+  narrow and checked against an authenticated fact: the `dco` check and the auditor accept
+  a commit without sign-off only when it is the `merge_commit_sha` GitHub reports for a
+  merged pull request into that branch; any other unsigned commit fails. `squash` would
+  instead write a new commit under the PR author's name from the PR title and body, so
+  `merge` mode accepts only `merge_method = "merge"` or `"rebase"`, and `repo-settings.py`
+  refuses `squash`. The driver records the line's tip
   before the merge and, if either the merge or the commit step fails, runs `git merge --abort`
   and resets to that
   tip, so no half-made merge is left for the next fold.
@@ -182,7 +193,11 @@ repositories of that owner's instances and targets.
   whoever pushes can set, so a stolen App token could write any name and drop the trailer.
   GitHub records authenticated *who opened the PR*, not who pushed each commit. The
   auditor's claim is therefore narrow: it flags a PR opened by the agent App whose commits
-  lack the trailer or claim a committer other than the bot. A commit the App pushes to a PR
+  lack the trailer or claim a committer other than the bot, with one exception: commits
+  re-created by GitHub's "Update branch" in rebase mode (section 1) carry GitHub as
+  committer, and the auditor accepts that only when the PR's timeline shows the maintainer
+  updating the branch (an authenticated event) and the commits still carry their author,
+  `Signed-off-by` and `Assisted-by`. A commit the App pushes to a PR
   someone else opened is not attributable from the PR data; the driver never pushes to a PR
   it did not open, and per-push attribution would need webhook or audit-log retention, which
   this proposal does not add. Commits carry the human's
