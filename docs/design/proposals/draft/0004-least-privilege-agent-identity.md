@@ -177,8 +177,10 @@ repositories of that owner's instances and targets.
 A second, **read-only auditor App** per owner (`pdca-auditor-<owner>`, private like the agent
 App, so no one else can install it)
 checks the settings the agent App must not be able to read (section 6). It has no write
-permission of any kind, so its key can at most reveal how the repositories are configured and
-the *names* of their secrets, never the values:
+permission of any kind. Through the secrets APIs its key reveals only the *names* of
+secrets, never their values; but its `Actions: read` also reaches workflow logs and
+artifacts, which can hold secret-derived data GitHub's masking misses, so a stolen auditor
+key is treated as a confidentiality incident, not a harmless one (see the security impact):
 
 | Permission | Auditor | Reads |
 |---|---|---|
@@ -226,7 +228,7 @@ the environment policies and the `doctor` rows all take the name from there.
 
   | `wave_mode` | `CODEOWNERS` covers | The App can merge |
   |---|---|---|
-  | `stack` (default) | everything (`*`) | nothing: `main` also carries an update restriction whose only bypass actor is the maintainer (pull-request mode), so even an approved PR is merged by the maintainer, not the App |
+  | `stack` (default) | everything (`*`) | nothing: `main` and every listed target branch carry an update restriction whose only bypass actor is the maintainer (pull-request mode), so even an approved PR is merged by the maintainer, not the App |
   | `merge` | the files that govern or run the agent (list below) | any PR that touches no governing file, once its required checks pass; a PR touching a governing file still waits for the maintainer |
 
   GitHub does not know a PR's wave position, so "the final wave stays a draft" is the
@@ -551,7 +553,7 @@ The App keys do **not** live with the loop user. The model leaves run as that us
 sandbox that limits writes and network (Codex `workspace-write`, for one) does not hide
 readable files, so a prompt-injected leaf could read a key in the loop user's home. The keys
 belong to a second OS user (`<loop>-keys`) that runs a small token minter. The driver asks it
-over a Unix socket for an installation token and gets back only that token, valid one hour,
+over a Unix socket for an agent-App installation token and gets back only that token, valid one hour,
 for repositories on the minter's own per-loop allowlist (a file owned by the key user, so
 the caller cannot widen it); the minter logs every request. The minter is **not** one of the
 loop user's pipx tools: it is installed root-owned outside the loop user's home (its own
@@ -619,8 +621,9 @@ every unattended run, so no proof is cached between runs.
   required status checks on `main` with the strict "up to date with the base" policy, so a
   green result from an older checker cannot carry over after `main` moves; creation, update
   and deletion restrictions on tags and on every branch that is neither a driver namespace,
-  `main` nor a listed target branch; and for `main` itself, in `stack` mode, the update restriction whose only
-  bypass actor is the maintainer, while `merge` mode leaves `main` to its pull-request rule
+  `main` nor a listed target branch; and for `main` and every listed target branch, in `stack` mode, the update restriction
+  whose only bypass actor is the maintainer, while `merge` mode leaves them to their
+  pull-request rule
   so its merges can land without a bypass), compared rule by rule with their parameters, since a ruleset with
   the right conditions but a missing rule has nothing to bypass, and that the
   namespaces the App may write are **exactly** the derived list of section 3: it compares the
@@ -667,7 +670,12 @@ repositories) rather than a live one:
   delete it if it exists at the probe commit, and record it if it cannot be removed. Nothing is left behind on
   success.
 
-**With the auditor App's token**: first the same identity check as for the agent App, an
+**With the auditor App's token**, which never leaves the key side: the minter does not
+mint auditor tokens for anyone. It runs these checks itself, as the key user, and returns
+to `doctor` only a verdict per manifest check ID (pass, fail, inconclusive) and the names
+of what failed, so a compromised loop user that talks to the socket gets no auditor token,
+no logs, no artifacts and no general API access. The n8n audit holds its own copy of the
+auditor key. The checks: first the same identity check as for the agent App, an
 unscoped token whose permissions must equal the auditor table of section 2 exactly (any write
 permission fails) and whose repositories must be exactly the configured ones. Then:
 the settings of sections 3 and 4: immutable releases are on, every release is immutable,
