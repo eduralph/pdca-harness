@@ -89,6 +89,14 @@ repositories of that owner's instances and targets.
   environment, so neither an inherited variable nor a leaf-edited remote can point it at
   another repository the token reaches.
 
+  **Driver git and `gh` get a built environment, not an inherited one.** Each subprocess
+  starts from an empty environment plus an allowlist: a fixed `PATH` of root-owned
+  directories, the fresh `HOME` below, locale variables, and the variables named in this
+  section; everything else, `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
+  `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES` and `GIT_EXEC_PATH` among
+  them, is absent, so nothing inherited can point git at another repository or another
+  helper. The removals listed below are what that allowlist guarantees in particular.
+
   **Authentication never falls back.** Every driver git call runs with
   `GIT_TERMINAL_PROMPT=0`, with `GIT_ASKPASS`, `SSH_ASKPASS` and every command-scope
   configuration variable (`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`,
@@ -928,7 +936,12 @@ mint auditor tokens for anyone. It runs these checks itself, as the key user, an
 to `doctor` only a verdict per manifest check ID (pass, fail, inconclusive) and the names
 of what failed, so a compromised loop user that talks to the socket gets no auditor token,
 no logs, no artifacts and no general API access. The minter does not leave enforcement
-to the caller either, since the loop user may be compromised and could skip `doctor`: it
+to the caller either, since the loop user may be compromised and could skip `doctor`. It
+refuses while the **host checks** are stale or failing: the key-file and root-equivalence
+rows of section 5 need root to see everything (sudo rules, setuid files), so a root-owned
+systemd timer runs them at least every hour and writes its verdict to a root-owned file
+the minter reads, and the minter refuses tokens when that verdict fails or is older than
+two hours. It also
 runs these auditor checks, and the agent-token rows above (installation, permissions,
 rules, `current_user_can_bypass`), itself when a run starts and again at least every
 hour, and refuses to mint agent tokens while any of them fails, so a lost approval rule,
@@ -958,7 +971,8 @@ and approve pull requests" is off; no persistent self-hosted runner is available
 review aids of section 4 report nothing new. All workflow-content checks (triggers,
 permissions, pins, caches, artifacts, the review aids) run on every ref an environment
 admits: the heads of `main` and every listed target branch, and the commit of every
-release tag that has no release yet, since a divergent `release/1.x` could otherwise carry
+release tag (`v*`), released or not, since a release's re-attestation job or a re-run
+executes that tag's workflow again; a divergent `release/1.x` could otherwise carry
 a workflow `main` does not. Any failure blocks the run.
 
 Turning immutability on protects only releases published afterwards; older ones keep
