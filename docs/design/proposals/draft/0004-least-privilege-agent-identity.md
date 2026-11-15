@@ -63,8 +63,12 @@ repositories of that owner's instances and targets.
   rotation print the minter key's SHA-256 fingerprint for the maintainer to compare with
   the App settings page, which must show that key alone (two during a rotation). The App
   is registered by the maintainer's account, or by an organization whose only owner is the
-  maintainer and which has no App managers, so no one else can add a key; section 4's
-  known limits record that this check is manual.
+  maintainer and which has no App managers (neither organization-wide nor for this App),
+  so no one else can add a key. No API shows App managers or an App's keys, so this is a
+  **recurring manual attestation**: at setup, at each rotation and at least every 30 days
+  (n8n sends the reminder through ntfy), the maintainer checks both pages and records the
+  date with `pdca setup-identity --attest`; `doctor` fails once the last attestation is
+  older than 35 days. Section 4's known limits record that the check is manual.
 - **Tokens are short-lived.** The driver mints installation tokens just in time, scoped down
   to the repositories the run touches and to **exactly** section 2's permissions (the
   minter names them in every token request, so a grant the installation gained by mistake,
@@ -185,7 +189,10 @@ repositories of that owner's instances and targets.
   so the driver does not try: it reports the PR as needing the maintainer, who refreshes it
   with GitHub's "Update branch" in rebase mode, which keeps each commit's author and
   `Signed-off-by` and so passes the `dco` check. A rebase that conflicts is aborted and the
-  PR reported, never pushed half-done. `gh pr update-branch` is no longer used.
+  PR reported, never pushed half-done. The driver records the branch's tip before the
+  rebase, and when the push fails or its result is unclear (a lease race, a network error,
+  a ruleset refusal) it resets the local branch to that tip and re-reads the remote
+  head before anything else touches the branch. `gh pr update-branch` is no longer used.
 
   `doctor` fails when `signoff` is missing or names a bot (a name, or an email's local part,
   ending in `[bot]`; a human's private `<id>+<login>@users.noreply.github.com` address is
@@ -760,8 +767,9 @@ every unattended run, so no proof is cached between runs.
   ruleset's target, enforcement and conditions. The row checks that section 3's branch and
   tag rulesets exist, are `active`, cover `main` and `refs/tags/**`, and carry **every rule**
   section 3 requires (pull request with code-owner review and stale-approval dismissal,
-  required status checks on `main` with the strict "up to date with the base" policy, so a
-  green result from an older checker cannot carry over after `main` moves; creation, update
+  required status checks on `main` and on every listed target branch, each with the strict
+  "up to date with the base" policy, so a green result from an older checker cannot carry
+  over after the base moves; creation, update
   and deletion restrictions on tags and on every branch that is neither a driver namespace,
   `main` nor a listed target branch; and for `main` and every listed target branch, in `stack` mode, the update restriction
   whose only bypass actor is the maintainer, while `merge` mode leaves them to their
