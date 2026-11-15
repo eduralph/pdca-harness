@@ -406,8 +406,9 @@ review aid, never the gate.
 - **Secrets live only in environments.** No repository secret, and no organization secret
   visible to a repository the App is installed on (an organization secret cannot be put
   behind an environment). Every environment, whether it holds a secret, anchors an OIDC
-  trust or deploys Pages, has a deployment policy that admits only `main` (or, for
-  `release`, only `v*` tags), so a job on a driver branch gets nothing however its file is
+  trust or deploys Pages, has a deployment policy that admits only `main` and the
+  listed target branches (`[publisher].target_branches`, protected like `main`, section 3)
+  or, for `release`, only `v*` tags, so a job on a driver branch gets nothing however its file is
   written. Every environment also **requires the maintainer's approval**, with no exception. A deployment policy alone is not enough: any
   workflow token with `actions: write`, including one from an old commit on a driver branch,
   can re-run an earlier run whose ref was `main`, and the re-run passes the policy while
@@ -858,7 +859,8 @@ Instances keep working on a personal token or the maintainer's login until they 
 publisher takes the credential from configuration. Rulesets and code owners change what the
 maintainer must review, not what the loop produces. Workflows that read a repository secret
 on `pull_request` break, and moving the secret into an environment does not bring them back:
-environments admit only `main` and release tags and need approval, so a PR check can never
+environments admit only `main`, the listed target branches and release tags and need
+approval, so a PR check can never
 reach one. The `doctor` row names these workflows first, and migration rewrites each before
 the App is installed: a required check that needs a secret is split into an unprivileged
 PR check and a post-merge job on `main` in an environment, or loses the secret; a required
