@@ -1046,11 +1046,15 @@ repository's deploy keys on every run (Administration: read) and fails on any wi
 access. Other GitHub Apps are not visible to an installation token. For an organization,
 `repo-settings.py check`, with the maintainer's login, lists every installation
 (`GET /orgs/{org}/installations`) and fails on any App other than the agent App, the
-auditor App and GitHub's Dependabot that holds **any** write or admin permission,
-repository or organization level, and is installed on all repositories. For one
-installed on selected repositories, the API does not show which ones to the maintainer's
-login, so `pdca setup-identity` lists it and the maintainer confirms on the organization's
-installed-Apps page that it does not cover the repository, as for a personal account. The
+auditor App and GitHub's own `github-actions` and Dependabot (built in; their reach is
+what sections 3 and 4 fence) that holds **any organization-level** write or admin
+permission, wherever it is installed, since repository selection does not limit
+organization permissions (`Members: write` alone can add an owner). It also fails on any
+such App with repository-level write or admin installed on all repositories. For one
+with only repository-level write installed on selected repositories, the API does not
+show which ones to the maintainer's login, so `pdca setup-identity` lists it and the
+maintainer confirms on the organization's installed-Apps page that it does not cover the
+repository, as for a personal account. The
 rule is an allowlist of read-only grants,
 not a list of dangerous ones, since combinations such as Organization secrets write with
 Actions write (add the repository to a secret, re-run an old workflow) are as harmful as
