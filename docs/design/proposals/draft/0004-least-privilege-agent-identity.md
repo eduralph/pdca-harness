@@ -68,7 +68,7 @@ repositories of that owner's instances and targets.
   **recurring manual attestation**: at setup, at each rotation and at least every 30 days
   (n8n sends the reminder through ntfy), the maintainer checks both pages and records the
   date with `pdca setup-identity --attest`, which writes it to a file owned by the key user
-  (the command runs through `sudo -u <loop>-keys` from the maintainer's own login, never
+  (the command runs through `sudo -u <owner>-keys` from the maintainer's own login, never
   as the loop user). The minter refuses to mint once that date is older than 35 days, and
   `doctor` reports it. Section 4's known limits record that the check is manual.
 - **Tokens are short-lived.** The driver mints installation tokens just in time, scoped down
@@ -832,11 +832,13 @@ holding one (no Secret Service item for `gh:github.com`).
 The App keys do **not** live with the loop user. The model leaves run as that user, and a
 sandbox that limits writes and network (Codex `workspace-write`, for one) does not hide
 readable files, so a prompt-injected leaf could read a key in the loop user's home. The keys
-belong to a second OS user (`<loop>-keys`) that runs a small token minter. The driver asks it
-over a Unix socket (in a directory owned by the key user, group the loop's own group
-with only the loop user in it, mode `0750`, the socket `0660`; the minter also checks the
-caller's UID with `SO_PEERCRED` against its loop and refuses any other, so one loop cannot
-draw tokens from another's minter) for an agent-App installation token and gets back only that token, valid one hour,
+belong to a separate OS user, **one per owner** (`<owner>-keys`), the App's only key
+holder on the host, which runs a small token minter. Several loops of the same owner share
+that one minter, each through its own socket (in a directory owned by the key user, group
+that loop's own group with only its loop user in it, mode `0750`, the socket `0660`); the
+minter checks the caller's UID with `SO_PEERCRED` against the loop that socket belongs to
+and refuses any other, so one loop cannot draw tokens on another's allowlist. The driver
+asks it over its loop's socket for an agent-App installation token and gets back only that token, valid one hour,
 for repositories on the minter's own per-loop allowlist (a file owned by the key user, so
 the caller cannot widen it); the minter logs every request. The minter is **not** one of the
 loop user's pipx tools: it is installed root-owned outside the loop user's home (its own
@@ -958,7 +960,13 @@ every unattended run, so no proof is cached between runs.
   arbitrary JavaScript and no probe can show what it grants, or when an
   executable it can run carries any file capability outside a short allowlist (`cap_net_raw`, `cap_net_bind_service`): a list of dangerous
   ones would always miss one (`cap_setuid`, `cap_setfcap`, `cap_sys_module` each lead to
-  root).
+  root). Finally, nothing root or the key user runs may be writable by the loop user: the
+  root host check lists every path the loop user can write (its UID and groups, outside
+  `/proc` and `/sys`) and fails when a system or key-user service, timer, cron job or
+  login script executes, sources or loads anything at or under such a path, or when the
+  loop user can write anywhere outside its home, its loop's working directories and the
+  shared temporary directories; a group-writable `/usr/local/bin/backup` that a root timer
+  runs is as good as root.
 
 `doctor` itself stays read-only, as it is today. The one check that has to write runs
 separately, when an App is installed and whenever its permissions change, against a
