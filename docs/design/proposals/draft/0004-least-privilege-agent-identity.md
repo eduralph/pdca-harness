@@ -90,7 +90,9 @@ repositories of that owner's instances and targets.
   or the loop user's `~/.gitconfig` at any time after `doctor` ran, for example a
   `url.*.insteadOf` that redirects the push to another host. So every authenticated driver
   git call runs with `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL` set to a driver-owned
-  file, pushes to an explicit `https://github.com/<owner>/<repo>.git` URL rather than a
+  file, with `HOME` pointed at a fresh empty directory created for that call and `NETRC`
+  removed (git's HTTP layer reads `$HOME/.netrc` on its own, apart from any helper, so a
+  `.netrc` a gate writes after `doctor` ran is never seen), pushes to an explicit `https://github.com/<owner>/<repo>.git` URL rather than a
   named remote, and is preceded by a check of the checkout's repository configuration that
   refuses any `url.*`, `http.*`, `credential.*`, `core.askPass`, `core.sshCommand` or
   `include*` entry. The helper is the last line: it runs with `credential.useHttpPath=true`
@@ -426,11 +428,17 @@ review aid, never the gate.
   refuses to install without that record and `doctor` shows its date.
 - **Privileged jobs build clean.** A job in an environment restores no Actions cache and
   downloads no artifact from another run: in `merge` mode an unprivileged run on `main` could
-  have filled the cache with agent-merged output. Unlike the other workflow rules this one
-  is a real gate: deployment policies admit only `main` (and `v*` tags) and every run needs
-  the maintainer's approval for the current head, so only the code-owned workflow files on
-  `main` and on release tags reach an environment, and the auditor reads exactly those. It fails on any environment job that uses `actions/cache`,
-  a `setup-*` action with caching on, or `download-artifact` with a `run-id`.
+  have filled the cache or an artifact with agent-merged output. Two parts are enforced:
+  every environment job declares `permissions:` without `actions: read`, so its
+  `GITHUB_TOKEN` cannot fetch another run's artifacts by any route (`gh run download`, the
+  REST API, a custom action), and the auditor fails on a job that declares otherwise. The
+  cache is not fenced that way, because cache restore uses the runner's own token whatever
+  the job's permissions; there, and for downloads through a credential the job is handed,
+  the rule is the maintainer's review. Every line such a job runs is on `main` or a release
+  tag and inside the cumulative review that precedes approval, and that review rejects any
+  cache restore or cross-run download in a privileged job. The auditor flags the known
+  spellings (`actions/cache`, a `setup-*` action with caching on, `download-artifact` with a
+  `run-id`) as an aid; it cannot prove their absence, so section 4's known limits list it.
 - **What the workflow token can still do.** The repository default for `GITHUB_TOKEN` is
   read-only, but a workflow file can raise it, and an old commit's file can too. Every
   writable scope is therefore accounted for:
@@ -438,7 +446,7 @@ review aid, never the gate.
   | Scope | Fenced by | Residual |
   |---|---|---|
   | `contents` | rulesets on `main`, tags and non-driver branches (no bypass for GitHub Actions) | driver branches, which the App can write anyway |
-  | `pull-requests`, `issues` | "Allow GitHub Actions to create and approve pull requests" off; code-owner review | editing, closing and reopening issues and PRs, retargeting a PR's base, editing and deleting comments, labels; none of it merges or approves |
+  | `pull-requests`, `issues` | "Allow GitHub Actions to create and approve pull requests" off; code-owner review | editing, closing and reopening issues and PRs, retargeting a PR's base, editing and deleting comments, labels, marking a draft ready; it cannot approve. In `stack` mode it cannot merge (only the maintainer can update `main`); in `merge` mode it can merge a PR that touches no governing file once the required checks pass, the same reach the App has there (known limits) |
   | `discussions` | nothing on GitHub's side (Discussions stay on: the project's discussions happen there) | editing or deleting discussions and comments; see known limits |
   | `id-token` | trust policies pinned to fenced environments | none |
   | `attestations` | consumers verify `--source-ref refs/tags/<tag>` and the signer workflow | an attestation from a branch run, which that check rejects |
@@ -461,7 +469,14 @@ review aid, never the gate.
   on an old commit can post a passing status for a required check's name, and GitHub
   attributes it to GitHub Actions just like the real check. In `stack` mode the maintainer
   reviews every PR, so this changes nothing. In `merge` mode it can let the driver merge an
-  ordinary-code PR whose real checks failed; governing files still wait for the maintainer.
+  ordinary-code PR whose real checks failed, and together with `pull-requests: write` an old
+  workflow can ready and merge such a PR itself, the final wave's included; governing files
+  still wait for the maintainer. This is the same reach `merge` mode already gives the App,
+  and the cumulative review before any privileged run (section 4) is what catches it.
+- **Cache poisoning of privileged jobs.** Cache restore uses the runner's token, so no
+  permission keeps an environment job from restoring a cache an unprivileged `main` run
+  wrote. Only the maintainer's review of the job keeps it out; the auditor's pattern scan
+  is an aid.
 - **Packages.** A token with `packages: write` can publish to GitHub Packages from a driver
   branch, and package access cannot be restricted by branch. Repositories that publish
   packages from Actions are listed by the auditor, and their publishing moves to the
@@ -577,7 +592,13 @@ every unattended run, so no proof is cached between runs.
   and bypass the per-loop allowlist. It fails unless the permissions are exactly section 2's
   set (no `workflows`, no `administration`, no `secrets`), the repositories are exactly the
   configured ones, and every one of them is public (section 3); a repository the App was
-  installed on by mistake shows up here.
+  installed on by mistake shows up here. The installation's `repository_selection` must be
+  `selected`: an "All repositories" installation that happens to cover exactly the
+  configured set today would gain every repository the owner creates tomorrow.
+- **Minter allowlist**: the minter returns its effective per-loop allowlist, and the row
+  fails unless it equals this loop's configured repositories exactly; an entry for another
+  loop's repository would otherwise let this loop mint tokens there, unseen by the
+  installation check.
 - **Rules, including tags**: `GET /repos/{repo}/rules/branches/{branch}` returns the effective
   rules for `main` and for a branch outside the allowed patterns, and
   `GET /repos/{repo}/rulesets?includes_parents=true` with `GET …/rulesets/{id}` returns every
@@ -736,7 +757,9 @@ private key becomes a new high-value, long-lived secret: it can mint tokens for 
 repository of its owner's installation (section 1), so it is held by a separate key user
 behind a token minter that leaves cannot reach (section 5), rotated on a schedule and revoked
 on exposure; one App per owner bounds a stolen key to one owner. The auditor App's key is
-read-only and reveals configuration and secret names, not values; it is held by the same key
+read-only and reveals configuration, secret names (not values), and through `Actions: read`
+the repositories' workflow logs and artifacts, which can carry secret-derived data GitHub's
+log masking misses, so it is handled with the same care as the agent key; it is held by the same key
 user and, for the daily audit, in n8n. The threat models (`docs/design/architecture/14-threat-model.md`,
 `.oss-scanner/threat_model.md`) get the credential boundary, the CI secret rule and the
 protected paths in the same change that lands step 2.
