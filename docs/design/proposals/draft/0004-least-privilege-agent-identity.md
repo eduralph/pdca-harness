@@ -922,7 +922,10 @@ repositories) rather than a live one:
   fresh `pdca-doctor/probe-<random>` branch and expects GitHub to refuse it. The push is a
   conditional creation (`git push --force-with-lease=refs/heads/<branch>:`, an empty
   expected value meaning the ref must not exist), so if anyone else created the name in
-  between, the push fails instead of moving their branch. Before any
+  between, the push fails instead of moving their branch. The probe takes the instance's lane lock first and
+  holds it until its cleanup is confirmed, so two probes, or a probe and a run, never
+  journal or clean up at the same time; the journal holds a list of obligations, appended
+  to and removed from one by one, never overwritten. Before any
   write, `git ls-remote` must show the branch absent (otherwise another name is drawn). The
   branch name and the probe commit's OID are then written to the instance state **before**
   the push and cleared only once `git ls-remote` shows the branch absent, so a crash at any
