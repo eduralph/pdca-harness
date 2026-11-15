@@ -69,7 +69,12 @@ repositories of that owner's instances and targets.
   `-c credential.helper= -c credential.helper=<driver helper>` so that the empty entry resets
   any system, global or repository helper that could otherwise store the token, and each
   `gh` call gets `GH_TOKEN` in that one subprocess's environment only, with `GH_CONFIG_DIR`
-  set to an empty directory so no stored login can stand in for it.
+  set to an empty directory so no stored login can stand in for it. Every `gh` call also
+  names its target explicitly (`--repo github.com/<owner>/<repo>`, or the full
+  `repos/<owner>/<repo>/…` path for `gh api`) after checking it against the loop's
+  repository allowlist, with `GH_HOST`, `GH_REPO` and `GH_ENTERPRISE_TOKEN` removed from its
+  environment, so neither an inherited variable nor a leaf-edited remote can point it at
+  another repository the token reaches.
 
   **Authentication never falls back.** Every driver git call runs with
   `GIT_TERMINAL_PROMPT=0`, with `GIT_ASKPASS`, `SSH_ASKPASS` and every command-scope
@@ -173,9 +178,10 @@ the *names* of their secrets, never the values:
 | Secrets | read | names of repository secrets, and of organization secrets visible to the repository (`GET /repos/{repo}/actions/organization-secrets`) |
 | Environments | read | names of environment secrets |
 | Actions | read | environments and their protection rules; waiting runs, pending deployments and their approvals (the approval baseline of section 4) |
+| Deployments | read | deployment history, compared with the approval baseline of section 4 |
 | Contents | read | workflow files for the audit of section 4, tags and releases |
 | Attestations | read | the provenance attestations of release assets (`gh attestation verify`) |
-| Discussions | read | the daily discussions snapshot of section 4 |
+| Discussions | read | the discussions copy of section 4 |
 | Metadata | read | mandatory; also rulesets |
 
 ### 3. Rulesets and code owners (template `repo-settings.py`)
@@ -413,7 +419,7 @@ review aid, never the gate.
   | Scope | Fenced by | Residual |
   |---|---|---|
   | `contents` | rulesets on `main`, tags and non-driver branches (no bypass for GitHub Actions) | driver branches, which the App can write anyway |
-  | `pull-requests`, `issues` | "Allow GitHub Actions to create and approve pull requests" off; code-owner review | comments and labels, as the App |
+  | `pull-requests`, `issues` | "Allow GitHub Actions to create and approve pull requests" off; code-owner review | editing, closing and reopening issues and PRs, retargeting a PR's base, editing and deleting comments, labels; none of it merges or approves |
   | `discussions` | nothing on GitHub's side (Discussions stay on: the project's discussions happen there) | editing or deleting discussions and comments; see known limits |
   | `id-token` | trust policies pinned to fenced environments | none |
   | `attestations` | consumers verify `--source-ref refs/tags/<tag>` and the signer workflow | an attestation from a branch run, which that check rejects |
@@ -450,12 +456,14 @@ review aid, never the gate.
   alerts as advisory.
 - **Discussions.** Discussions stay enabled because the project's discussions happen there,
   and no setting stops an old workflow from requesting `discussions: write`. The accepted
-  residual is that such a run can edit or delete discussions and comments. It is detected
-  and mostly recoverable, not prevented: the n8n auditor keeps a copy of every discussion
+  residual is that such a run can edit or delete discussions and comments. It is detected,
+  not prevented, and recovery is manual: the n8n auditor keeps a copy of every discussion
   and comment in its own store (Discussions: read), fetching what changed since its last
   poll (ordered by `updatedAt`) on the same few-minute schedule as the approval poll, with a
-  full snapshot daily; it alerts through ntfy on any edit or deletion made by
-  `github-actions[bot]` or the agent App, and restores from its copy. Content created or
+  full snapshot daily. Polling sees that an object vanished, not who removed it, so n8n
+  alerts through ntfy on **every** deletion and on every edit whose last editor is
+  `github-actions[bot]` or the agent App. The auditor is read-only, so it restores
+  nothing itself: the alert carries the saved content and the maintainer reposts it. Content created or
   edited and then deleted between two polls was never copied and is lost; the window is
   the poll interval, and closing it would need webhook events kept outside GitHub.
 - **Cloud-side OIDC policies.** Whether a cloud still trusts a ref-based or wildcard
@@ -485,7 +493,8 @@ from a probe leaf and a probe gate as well as from the driver. For the driver it
 live environment of the running service (`/proc/<pid>/environ` of the unit), not only the
 profile, and fails on any `GIT_CONFIG_*`, askpass or token variable there. Because `gh` can also keep a
 login under `GH_CONFIG_DIR`, `XDG_CONFIG_HOME` or the system keyring, `doctor` checks the
-effective store rather than one file: `gh auth status`, run as the loop user with its own
+effective store rather than one file: `gh auth status --no-refresh` (a plain `gh auth status`
+refreshes an expiring token, which would extend the very login it is looking for), run as the loop user with its own
 profile's environment, must report no login, and the loop user has no keyring daemon
 holding one (no Secret Service item for `gh:github.com`).
 
@@ -703,8 +712,9 @@ protected paths in the same change that lands step 2.
 What it does not change: prompt injection through issues, comments and model output stays
 possible. A compromised loop user can obtain an App token for its allowlisted repositories
 and so has the App's whole grant there, not only its branches: in `stack` mode that is
-pushing driver branches and opening pull requests the maintainer reviews, writing issues,
-comments and labels, editing or deleting releases the immutability rule and the auditor do
+pushing driver branches and opening pull requests the maintainer reviews, editing,
+closing and retargeting issues and pull requests, writing and deleting comments and labels,
+editing or deleting releases the immutability rule and the auditor do
 not protect, and pushing a branch whose old workflows run with their own `GITHUB_TOKEN`
 scopes, which reach the residuals of section 4's table and known limits (Actions runs,
 discussions, packages, commit statuses, code-scanning data). None of that reaches `main`,
