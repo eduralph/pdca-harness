@@ -672,6 +672,9 @@ review aid, never the gate.
 - **Apps on a personal account are reviewed by hand.** No API lists the Apps a user has
   installed, so the rule that no other App holds write access to the repositories rests on
   the maintainer's review at setup (section 6).
+- **Old personal tokens are revoked by hand.** A maintainer token left in a file the loop
+  user can read would bypass every App boundary. No API lists a user's tokens, so their
+  revocation at migration rests on the maintainer (section 5).
 - **App keys are counted by hand.** No API lists an App's private keys, so that the key
   user holds the only one rests on the maintainer comparing fingerprints on the App
   settings page at setup and at each rotation (section 1).
@@ -718,7 +721,12 @@ the old setup are removed from the account outright, no `url.*.insteadOf` or
 `pushInsteadOf` rewrite, and every remote a plain `https://github.com/` URL with no
 credential in it. Otherwise a leaf or a compromised gate could skip the App and use an
 older, broader personal token or deploy key. Migration removes them (existing loop
-users hold the ADR-0006 personal token today), and `doctor` fails on any it finds, checking
+users hold the ADR-0006 personal token today) and, because a copy could sit in any file
+the loop user can read (a backup, an `.env`) where no file check finds it, **revokes**
+them on GitHub: the ADR-0006 token and every other token that was ever stored on the loop
+host are deleted in the maintainer's token settings, which `pdca setup-identity` walks the
+maintainer through and records; no API lists a user's own tokens, so section 4's known
+limits record that this is manual, and `doctor` fails on any it finds, checking
 from a probe leaf and a probe gate as well as from the driver. For the driver it reads the
 live environment of the running service (`/proc/<pid>/environ` of the unit), not only the
 profile, and fails on any `GIT_CONFIG_*`, askpass, tracing or token variable there. Because `gh` can also keep a
@@ -831,10 +839,14 @@ every unattended run, so no proof is cached between runs.
   the minter's unit executes or imports (unit file, interpreter, virtual environment,
   `PYTHONPATH`, working directory) is writable by the loop user. Nor does the loop user
   hold anything root-equivalent, which would reach the key regardless of file modes:
-  `doctor` fails when `sudo -n true` succeeds for it, when it belongs to `sudo`, `wheel`,
-  `docker`, `lxd`, `libvirt` or `incus` (or any group that owns a privileged daemon
-  socket), or when it can open the socket of a rootful Docker, Podman, LXD or libvirt
-  daemon.
+  `doctor` fails when `sudo -n -l` lists any rule for it (a command-specific `NOPASSWD`
+  rule, such as `cat` as the key user, is enough to read the key, so the user must have no
+  sudo rule at all), when it belongs to `sudo`, `wheel`, `disk`, `docker`, `lxd`,
+  `libvirt` or `incus` (or any group that owns a privileged daemon socket or a block
+  device), when it can open any block device or the socket of a rootful Docker, Podman,
+  LXD or libvirt daemon, or when an executable it can run carries a capability that
+  bypasses file permissions (`cap_dac_override`, `cap_dac_read_search`, `cap_sys_admin`,
+  `cap_sys_ptrace`).
 
 `doctor` itself stays read-only, as it is today. The one check that has to write runs
 separately, when an App is installed and whenever its permissions change, against a
@@ -867,7 +879,11 @@ repositories) rather than a live one:
 mint auditor tokens for anyone. It runs these checks itself, as the key user, and returns
 to `doctor` only a verdict per manifest check ID (pass, fail, inconclusive) and the names
 of what failed, so a compromised loop user that talks to the socket gets no auditor token,
-no logs, no artifacts and no general API access. The n8n audit holds its own copy of the
+no logs, no artifacts and no general API access. The minter does not leave enforcement
+to the caller either, since the loop user may be compromised and could skip `doctor`: it
+runs these auditor checks itself when a run starts and again at least every hour, and
+refuses to mint agent tokens while any of them fails, so a lost approval rule or a
+self-hosted runner that appears stops token issue, not only the `doctor` report. The n8n audit holds its own copy of the
 auditor key. The checks: first the same identity check as for the agent App, an
 unscoped token whose permissions must equal the auditor table of section 2 exactly (any write
 permission fails) and whose repositories must be exactly the configured ones. Then:
@@ -884,7 +900,8 @@ section 4 requires it, the approval rule. The policy list API returns a policy's
 not whether it matches branches or tags, so `repo-settings.py` records the IDs of the
 policies it created (with their type) and the auditor fails when an environment's policy
 IDs differ from that record: a `v*` branch policy put in place of the `v*` tag policy has
-a new ID; the OIDC subject template is the default; "Allow GitHub Actions to create
+a new ID, and it also compares each policy's current name with the recorded pattern, since
+a policy edited in place (`main` renamed to `*`) keeps its ID; the OIDC subject template is the default; "Allow GitHub Actions to create
 and approve pull requests" is off; no persistent self-hosted runner is available; and the
 review aids of section 4 report nothing new on `main`. Any failure blocks the run.
 
