@@ -629,12 +629,16 @@ review aid, never the gate.
   has another trigger, and every approval notice names the run's event so the maintainer
   refuses any other. ADR-0017's issue triage, triggered by `issues`, is the pilot decision
   above: it runs without an environment or moves to the driver side.
-- **Privileged jobs build clean.** A job in an environment neither restores nor saves an
+- **Privileged jobs build clean**, and so does every job of their workflow: a job that
+  feeds an environment job through `needs` outputs or same-run artifacts could otherwise
+  restore a poisoned cache or another run's artifact and pass it on as same-run data. So
+  every rule in this item applies to each job of a workflow that defines an environment
+  job, and the auditor checks each of them. A job in such a workflow neither restores nor saves an
   Actions cache (a cache it saved on `main` could carry secret-derived output, and driver
   branches can restore `main`'s caches) and
   downloads no artifact from another run: in `merge` mode an unprivileged run on `main` could
   have filled the cache or an artifact with agent-merged output. Two parts are enforced:
-  every environment job declares `permissions:` with `actions: none` (neither `read` nor
+  every job of such a workflow declares `permissions:` with `actions: none` (neither `read` nor
   `write`, since write includes read; a job without its own `permissions:` block fails too,
   as it would inherit the workflow's), so its
   `GITHUB_TOKEN` cannot fetch another run's artifacts by any route (`gh run download`, the
@@ -930,8 +934,10 @@ every unattended run, so no proof is cached between runs.
   checksum of each; a package update re-records it through the same step) in any of those
   fields, or any set-ID file appears that the manifest lacks, a stray one or a
   `chmod u+s` on `/bin/bash` being as good as root (`dpkg --verify` alone checks content,
-  not mode), when a polkit rule
-  grants the loop user or its groups any action without authentication, or when an
+  not mode), when the host's polkit rule files
+  (`/etc/polkit-1/rules.d`, `/usr/share/polkit-1/rules.d`) differ from a root-owned
+  manifest of approved files and checksums the maintainer records at setup, since a rule is
+  arbitrary JavaScript and no probe can show what it grants, or when an
   executable it can run carries any file capability outside a short allowlist (`cap_net_raw`, `cap_net_bind_service`): a list of dangerous
   ones would always miss one (`cap_setuid`, `cap_setfcap`, `cap_sys_module` each lead to
   root).
