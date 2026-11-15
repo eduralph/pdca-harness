@@ -72,8 +72,10 @@ repositories of that owner's instances and targets.
   set to an empty directory so no stored login can stand in for it.
 
   **Authentication never falls back.** Every driver git call runs with
-  `GIT_TERMINAL_PROMPT=0`, with `GIT_ASKPASS` and `SSH_ASKPASS` removed from its environment
-  and `-c core.askPass= -c credential.interactive=false`, so git has no prompt or askpass
+  `GIT_TERMINAL_PROMPT=0`, with `GIT_ASKPASS`, `SSH_ASKPASS` and every command-scope
+  configuration variable (`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`,
+  `GIT_CONFIG_VALUE_*`) removed from its environment, so an inherited header or URL rewrite
+  cannot ride along, and with `-c core.askPass= -c credential.interactive=false`, so git has no prompt or askpass
   program to try after the helper. When the minter fails or refuses, the helper answers
   `quit=1`, which ends git's credential lookup, and the call fails; the driver stops the
   run rather than retrying with anything else. Remotes are plain `https://` URLs (section
@@ -451,7 +453,9 @@ agent that GitHub accepts (`ssh -T git@github.com` must be refused), no `url.*.i
 credential in it. Otherwise a leaf or a compromised gate could skip the App and use an
 older, broader personal token or deploy key. Migration removes them (existing loop
 users hold the ADR-0006 personal token today), and `doctor` fails on any it finds, checking
-from a probe leaf and a probe gate as well as from the driver. Because `gh` can also keep a
+from a probe leaf and a probe gate as well as from the driver. For the driver it reads the
+live environment of the running service (`/proc/<pid>/environ` of the unit), not only the
+profile, and fails on any `GIT_CONFIG_*`, askpass or token variable there. Because `gh` can also keep a
 login under `GH_CONFIG_DIR`, `XDG_CONFIG_HOME` or the system keyring, `doctor` checks the
 effective store rather than one file: `gh auth status`, run as the loop user with its own
 profile's environment, must report no login, and the loop user has no keyring daemon
