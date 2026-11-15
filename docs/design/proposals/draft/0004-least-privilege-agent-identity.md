@@ -136,11 +136,15 @@ repositories of that owner's instances and targets.
   A check made before a git call cannot protect that call if a leaf can rewrite the config
   in between. So the driver never runs git in a repository a leaf can write: it keeps its
   own clone, whose git directory lies outside every leaf's mount namespace, and takes a
-  leaf's work into it as a **bundle file**: the leaf writes `git bundle create` output, and
-  the driver verifies and fetches from that file. A fetch from the leaf's repository itself
+  leaf's work into it as **files of data**: a leaf's output is today an uncommitted
+  change that the publisher applies (`leaves.py`, `publish.py`), so the leaf writes it,
+  inside its own namespace, as a patch file (`git diff --binary --no-ext-diff
+  --no-textconv` against the base it was given), and commits it made, if any, as a
+  `git bundle create` file; the driver applies the patch with `git apply` in its own
+  clone, checking that it applies to that base, and verifies and fetches the bundle. A fetch from the leaf's repository itself
   would not do, since the `git upload-pack` it starts reads that repository's
   configuration and can run programs from it (`core.alternateRefsCommand`, for one),
-  outside the leaf's namespace; a bundle is a plain file with no configuration. The configuration check above still runs on the driver's clone. It is not
+  outside the leaf's namespace; a patch or a bundle is a plain file with no configuration. The configuration check above still runs on the driver's clone. It is not
   a boundary against the loop user itself: a gate, or a daemon a gate leaves behind, runs
   as that user, can rewrite the driver's clone and can reach the minter directly, which is
   why section 5 treats the loop user as possibly compromised and puts the boundary on
