@@ -575,9 +575,9 @@ review aid, never the gate.
   | `pull-requests`, `issues` | "Allow GitHub Actions to create and approve pull requests" off; code-owner review | editing, closing and reopening issues and PRs, retargeting a PR's base, editing and deleting comments, labels, marking a draft ready; it cannot approve. In `stack` mode it cannot merge (only the maintainer can update `main`); in `merge` mode it can merge a PR that touches no governing file once the required checks pass, the same reach the App has there (known limits) |
   | `discussions` | nothing on GitHub's side (Discussions stay on: the project's discussions happen there) | editing or deleting discussions and comments; see known limits |
   | `id-token` | trust policies pinned to fenced environments | none |
-  | `attestations` | consumers verify `--source-ref refs/tags/<tag>` and the signer workflow | an attestation from a branch run, which that check rejects |
+  | `attestations` | consumers verify `--source-ref refs/tags/<tag>`, the signer workflow and a `push` trigger | an attestation from a branch run, which that check rejects; deleting a release's attestations, which the auditor reports as missing and the maintainer restores by re-running the release workflow for that tag (with approval) |
   | `deployments` | environment deployment policies | deployment records without access |
-  | `pages` | the `github-pages` environment's deployment policy (`main` and the listed target branches, like every environment) | none |
+  | `pages` | Pages is published from a **branch** (`main`, `/docs` or another protected branch), not by an Actions deployment: for an Actions-based site the `github-pages` environment is optional, so an old workflow without it could deploy. The auditor fails on a repository whose Pages build type is `workflow`, unless the maintainer has recorded that repository as an accepted exception | for a recorded exception, a site deployment from an old workflow (known limit) |
   | `actions` | none available | known limit: disable workflows, cancel or delete runs and artifacts |
   | `statuses`, `checks` | none available | known limit: fake status checks |
   | `packages` | none available | known limit |
@@ -850,7 +850,11 @@ per tag from its few-minute poll; `doctor`, which has no such store, checks only
 every `v*` tag n8n has listed as overdue has a release (other tags need none, and any
 release the App put on one fails the author, manifest and attestation checks); no repository secret and no visible organization secret; every
 environment, whether it holds a secret or not, has the deployment policy and, where
-section 4 requires it, the approval rule; the OIDC subject template is the default; "Allow GitHub Actions to create
+section 4 requires it, the approval rule. The policy list API returns a policy's name but
+not whether it matches branches or tags, so `repo-settings.py` records the IDs of the
+policies it created (with their type) and the auditor fails when an environment's policy
+IDs differ from that record: a `v*` branch policy put in place of the `v*` tag policy has
+a new ID; the OIDC subject template is the default; "Allow GitHub Actions to create
 and approve pull requests" is off; no persistent self-hosted runner is available; and the
 review aids of section 4 report nothing new on `main`. Any failure blocks the run.
 
