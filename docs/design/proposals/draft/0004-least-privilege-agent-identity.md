@@ -67,8 +67,10 @@ repositories of that owner's instances and targets.
   so no one else can add a key. No API shows App managers or an App's keys, so this is a
   **recurring manual attestation**: at setup, at each rotation and at least every 30 days
   (n8n sends the reminder through ntfy), the maintainer checks both pages and records the
-  date with `pdca setup-identity --attest`; `doctor` fails once the last attestation is
-  older than 35 days. Section 4's known limits record that the check is manual.
+  date with `pdca setup-identity --attest`, which writes it to a file owned by the key user
+  (the command runs through `sudo -u <loop>-keys` from the maintainer's own login, never
+  as the loop user). The minter refuses to mint once that date is older than 35 days, and
+  `doctor` reports it. Section 4's known limits record that the check is manual.
 - **Tokens are short-lived.** The driver mints installation tokens just in time, scoped down
   to the repositories the run touches and to **exactly** section 2's permissions (the
   minter names them in every token request, so a grant the installation gained by mistake,
@@ -838,11 +840,14 @@ every unattended run, so no proof is cached between runs.
   answer, a network error included, fails the row. Each agent App is created
   as a private App by the owner it serves, so GitHub refuses installation anywhere else; the
   auditor Apps are checked the same way.
-- **Identity and permissions**: the minter mints an *unscoped* diagnostic token (no
-  repository list), so the response shows the installation's full grant, and enumerates
-  `GET /installation/repositories` itself; it returns only the permissions and the repository
-  list to `doctor`, never the token, which would reach every repository of the installation
-  and bypass the per-loop allowlist. It fails unless the permissions are exactly section 2's
+- **Identity and permissions**: the minter reads the installation record itself with the
+  App's JWT (`GET /app/installations/{id}`), which shows the installation's full
+  permission grant; a minted token would not, since GitHub reports the permissions of the
+  token, and the minter's tokens always request section 2's set. For the repository list it
+  mints a diagnostic token with no repository list and no permission list and enumerates
+  `GET /installation/repositories`; it returns only the permissions and the repository
+  list to `doctor`, never that token, which would reach every repository of the
+  installation and bypass the per-loop allowlist. It fails unless the permissions are exactly section 2's
   set (no `workflows`, no `administration`, no `secrets`), the repositories are exactly
   the **owner-wide** set (the union of every loop's repositories for this owner, kept in a
   key-side file of the key user that the maintainer edits), and every one of them is
@@ -947,7 +952,7 @@ rules, `current_user_can_bypass`), itself when a run starts and again at least e
 hour, and refuses to mint agent tokens while any of them fails, so a lost approval rule,
 a self-hosted runner that appears or the App added as a bypass actor stops token issue, not only the `doctor` report. The n8n audit holds its own copy of the
 auditor key. The checks: first the same identity check as for the agent App, an
-unscoped token whose permissions must equal the auditor table of section 2 exactly (any write
+installation record whose permissions must equal the auditor table of section 2 exactly (any write
 permission fails) and whose repositories must be exactly the configured ones. Then:
 the settings of sections 3 and 4: immutable releases are on, every release is immutable,
 authored by `github-actions[bot]`, complete against its attested manifest and attested by
@@ -986,7 +991,11 @@ provenance), whether they are mutable or already immutable. They are **grandfath
 `repo-settings.py` records their IDs and asset digests at installation, the author,
 manifest and provenance checks apply only to releases not in that record, and the
 auditor fails if a recorded release's assets or digests change or a recorded release is
-mutable. `repo-settings.py` lists the releases concerned when the
+mutable. Their tags are recorded too and exempt from the workflow-content checks, whose
+rules their historical workflows predate and cannot be changed to meet; instead, every
+approval notice for a run on a grandfathered tag says not to approve it, and the
+re-attestation job never runs for a grandfathered release (it has no manifest to check
+against). `repo-settings.py` lists the releases concerned when the
 setting is switched on (for the existing repositories, 14.11.2026).
 
 **Independently, from n8n**: the same auditor checks run daily from n8n with the auditor
