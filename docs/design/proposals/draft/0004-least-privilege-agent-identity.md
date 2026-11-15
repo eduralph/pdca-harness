@@ -411,7 +411,13 @@ the environment policies and the `doctor` rows all take the name from there.
   attestation instead), or that holds any asset
   without a provenance attestation from the release workflow at that tag, and consumers
   verify with `gh attestation verify --signer-workflow <release workflow>
-  --source-ref refs/tags/<tag>`, which an asset the App supplied cannot pass. Because
+  --source-ref refs/tags/<tag> --deny-self-hosted-runners`, which an asset the App supplied
+  cannot pass. Path and ref alone do not prove the release went through the approved path:
+  an old workflow with `actions: write` could dispatch the release workflow on an existing
+  tag whose older copy of that workflow lacked the environment. So the release workflow is
+  triggered by tag pushes only (no `workflow_dispatch`), and the auditor and the documented
+  consumer check also require the attestation certificate's build trigger to be `push`,
+  read from `gh attestation verify --format json`; only the maintainer can push a tag. Because
   immutability would lock such a release, the response is to delete it and release under
   the next version number.
 
@@ -659,7 +665,11 @@ to GitHub at all: a key in a file the loop user can read anywhere, not only in `
 would be found by no file check, so the host's firewall drops outgoing SSH (port 22, and
 443 to `ssh.github.com`) for the loop user's UID, and `doctor` checks it by attempting the
 connection and requiring it to fail at the network level, judged by the output, not the
-exit status (a successful `ssh -T git@github.com` also exits 1), no `url.*.insteadOf` or
+exit status (a successful `ssh -T git@github.com` also exits 1). A relay on another port
+could still carry SSH, so the firewall is not the boundary; GitHub's side is: no key a loop
+user could hold has write access, because the auditor fails on any deploy key with write
+(section 6), and migration removes every SSH key of the old setup from the maintainer's
+GitHub account that ever lived on the loop host, no `url.*.insteadOf` or
 `pushInsteadOf` rewrite, and every remote a plain `https://github.com/` URL with no
 credential in it. Otherwise a leaf or a compromised gate could skip the App and use an
 older, broader personal token or deploy key. Migration removes them (existing loop
@@ -868,8 +878,12 @@ repository's deploy keys on every run (Administration: read) and fails on any wi
 access. Other GitHub Apps are not visible to an installation token. For an organization,
 `repo-settings.py check`, with the maintainer's login, lists every installation
 (`GET /orgs/{org}/installations`) and fails on any App other than the agent App, the
-auditor App and GitHub's Dependabot that covers the repository and holds **any** write
-or admin permission, repository or organization level: an allowlist of read-only grants,
+auditor App and GitHub's Dependabot that holds **any** write or admin permission,
+repository or organization level, and is installed on all repositories. For one
+installed on selected repositories, the API does not show which ones to the maintainer's
+login, so `pdca setup-identity` lists it and the maintainer confirms on the organization's
+installed-Apps page that it does not cover the repository, as for a personal account. The
+rule is an allowlist of read-only grants,
 not a list of dangerous ones, since combinations such as Organization secrets write with
 Actions write (add the repository to a secret, re-run an old workflow) are as harmful as
 Contents write. For a personal account GitHub offers no API that lists the Apps a user
