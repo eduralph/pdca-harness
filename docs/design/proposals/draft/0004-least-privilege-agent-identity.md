@@ -45,6 +45,42 @@ away from any git credential (ADR-0007), and `doctor` proves the split (`token-s
 ADR-0021's driver container adds a fourth credential of the same kind: a deploy key with
 write access, which can change workflow files.
 
+## Threat model
+
+The design defends against one adversary: **whoever controls content the loop reads**, be
+it an issue, a comment, a dependency, model output or the target repository's own code.
+Gates run that code and git runs its hooks outside any leaf sandbox, so the adversary is
+taken to control the **loop user** and everything it runs, the driver included. In scope
+is any way for it to:
+
+- change `main`, a listed target branch or a release tag without the maintainer's review,
+  beyond the ordinary-code merges `merge` mode gives the App by design (section 3);
+- reach an environment secret, a cloud credential or a release;
+- obtain an App private key, the auditor's token, or a token beyond its loop's allowlist;
+- change the files that govern the agent, or the checks that judge it;
+- hide any of this from `doctor`, the minter or the n8n audit.
+
+Settings drift is in scope whoever causes it: the auditor fails on a loosened setting, an
+added writer or a credential stored where workflows can read it.
+
+Out of scope, each an assumption the design rests on rather than a threat it defends:
+
+- **The loop host.** The loop user gains no privilege beyond its own (root, the key user,
+  another loop user), and the host holds no credential of the maintainer's that the loop
+  user can read. How a host is hardened, and how that is checked, is the **loop-host
+  baseline**, a separate proposal
+  ([#965](https://github.com/eduralph/pdca-harness/issues/965)); this design only consumes its verdict
+  (section 6). In practice: a dedicated host on which the maintainer's own keys and tokens
+  never were.
+- **The maintainer**: their own machine, account and second factor, and their own actions
+  on their repositories.
+- **GitHub, n8n and ntfy themselves**, and the hosts n8n and ntfy run on.
+- **Denial of service.** Stopping the loop, cancelling runs or making `doctor` fail costs
+  time, not integrity.
+
+Residuals the design accepts within scope are section 4's known limits. A weakness outside
+this model, or one already listed there, is recorded there rather than designed against.
+
 ## Design
 
 ### 1. Identity: one GitHub App per owner
@@ -804,24 +840,14 @@ user (the `doctor` secret-guard row, #959, reports it).
 The loop user holds **no ambient GitHub credential**: no `gh` login (`~/.config/gh/hosts.yml`),
 no `.git-credentials`, no credential helper or `http.*.extraHeader` in its global, system or
 any checkout's repository git configuration, no `GH_TOKEN` in its profile, no `~/.netrc` or
-`~/_netrc` (nor a `NETRC` variable pointing elsewhere), no SSH path
-to GitHub at all: a key in a file the loop user can read anywhere, not only in `~/.ssh`,
-would be found by no file check, so the host's firewall drops outgoing SSH (port 22, and
-443 to `ssh.github.com`) for the loop user's UID, and `doctor` checks it by attempting the
-connection and requiring it to fail at the network level, judged by the output, not the
-exit status (a successful `ssh -T git@github.com` also exits 1). A relay on another port
-could still carry SSH, so the firewall is not the boundary; GitHub's side is: no key a loop
-user could hold has write access, because the auditor fails on any deploy key with write
-(section 6), and no key on the maintainer's GitHub account is reachable
-by the loop user. `pdca setup-identity` lists the account's SSH keys (`GET /user/keys`,
-with the maintainer's login) and asks, for each, where its private half lives; it refuses
-to continue until every key whose private half **is or ever was** on the loop host is
-removed from the account (rotated: a new key made elsewhere replaces it), since a
-forgotten backup copy somewhere the loop user can read cannot be ruled out by any check;
-in practice the loop runs on a host where the maintainer's own keys never were, or the
-maintainer rotates those keys once. No agent socket of the maintainer's may be reachable
-from the loop user either, both of which `doctor` re-checks as the
-loop user (opening the maintainer's `~/.ssh` and any `SSH_AUTH_SOCK` must fail). Keys of
+`~/_netrc` (nor a `NETRC` variable pointing elsewhere), and no SSH path to GitHub: the
+host's firewall drops outgoing SSH (port 22, and 443 to `ssh.github.com`) for the loop
+user's UID, and `doctor` checks it by attempting the connection and requiring it to fail
+at the network level, judged by the output, not the exit status (a successful
+`ssh -T git@github.com` also exits 1). The firewall is defence in depth; the boundary is
+GitHub's side: no deploy key has write access (section 6), and no key on the maintainer's
+account is on the loop host (threat model). `doctor` re-checks as the loop user that the
+maintainer's `~/.ssh` and any `SSH_AUTH_SOCK` cannot be opened. Keys of
 the old setup are removed from the account outright, no `url.*.insteadOf` or
 `pushInsteadOf` rewrite, and every remote a plain `https://github.com/` URL with no
 credential in it. Otherwise a leaf or a compromised gate could skip the App and use an
@@ -912,11 +938,11 @@ every unattended run, so no proof is cached between runs.
   `selected`: an "All repositories" installation that happens to cover exactly the
   configured set today would gain every repository the owner creates tomorrow.
 - **Where the records live.** Everything the checks compare against (the variable
-  allowlist, the deployment-policy IDs, the grandfathered releases, the host manifests,
+  allowlist, the deployment-policy IDs, the grandfathered releases,
   the owner-wide repository set, the per-loop allowlists and the key and App-manager
   attestation) is stored owned by the key user or by root, outside every directory the
   loop user can write; `repo-settings.py` and `pdca setup-identity` write them from the
-  maintainer's login through `sudo -u <owner>-keys` (root for the host manifests), never as
+  maintainer's login through `sudo -u <owner>-keys`, never as
   the loop user, and the minter refuses to run while any of them is writable by the loop
   user.
 - **Minter allowlist**: the minter returns its effective per-loop allowlist, and the row
@@ -958,40 +984,10 @@ every unattended run, so no proof is cached between runs.
 - **Key files**: the agent and auditor keys are owned by the key user and unreadable to the
   loop user (`doctor`, running as the loop user, fails if it can open either), and nothing
   the minter's unit executes or imports (unit file, interpreter, virtual environment,
-  `PYTHONPATH`, working directory) is writable by the loop user. Nor does the loop user
-  hold anything root-equivalent, which would reach the key regardless of file modes:
-  `doctor` fails when `sudo -n -l` lists any rule for it (a command-specific `NOPASSWD`
-  rule, such as `cat` as the key user, is enough to read the key, so the user must have no
-  sudo rule at all), when it belongs to `sudo`, `wheel`, `disk`, `docker`, `lxd`,
-  `libvirt` or `incus` (or any group that owns a privileged daemon socket or a block
-  device), when it can open any block device or the socket of a rootful Docker, Podman,
-  LXD or libvirt daemon, when the host's setuid and setgid files differ from a
-  root-owned manifest the maintainer records at setup (path, owner, group, mode and
-  checksum of each; a package update re-records it through the same step) in any of those
-  fields, or any set-ID file appears that the manifest lacks, a stray one or a
-  `chmod u+s` on `/bin/bash` being as good as root (`dpkg --verify` alone checks content,
-  not mode), when the host's polkit configuration differs from a
-  root-owned manifest of approved files and checksums the maintainer records at setup:
-  every authorization source polkit reads, the JavaScript rules (`/etc/polkit-1/rules.d`,
-  `/usr/share/polkit-1/rules.d`), the action definitions whose defaults can allow without
-  authentication (`/usr/share/polkit-1/actions/*.policy`) and, where the legacy backend is
-  installed, `localauthority` (`*.pkla`), and an authorization source outside that list
-  fails the check, since a rule is
-  arbitrary JavaScript and no probe can show what it grants, or when an
-  executable it can run carries any file capability outside a short allowlist (`cap_net_raw`, `cap_net_bind_service`): a list of dangerous
-  ones would always miss one (`cap_setuid`, `cap_setfcap`, `cap_sys_module` each lead to
-  root). Finally, nothing root or the key user runs may be writable by the loop user, and since
-  no scan can prove what a job loads at run time, this rests on two checkable parts. The
-  root host check lists every path the loop user can write (its UID and groups, outside
-  `/proc` and `/sys`) and fails when that reaches anywhere outside its home, its loop's
-  working directories and the shared temporary directories, so a group-writable
-  `/usr/local/bin/backup` fails directly. And every job that runs as root or the key user
-  (systemd units and timers, cron entries, login scripts) is on a root-owned manifest the
-  maintainer records at setup with the checksum of each definition and of every executable
-  and script it names, having reviewed that none
-  reads from the loop user's directories; a new or changed one fails until the
-  maintainer reviews and records it. The loop host is dedicated, so that list stays short. What those
-  scripts load beyond the files they name is the maintainer's review, recorded with them.
+  `PYTHONPATH`, working directory) is writable by the loop user. That the loop user holds
+  nothing root-equivalent, which would reach the key regardless of file modes, is the
+  loop-host baseline's to establish (threat model); the minter refuses tokens without its
+  passing verdict (below).
 
 `doctor` itself stays read-only, as it is today. The one check that has to write runs
 separately, when an App is installed and whenever its permissions change, against a
@@ -1029,11 +1025,10 @@ to `doctor` only a verdict per manifest check ID (pass, fail, inconclusive) and 
 of what failed, so a compromised loop user that talks to the socket gets no auditor token,
 no logs, no artifacts and no general API access. The minter does not leave enforcement
 to the caller either, since the loop user may be compromised and could skip `doctor`. It
-refuses while the **host checks** are stale or failing: the key-file and root-equivalence
-rows of section 5 need root to see everything (sudo rules, setuid files), so a root-owned
-systemd timer runs them at least every hour and writes its verdict to a root-owned file
-the minter reads, and the minter refuses tokens when that verdict fails or is older than
-two hours. It also
+refuses while the **host checks** are stale or failing: the loop-host baseline's checks
+(threat model) need root to see everything, so a root-owned systemd timer runs them at
+least every hour and writes its verdict to a root-owned file the minter reads, and the
+minter refuses tokens when that verdict fails, is missing or is older than two hours. It also
 runs these auditor checks, and the agent-token rows above (installation, permissions,
 rules, `current_user_can_bypass`), itself when a run starts and again at least every
 hour, and refuses to mint agent tokens while any of them fails, so a lost approval rule,
@@ -1196,7 +1191,8 @@ agent App, and the row fails closed if it is not.
 
 ## Graduation criteria
 
-1. **Pilot** on wyrd-pdca and its target wyrd: agent App and auditor App installed, the
+1. **Pilot** on wyrd-pdca and its target wyrd, on a host that meets the loop-host
+   baseline (#965): agent App and auditor App installed, the
    instance's driver publishes through the agent App, rulesets and code owners applied,
    secrets moved into environments, and the daily n8n audit alerting through ntfy.
    Done when a full flow (plan to publish) runs on the App token, the `doctor` rows above
@@ -1271,6 +1267,12 @@ PR check and a post-merge job on `main` in an environment, or loses the secret; 
 check is never left depending on an environment.
 
 ## Decisions taken while drafting
+
+- **Threat model and the loop host** (decided 16.11.2026): the design is bounded by the
+  threat model above. Hardening the loop host against privilege escalation, and keeping
+  the maintainer's credentials off it, moved to the loop-host baseline (#965), which may
+  instead become part of the disposable job VM decision that supersedes ADR-0021; this
+  proposal keeps only the minter's refusal without that baseline's passing verdict.
 
 - **`merge` mode and `AGENTS.md`** (decided 15.11.2026): `merge` mode works differently from
   the STOP discipline by nature, since its driver merges non-final waves itself, and it
