@@ -55,13 +55,17 @@ is any way for it to:
 
 - change `main`, a listed target branch or a release tag without the maintainer's review,
   beyond the ordinary-code merges `merge` mode gives the App by design (section 3);
-- reach an environment secret, a cloud credential or a release;
+- reach an environment secret, a credential a workflow obtains through OIDC, or a release;
 - obtain an App private key, the auditor's token, or a token beyond its loop's allowlist;
 - change the files that govern the agent, or the checks that judge it;
 - hide any of this from `doctor`, the minter or the n8n audit.
 
-Settings drift is in scope whoever causes it: the auditor fails on a loosened setting, an
-added writer or a credential stored where workflows can read it.
+Settings drift that the auditor can see is in scope whoever causes it: it fails on a
+loosened setting, an added collaborator or deploy key, or a credential stored where
+workflows can read it. Changes that only an admin can make and only the maintainer's login
+can see (a ruleset's full bypass list, another App installed on a personal account) are
+the maintainer's own actions; they are checked when the maintainer applies settings
+(section 6), not between runs.
 
 Out of scope, each an assumption the design rests on rather than a threat it defends:
 
@@ -77,6 +81,11 @@ Out of scope, each an assumption the design rests on rather than a threat it def
 - **GitHub, n8n and ntfy themselves**, and the hosts n8n and ntfy run on.
 - **Denial of service.** Stopping the loop, cancelling runs or making `doctor` fail costs
   time, not integrity.
+- **The model provider's key.** Each leaf holds the key it needs to call its model
+  (section 1), so a leaf can leak it, for instance through a patch the publisher pushes.
+  That key spends money and reaches no repository; it is limited and rotated at the
+  provider, and keeping it out of the leaf is the separate model-key gateway's to do
+  (decision Q4).
 
 Residuals the design accepts within scope are section 4's known limits. A weakness outside
 this model, or one already listed there, is recorded there rather than designed against.
