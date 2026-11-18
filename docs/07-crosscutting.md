@@ -989,15 +989,24 @@ wave builds on, via `[driver].wave_mode`:
   files, each with the bundle whose own change last touched it on the line when
   the run can tell: update that PR's branch from your base, resolving the
   conflict, then re-run. If merging your base would remove work a bundle put on
-  the line (your base reverted a merged PR the line carries), the line names the
-  file and the bundle. The line keeps that work: put it back on your base
-  (revert the revert) if the revert was a mistake; if it was meant, drop that
-  bundle from the briefs that name it and re-issue without it. Deleting the line
-  on origin would build on your base without that work. If no bundle put the
-  file there (it came onto the line from your base, which has since deleted,
-  renamed or reverted it) and the run could read every bundle's commits, the
-  line says so instead: deleting the line on origin loses no bundle's work and
-  is the way out. If a finished
+  the line (your base reverted a merged PR the line carries, or edited a line
+  of it), the line names the file and the bundle, or says `folded work` when it
+  cannot tell which bundle. The check counts line texts and never looks at
+  where a line is. It judges each file the merge changes that a commit a fold
+  put on the line also changed: each line text such a commit added must be
+  there at least as often after the merge as before it, a text such a commit
+  removed must not be there more often, and the file must not go back to how
+  your base had it when the line was cut. Blank and whitespace-only lines are
+  not counted. It needs no publish record and no host read, so a squash merge,
+  a cherry-pick or a rewritten branch does not hide a bundle's work from it. A
+  change your base made to its own lines, or a revert of one, does not drop the
+  refresh (unless a bundle has the same text, see the limits below); your base
+  editing or deleting a bundle's line does, even on purpose, on every re-run.
+  The line keeps that work: put it back on your base (revert the revert) if
+  that was a mistake; if it was meant, drop that bundle from the briefs that
+  name it and re-issue without it; if your base changed only its own copy of
+  the same text, delete the line on origin once the run ends, then re-run: the
+  re-run starts the line from your base. If a finished
   prerequisite merges onto the line as found but not once your base is in it,
   the line names it and the files: update its PR branch from your base,
   resolving the conflict, then re-run. A prerequisite that is left off either
@@ -1014,25 +1023,31 @@ wave builds on, via `[driver].wave_mode`:
   base into the line before the re-gate, so your base itself may be what is red,
   and gives the delete step rather than re-opening a PR, which cannot help.
 
-  Known limits of the refresh: the check for removed work compares each file
-  with where the line leaves your base, so it misses a revert of a bundle's
-  lines when your base also edits that file (as the fold's own checks above
-  do), and every re-run now meets that case; that point never moves past a
-  refresh, so once your base deletes or renames a file it added after that
-  point, or reverts another change of its own made after it, every later
-  refresh of that line is dropped, not only the next, until that point moves
-  (#894) or the line is deleted (the warning says the file came from your base
-  and gives deleting the line as the way out), and the fold can refuse a branch
-  for the same reason (too much refused, never work lost); a prerequisite your
+  Known limits of the refresh: the count cannot tell a bundle's line from your
+  base's own copy of the same text, so a base that deletes or edits its own copy
+  of a text a bundle also added, or adds a copy of a text a bundle removed,
+  drops the refresh (the way out is the delete step above); blank and
+  whitespace-only lines are not protected; a bundle's line moved within its
+  file counts as kept; a moved file is judged as a removal and an addition (no
+  rename detection); the fold's own check of a bundle's branch still compares
+  each file with where the line leaves your base, a point a refresh never
+  moves, so it can refuse a branch that brings your base's deletion or revert
+  of a change of its own that a refresh put on the line (too much refused,
+  never work lost); a prerequisite your
   base merged and then reverted that was never on the line arrives through the
-  refresh with its work absent, as on a fresh line; a kept
+  refresh with its work absent, as on a fresh line, and one whose work reached
+  the line only through a refresh (your base merged its PR before any fold put
+  its branch there) counts as your base's own, so a later revert of it on your
+  base is no reason to drop the next refresh; a kept
   refresh is pushed before the re-gate, so a red base makes every carry of that
   line red until the base is fixed or the line deleted; base commits a refresh
   put on the line that later leave your base (a force-push there) make the next
   re-run find commits it cannot account for, and it asks you to delete the line;
-  a refused push is refused as any other fold push is, not retried; and a file
-  name on your base that is not valid UTF-8 can stop the run during the check
-  for removed work. A target with no line yet is judged as above.
+  a refused push is refused as any other fold push is, not retried; and the
+  refresh's own check no longer stops on a file name that is not valid UTF-8,
+  but once the refresh has put such a name on the line, merging a bundle's
+  branch onto that line can still stop the run during the fold's check for
+  removed work. A target with no line yet is judged as above.
 - **`"merge"`** (own-repo / continuous-delivery only) — actually `gh pr merge`s
   each non-final wave's PRs, so the next wave builds on a genuinely merged base.
   Needs merge rights on the base remote and relaxes STOP discipline for the

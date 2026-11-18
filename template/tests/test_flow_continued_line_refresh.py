@@ -10,8 +10,8 @@ line, it would leave off a finished id the line as found takes, or one of its ow
 fails), the carry does what it did before on the line as found, and says so on one stderr line
 with the step for that cause — and with whether the line it pushes has the base all the same
 (a carried branch can bring it in), or that it pushes nothing when every bundle is left off.
-A file the base itself put on the line and then removed is named as the base's, with deleting
-the line as the way out, unless a bundle's commits could not be read.
+A file the base itself put on the line and then removed never costs a later refresh: no fold
+put it there (#894, whose own cases are in tests/test_flow_continued_line_refresh_guard.py).
 When the bundle passes run on both lines, only the one that stands is heard: what the other
 said about a bundle, a PR state the host would not give included, is never printed. A PR
 state the refresh's own check could not read, and the passes then could not read either, is
@@ -353,11 +353,12 @@ class ContinuedLineRefresh(unittest.TestCase):
         self._run([d], ["W", "D"])
         said = self._one_warning("would remove issue_W's work", "w.txt (issue_W)")
         for step in ("the line keeps that work",
-                     "put it back on origin/main (revert the revert) if the revert was a "
-                     "mistake",
+                     "put it back on origin/main (revert the revert) if that was a mistake",
                      "drop issue_W from the briefs that name it and re-issue without it",
-                     f"deleting {self.line} on origin would build on origin/main without "
-                     "that work"):
+                     # The way out of the accepted false alarm (#894).
+                     f"if origin/main changed only its own copy of the same text, delete "
+                     f"{self.line} on origin once this run ends, then re-run: the re-run "
+                     f"starts the line from origin/main"):
             self.assertIn(step, said)
         # Not the gone-branch sentence of `_take_in_base`: W's branch is there, and the run
         # is building.
@@ -369,13 +370,13 @@ class ContinuedLineRefresh(unittest.TestCase):
         self.assertEqual(t, old)                      # the carry's result is today's
         self.assertEqual(self.fx._show(t, "w.txt"), "w\n")
 
-    def test_a_file_the_base_added_then_deleted_is_said_to_come_from_the_base(self):
+    def test_a_file_the_base_added_then_deleted_does_not_cost_the_next_refresh(self):
         # main adds tmp.txt after the line was started, and a re-run's refresh brings it onto
-        # the line. main then deletes it (a cleanup, no one's revert). The line's cut point
-        # does not move past a refresh, so the next refresh reads as removing work from the
-        # line and is dropped (a known limit: once #894 moves that point, this changes). No
-        # bundle put tmp.txt there: the one warning says it came from origin/main and gives
-        # deleting the line as the way out, not a revert's steps.
+        # the line. main then deletes it (a cleanup, no one's revert). No fold put tmp.txt on
+        # the line, so the next refresh does not judge it (#894): kept, no warning, and E is
+        # built on a line with main's tip and without tmp.txt. Before #894 the cut point
+        # never moved past a refresh, so this refresh read as removing work and was dropped,
+        # with deleting the line as the only way out.
         w = self._finished("W", {"w.txt": "w\n"})
         batch = ["W", "D", "E"]
         self._earlier(batch, w)
@@ -390,20 +391,20 @@ class ContinuedLineRefresh(unittest.TestCase):
         sb._git(h, "commit", "-q", "-s", "-m", "remove tmp.txt")
         sb._git(h, "push", "-q", "origin", "HEAD:refs/heads/main")
         self._run([self._planned("E", PLAIN_EDGE + ON_LINE)], batch)
-        said = self._one_warning("tmp.txt", "came onto the line from origin/main, not from a "
-                                 "bundle", f"deleting {self.line} on origin loses no bundle's "
-                                 "work and is the way out")
-        for wrong in ("a revert on origin/main", "revert the revert", "the bundle whose work",
-                      "without that work"):
-            self.assertNotIn(wrong, said)
+        self.assertEqual(self._warnings(), [], self.err)
         self.assertIn("carried issue_W", self.err)
-        self._built_on_line("E")
+        t = self._built_on_line("E")
+        self.assertTrue(self.fx._ancestor(self.fx._tip("main"), t))
+        self.assertNotEqual(sb._run(self.fx.origin, "cat-file", "-e", f"{t}:tmp.txt")
+                            .returncode, 0)
+        self.assertEqual(self.fx._show(t, "w.txt"), "w\n")
 
     def test_a_path_whose_bundle_the_host_cannot_name_keeps_the_revert_steps(self):
         # G is on the line; main merged G's PR with a merge commit, G's branch was deleted,
         # and main reverted that merge. The host answers the carry's own check of G, then
         # fails, so the refresh's check cannot read G's commits and names no bundle for g.txt.
-        # The warning must not call deleting the line safe: it keeps the revert's steps.
+        # The warning must not call deleting the line safe: it keeps the revert's steps, and
+        # gives deleting the line only for a base that changed its own copy (#894).
         w = self._finished("W", {"w.txt": "w\n"})
         g = self._finished("G", {"g.txt": "g\n"})
         batch = ["W", "G", "D"]
@@ -413,9 +414,11 @@ class ContinuedLineRefresh(unittest.TestCase):
         self.gh_ok["G"] = 1
         self._run([self._planned("D", PLAIN_EDGE + ON_LINE)], batch)
         self.assertIn("G", self.gh_refused)
-        said = self._one_warning("would remove folded work", "g.txt (last changed by",
-                                 f"deleting {self.line} on origin would build on origin/main "
-                                 "without that work")
+        said = self._one_warning("would remove folded work", "g.txt (folded work)",
+                                 "put it back on origin/main (revert the revert) if that was "
+                                 "a mistake", "drop the bundle whose work it is from the "
+                                 "briefs that name it", "if origin/main changed only its own "
+                                 f"copy of the same text, delete {self.line} on origin")
         self.assertNotIn("loses no bundle's work", said)
         t = self._built_on_line()
         self.assertEqual(t, old)
@@ -619,12 +622,14 @@ class ContinuedLineRefresh(unittest.TestCase):
     def test_a_failed_check_for_removed_work_puts_the_line_back(self):
         # The base merged cleanly, then the check for work it would remove fails: the merge
         # is undone (`_reset_line`) before any bundle merges, so what is pushed is the line
-        # as found — never a base merge nothing checked.
+        # as found — never a base merge nothing checked. The read that fails is that check's
+        # read of where the line as found leaves the base (#894: the check no longer goes
+        # through `_undone_paths`).
         old, d = self._behind()
-        patch, hit = self._fails_once("_undone_paths", lambda *a, **k: k.get("head") is None)
+        patch, hit = self._fails_once("_cut_point", lambda _wt, tip, _base: tip == old)
         self._run([d], ["W", "D"], patches=[patch])
         self.assertTrue(hit)
-        self._as_found(old, "_undone_paths failed (test)", "check that checkout, then re-run")
+        self._as_found(old, "_cut_point failed (test)", "check that checkout, then re-run")
         self.assertNotIn("pdca-integrate: origin/main", sb._git(
             self.fx.origin, "log", "--format=%s", self.line))
 
