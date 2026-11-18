@@ -635,8 +635,8 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
     the fold continues from origin (not one it starts fresh) is brought up to date with
     ``<base_remote>/<base>`` when the line does not have it yet: the base is merged in as
     :func:`_take_in_base` merges it (one signed-off merge commit on top, never a rewrite) and
-    kept unless that merge conflicts, would remove work a bundle put on the line (#623,
-    :func:`_undone_paths`) or fails as a git step — then the line is put back
+    kept unless that merge conflicts, would take work a fold put on the line off it (#894,
+    :func:`_lost_work`, by line counts) or fails as a git step — then the line is put back
     (:func:`_reset_line`). Kept, the bundle passes run on it; when they leave off (skip or
     hold) any bundle, they run again on the line as found, each run with state of its own,
     sharing only the branch tips read (#633). The refreshed run stands unless it leaves off a
@@ -1847,12 +1847,12 @@ def _refresh_line(cfg: Config, wt: Path, branch: str, base_ref: str, before: str
     ``(tip, "")``: kept, ``tip`` the merge commit, checked out. ``(None, why)``: not kept,
     the line back at ``before``, and ``why`` what happened with the step for it, for
     :func:`fold`'s warning: a conflict (each path with the bundle of ``owners`` whose own
-    commits last changed it on the line, :func:`_last_changed`); a merge that would remove
-    work a bundle put on the line (#623, judged as :func:`_take_in_base` judges it,
-    :func:`_undone_paths`, and named as :func:`_removed` names it); or a git step that
-    failed (an :class:`IntegrationError`, named). :class:`IntegrationTreeError` (``_merge``'s
-    tip read) and :class:`_LineBroken` (a line that will not go back, :func:`_reset_line`)
-    raise: the fold stops. Any other exception propagates."""
+    commits last changed it on the line, :func:`_last_changed`); a merge that would take
+    work folded onto the line off it (#894, judged by line counts, :func:`_lost_work`, and
+    worded by :func:`_lost_step`); or a git step that failed (an :class:`IntegrationError`,
+    named). :class:`IntegrationTreeError` (``_merge``'s tip read) and :class:`_LineBroken`
+    (a line that will not go back, :func:`_reset_line`) raise: the fold stops. Any other
+    exception propagates."""
     rc, conflicts = _merge(wt, base_ref, f"pdca-integrate: {base_ref} (brings {branch} up "
                                          f"to date)")
     if rc != 0 and not conflicts:
@@ -1864,33 +1864,16 @@ def _refresh_line(cfg: Config, wt: Path, branch: str, base_ref: str, before: str
                                                         owners, conflicts))
         return None, (f"merging it conflicts: update the PR branch that changed {paths} on "
                       f"{branch} from {base_ref} (resolving the conflict), then re-run")
-    unread: list[str] = []      # owners whose commits could not be read
     try:
-        undone = _undone_paths(cfg, wt, before, base_ref, branch, owners, unread=unread)
+        lost = _lost_work(cfg, wt, before, base_ref, owners)
     except (IntegrationTreeError, _LineBroken):
         raise
     except IntegrationError as exc:
         _reset_line(wt, before, branch, base_ref)
         return None, _step_failed(exc)
-    if undone:
+    if lost:
         _reset_line(wt, before, branch, base_ref)
-        work, paths = _removed(undone, branch)
-        whose = sorted({n for _p, names, _note, _groups in undone for n in names})
-        if not whose and not unread:    # no bundle's own commit changed them: the base's
-            it, them = ("it", "it") if len(undone) == 1 else ("they", "them")
-            return None, (f"merging it would remove {paths}: {it} came onto the line from "
-                          f"{base_ref}, not from a bundle, and {base_ref} has since deleted, "
-                          f"renamed or reverted {them}; deleting {branch} on origin loses no "
-                          f"bundle's work and is the way out (a re-run then starts the line "
-                          f"from {base_ref})")
-        it = "it" if len(whose) <= 1 else "them"
-        return None, (f"merging it would remove {work} from {branch}: {paths} would go back "
-                      f"to how {base_ref} had it before the line changed it (a revert on "
-                      f"{base_ref}?); the line keeps that work: put it back on {base_ref} "
-                      f"(revert the revert) if the revert was a mistake; if it was meant, "
-                      f"drop {', '.join(whose) or 'the bundle whose work it is'} from the "
-                      f"briefs that name {it} and re-issue without {it}; deleting {branch} on "
-                      f"origin would build on {base_ref} without that work")
+        return None, _lost_step(lost, branch, base_ref)
     tip = _rev(wt, "HEAD")
     if tip is None:
         raise IntegrationTreeError(f"could not read the tip of {branch} in {wt} — check that "
@@ -1903,6 +1886,36 @@ def _step_failed(exc: IntegrationError) -> str:
     the message does not give one already."""
     said = str(exc)
     return said if "then re-run" in said else f"{said} — check that checkout, then re-run"
+
+
+# What a base merge would do to a file whose folded work it takes off the line, by how
+# :func:`_lost_work` found it (#894).
+_LOST = {"cut": "{paths} would go back to how {base} had it before the line changed it (a "
+                "revert on {base}?)",
+         "gone": "the lines a bundle put in {paths} would be gone or changed",
+         "back": "lines a bundle took out of {paths} would come back"}
+
+
+def _lost_step(lost: Sequence[tuple[str, list[str], str]], branch: str, base_ref: str) -> str:
+    """Why :func:`fold` drops a refresh that would take folded work off the line (#894), with
+    the ways out: each path of :func:`_lost_work` with its bundles, or ``folded work`` when
+    none can be named (as :func:`_removed` words whose work it is), and what the merge would
+    do to it (:data:`_LOST`). The last way out is for a base that changed only its own copy
+    of a text a bundle also has, which the count cannot tell from the bundle's (a false
+    alarm): a line started again from the base has that work as the base has it."""
+    whose = sorted({n for _p, names, _how in lost for n in names})
+    work = f"{', '.join(whose)}'s work" if whose else "folded work"
+    what = ", and ".join(
+        text.format(paths="; ".join(f"{p} ({', '.join(names) or 'folded work'})"
+                                    for p, names, h in lost if h == how), base=base_ref)
+        for how, text in _LOST.items() if any(h == how for _p, _names, h in lost))
+    it = "it" if len(whose) <= 1 else "them"
+    return (f"merging it would remove {work} from {branch}: {what}; the line keeps that "
+            f"work: put it back on {base_ref} (revert the revert) if that was a mistake; if "
+            f"it was meant, drop {', '.join(whose) or 'the bundle whose work it is'} from "
+            f"the briefs that name {it} and re-issue without {it}; if {base_ref} changed "
+            f"only its own copy of the same text, delete {branch} on origin once this run "
+            f"ends, then re-run: the re-run starts the line from {base_ref}")
 
 
 def _left_off(branch: str, base_ref: str, on: _Passes, names: Sequence[str]) -> str:
@@ -2066,8 +2079,7 @@ def _own_removals(wt: Path, head: str, before: str, skip: Collection[str],
 
 
 def _undone_paths(cfg: Config, wt: Path, before: str, base_ref: str, branch: str,
-                  owners: Sequence[Path], *, head: str | None = None,
-                  unread: list[str] | None = None
+                  owners: Sequence[Path], *, head: str | None = None
                   ) -> list[tuple[str, list[str], str, list[tuple[str, ...]]]]:
     """``(path, bundles, note, groups)`` for each path the merge just made in ``wt`` undoes
     — of the base (#623), or of a bundle's branch at ``head`` (#673): one the line at
@@ -2085,8 +2097,7 @@ def _undone_paths(cfg: Config, wt: Path, before: str, base_ref: str, branch: str
     both: git cannot tell which branch it was made on, and naming both never leaves out the
     one whose work it is. ``groups`` keeps them apart for the bundle-branch refusal
     (:func:`_branch_removed`): for each of those commits a bundle has as its own, the
-    bundles that have it — one, or the several that share it. ``unread`` (#893), when given,
-    gets each owner whose commits could not be read, so a path named for no bundle may be its.
+    bundles that have it — one, or the several that share it.
 
     Judged per path from the line's cut point, so it does not see a partial revert inside a
     file the line also changed in other ways, nor a revert of work below the cut point
@@ -2106,35 +2117,17 @@ def _undone_paths(cfg: Config, wt: Path, before: str, base_ref: str, branch: str
         undone = [p for p in undone if p not in mine]
         if not undone:
             return []
-    return _owned(cfg, wt, before, branch, owners, undone, since, skip, unread)
+    return _owned(cfg, wt, before, branch, owners, undone, since, skip)
 
 
 def _owned(cfg: Config, wt: Path, before: str, branch: str, owners: Sequence[Path],
-           paths: Sequence[str], since: Sequence[str], skip: Collection[str],
-           unread: list[str] | None = None
+           paths: Sequence[str], since: Sequence[str], skip: Collection[str]
            ) -> list[tuple[str, list[str], str, list[tuple[str, ...]]]]:
     """:func:`_undone_paths`' ``(path, bundles, note, groups)`` for each of ``paths``, which
     the line at ``before`` changed (``since``: down to its cut point; ``skip``: the line's
     and the base's first-parent commits, :func:`_own_commits`): whose own commits changed
     it, judged as that docstring says. Shared with :func:`_last_changed` (#893)."""
-    tips: dict[str, str] = {}                 # bundle name → its branch tip (or merged head)
-    for o in owners:
-        pub = _published_ref(o)
-        if pub is None:
-            continue
-        tip = _rev(wt, pub[1]) or merged.merged_head(cfg, o.name.removeprefix("issue_"))
-        if tip and _git(wt, "cat-file", "-e", f"{tip}^{{commit}}") == 0:
-            tips[o.name] = tip
-        elif unread is not None:
-            unread.append(o.name)
-    walks = {name: _own_commits(wt, tip, since, skip, what=f"{name}'s commits")
-             for name, tip in tips.items()}
-    own: list[tuple[str, set[str]]] = []      # (bundle name, the commits it adds)
-    for name, tip in tips.items():
-        mine = walks[name]
-        held = [walks[n] for n, t in tips.items() if t != tip and not walks[n].isdisjoint(mine)
-                and _in_line(wt, t, f"{n}'s branch tip {t[:12]}", f"{name}'s branch", of=tip)]
-        own.append((name, mine.difference(*held)))
+    own = _bundle_commits(cfg, wt, owners, since, skip)
     out: list[tuple[str, list[str], str, list[tuple[str, ...]]]] = []
     for path in paths:
         touched = _out(wt, "rev-list", before, *since, "--", f":(literal){path}",
@@ -2144,6 +2137,178 @@ def _owned(cfg: Config, wt: Path, before: str, branch: str, owners: Sequence[Pat
                     f"last changed by {touched[0][:12]}" if touched else "changed",
                     list(dict.fromkeys(g for g in groups if g))))
     return out
+
+
+def _bundle_commits(cfg: Config, wt: Path, owners: Sequence[Path], since: Sequence[str],
+                    skip: Collection[str]) -> list[tuple[str, set[str]]]:
+    """``(bundle, the commits it adds)`` for each of ``owners`` whose commits can be read, as
+    :func:`_undone_paths` judges them (``since`` / ``skip`` as for :func:`_owned`): its own
+    commits (:func:`_own_commits`) from its published branch or, gone, the head its PR
+    merged with, less those of another bundle's tip its branch holds (#673). Shared by
+    :func:`_owned` and :func:`_lost_work` (#894)."""
+    tips: dict[str, str] = {}                 # bundle name → its branch tip (or merged head)
+    for o in owners:
+        pub = _published_ref(o)
+        if pub is None:
+            continue
+        tip = _rev(wt, pub[1]) or merged.merged_head(cfg, o.name.removeprefix("issue_"))
+        if tip and _git(wt, "cat-file", "-e", f"{tip}^{{commit}}") == 0:
+            tips[o.name] = tip
+    walks = {name: _own_commits(wt, tip, since, skip, what=f"{name}'s commits")
+             for name, tip in tips.items()}
+    own: list[tuple[str, set[str]]] = []      # (bundle name, the commits it adds)
+    for name, tip in tips.items():
+        mine = walks[name]
+        held = [walks[n] for n, t in tips.items() if t != tip and not walks[n].isdisjoint(mine)
+                and _in_line(wt, t, f"{n}'s branch tip {t[:12]}", f"{name}'s branch", of=tip)]
+        own.append((name, mine.difference(*held)))
+    return own
+
+
+# A file's (mode, object) in a tree, as `git diff-tree` gives it (#894).
+_Entry = tuple[str, str]
+_ABSENT, _GITLINK = "000000", "160000"
+
+
+def _lost_work(cfg: Config, wt: Path, before: str, base_ref: str, owners: Sequence[Path]
+               ) -> list[tuple[str, list[str], str]]:
+    """``(path, bundles, how)`` for each file the base merge just made in ``wt`` (the
+    refresh, #894) would take work folded onto the line at ``before`` out of, judged by how
+    many times each line text is in it, never by position.
+
+    Folded work is every commit a fold put on the line: each one reachable from a non-first
+    parent of a commit on the line's first-parent chain since its cut point
+    (:func:`_cut_point`), walked as :func:`_own_commits` walks, so never one on the base's
+    first-parent chain (a squash or a cherry-pick there, the base side of an "Update branch"
+    merge). It needs no publish record and no host read. Such a commit adds, in each file,
+    the line texts it has more of than every parent has, and removes those it has fewer of
+    than every parent has, so a merge claims neither side's lines. Blank and
+    whitespace-only lines never count, an absent file has none, and a submodule's commit is
+    its one line.
+
+    Only a file the merge changed that folded work changed is judged; the base's own files,
+    and its changes and reverts of them, never are. ``how`` says what the merge does to it:
+    ``"cut"``, back to its content at the cut point; ``"gone"``, fewer copies of a text
+    folded work added there than before the merge; ``"back"``, more copies of a text it
+    removed. A base that deletes or edits its own copy of a text a bundle also added counts
+    too: no count can tell the two copies apart, so the refresh is refused, never kept on a
+    guess. ``bundles``: the ones of ``owners`` with an own commit (:func:`_bundle_commits`)
+    among the commits whose work the merge takes out; none when none can be named. Names
+    and contents are read as bytes, so no file name stops it, and a byte of a name that is
+    not UTF-8 is printed as a replacement character. A git read that fails raises
+    :class:`IntegrationError`."""
+    merged_in = _tree_diff(wt, before, "HEAD")
+    if not merged_in:
+        return []
+    cut, chain = _cut_point(wt, before, base_ref)
+    since = ("--not", cut) if cut else ()
+    base = set(_out(wt, "rev-list", "--first-parent", base_ref, *since,
+                    what=f"the first-parent chain of {base_ref}").split())
+    folded = _own_commits(wt, before, since, base,
+                          what=f"the commits on the line at {before[:12]}").difference(chain)
+    if not folded:
+        return []
+    empty = _out(wt, "hash-object", "-t", "tree", "--stdin", stdin="",
+                 what="the empty tree").strip()
+    rows = _out(wt, "rev-list", "--no-walk=unsorted", "--parents", "--stdin",
+                stdin="".join(f"{c}\n" for c in sorted(folded)),
+                what="the parents of the work folded onto the line")
+    # path → (commit, its entry, each parent's) for each folded commit that changed it
+    # against every parent
+    changes: dict[bytes, list[tuple[str, _Entry, list[_Entry]]]] = {}
+    for c, *ps in (row.split() for row in rows.splitlines() if row):
+        diffs = [_tree_diff(wt, p, c) for p in ps or [empty]]
+        for path in set(merged_in).intersection(*diffs):
+            changes.setdefault(path, []).append(
+                (c, diffs[0][path][1], [d[path][0] for d in diffs]))
+    if not changes:
+        return []
+    since_cut = _tree_diff(wt, cut or empty, "HEAD")
+    want: set[_Entry] = set()
+    for path, done in changes.items():
+        want.update(merged_in[path])
+        for _c, mine, theirs in done:
+            want.update((mine, *theirs))
+    texts = _line_texts(wt, want)
+    lost: list[tuple[bytes, set[str], str]] = []
+    for path in sorted(changes):
+        if path not in since_cut:       # back to its content at the cut point
+            lost.append((path, {c for c, _mine, _theirs in changes[path]}, "cut"))
+            continue
+        was, now = (texts[e] for e in merged_in[path])
+        gone: set[str] = set()          # commits a text added by has fewer copies after
+        back: set[str] = set()          # commits a text removed by has more copies after
+        for c, mine, theirs in changes[path]:
+            has, had = texts[mine], [texts[e] for e in theirs]
+            added = [t for t, n in has.items() if all(n > h[t] for h in had)]
+            removed = [t for t in set().union(*had) if all(has[t] < h[t] for h in had)]
+            if any(now[t] < was[t] for t in added):
+                gone.add(c)
+            if any(now[t] > was[t] for t in removed):
+                back.add(c)
+        if gone or back:
+            lost.append((path, gone | back, "gone" if gone else "back"))
+    if not lost:
+        return []
+    own = _bundle_commits(cfg, wt, owners, since, {*chain, *base})
+    return [(path.decode("utf-8", "replace"), [n for n, commits in own if commits & by], how)
+            for path, by, how in lost]
+
+
+def _raw(wt: Path, *args: str, what: str, stdin: bytes | None = None) -> bytes:
+    """:func:`_out` as bytes (#894): the output is never decoded, so no byte of a file name
+    or a file stops the read. A failing git step raises."""
+    r = subprocess.run(["git", "-C", str(wt), *args], capture_output=True, input=stdin)
+    if r.returncode != 0:
+        raise IntegrationError(f"could not read {what} in {wt} — `git {args[0]}` exited "
+                               f"{r.returncode}; a git step failed: check that checkout, "
+                               f"then re-run")
+    return r.stdout
+
+
+def _tree_diff(wt: Path, old: str, new: str) -> dict[bytes, tuple[_Entry, _Entry]]:
+    """Each path whose entry differs between the trees of ``old`` and ``new`` → its entry in
+    each (:data:`_Entry`; mode ``000000`` where it is absent), read as bytes (#894): the name
+    is git's own. No rename pairing, and a submodule's commit counts whatever the repo or
+    the user set git to ignore."""
+    out = _raw(wt, "diff-tree", "-r", "-z", "--no-renames", "--ignore-submodules=none", old,
+               new, what=f"the files changed between {old} and {new}")
+    fields = out.split(b"\0")
+    found: dict[bytes, tuple[_Entry, _Entry]] = {}
+    for meta, path in zip(fields[0::2], fields[1::2]):
+        cols = meta.decode("ascii", "replace").split()
+        if len(cols) != 5 or not cols[0].startswith(":"):
+            raise IntegrationError(f"could not read the files changed between {old} and "
+                                   f"{new} in {wt} — `git diff-tree` gave a line it does not "
+                                   f"document; check that checkout, then re-run")
+        found[path] = ((cols[0][1:], cols[2]), (cols[1], cols[3]))
+    return found
+
+
+def _line_texts(wt: Path, entries: Collection[_Entry]) -> dict[_Entry, Counter[bytes]]:
+    """How many times each line text is in the file of each of ``entries`` (#894): blank and
+    whitespace-only lines never count, an absent file has none, a submodule's commit is its
+    one line. Every blob is read as bytes, in one ``git cat-file --batch``."""
+    blobs = sorted({oid for mode, oid in entries if mode not in (_ABSENT, _GITLINK)})
+    out = _raw(wt, "cat-file", "--batch", stdin="".join(f"{o}\n" for o in blobs).encode(),
+               what="the files the base merge changes") if blobs else b""
+    data: dict[str, bytes] = {}
+    at = 0
+    for oid in blobs:
+        end = out.find(b"\n", at)
+        head = out[at:end].split() if end >= 0 else []
+        if len(head) != 3 or head[0] != oid.encode() or not head[2].isdigit():
+            raise IntegrationError(f"could not read {oid} in {wt} — `git cat-file` gave no "
+                                   f"content for it; a git step failed: check that checkout, "
+                                   f"then re-run")
+        at = end + 1 + int(head[2])
+        data[oid] = out[end + 1:at]
+        at += 1
+    counts: dict[_Entry, Counter[bytes]] = {}
+    for mode, oid in entries:
+        text = b"" if mode == _ABSENT else oid.encode() if mode == _GITLINK else data[oid]
+        counts[(mode, oid)] = Counter(line for line in text.split(b"\n") if line.strip())
+    return counts
 
 
 def _reset_line(wt: Path, tip: str, branch: str, merged_in: str) -> None:
