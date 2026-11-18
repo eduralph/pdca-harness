@@ -394,6 +394,13 @@ class Config:
     # refuses every PR naming the bad setting (fail-closed: falling back to the empty list
     # would be the weakest reading and merge what the operator configured against).
     expected_checks_error: str = ""
+    # Merge-mode remark rounds (issue #921): how many times a non-final wave's accepted
+    # bundle may be reopened, on its PR's own head, when collaborator review threads block
+    # its merge (the remarks issue #838 names). 0 (the default) is off: the run stops on the
+    # remarks as before. Counted per bundle in its `remark-round.json`, the only cap on
+    # rounds; auto-iterate's budget is not touched. A value that is not a non-negative
+    # integer warns and reads as 0. [driver].remark_rounds.
+    remark_rounds: int = 0
     # Optional integration re-gate (#wave-model): after each wave folds onto the
     # integration branch, run the repo-scoped gates over that tip before the next wave
     # builds on it, so a combination that is red though each fix was green alone STOPs the
@@ -761,6 +768,17 @@ class Config:
             print(f"config: [driver].merge_wait_secs must be >= 0, got {merge_wait_secs} — "
                   "using the default 300", file=sys.stderr)
             merge_wait_secs = 300
+        # Merge-mode remark rounds (issue #921). Only a non-negative integer counts: TOML
+        # gives `1.9` a float, `"2"` a string and `true` a bool (which Python treats as an
+        # int, so it is refused by name). Anything else warns and falls back to 0, rounds
+        # off, as merge_wait_secs above warns and falls back — off is the safe reading of a
+        # setting that, on, reopens accepted bundles.
+        remark_rounds = driver_cfg.get("remark_rounds", 0)
+        if isinstance(remark_rounds, bool) or not isinstance(remark_rounds, int) \
+                or remark_rounds < 0:
+            print(f"config: [driver].remark_rounds must be a non-negative integer, got "
+                  f"{remark_rounds!r} — using 0 (remark rounds off)", file=sys.stderr)
+            remark_rounds = 0
         # Checks a complete rollup must contain (issue #621). A bad value warns and fails
         # CLOSED like merge_requires above — never to the empty default, the weakest reading.
         expected_checks, expected_checks_error = _expected_checks(
@@ -876,6 +894,7 @@ class Config:
             merge_method=merge_method,
             merge_requires=merge_requires,
             merge_wait_secs=merge_wait_secs,
+            remark_rounds=remark_rounds,
             expected_checks=expected_checks,
             expected_checks_error=expected_checks_error,
             regate_between_waves=regate_between_waves,

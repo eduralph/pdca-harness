@@ -31,7 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import brief, gates, leaves, progress, state, waves, worktree
+from . import brief, gates, leaves, progress, remark_round, state, waves, worktree
 # Aliased: `publish()` builds a local `record = {...}` (its publish.json payload,
 # below) that would shadow the module name at the #317 call-in.
 from . import record as record_mod
@@ -154,6 +154,16 @@ def publish(
     """
     d = cfg.bundle(issue_id)
     today = today or datetime.date.today().isoformat()
+
+    # A live remark round (issue #921): patch.diff is a delta built on the PR's own head, and
+    # this path cuts a fresh branch off the base and force-pushes it over the PR (the
+    # `--force-with-lease` push below), which would replace the PR's work with the delta
+    # alone. Until a round can be published (#922), refuse before anything is drafted, cut
+    # or pushed.
+    if remark_round.live(d):
+        print(f"publish: {d.name} — {remark_round.line(d)}; nothing was pushed.",
+              file=sys.stderr)
+        return 1
 
     # Guard — publish is Check's CLOSING act: only on an accepted bundle.
     s = state.state(d)

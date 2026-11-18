@@ -454,12 +454,20 @@ def _within(p: Path, parent: Path) -> bool:
         return False
 
 
-def _archive_iteration(d: Path, n: int, *, include_brief: bool) -> None:
+def _archive_iteration(d: Path, n: int, *, include_brief: bool,
+                       moved: list[tuple[Path, Path]] | None = None) -> None:
     """Move the previous attempt's artifacts into ``d/iteration-v<N>/`` rather than
     deleting them: the Do+Check downstream always, plus ``brief.md`` on iterate-plan
     (so state() → UNPLANNED and the human re-authors a fresh brief). Most tests ride
     in patch.diff; a test file written *into the bundle* is archived too. External
     paths (e.g. a sibling repo's test) are left untouched, never deleted.
+
+    The files move one at a time, so a move that fails leaves the ones before it moved.
+    ``moved`` (a caller's collector, issue #921) gets ``(source, destination)`` for each
+    move just BEFORE it is tried, so a caller that must not leave a half-archived bundle
+    (the remark-round reopen, :mod:`remark_round`) can move those back even when an
+    interrupt lands between a move and the line after it: an entry whose destination does
+    not exist is one that never moved.
     """
     arch = d / f"iteration-v{n}"
     names = list(DOWNSTREAM_OF_BRIEF)
@@ -491,4 +499,7 @@ def _archive_iteration(d: Path, n: int, *, include_brief: bool) -> None:
         # is moved whole: each iteration-v<N>/ keeps the full basis of its own verdict.
         if src.is_file() or src.is_dir():
             arch.mkdir(parents=True, exist_ok=True)
-            src.rename(arch / Path(name).name)
+            dst = arch / Path(name).name
+            if moved is not None:
+                moved.append((src, dst))
+            src.rename(dst)

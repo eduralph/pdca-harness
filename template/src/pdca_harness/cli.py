@@ -20,8 +20,9 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from . import (act, brief, cleanup, doctor, drift, drive_claim, driver, flow, gates, leaves,
-               manual_test, merged, publish, queue, record, registry, revalidate, revert,
-               signoff, sizing, split, state, sweep, triage, waves, worktree)
+               manual_test, merged, publish, queue, record, registry, remark_round,
+               revalidate, revert, signoff, sizing, split, state, sweep, triage, waves,
+               worktree)
 from .config import Config
 
 
@@ -1246,7 +1247,8 @@ def _contribcheck(cfg: Config, args: argparse.Namespace) -> int:
     ticket — the tracker id is absent from either ``commit-msg.txt`` or ``pr-description.md``
     (the two are linted INDEPENDENTLY, so a ticketed fix needs the id in BOTH). The bundle is
     the ``issue_id`` arg or ``$PDCA_BUNDLE`` (set by the gate runner). No patch (close/no-fix)
-    ⇒ pass (default-open, like an unconfigured gate).
+    ⇒ pass (default-open, like an unconfigured gate) — but a remark round's replies (#921) are
+    checked first, since a round that declines every thread has no patch and still replies.
 
     **Artifacts not drafted yet ⇒ a declared deferral, not a bare pass** (issue #401). This
     row is registered for Check *and* re-run by ``publish`` (``publish.publish_gates``), and
@@ -1264,9 +1266,19 @@ def _contribcheck(cfg: Config, args: argparse.Namespace) -> int:
     else:
         print("contribcheck needs an issue id or $PDCA_BUNDLE", file=sys.stderr)
         return 2
+    # A remark round's reply texts (#921) exist from Do on, so they are checked at Check
+    # even before the publish texts below are drafted (the human signs them off at the
+    # round's sign-off), and before the no-fix return: a round that declines every thread
+    # changes nothing, so its patch.diff is empty, yet each thread still gets a reply.
+    replies = remark_round.reply_problems(d)
     patch = d / "patch.diff"
-    if not patch.is_file() or not patch.read_text(encoding="utf-8").strip():
-        return 0  # close / no-fix bundle: nothing contributed
+    empty = not patch.is_file() or not patch.read_text(encoding="utf-8").strip()
+    if replies and (empty or not (d / publish.PR_BODY).is_file()):
+        for p in replies:
+            print(f"contribcheck: {p}", file=sys.stderr)
+        return 1
+    if empty:
+        return 0  # close / no-fix bundle (or a round that changed nothing): nothing contributed
     if not (d / publish.PR_BODY).is_file():
         # Artifacts not drafted yet (Check-time gate, pre-publish): the gate ran and found
         # its subject absent BY DESIGN. Declare the deferral (#401) rather than exit 0 mute,
@@ -1317,6 +1329,10 @@ def contribution_problems(d: Path, *, no_issue: bool = False) -> list[str]:
             problems.append(f"{publish.PR_BODY} does not reference the tracker id #{issue_id}")
         if not needle.search(commit_text):
             problems.append(f"{publish.COMMIT_MSG} does not reference the tracker id #{issue_id}")
+    # 3) A remark round's replies (#921, Plan decision 2 of #840): the exact text a later
+    #    step posts on each collaborator thread, held to its own rules here, beside the
+    #    commit message and the PR body.
+    problems += remark_round.reply_problems(d)
     return problems
 
 
@@ -1550,6 +1566,15 @@ def _signoff(cfg: Config, args: argparse.Namespace) -> int:
         # exiting 0 would tell automation the sign-off decision was carried out.
         print(f"signoff: {d.name} is held at {final} — the transition was recorded but the "
               "rebuild did not run; resolve the item(s) above and re-run",
+              file=sys.stderr)
+        return 1
+
+    # A remark round (#921) the sign-off just closed — accepted or discontinued — with or
+    # without `--no-publish`: its work is on no PR yet and no publish of a round exists, so
+    # the decision did not finish the contribution. Say so with the round's own line and
+    # exit non-zero, before the publish below (which would only refuse it the same way).
+    if final in (state.COMPLETE, state.DISCONTINUED) and remark_round.live(d):
+        print(f"signoff: {d.name} — {remark_round.line(d)}; nothing was pushed.",
               file=sys.stderr)
         return 1
 

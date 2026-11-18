@@ -377,11 +377,24 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
         except worktree.WorktreeError as exc:
             hold.close()
             print(f"gates: {exc} — failing closed, no gate was run", file=sys.stderr)
-            return _assemble_matrix([_row(
-                "C4 Verification (worktree mismatch)", "fail",
-                oracle="worktree reconstruction (base + patch.diff)",
-                rule_id="worktree-mismatch", path_line=str(exc).splitlines()[0][:160],
-                gating=True, element="C4")], stub=False)
+            # A live remark round (#921) whose tree cannot be read. Its usual causes —
+            # worktrees off, no target checkout, a pinned_head that will not check out — are
+            # refused the same way at a rebuild's Do (`worktree.ensure`), so the row is marked
+            # `stops_rebuilds`, as the round's failed head check is (`_run_one`): it is the
+            # human's (§6, HUMAN) and auto-iterate stops on it. The rarer ones (a busy lane, a
+            # patch.diff that does not apply) go to the human too, who can still send the
+            # round back to Do. The row gets the head check's room, so §6 shows the refusal's
+            # way out.
+            from . import remark_round  # lazy, as in _run_one
+            in_round = remark_round.live(bundle)
+            row = _row("C4 Verification (worktree mismatch)", "fail",
+                       oracle="worktree reconstruction (base + patch.diff)",
+                       rule_id="worktree-mismatch",
+                       path_line=str(exc).splitlines()[0][:400 if in_round else 160],
+                       gating=True, element="C4")
+            if in_round:
+                row["stops_rebuilds"] = True
+            return _assemble_matrix([row], stub=False)
     else:
         wt, ovf_primary = None, None
     if log_dir is not None:
@@ -559,7 +572,37 @@ def _run_one(chk: dict, *, cfg: Config, cwd: Path, bundle: Path | None, runner: 
     # whole-suite row, a docs-lint row, or ANY OTHER bundle-scoped row (scope does not
     # separate them — this project's own T3 row is bundle-scoped too) never asked to
     # reconstruct a base and must not observe one (see :func:`_verifies_base`).
-    if bundle is not None and _verifies_base(chk):
+    #   0. A live remark round (#921) → PDCA_BASE = `origin/<branch>`, the PR head the round
+    #      was built on (`worktree._target`'s first rung), in the ref form the `Onto` rung
+    #      uses, so the verifier contract is unchanged. The branch is fetched first and must
+    #      still be at the round's `pinned_head`: a head that moved, or one that cannot be
+    #      read, fails this row closed, never falling back to the target base. That failure
+    #      is marked `stops_rebuilds`: nothing in a rebuild moves `pinned_head`, so it is the
+    #      human's (§6, HUMAN) and auto-iterate stops on it (`assemble._failed_gating_items`).
+    from . import remark_round  # lazy, like publish below
+    if bundle is not None and _verifies_base(chk) and remark_round.live(bundle):
+        ref, why = remark_round.head_check(cfg, bundle)
+        if why:
+            print(f"  · gate {label}: {why}", file=sys.stderr, flush=True)
+            # Room for both commits (64 characters each in a SHA-256 repository) and the
+            # way out a moved head's line gives right after them, so SUMMARY.md shows it.
+            row = _row(f"{chk.get('tier', '?')} {chk.get('label', chk.get('id', ''))}",
+                       "fail", oracle="remark round: fetch origin/<branch>, compare with "
+                       "pinned_head", rule_id=chk.get("id", ""), path_line=why[:400],
+                       gating=gating, element=chk.get("tier", ""))
+            row["stops_rebuilds"] = True
+            if log_dir is not None:
+                rel, log_error = _write_gate_log(
+                    log_dir, chk, cmd=cmd, cwd=cwd, worktree_path=worktree_path, duration=0.0,
+                    result="fail", timeout=None, attempts=[{
+                        "rc": None, "output": why + "\n", "result": "fail", "evidence": [why],
+                        "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "duration": 0.0}])
+                row["duration_secs"] = 0.0
+                row["log" if log_error is None else "log_error"] = rel or log_error
+            return row
+        env = {**(env or {}), "PDCA_BASE": ref}
+    elif bundle is not None and _verifies_base(chk):
         onto = brief.onto_branch(bundle / "brief.md")
         if onto is not None:
             env = {**(env or {}), "PDCA_BASE": f"{onto[0]}/{onto[1]}"}

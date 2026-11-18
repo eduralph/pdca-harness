@@ -69,10 +69,12 @@ max_passes = 20
 # `Validation — fitness-to-purpose` row is emitted NEEDS-HUMAN on EVERY cycle by design, so
 # it is a constant, never deferred — but still in §6 for you to clear (#293).
 #
-# It NEVER auto-accepts and never ticks a §6 box. Two things stop the loop: the size backstop
+# It NEVER auto-accepts and never ticks a §6 box. Three things stop the loop: the size backstop
 # (the empirical size thresholds further down, whose `rounds` rule fires before this cap on
-# purpose) and `max_auto_iters` rounds per bundle (clamped below max_passes). On either the
-# bundle halts for you as before. `PDCA_AUTO_ITERATE=1` / `--auto-iterate` override.
+# purpose), a failure no rebuild can change (a remark round's PR head that moved, or gates
+# that cannot read the round's tree, see `remark_rounds`) and `max_auto_iters` rounds per
+# bundle (clamped below max_passes). On any of them the bundle halts for you as before.
+# `PDCA_AUTO_ITERATE=1` / `--auto-iterate` override.
 auto_iterate = false
 max_auto_iters = 3
 # Worktree isolation (issue #94). A cycle's Do/Check run in a dedicated git worktree off
@@ -205,6 +207,20 @@ merge_wait_secs = 300
 #   []   (default) — declare nothing.
 #   ["dco", "e2e"] — merge only once both have reported and passed.
 # expected_checks = ["dco", "e2e"]
+# Remark rounds (merge mode; issue #921). When a non-final wave's PR is green but its merge
+# is blocked by unresolved review threads (the remarks `merge-remarks.json` names), the run
+# can reopen that accepted bundle as a "remark round" instead of stopping: it archives the
+# accepted attempt to `iteration-v<n>/`, records the round in `remark-round.json`, adds the
+# threads to brief.md, and rebuilds the bundle on the PR's own head, so `patch.diff` is then
+# the change ON TOP of that head. Only threads opened by an OWNER, MEMBER or COLLABORATOR
+# count; others are listed and ignored. The round's SUMMARY.md shows the reply each thread
+# would get, and T4 checks those replies. A round needs `worktree = true` above. This stage
+# pushes, replies to, resolves and merges nothing: after the round's sign-off the run stops,
+# and the round's `patch.diff` is applied to the PR branch by hand. The value is how many
+# rounds one bundle may have; any value that is not a whole number >= 0 warns and means 0.
+#   0    (default) — off: the run stops on the remarks, as before.
+#   1    — at most one round per bundle.
+# remark_rounds = 0
 # Optional integration re-gate (#wave-model). After each wave folds (stack mode), run the
 # repo-scoped gates over the folded integration tip before the next wave builds on it, so a
 # combination that is red though each fix was green ALONE stops the run. Off by default

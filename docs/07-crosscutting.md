@@ -516,12 +516,12 @@ checkbox a reviewer quoted in §5 is not yours, for a tick here or for an
 accept. If the ledger file exists but can't be read, §6 says so as its own
 `- [ ]` item, and an accept is refused until you clear it.
 
-**Exactly two things stop the loop while there's still implementation work:**
+**Exactly three things stop the loop while there's still implementation work:**
 
 - **The size backstop** — the early stop. At Check the driver measures what the
   patch actually came to and how many rounds this brief has already spent; past
   a threshold it raises a `size backstop —` item recommending `iterate-plan`.
-  That's the one HUMAN item that stops the loop rather than riding along: it
+  It's a HUMAN item that stops the loop rather than riding along: it
   says further rebuilds are the wrong move, so it ends the loop, and the flow
   names it on stderr. By
   default it fires at 2 rounds, below the hard cap, on purpose — most bundles
@@ -529,11 +529,19 @@ accept. If the ledger file exists but can't be read, §6 says so as its own
   produces implementation-shaped findings every round. The thresholds live
   once, in `pdca.toml`'s `[driver.size_signal]` block (set one to `0` to
   switch that rule off).
+- **A failure no rebuild can change** — a remark round's PR head that moved,
+  or can't be read, after the round was built on it (merge mode, in
+  [Waves in execution](#waves-in-execution)). Nothing in a rebuild moves the
+  round to the new head, so every rebuild would fail the same way. The same
+  goes for a round whose gates can't have its tree (worktrees turned off, its
+  target checkout gone): a rebuild's Do would refuse the round the same way.
+  Either way the gate's §6 row is a HUMAN item that ends the loop at once, and
+  the flow names it on stderr.
 - **The hard cap** — `[driver].max_auto_iters` (default `3`) automatic rounds
   per bundle, tracked in `auto-iterate.json`. It's the ceiling that still
   holds when the backstop is off or hasn't fired.
 
-There's no third, softer budget. Either way the bundle halts at
+There's no other, softer budget. Whichever one stops it, the bundle halts at
 `AWAITING_SIGNOFF` for you, with every deferred finding in §6 — never dropped.
 
 Three guarantees hold by construction, worth knowing before you flip it on:
@@ -1108,6 +1116,67 @@ wave builds on, via `[driver].wave_mode`:
   merge, the stop also shows the PR's `reviewDecision`, and `merge-remarks.json`
   in the bundle records that and the host's merge error beside the remarks (the
   bundle's next merge attempt removes the file first).
+  With `[driver].remark_rounds` above 0 (default 0, off) such a stop can open a
+  **remark round** instead. It counts only for the bundle the merge stopped on,
+  only when at least one open thread was started by an OWNER, MEMBER or
+  COLLABORATOR (other threads are listed as ignored and never reach the brief),
+  and only while the bundle has rounds left. A round needs the run to have pushed
+  the bundle's branch (so the PR holds what was accepted), `[driver].worktree =
+  true`, a pass of the run's pass budget left to drive it, and a PR branch it can
+  fetch whose head holds only what the run pushed: that commit, with at most its
+  base merged in (as the merge step's own update of a branch behind its base
+  does). A commit someone else pushed on top, such as a reviewer's committed
+  suggestion, would be on the PR but in no archive the round records, so the
+  round is refused. So is a merge on the head that is not the clean merge of
+  its two parents (checked with `git merge-tree --write-tree`, git 2.38 or
+  later): one that carries an edit of its own (GitHub's conflict editor, or
+  `git merge` and then an edit) or a conflict resolved by hand. Without any of
+  these the run stops as before, saying why
+  (the PR, the commit the run pushed and the head found, in that last case). The
+  driver archives the accepted attempt to `iteration-v<n>/`, writes
+  `remark-round.json` (the round count, the PR head it fetched, the archives
+  already on the PR, each thread), appends the threads to the brief,
+  and drives the bundle again in the same run: Do builds on the PR head, so
+  `patch.diff` after a round is the change on top of that head, not the whole
+  contribution. The per-fix verifier gets `PDCA_BASE=origin/<branch>` and fails
+  if that branch moved or cannot be fetched. Nothing in this release moves a
+  round to a new head, so a branch that moved leaves the round out of date; the
+  failure says so and says to discontinue the round
+  (`pdca signoff <id> --discontinue`) and re-run. No rebuild changes that
+  failure, so §6 lists it as yours and auto-iterate stops on it, whatever else
+  §6 holds, rather than rebuild on the same head. `pdca drift` checks the base plus
+  the archived patches plus `patch.diff`. The builder is given each thread (from
+  `remark-round.json`, so a re-plan of the round keeps them) and answers it in
+  `remark-responses.json`, and the round's SUMMARY.md shows a reply plan: each
+  thread `addressed` (said so, and `patch.diff` changes its file, as
+  `git apply --numstat` reads it), `held` (a §6 row of this Check names its id or
+  its exact `path:line`) or `declined`, with the exact reply, which T4 checks
+  (any character that would end a line of SUMMARY.md is shown as its `\u`
+  escape, so no reply can start a heading of its own there). A
+  round pushes, replies to, resolves and merges nothing yet. After its sign-off
+  the run stops, non-zero (with `--no-publish` too, and `pdca signoff` exits
+  non-zero the same way), and while `remark-round.json` exists the bundle is
+  never published or merged: every path says to apply `patch.diff` to the PR
+  branch by hand. A discontinued round's PR stays open, the human's to close.
+  Its dependents wait for as long as the round is live, with or without
+  publishing, even if its PR is merged by hand, since that PR lacks the round's
+  change; an empty `patch.diff` (every thread declined) is no no-fix close
+  either, so `pdca cleanup` only reports the bundle and `pdca revert` refuses it.
+  With `[driver].worktree` turned off while a round is live, its Do and its gates
+  fail instead of running on the target base; its Do also fails, instead of
+  running in place, when its worktree cannot be resolved, created or reset, and
+  so do its gates when its target checkout cannot be resolved. When its gates
+  fail that way, §6 lists the failure as yours and auto-iterate stops on it, as
+  for a head that moved. The
+  accepted attempt the round archives is not counted as a spent round by the
+  size backstop. `remark_rounds` is the only cap; auto-iterate's budget is not
+  used. Nothing in this release ends a live round. It ends only when you delete
+  `remark-round.json`, and only after the PR has merged with the round's
+  `patch.diff` applied to its branch by hand. Deleted before that, the bundle
+  reads as an ordinary accepted one, and `pdca publish` then cuts a fresh branch
+  off the base and force-pushes `patch.diff`, the round's delta alone, over the
+  PR, dropping the accepted work the PR holds. The accepted round's stop line
+  says the same.
   Under either setting, before it readies a PR the driver reads the PR's base on
   the host and compares it with the bundle's own target base (the `Repo + branch
   target` publish used). If they differ, the driver retargets the PR
