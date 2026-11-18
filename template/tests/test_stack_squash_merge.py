@@ -1269,56 +1269,59 @@ class ReissueCarry(_Git):
         self.assertFalse(self.fx._ancestor(head, line))
         return line, oid
 
-    def _assert_older_line_is_named(self, record: dict[str, str]) -> None:
-        # Before: "drop issue_P from issue_D's brief, then re-run", and nothing else: the re-run
-        # continues the line, with no edge left to make it check for the merge.
+    def _assert_older_line_is_refreshed(self, record: dict[str, str]) -> None:
+        # The carry brings the older line up to date with main before wave 0 (#893), so the
+        # line D would build on has the merge commit, and the hold gives the plain drop step:
+        # no line to delete. Before #893: the line kept its older tip, and the hold asked to
+        # delete it too.
         line, oid = self._line_older_than_the_merge(record)
         tip = self.fx._tip(line)
         self._run([self._planned("D", "R, P")], ["R", "D"])
         self.assertEqual(self.line, line)
         self.assertIn("carried issue_R", self.err)
         self._assert_never_built("D")
-        said = self._assert_told_to_drop(oid, delete=line)
-        self.assertIn(f"{line} at {tip[:12]}, does not have the merge of issue_P,", said)
-        self.assertIn("once this run ends", said)
-        self.assertIn("starts from main, which has the merge commit", said)
+        said = self._assert_told_to_drop(oid)
+        self.assertNotIn(f"{line} at {tip[:12]}", said)
+        self.assertTrue(self.fx._ancestor(oid, line))
+        self.assertTrue(self.fx._ancestor(tip, line))
 
-    def test_an_older_line_is_named_for_an_onto_branch_record(self):
-        self._assert_older_line_is_named(_onto_record("P"))
+    def test_an_older_line_is_refreshed_for_an_onto_branch_record(self):
+        self._assert_older_line_is_refreshed(_onto_record("P"))
 
-    def test_an_older_line_is_named_for_a_legacy_stacks_on_pr(self):
-        self._assert_older_line_is_named(LEGACY)
+    def test_an_older_line_is_refreshed_for_a_legacy_stacks_on_pr(self):
+        self._assert_older_line_is_refreshed(LEGACY)
 
-    def test_an_older_line_is_named_for_a_record_for_another_repo(self):
-        self._assert_older_line_is_named(RENAMED)
+    def test_an_older_line_is_refreshed_for_a_record_for_another_repo(self):
+        self._assert_older_line_is_refreshed(RENAMED)
 
-    def test_an_older_line_is_named_for_a_depends_on_merged_edge(self):
+    def test_an_older_line_is_refreshed_for_a_depends_on_merged_edge(self):
         line, oid = self._line_older_than_the_merge(_onto_record("P"))
         d = self.cfg.bundle("D")
         sb._brief(d, extra="- **Depends on:** R\n- **Depends on (merged):** P\n")
         self._run([d], ["R", "D"])
         self._assert_never_built("D")
-        self._assert_told_to_drop(oid, delete=line)
+        self._assert_told_to_drop(oid)
 
     def test_the_way_out_past_an_older_line_builds_on_the_merge(self):
-        # The line's two steps followed: D is built on a line that has the merge commit.
+        # The line's step followed: the drop alone builds D on a line that has the merge
+        # commit, the line the carry brought up to date (#893).
         line, oid = self._line_older_than_the_merge(_onto_record("P"))
         d = self._planned("D", "R, P")
         self._run([d], ["R", "D"])
         self._assert_never_built("D")
-        self._assert_told_to_drop(oid, delete=line)
+        self._assert_told_to_drop(oid)
         self._planned("D", "R")
-        self.fx._delete(line)
         self._run([d], ["R", "D"])
         self.assertEqual(self.line, line)
         self.assertEqual(self.results["D"], state.COMPLETE)
         self.assertEqual(self.seen["issue_D"][0], line)
         self.assertTrue(self.fx._ancestor(oid, self.seen["issue_D"][1]))
 
-    def test_the_drop_alone_leaves_d_on_the_older_line(self):
-        # Why the line asks for both: with the edge gone nothing checks the line, so a run that
-        # still finds it builds D on a tip without the merge, and says nothing. Pinned so that
-        # the docs' sentence on it stays true.
+    def test_the_drop_alone_builds_d_on_the_refreshed_line(self):
+        # With the edge gone nothing checks the line for the merge, but a run that still finds
+        # the line brings it up to date first (#893): D is built on a tip with the merge, and
+        # nothing is said. Pinned so that the docs' sentence on it stays true. Before #893 the
+        # tip lacked the merge.
         line, oid = self._line_older_than_the_merge(_onto_record("P"))
         d = self._planned("D", "R, P")
         self._run([d], ["R", "D"])
@@ -1327,7 +1330,7 @@ class ReissueCarry(_Git):
         self._run([d], ["R", "D"])
         self.assertEqual(self.results["D"], state.COMPLETE)
         self.assertEqual(self.seen["issue_D"], (line, tip))
-        self.assertFalse(self.fx._ancestor(oid, tip))
+        self.assertTrue(self.fx._ancestor(oid, tip))
         self.assertNotIn(NAMED, self.err)
 
     def test_a_drop_made_before_the_re_run_is_told_to_delete_the_line_too(self):
@@ -1483,9 +1486,10 @@ class ReissueCarry(_Git):
         self.assertEqual(self.results["D"], state.COMPLETE)
         self.assertTrue(self.fx._ancestor(oid, self.seen["issue_D"][1]))
 
-    def test_the_drop_alone_past_a_line_not_checked_leaves_d_on_it(self):
-        # Why that line asks for both: the older line is continued once R is back, and nothing
-        # says so. Pinned so that the docs' sentence on it stays true.
+    def test_the_drop_alone_past_a_line_not_checked_builds_d_on_the_merge(self):
+        # The older line is continued once R is back, and brought up to date with main first
+        # (#893), so D is built on the merge, and nothing is said. Pinned so that the docs'
+        # sentence on it stays true. Before #893 the tip lacked the merge.
         line, oid = self._line_older_than_the_merge(_onto_record("P"))
         self.prs["R"] = "CLOSED"
         d = self._planned("D", "R, P")
@@ -1495,7 +1499,7 @@ class ReissueCarry(_Git):
         self._run([d], ["R", "D"])
         self.assertEqual(self.results["D"], state.COMPLETE)
         self.assertEqual(self.seen["issue_D"][0], line)
-        self.assertFalse(self.fx._ancestor(oid, self.seen["issue_D"][1]))
+        self.assertTrue(self.fx._ancestor(oid, self.seen["issue_D"][1]))
         self.assertNotIn(NAMED, self.err)
 
     def test_a_fold_that_failed_leaves_the_line_not_checked(self):
@@ -1542,7 +1546,8 @@ class ReissueCarry(_Git):
         self._run([e, d], batch)
         self.assertEqual(self.results["D"], state.COMPLETE)
         self.assertEqual(self.seen["issue_D"][0], line)
-        self.assertFalse(self.fx._ancestor(oid, self.seen["issue_D"][1]))   # hence the step
+        # The first run's carry brought the line up to date (#893): D has the merge.
+        self.assertTrue(self.fx._ancestor(oid, self.seen["issue_D"][1]))
 
     def test_a_prerequisite_to_name_in_the_re_run_brings_that_lines_step(self):
         # A run of O and D left O on its line. A run of D alone is told to name O and to drop P:
@@ -1569,9 +1574,10 @@ class ReissueCarry(_Git):
         self.assertEqual(self.results["D"], state.COMPLETE)
         self.assertTrue(self.fx._ancestor(oid, self.seen["issue_D"][1]))
 
-    def test_the_drop_alone_past_that_line_leaves_d_on_it(self):
-        # Why it asks for the delete there too: the run naming O continues the older line, and
-        # nothing says so. Pinned so that the docs' sentence on it stays true.
+    def test_the_drop_alone_past_that_line_builds_d_on_the_merge(self):
+        # The run naming O continues the older line, brought up to date with main first
+        # (#893), so D is built on the merge, and nothing is said. Pinned so that the docs'
+        # sentence on it stays true. Before #893 the tip lacked the merge.
         o, p = self._finished("O"), self._finished("P")
         line = self._earlier_run_folds(["O", "D"], o)
         oid = self._squash("P")
@@ -1583,13 +1589,13 @@ class ReissueCarry(_Git):
         self._run([d], ["O", "D"])
         self.assertEqual(self.results["D"], state.COMPLETE)
         self.assertEqual(self.seen["issue_D"][0], line)
-        self.assertFalse(self.fx._ancestor(oid, self.seen["issue_D"][1]))
+        self.assertTrue(self.fx._ancestor(oid, self.seen["issue_D"][1]))
         self.assertNotIn(NAMED, self.err)
 
-    def test_a_prerequisite_to_name_past_an_older_line_brings_both_lines_steps(self):
-        # D's line says to delete this run's older line and to name O, and naming O moves the
-        # re-run to another older line. Before: only the first was named, so with every step
-        # followed D was built on the second, without the merge.
+    def test_a_prerequisite_to_name_past_an_older_line_brings_only_that_lines_step(self):
+        # This run's line was brought up to date (#893), so it has the merge and D's line asks
+        # for no delete of it; naming O moves the re-run to another line, which this run did
+        # not check, so that step stays. Before #893 both lines were named.
         r, o, p = self._finished("R"), self._finished("O"), self._finished("P")
         other = self._earlier_run_folds(["R", "O", "D"], r, o)
         line = self._earlier_run_folds(["R", "D"], r)
@@ -1603,11 +1609,11 @@ class ReissueCarry(_Git):
         held = [x for x in self.err.splitlines() if x.startswith("flow: issue_D held")]
         self.assertEqual(len(held), 2, self.err)
         told = next(x for x in held if "issue_P (merge commit" in x)
-        self.assertIn(f"delete {line} on origin, then re-run", told)
-        self.assertIn(f"Naming issue_O too gives the re-run another line: delete {other} on origin "
-                      "as well if it is there.", told)
+        self.assertNotIn(f"delete {line} on origin", told)
+        self.assertIn(f"delete {other} on origin if it is there", told)
+        self.assertNotIn("Naming issue_O too", told)
         self._planned("D", "R, O")
-        self.fx._delete(line, other)
+        self.fx._delete(other)
         self._run([d], ["R", "O", "D"])
         self.assertEqual(self.line, other)
         self.assertEqual(self.results["D"], state.COMPLETE)
@@ -1630,7 +1636,8 @@ class ReissueCarry(_Git):
         self.assertEqual(len(told), 1, self.err)
         self.assertIn(oid[:12], told[0])
         self.assertIn("drop issue_P from issue_E's brief", told[0])
-        self.assertIn(f"delete {line} on origin", told[0])
+        # E's run brought its line up to date (#893): it has the merge, nothing to delete.
+        self.assertNotIn(f"delete {line} on origin", told[0])
 
     def test_a_bundle_held_for_nothing_else_is_not_told_the_line_was_not_checked(self):
         # Something else is held, but D does not name it: once the edge is gone D is built from
@@ -1776,13 +1783,16 @@ class ReissueCarry(_Git):
         self.assertIn("their PR was squash- or rebase-merged into main", said)
 
     def test_a_reverted_merge_is_not_said_to_be_on_the_base_past_an_older_line(self):
-        # The same words where the line asks for a delete too: it speaks of the merge commit.
+        # The same words past an older line: the carry brought it up to date (#893), so it has
+        # the merge commit, and the plain step neither asks for a delete nor speaks of a base
+        # "which has the merge commit".
         line, oid = self._line_older_than_the_merge(_onto_record("P"))
         self.fx._revert_on_main(oid)
         self._run([self._planned("D", "R, P")], ["R", "D"])
         self._assert_never_built("D")
-        said = self._assert_told_to_drop(oid, delete=line)
-        self.assertIn("which has the merge commit", said)
+        said = self._assert_told_to_drop(oid)
+        self.assertNotIn("which has the merge commit", said)
+        self.assertTrue(self.fx._ancestor(oid, line))
 
     def test_the_drop_after_a_revert_builds_without_the_change(self):
         # What the line's plainer words leave to you: the check cannot see the revert, so the

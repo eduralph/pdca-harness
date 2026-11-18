@@ -516,12 +516,12 @@ checkbox a reviewer quoted in §5 is not yours, for a tick here or for an
 accept. If the ledger file exists but can't be read, §6 says so as its own
 `- [ ]` item, and an accept is refused until you clear it.
 
-**Exactly two things stop the loop while there's still implementation work:**
+**Exactly three things stop the loop while there's still implementation work:**
 
 - **The size backstop** — the early stop. At Check the driver measures what the
   patch actually came to and how many rounds this brief has already spent; past
   a threshold it raises a `size backstop —` item recommending `iterate-plan`.
-  That's the one HUMAN item that stops the loop rather than riding along: it
+  It's a HUMAN item that stops the loop rather than riding along: it
   says further rebuilds are the wrong move, so it ends the loop, and the flow
   names it on stderr. By
   default it fires at 2 rounds, below the hard cap, on purpose — most bundles
@@ -529,11 +529,19 @@ accept. If the ledger file exists but can't be read, §6 says so as its own
   produces implementation-shaped findings every round. The thresholds live
   once, in `pdca.toml`'s `[driver.size_signal]` block (set one to `0` to
   switch that rule off).
+- **A failure no rebuild can change** — a remark round's PR head that moved,
+  or can't be read, after the round was built on it (merge mode, in
+  [Waves in execution](#waves-in-execution)). Nothing in a rebuild moves the
+  round to the new head, so every rebuild would fail the same way. The same
+  goes for a round whose gates can't have its tree (worktrees turned off, its
+  target checkout gone): a rebuild's Do would refuse the round the same way.
+  Either way the gate's §6 row is a HUMAN item that ends the loop at once, and
+  the flow names it on stderr.
 - **The hard cap** — `[driver].max_auto_iters` (default `3`) automatic rounds
   per bundle, tracked in `auto-iterate.json`. It's the ceiling that still
   holds when the backstop is off or hasn't fired.
 
-There's no third, softer budget. Either way the bundle halts at
+There's no other, softer budget. Whichever one stops it, the bundle halts at
 `AWAITING_SIGNOFF` for you, with every deferred finding in §6 — never dropped.
 
 Three guarantees hold by construction, worth knowing before you flip it on:
@@ -809,7 +817,11 @@ wave builds on, via `[driver].wave_mode`:
   that target onto the line, before wave 0, and points that target's bundles at
   it. It continues the line already on origin, without force, when every commit
   on it is accounted for by your base or a finished prerequisite's PR head, and
-  starts the line when origin has none. Only a clean prerequisite is carried:
+  starts the line when origin has none. A line it continues is first brought up
+  to date with your base: one merge commit on top, pushed without force, unless
+  the line has your base already. When that merge cannot be kept, the run says
+  so on one line with what to do and carries onto the line as found (see the
+  end of this section). Only a clean prerequisite is carried:
   its PR is open (or merged, with its head already on your base or the line), it
   merges onto the line without error, and, with `[driver].regate_between_waves`,
   the carried line's re-gate is not red. A finished prerequisite that is not
@@ -834,12 +846,13 @@ wave builds on, via `[driver].wave_mode`:
   bundle of the re-issued batch that names it as a prerequisite, and delete any
   line on origin that batch would continue. They name that line for the batch
   without the merged prerequisite, since any other batch has a line of its own.
-  With the edge gone nothing checks that line for the merge, so a re-run that
-  finds it may build the dependent there without that merge; one that does not
-  starts from your base. A bundle still naming it, in that batch or another, is
-  held when it runs and given the steps for its own line, as below. A
-  prerequisite squash- or rebase-merged with its head already on the line (an
-  earlier fold put it there) is clean, as above: the line has its work, so the
+  With the edge gone nothing checks that line for the merge. A re-run that finds
+  it brings it up to date with your base first, but if that run reports the
+  refresh dropped, it builds the dependent there without that merge; one that
+  does not find it starts from your base. A bundle still naming it, in that
+  batch or another, is held when it runs and given the steps for its own line,
+  as below. A prerequisite squash- or rebase-merged with its head already on the
+  line (an earlier fold put it there) is clean, as above: the line has its work, so the
   run carries it and the ones built on it and names no merge, and their PRs keep
   showing its change until they are updated from your base. A prerequisite
   whose merge fails
@@ -928,10 +941,12 @@ wave builds on, via `[driver].wave_mode`:
   later revert on the base: after one, dropping the edge builds the dependent
   without that change. With the edge gone nothing checks the line for that merge
   either. So when the dependent is cut from a line of the run that lacks it (say
-  a line older than the merge, continued from origin), or that cannot be checked
-  for it, the step also says to delete that line on origin once the run ends: a
-  re-run that still finds it builds the dependent there without the merge, and
-  one that does not starts from the base, which has the merge commit. Dropping
+  a line continued from origin whose refresh, below, was dropped), or that cannot
+  be checked for it, the step also says to delete that line on origin once the
+  run ends: a re-run that still finds it brings it up to date with the base
+  first, but if that refresh is dropped again it builds the dependent there
+  without the merge; one that does not find it starts from the base, which has
+  the merge commit. Dropping
   the edge before the re-run, as the prerequisite's own line above asks, skips
   this check, which is why that line gives the delete step too. When no line was
   judged for the dependent but a re-run may continue one, because it is held for
@@ -947,20 +962,85 @@ wave builds on, via `[driver].wave_mode`:
   any branch).
 
   Once the run has a line for the dependent's target (its first fold, or the
-  carry above), the dependent is cut from that line, not from the base, and the
-  line does not follow the base: a merge into the base after the line was
-  started may be missing from it. For either edge the dependent then also waits
-  until the line has the prerequisite's work: the commit its PR merge put on
-  the base (`gh pr view --json mergeCommit`; a merge, squash or rebase merge
-  all put one there), or the PR's head, which the carry puts on the line when
-  it carries that prerequisite. A merge commit that cannot be read, or a
-  checkout that cannot be fetched, holds it too. It is named on one line with
-  the line's tip, and the rest of the run goes on. Re-running alone may not
-  help, and that includes a re-run after waiting for a merge as above: a
-  re-run whose carry finds the line on origin continues it, and holds the
-  dependent this way. So once the run ends, delete that line on origin, then
-  re-run: with no line there, the re-run starts from the base, which has the
-  merge. A target with no line yet is judged as above.
+  carry above), the dependent is cut from that line, not from the base, and
+  within the run the line does not follow the base: a merge into the base after
+  the line was started may be missing from it. For either edge the dependent
+  then also waits until the line has the prerequisite's work: the commit its PR
+  merge put on the base (`gh pr view --json mergeCommit`; a merge, squash or
+  rebase merge all put one there), or the PR's head, which the carry puts on the
+  line when it carries that prerequisite. A merge commit that cannot be read, or
+  a checkout that cannot be fetched, holds it too. It is named on one line with
+  the line's tip, and the rest of the run goes on. To build it, re-run with the
+  same ids. The line follows the base at the carry: a re-run whose carry finds
+  the line on origin brings it up to date with the base before wave 0, by
+  merging the base into it (one merge commit on top, pushed without force, so
+  the line keeps every commit it had), and one whose carry finds no line starts
+  it from the base. Either way the dependent is built once the line has the
+  merge. A re-run with no carry (no bundle it drives has a plain `Depends on`
+  naming a finished id) starts the line from the base at its first fold, as
+  before. A kept refresh cannot be undone: the merge commit stays on the line.
+
+  The carry drops the refresh, says so on one line (`integrate: refresh dropped
+  — <line> is not brought up to date with <base> before its bundles: …`, with
+  the cause and what to do), and carries onto the line as found, as it did
+  before, when the refresh cannot be kept. That line ends by saying whether the
+  line the fold pushes still lacks your base or has it all the same, because a
+  carried prerequisite brought it in (its branch was updated from your base,
+  say), or, when no prerequisite can be carried, that the fold pushes nothing.
+  When the fold tried the prerequisites on both lines, only what it said about
+  them on the line it keeps is printed, a PR state it could not read included.
+  A PR state that neither the refresh's own check nor the merges after it could
+  read is reported once. A fold that stops on an error still prints what it
+  said and, if it dropped the refresh, that one line, which then says the fold
+  stops and pushes nothing.
+  If your base does not merge onto the line (a conflict), the line names the
+  files, each with the bundle whose own change last touched it on the line when
+  the run can tell: update that PR's branch from your base, resolving the
+  conflict, then re-run. If merging your base would remove work a bundle put on
+  the line (your base reverted a merged PR the line carries), the line names the
+  file and the bundle. The line keeps that work: put it back on your base
+  (revert the revert) if the revert was a mistake; if it was meant, drop that
+  bundle from the briefs that name it and re-issue without it. Deleting the line
+  on origin would build on your base without that work. If no bundle put the
+  file there (it came onto the line from your base, which has since deleted,
+  renamed or reverted it) and the run could read every bundle's commits, the
+  line says so instead: deleting the line on origin loses no bundle's work and
+  is the way out. If a finished
+  prerequisite merges onto the line as found but not once your base is in it,
+  the line names it and the files: update its PR branch from your base,
+  resolving the conflict, then re-run. A prerequisite that is left off either
+  way (it conflicts with another one, say) does not cost the refresh: it is held
+  with its own reason, as above. If a git step of the refresh fails, the line
+  names the error: check that checkout, then re-run. After a dropped refresh a
+  dependent that needs the newer base stays held; its line gives the delete step
+  as the other way out: once the run ends, delete that line on origin, then
+  re-run, and the re-run starts from the base. A dependent whose line could not
+  be checked for the merge gets only that step. With
+  `[driver].regate_between_waves`, a red re-gate of a line the carry brought up
+  to date (by the refresh, or through a carried prerequisite after a dropped
+  one) holds the carried prerequisites with a line saying the run merged your
+  base into the line before the re-gate, so your base itself may be what is red,
+  and gives the delete step rather than re-opening a PR, which cannot help.
+
+  Known limits of the refresh: the check for removed work compares each file
+  with where the line leaves your base, so it misses a revert of a bundle's
+  lines when your base also edits that file (as the fold's own checks above
+  do), and every re-run now meets that case; that point never moves past a
+  refresh, so once your base deletes or renames a file it added after that
+  point, or reverts another change of its own made after it, every later
+  refresh of that line is dropped, not only the next, until that point moves
+  (#894) or the line is deleted (the warning says the file came from your base
+  and gives deleting the line as the way out), and the fold can refuse a branch
+  for the same reason (too much refused, never work lost); a prerequisite your
+  base merged and then reverted that was never on the line arrives through the
+  refresh with its work absent, as on a fresh line; a kept
+  refresh is pushed before the re-gate, so a red base makes every carry of that
+  line red until the base is fixed or the line deleted; base commits a refresh
+  put on the line that later leave your base (a force-push there) make the next
+  re-run find commits it cannot account for, and it asks you to delete the line;
+  a refused push is refused as any other fold push is, not retried; and a file
+  name on your base that is not valid UTF-8 can stop the run during the check
+  for removed work. A target with no line yet is judged as above.
 - **`"merge"`** (own-repo / continuous-delivery only) — actually `gh pr merge`s
   each non-final wave's PRs, so the next wave builds on a genuinely merged base.
   Needs merge rights on the base remote and relaxes STOP discipline for the
@@ -1036,6 +1116,67 @@ wave builds on, via `[driver].wave_mode`:
   merge, the stop also shows the PR's `reviewDecision`, and `merge-remarks.json`
   in the bundle records that and the host's merge error beside the remarks (the
   bundle's next merge attempt removes the file first).
+  With `[driver].remark_rounds` above 0 (default 0, off) such a stop can open a
+  **remark round** instead. It counts only for the bundle the merge stopped on,
+  only when at least one open thread was started by an OWNER, MEMBER or
+  COLLABORATOR (other threads are listed as ignored and never reach the brief),
+  and only while the bundle has rounds left. A round needs the run to have pushed
+  the bundle's branch (so the PR holds what was accepted), `[driver].worktree =
+  true`, a pass of the run's pass budget left to drive it, and a PR branch it can
+  fetch whose head holds only what the run pushed: that commit, with at most its
+  base merged in (as the merge step's own update of a branch behind its base
+  does). A commit someone else pushed on top, such as a reviewer's committed
+  suggestion, would be on the PR but in no archive the round records, so the
+  round is refused. So is a merge on the head that is not the clean merge of
+  its two parents (checked with `git merge-tree --write-tree`, git 2.38 or
+  later): one that carries an edit of its own (GitHub's conflict editor, or
+  `git merge` and then an edit) or a conflict resolved by hand. Without any of
+  these the run stops as before, saying why
+  (the PR, the commit the run pushed and the head found, in that last case). The
+  driver archives the accepted attempt to `iteration-v<n>/`, writes
+  `remark-round.json` (the round count, the PR head it fetched, the archives
+  already on the PR, each thread), appends the threads to the brief,
+  and drives the bundle again in the same run: Do builds on the PR head, so
+  `patch.diff` after a round is the change on top of that head, not the whole
+  contribution. The per-fix verifier gets `PDCA_BASE=origin/<branch>` and fails
+  if that branch moved or cannot be fetched. Nothing in this release moves a
+  round to a new head, so a branch that moved leaves the round out of date; the
+  failure says so and says to discontinue the round
+  (`pdca signoff <id> --discontinue`) and re-run. No rebuild changes that
+  failure, so §6 lists it as yours and auto-iterate stops on it, whatever else
+  §6 holds, rather than rebuild on the same head. `pdca drift` checks the base plus
+  the archived patches plus `patch.diff`. The builder is given each thread (from
+  `remark-round.json`, so a re-plan of the round keeps them) and answers it in
+  `remark-responses.json`, and the round's SUMMARY.md shows a reply plan: each
+  thread `addressed` (said so, and `patch.diff` changes its file, as
+  `git apply --numstat` reads it), `held` (a §6 row of this Check names its id or
+  its exact `path:line`) or `declined`, with the exact reply, which T4 checks
+  (any character that would end a line of SUMMARY.md is shown as its `\u`
+  escape, so no reply can start a heading of its own there). A
+  round pushes, replies to, resolves and merges nothing yet. After its sign-off
+  the run stops, non-zero (with `--no-publish` too, and `pdca signoff` exits
+  non-zero the same way), and while `remark-round.json` exists the bundle is
+  never published or merged: every path says to apply `patch.diff` to the PR
+  branch by hand. A discontinued round's PR stays open, the human's to close.
+  Its dependents wait for as long as the round is live, with or without
+  publishing, even if its PR is merged by hand, since that PR lacks the round's
+  change; an empty `patch.diff` (every thread declined) is no no-fix close
+  either, so `pdca cleanup` only reports the bundle and `pdca revert` refuses it.
+  With `[driver].worktree` turned off while a round is live, its Do and its gates
+  fail instead of running on the target base; its Do also fails, instead of
+  running in place, when its worktree cannot be resolved, created or reset, and
+  so do its gates when its target checkout cannot be resolved. When its gates
+  fail that way, §6 lists the failure as yours and auto-iterate stops on it, as
+  for a head that moved. The
+  accepted attempt the round archives is not counted as a spent round by the
+  size backstop. `remark_rounds` is the only cap; auto-iterate's budget is not
+  used. Nothing in this release ends a live round. It ends only when you delete
+  `remark-round.json`, and only after the PR has merged with the round's
+  `patch.diff` applied to its branch by hand. Deleted before that, the bundle
+  reads as an ordinary accepted one, and `pdca publish` then cuts a fresh branch
+  off the base and force-pushes `patch.diff`, the round's delta alone, over the
+  PR, dropping the accepted work the PR holds. The accepted round's stop line
+  says the same.
   Under either setting, before it readies a PR the driver reads the PR's base on
   the host and compares it with the bundle's own target base (the `Repo + branch
   target` publish used). If they differ, the driver retargets the PR

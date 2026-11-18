@@ -59,7 +59,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import state, waves
+from . import signoff, state, waves
 
 #: Written at Check, read by `assemble.collect_needs_human`. A file rather than a
 #: recomputation so §6 and any later audit see the same numbers the decision was made on.
@@ -139,6 +139,11 @@ def iteration_rounds(d: Path) -> tuple[int, int]:
     round, so the failure mode is over-counting (the backstop stays), never silent
     shrinkage.
 
+    An archive whose own SUMMARY.md §9 reads an ACCEPT is no round spent at all (issue
+    #921): only a remark round archives one — the accepted attempt it reopens, already on
+    the PR — and charging it would raise the backstop, and its iterate-plan advice, on a
+    bundle the human accepted. Same fail-safe: a §9 that cannot be read is no accept.
+
     Shared with ``scripts/size-calibrate``, which defined it first: the thresholds were
     calibrated on THIS definition, so a runtime counting anything else is measuring a
     different quantity from the one the numbers describe.
@@ -148,8 +153,18 @@ def iteration_rounds(d: Path) -> tuple[int, int]:
     # archive holds the brief the bundle was last planned from.
     replans = state.replan_archives(d)
     boundary = replans[-1][0] if replans else 0
-    counted = [a for n, a in state.iteration_archives(d) if n > boundary]
+    counted = [a for n, a in state.iteration_archives(d) if n > boundary and not _accepted(a)]
     return sum(1 for a in counted if not _environment_attributed(a)), len(replans)
+
+
+def _accepted(archive: Path) -> bool:
+    """True iff the archive's SUMMARY.md §9 records an accept (#921) — read as
+    ``state.state`` reads a live bundle's. Missing or unreadable: False, so it counts."""
+    try:
+        token = signoff.outcome_token(archive / "SUMMARY.md")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return state._OUTCOME_TO_STATE.get(token) == state.COMPLETE
 
 
 #: The gating results that are NOT a verdict on the patch: a green, a gate whose subject is

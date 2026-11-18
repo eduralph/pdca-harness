@@ -141,7 +141,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import integrate, leaves, merged, publish, state
+from . import integrate, leaves, merged, publish, remark_round, state
 from .config import Config
 
 # Patchable indirection so a test can drive the wait loop below with no real wall-clock
@@ -159,19 +159,26 @@ _ROLLUP_PENDING = frozenset({"pending"})
 
 
 def merge_wave(cfg: Config, bundles: list[Path], *, dry_run: bool = False,
-               method: str = "merge", pushed: set[str] | None = None) -> int:
+               method: str = "merge", pushed: set[str] | None = None,
+               stopped: list[Path] | None = None) -> int:
     """Merge each accepted bundle's PR into its base, then fetch the base. Return 0 iff
     every bundle merged (or had nothing to merge); non-zero (STOP) on the first failure.
     Its only caller runs it for a non-final wave, so each PR it attempts is marked for a
     later merge-mode run (``mark``, issue #839), unless this run pushed no branch for it
     (``pushed``: the names of the bundles that did; ``None``: all of them). The record of
     such a bundle is an earlier attempt's, so the hash marked beside it would name a patch
-    its PR does not hold, and a later run would merge that PR's older head for it."""
+    its PR does not hold, and a later run would merge that PR's older head for it.
+
+    ``stopped`` (issue #921) is the caller's collector: on a non-zero return the bundle this
+    call stopped on is appended to it, so the caller can tell which bundle's remarks, if
+    any, belong to this stop. The bundles after it in ``bundles`` were never attempted."""
     fetched: set[str] = set()
     for d in bundles:
         rc = _merge_one(cfg, d, dry_run=dry_run, method=method, fetched=fetched,
                         mark=pushed is None or d.name in pushed)
         if rc:
+            if stopped is not None:
+                stopped.append(d)
             return rc
     return 0
 
@@ -547,7 +554,7 @@ query($url: URI!, $cursor: String) {
         pageInfo { hasNextPage endCursor }
         nodes {
           id isResolved isOutdated path line originalLine
-          comments(first: 1) { nodes { body url author { login } } }
+          comments(first: 1) { nodes { body url authorAssociation author { login } } }
         }
       }
     }
@@ -581,7 +588,8 @@ def _login(node: dict) -> str:
 
 def _review_threads(pr_url: str) -> list[dict] | None:
     """PR ``pr_url``'s UNRESOLVED review threads (``gh api graphql``), one dict per thread
-    — ``id``, ``path``, ``line``, ``outdated``, ``body``, ``author``, ``url`` — or None when
+    — ``id``, ``path``, ``line``, ``outdated``, ``body``, ``author``, ``url``, and
+    ``association`` (the ``authorAssociation`` of its first comment, issue #921) — or None when
     a query fails or its answer cannot be read, whatever earlier pages held: None means
     unknown, and a list always means all of them. It never raises, because it runs while the
     PR is still marked ready. Every page is read, each one asked for with the end cursor of
@@ -623,6 +631,12 @@ def _review_threads(pr_url: str) -> list[dict] | None:
                     "body": first.get("body") or "",
                     "author": _login(first),
                     "url": first.get("url") or "",
+                    # Issue #921: the first comment's author's relation to the repo, as
+                    # the host reports it (OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, …),
+                    # or None when it gave none. Only a remark round reads it.
+                    "association": (first.get("authorAssociation")
+                                    if isinstance(first.get("authorAssociation"), str)
+                                    else None),
                 })
             more, cursor = conn["pageInfo"].get("hasNextPage"), conn["pageInfo"].get("endCursor")
             if not more:
@@ -768,6 +782,18 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
     goes on: each refusal says that and what clears it, in place of its "STOP" (``_next``)."""
     if state.state(d) != state.COMPLETE:
         return 0  # not accepted — nothing of this bundle's to merge
+    # Issue #921: a bundle with a live remark round holds, as its patch.diff, a delta built
+    # on its PR's head that nothing has pushed yet, so its PR's head is the pre-round one.
+    # Readying or merging that PR would land the very head the remarks blocked, so it is
+    # refused before any `gh` call, in a dry run too, and before the remarks file is touched.
+    # It comes before the no-fix return below: a round that changed nothing (every thread
+    # declined) has an empty delta, yet its PR still holds the accepted work, unmerged.
+    if remark_round.live(d):
+        end = _next(held, "STOP: later waves are NOT run.",
+                    "it is held until the round's commit reaches its PR")
+        print(f"\n!!! merge: {d.name} was NOT merged — it has a live remark round "
+              f"({state.state(d)}): {remark_round.line(d)}. {end}\n", file=sys.stderr)
+        return 1
     patch = d / "patch.diff"
     if not patch.is_file() or not patch.read_text(encoding="utf-8").strip():
         return 0  # close / no-fix disposition — no contribution to merge

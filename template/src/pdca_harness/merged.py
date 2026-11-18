@@ -37,13 +37,15 @@ is that still the patch a PR's merge marker was written for?
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
-from . import state
+from . import remark_round, state
 from .config import Config
 
 # The record's key beside ``merge_eligible`` (#839): :func:`patch_hash` of the patch that
@@ -57,11 +59,15 @@ def is_merged(cfg: Config, dep_id: str) -> bool:
     A close/no-fix prereq (COMPLETE with no patch) ships nothing to merge ⇒ ``True``. A
     prereq not yet COMPLETE, or accepted-but-unpublished, ⇒ ``False`` (wait). Otherwise
     the recorded PR's ``state`` is queried; ``MERGED`` ⇒ ``True``, and any ``gh`` failure
-    is treated as not-merged.
+    is treated as not-merged. A prereq with a live remark round (#921) ⇒ ``False``, before
+    any of that: the round's work (its ``patch.diff``, a delta on the PR's head, empty or
+    not) is on no PR yet, so not even a merged PR holds what the prereq now ships.
     """
     d = cfg.find_bundle(dep_id)  # a merged prereq may be archived to completed/ (#171)
     if state.state(d) != state.COMPLETE:
         return False  # prereq hasn't even finished its own cycle
+    if remark_round.live(d):
+        return False  # a live remark round: its work has reached no PR (#921)
     patch = d / "patch.diff"
     if not patch.is_file() or not patch.read_text(encoding="utf-8").strip():
         return True  # close/no-fix disposition — no contribution to wait on
@@ -94,15 +100,18 @@ def merged_into(cfg: Config, dep_id: str, repo: str, base: str) -> bool:
     counts — :func:`is_merged`'s answer.
 
     Otherwise as :func:`is_merged`: a close/no-fix prereq (COMPLETE, empty or no patch) ⇒
-    ``True``; not COMPLETE, or no recorded PR ⇒ ``False``. Fail-closed: a ``gh`` failure,
-    ``gh`` missing included (:func:`pr_state` guards it), is "not merged", said on stderr —
-    never a traceback; a ``patch.diff`` that cannot be read is no close/no-fix, so its record
+    ``True``; not COMPLETE, no recorded PR, or a live remark round (#921, whatever its PR
+    reads, a merged one included) ⇒ ``False``. Fail-closed: a ``gh`` failure, ``gh``
+    missing included (:func:`pr_state` guards it), is "not merged", said on stderr — never a
+    traceback; a ``patch.diff`` that cannot be read is no close/no-fix, so its record
     decides (:func:`has_patch`, #839). Only ``flow._runnable`` and the pre-wave merge
     (``flow._merge_prereqs``, #839) call it; :func:`is_merged` and its callers keep their
     answer."""
     d = cfg.find_bundle(dep_id)  # a merged prereq may be archived to completed/ (#171)
     if state.state(d) != state.COMPLETE:
         return False
+    if remark_round.live(d):
+        return False  # a live remark round: its work has reached no PR (#921)
     if has_patch(d) is False:
         return True  # close/no-fix disposition — no contribution to wait on
     rec = _publish_record(d)
@@ -137,6 +146,14 @@ def counts_into(rec: dict, repo: str, base: str) -> bool:
             and rec.get("base") == base)
 
 
+# Where :func:`merged_head` says that it could not read a PR's state: on stderr, unless a
+# caller keeping its stderr lines back has set a function here (#893: the integration fold,
+# while it runs one of a refresh's two attempts, ``integrate._said_into``). A context
+# variable, so another thread's line never goes to it.
+SAY: contextvars.ContextVar[Callable[[str], None] | None] = contextvars.ContextVar(
+    "SAY", default=None)
+
+
 def merged_head(cfg: Config, dep_id: str) -> str | None:
     """The head commit bundle ``dep_id``'s recorded PR merged with, or ``None`` (#593).
 
@@ -144,7 +161,8 @@ def merged_head(cfg: Config, dep_id: str) -> str | None:
     and returns ``headRefOid`` only when ``state`` is ``MERGED``. Fail-closed, as
     :func:`is_merged` is: no recorded PR, a PR not merged, a ``gh`` failure (``gh``
     missing included) or output it cannot parse all return ``None``, which the caller
-    treats as "not known to be merged".
+    treats as "not known to be merged". A ``gh`` failure is said on stderr, or to the
+    function in :data:`SAY` when one is set (#893).
     """
     rec = _publish_record(cfg.find_bundle(dep_id))
     pr_url = rec.get("pr_url") if isinstance(rec, dict) else None
@@ -156,8 +174,12 @@ def merged_head(cfg: Config, dep_id: str) -> str | None:
     except OSError:
         r = None
     if r is None or r.returncode != 0:
-        print(f"merged: could not read PR state for {dep_id} ({pr_url}); "
-              "treating as not merged", file=sys.stderr)
+        line = f"merged: could not read PR state for {dep_id} ({pr_url}); treating as not merged"
+        say = SAY.get()
+        if say is None:
+            print(line, file=sys.stderr)
+        else:
+            say(line)
         return None
     try:
         info = json.loads(r.stdout or "{}")
