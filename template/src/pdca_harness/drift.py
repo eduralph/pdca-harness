@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from . import brief, publish, state
+from . import brief, publish, remark_round, state
 from .config import Config
 
 
@@ -27,9 +27,15 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
 
 
-def _applies_to_base(repo: Path, base_ref: str, patch: Path) -> tuple[str, str]:
+def _applies_to_base(repo: Path, base_ref: str, patch: Path | None,
+                     before: list[Path] | None = None) -> tuple[str, str]:
     """``('ok' | 'needs-rebase' | 'error', detail)`` for ``patch`` vs ``base_ref``. Uses a
-    throwaway detached worktree at ``base_ref`` so the primary checkout is untouched."""
+    throwaway detached worktree at ``base_ref`` so the primary checkout is untouched.
+
+    ``before`` (a remark round, issue #921) are patches already on the PR, applied in order
+    first: ``patch`` is then checked on top of them, as the PR holds it. One that does not
+    apply is the drift, named by its archive. ``patch`` is ``None`` for a round that
+    changed nothing (an empty delta): those patches are then the whole check."""
     with tempfile.TemporaryDirectory(prefix="pdca-drift-") as tmp:
         wt = Path(tmp) / "wt"
         add = _git(repo, "worktree", "add", "--detach", str(wt), base_ref)
@@ -37,6 +43,13 @@ def _applies_to_base(repo: Path, base_ref: str, patch: Path) -> tuple[str, str]:
             tail = (add.stderr.strip().splitlines()[-1:] or ["worktree add failed"])[0]
             return "error", tail[:200]
         try:
+            for earlier in before or []:
+                app = _git(wt, "apply", str(earlier))
+                if app.returncode != 0:
+                    tail = (app.stderr.strip().splitlines()[-1:] or ["patch does not apply"])[0]
+                    return "needs-rebase", f"{earlier.parent.name}/patch.diff: {tail}"[:200]
+            if patch is None:
+                return "ok", ""
             chk = _git(wt, "apply", "--check", str(patch))
             if chk.returncode == 0:
                 return "ok", ""
@@ -75,7 +88,10 @@ def check_bundle(cfg: Config, d: Path, *, fetch: bool = True) -> dict | None:
     check (no patch, or accepted-but-unpublished — the latter is #206's part 2, not drift).
     Returns ``{bundle, pr_url, base, status, detail}``."""
     patch = d / "patch.diff"
-    if not patch.is_file() or not patch.read_text(encoding="utf-8").strip():
+    empty = not patch.is_file() or not patch.read_text(encoding="utf-8").strip()
+    # A remark round (issue #921) changed nothing when its delta is empty, but the archives
+    # already on its PR are still its contribution, so it is checked all the same (below).
+    if empty and not remark_round.live(d):
         return None  # close/no-fix disposition — nothing to apply
     rec = publish._publish_record(d)
     pr_url = rec.get("pr_url") if rec else None
@@ -85,6 +101,17 @@ def check_bundle(cfg: Config, d: Path, *, fetch: bool = True) -> dict | None:
     if not repo_spec or not base:
         return None  # no resolvable upstream target
     fetch_remote, fetch_ref, base_ref = _resolve_base(cfg, d, base)
+    # A remark round (issue #921, Plan decision 3 of #840): `patch.diff` is a delta on the
+    # PR's head, so the whole contribution is checked — the target base, each archive the
+    # round record lists as already on the PR (in order), then the delta, if any. Rejected
+    # attempts' archives are never applied, and the PR branch is never fetched: a deleted
+    # branch is no error here.
+    earlier, why = remark_round.contribution_patches(d)
+    if earlier is not None or why:
+        fetch_remote, fetch_ref, base_ref = cfg.base_remote, base, f"{cfg.base_remote}/{base}"
+        if why:
+            return {"bundle": d.name, "pr_url": pr_url, "base": base_ref, "status": "error",
+                    "detail": f"remark round: {why}"[:200]}
     repo = publish._checkout_path(cfg, repo_spec)
     if not (repo / ".git").exists():
         return {"bundle": d.name, "pr_url": pr_url, "base": base_ref,
@@ -97,7 +124,8 @@ def check_bundle(cfg: Config, d: Path, *, fetch: bool = True) -> dict | None:
             tail = (f.stderr.strip().splitlines()[-1:] or ["git fetch failed"])[0]
             return {"bundle": d.name, "pr_url": pr_url, "base": base_ref, "status": "error",
                     "detail": f"fetch {fetch_remote} {fetch_ref} failed: {tail}"[:200]}
-    status, detail = _applies_to_base(repo, base_ref, patch.resolve())
+    status, detail = _applies_to_base(repo, base_ref, None if empty else patch.resolve(),
+                                      [p.resolve() for p in earlier or []])
     return {"bundle": d.name, "pr_url": pr_url, "base": base_ref,
             "status": status, "detail": detail}
 

@@ -55,6 +55,17 @@ DEPENDENCY_ADJUDICATION = "dependency-adjudication.json"
 # `merge` and the archive list share one spelling.
 MERGE_REMARKS = "merge-remarks.json"
 
+# A merge-mode remark round (issue #921): the record of an accepted bundle reopened on its
+# PR's own head because collaborator review threads blocked the merge. A round is LIVE while
+# this file exists. It holds the round count, the PR head the round builds on, the archives
+# already on the PR and every thread seen, so it must outlive each rebuild of the round:
+# listed in CYCLE_EVIDENCE_ONLY below, never archived.
+REMARK_ROUND = "remark-round.json"
+
+# The round builder's answer to each thread (issue #921): `{<id>: {"addressed": bool,
+# "reply": "<one line>"}}`. Written by Do, so it is archived with the attempt that wrote it.
+REMARK_RESPONSES = "remark-responses.json"
+
 # The sign-off session's live carry-forward (issue #331): the FULL multi-line rationale
 # the session wrote below its decision token, captured by the driver (flow) at the moment
 # the decision is consumed — §9's "Iteration delta" flattens it to one line and the
@@ -154,6 +165,8 @@ DOWNSTREAM_OF_BRIEF = [
     # by Do or Check, but it describes THIS attempt's PR: archived with that attempt, so a
     # rebuild never sits beside remarks its new patch may already answer.
     MERGE_REMARKS,
+    # A remark round's builder answers (#921): this attempt's, archived with its patch.
+    REMARK_RESPONSES,
 ]
 
 # Cycle artifacts matched by pattern rather than name. ONE definition, read by both
@@ -177,10 +190,14 @@ DOWNSTREAM_GLOBS = ("check-advisory-*.md", "*.error.log", "*.memory.jsonl")
 #                            auto-iterate round iterated past. Archive it and every one of
 #                            them leaves the live bundle with the SUMMARY that carried it,
 #                            so the handover §6 would never show it to the human.
+#   remark-round.json      — REMARK_ROUND (#921): the live remark round. Archive it and the
+#                            round ends at its first iterate: the rebuild would go back to
+#                            the target base and the round count would reset.
 # Yet a bundle cannot hold any of them without having run a cycle, so each is unambiguous
 # evidence. Adding them to DOWNSTREAM_OF_BRIEF instead would fix the misclassification
 # below and break termination, which is the worse bug.
-CYCLE_EVIDENCE_ONLY = ("auto-iterate.json", "loop-telemetry.json", "deferred-findings.json")
+CYCLE_EVIDENCE_ONLY = ("auto-iterate.json", "loop-telemetry.json", "deferred-findings.json",
+                       REMARK_ROUND)
 
 # §9 outcome token → bundle state. state owns the state names, so the mapping
 # lives here; signoff knows only the tokens (no import cycle).

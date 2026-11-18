@@ -28,8 +28,8 @@ from collections.abc import Collection, Mapping
 from pathlib import Path
 
 from . import (act, assemble, autoiterate, brief, drive_claim, driver, gates, integrate, lane,
-               leaves, merge, merged, preflight, publish, queue, signoff, size_signal, sources,
-               split, state, sweep, waves)
+               leaves, merge, merged, preflight, publish, queue, remark_round, signoff,
+               size_signal, sources, split, state, sweep, waves)
 from .config import Config
 
 
@@ -311,7 +311,8 @@ def _maybe_auto_iterate(
     next Check runs again (``autoiterate.defer``). Every other outcome — auto-iterate off,
     the bundle not halted at AWAITING_SIGNOFF, a decision already recorded in the bundle and
     not yet consumed, a §6 with no IMPL item (empty, or HUMAN only), the size backstop's
-    item, the per-bundle budget spent, or a deferred ledger it cannot read — returns False
+    item, a row no rebuild can change (a remark round's failed PR-head check or gate read,
+    #921), the per-bundle budget spent, or a deferred ledger it cannot read — returns False
     and leaves the bundle exactly where it was, for the human.
 
     Deliberately routed through the existing ``_apply_decision`` rather than calling
@@ -347,15 +348,18 @@ def _maybe_auto_iterate(
               f"not auto-iterating", file=sys.stderr)
         return False
     if not autoiterate.eligible(items):
-        # The loop has exactly two stops while implementation work remains (#409): the size
-        # backstop here and the hard cap below. Say WHY when it was the size backstop
-        # (#324). It fires at 2 rounds while `max_auto_iters` defaults to 3, so it
-        # deliberately stops the loop with a round still nominally available — and an
-        # operator who set that number and sees the loop halt early has to be able to read
-        # the reason, or their setting simply appears not to work. Every other decline is a
-        # §6 with no implementation work at all, which the human is about to read anyway.
+        # The loop has exactly three stops while implementation work remains (#409): the
+        # size backstop and a row no rebuild can change (#921) here, and the hard cap below.
+        # Say WHY when it was one of the first two. The size backstop (#324) fires at 2
+        # rounds while `max_auto_iters` defaults to 3, so it deliberately stops the loop
+        # with a round still nominally available — and an operator who set that number and
+        # sees the loop halt early has to be able to read the reason, or their setting
+        # simply appears not to work. A remark round whose PR head moved, or whose gates
+        # cannot have its tree, stops it at once, and its row names the way out. Every other
+        # decline is a §6 with no implementation work at all, which the human is about to
+        # read anyway.
         for item in items:
-            if size_signal.is_size_item(item.text):
+            if item.stops_rebuilds or size_signal.is_size_item(item.text):
                 print(f"flow: {d.name} — not auto-iterating: {item.text}",
                       file=sys.stderr)
                 break
@@ -490,7 +494,9 @@ def flow(
         # is LOUD (#97) — never silently leave a COMPLETE bundle unpublished.
         rc = publish.publish(cfg, issue_id, dry_run=cfg.publisher.mode == "stub",
                              by=by, today=today, skip_if_no_target=True)
-        if rc:
+        # A remark round (#921) is refused by publish with its own way out; `pdca publish`
+        # would only refuse again.
+        if rc and not remark_round.live(d):
             print(f"flow: issue_{issue_id} is COMPLETE but publish did not complete "
                   f"(rc {rc}) — NOT published; run `pdca publish {issue_id}`.", file=sys.stderr)
     _sweep_quietly(cfg, [d])  # publish/freeze boundary — reclaim footprint (#297)
@@ -658,7 +664,9 @@ def _publish_bundle(cfg: Config, d: Path, *, by: str, today: str,
         cfg, d.name.removeprefix("issue_"),
         dry_run=cfg.publisher.mode == "stub", by=by, today=today, skip_if_no_target=True,
         texts_prevalidated=texts_prevalidated))
-    if rc not in (0, None):  # None ⇒ _isolate already logged an exception
+    # A remark round (#921) is refused by publish with its own way out, which `pdca publish`
+    # would only repeat.
+    if rc not in (0, None) and not remark_round.live(d):  # None ⇒ _isolate logged it
         print(f"flow: {d.name} is COMPLETE but publish did not complete (rc {rc}) — NOT "
               f"published; run `pdca publish {d.name.removeprefix('issue_')}`.", file=sys.stderr)
     after = _record_mtime(d)
@@ -695,7 +703,11 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
 
     A prerequisite that is not COMPLETE on disk (archived ``completed/`` too, #171) is never
     ready, whichever field names it — e.g. a prereq DISCONTINUED earlier never gets there,
-    and its dependent is skipped loudly. A prerequisite **in this run's batch** is carried
+    and its dependent is skipped loudly. Nor is one with a live remark round (#921), whatever
+    its state, in this batch or not, publishing or not: its ``patch.diff`` is a delta on its
+    PR's head that no PR holds yet, so no base of this run has that work, even once the PR
+    is merged by hand. Its dependent is held, named on ONE stderr line with the round's own
+    line (``remark_round.line``). A prerequisite **in this run's batch** is carried
     into the dependent's base by the wave fold once it reaches COMPLETE (it sits in an
     earlier wave), so COMPLETE is the bar. An in-batch prerequisite named in ``held``
     (bundle dir names, #593) is not ready either: it is COMPLETE, but this run pushed no
@@ -812,9 +824,16 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
         stale: list[tuple[str, str, bool]] = []  # … of those, not on d's line: off_line's shape
         unjudged = False                         # … of those, no line was judged for d
         busy: list[str] = []       # could not be claimed before wave 0, so not judged (#839)
+        rounds: list[tuple[str, str]] = []      # in a live remark round: (name, its line)
         for dep in deps:
             p = cfg.find_bundle(dep)
             out_of_batch = p.name not in batch_names
+            if remark_round.live(p):
+                # A live remark round (#921), in this batch or not, publishing or not: its
+                # patch.diff is a delta on its PR's head that no PR holds yet, so no base this
+                # run could give d has its work, the PR merged by hand included.
+                rounds.append((p.name, remark_round.line(p)))
+                continue
             if state.state(p) != state.COMPLETE:  # archived prereq too (#171)
                 unmet.append(dep)  # not ready, whichever field names it
                 continue
@@ -882,6 +901,11 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                 # In batch: accepted, but no branch pushed this run: nothing to fold (#593).
                 # Out of batch: a finished named id the carry could not put on the line (#646).
                 unmet.append(dep)
+        if rounds:
+            ways = "; ".join(f"{n}: {why}" for n, why in rounds)
+            print(f"flow: {d.name} held — prerequisite(s) {', '.join(n for n, _w in rounds)} "
+                  f"in a live remark round, whose work no PR holds yet; not built on a base "
+                  f"missing it. {ways}.", file=sys.stderr)
         if unmerged and in_merge_mode:
             ways = "; ".join(f"{n}: " + (merge_notes.get((n, repo, base))
                                          or _merge_way_out(cfg, n, d.name, repo, base))
@@ -989,7 +1013,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                   f"it. To build it, wait until {p} is built, once what its hold line names is "
                   f"fixed, and its PR merges{into}, then re-run.", file=sys.stderr)
         if (not unmet and not unmerged and not busy and not squashed and not off_line
-                and not off_base and not partners and not clashed and not unbuilt_partners):
+                and not off_base and not partners and not clashed and not unbuilt_partners
+                and not rounds):
             runnable.append(d)
     return runnable
 
@@ -1625,6 +1650,11 @@ def _merge_way_out(cfg: Config, name: str, dependent: str, repo: str, base: str)
     so that comes first."""
     iid = name.removeprefix("issue_")
     p = cfg.find_bundle(iid)
+    # A live remark round (#921): its patch.diff is a delta its PR does not hold yet, so no
+    # merge of that PR — by hand or by a run — gives the dependent the reviewed work, and no
+    # publish of it exists yet. The round's own line is the way out.
+    if remark_round.live(p):
+        return remark_round.line(p)
     st = state.state(p)
     if st != state.COMPLETE:
         return f"it is {st}, not COMPLETE; finish its cycle, merge its PR, then re-run"
@@ -2142,6 +2172,11 @@ def _terminal_hint(d: Path, s: str) -> str:
         return (f"split into children, but its {split.LINEAGE} names none readably — "
                 f"nothing to run here. Do not delete this bundle; read that file (or the "
                 f"parent's tracker issue) to find the child bundles.")
+    if remark_round.live(d):
+        # #921, whatever the terminal state (accepted, discontinued): the round's line names
+        # the PR and what is left to do; deleting the bundle would lose the round record and
+        # the accepted attempt it archived.
+        return remark_round.line(d)
     if s == state.RESOLVED:
         # Verbatim from the single-id CLI short-circuit this shared path replaces
         # (`cli.py:631-635` on f7876f2). The remediation names the WHOLE file (#302
@@ -3193,10 +3228,13 @@ def _drive_and_act(
     COMPLETE in the returned map, which therefore cannot say it was held.
     ``"base"`` (#738) for one held before it was built, because its own base could not be
     built (:func:`_bundle_bases`): not driven this run — PLANNED in the map, for one not
-    built yet — and named on stderr with the cause and the fix. ``cli._flow`` reads this to
-    exit 3 instead of 0 (``cli._results_rc``). It also names each bundle whose carried
-    branch was rewritten after the run's last fold read it (#695,
-    :func:`_report_late_rewrites`), a branch a base's refusal named included:
+    built yet — and named on stderr with the cause and the fix. ``"round"`` (#921) for one
+    with a live remark round this run met: reopened here after its PR was blocked by review
+    threads, or driven in a wave, with or without publishing, whatever its sign-off — no
+    publish of a round exists yet, so none is published or merged. ``cli._flow`` reads this
+    to exit 3 instead of 0 (``cli._results_rc``). It
+    also names each bundle whose carried branch was rewritten after the run's last fold
+    read it (#695, :func:`_report_late_rewrites`), a branch a base's refusal named included:
     ``"rewritten"``, or ``"unchecked"`` for each carried branch that end-of-run check could
     not judge — either one makes ``cli._flow`` exit 1, ahead of any hold. ``None`` — nobody
     listens.
@@ -3340,6 +3378,11 @@ def _drive_and_act(
     # base refused as rewritten is judged there too (#695 wins: still carried at the end of
     # the run, it fails the run). Only a broken shared worktree stops the loop at a base.
     held_base: set[str] = set()
+    # Bundles with a live remark round this run met (#921): accepted or not, their round's
+    # work is on no PR yet, so none is published or merged, and the run ends held ("round").
+    # Their dependents are held by `_runnable`, which reads the round record itself, so a
+    # round an earlier run left holds them too, with publishing on or off.
+    held_round: set[str] = set()
     for k, wave in enumerate(wave_list):
         # What each bundle of the wave is built on (#727), asked once: `_bundle_bases` points
         # it there below, and `_runnable` judges a merged prerequisite on the run's line for
@@ -3457,6 +3500,17 @@ def _drive_and_act(
         complete = [d for d in sorted(runnable, key=lambda p: p.name)
                     if state.state(d) == state.COMPLETE]
         _audit_wave_overlap(complete)
+        # A remark round (#921) this wave drove, publishing or not (`--no-publish`): whatever
+        # its sign-off, its work is on no PR, and no publish of a round exists yet — its
+        # patch.diff is a delta on the PR's head, and publishing it the ordinary way would
+        # overwrite the PR with the delta. Named with the state it is in and the round's way
+        # out, held, so the run does not end as a success; never drafted or published.
+        for d in sorted(runnable, key=lambda p: p.name):
+            if remark_round.live(d) and d.name not in held_round:
+                done = "; NOT published this run" if state.state(d) == state.COMPLETE else ""
+                print(f"flow: {d.name} — {remark_round.line(d)}{done}.", file=sys.stderr)
+                published.add(d.name)
+                held_round.add(d.name)
         if do_publish:
             to_publish = [d for d in complete if d.name not in published]
             # #295: draft ALL publishing texts (commit-msg.txt + pr-description.md) and
@@ -3504,10 +3558,39 @@ def _drive_and_act(
         if k < len(wave_list) - 1 and do_publish:
             dry = cfg.publisher.mode == "stub"
             if cfg.wave_mode == "merge":
+                stopped: list[Path] = []
                 if merge.merge_wave(cfg, complete, dry_run=dry, method=cfg.merge_method,
-                                    pushed=pushed):
-                    print(f"flow: wave {k} did not merge; STOPPING — later waves not run.",
-                          file=sys.stderr)
+                                    pushed=pushed, stopped=stopped):
+                    # A remark round (#921): only the bundle THIS call stopped on counts —
+                    # a remarks file on any other bundle of the wave is an earlier run's.
+                    # `open_round` decides whether its remarks open one — only for a bundle
+                    # whose branch this run pushed, so its PR holds the patch accepted
+                    # here, and only with a pass of the run's pool left to drive it in;
+                    # when they do not, the run stops as #838 leaves it, with at most one
+                    # line more.
+                    p = stopped[0] if stopped and not dry else None
+                    opened, why = (remark_round.open_round(cfg, p, pushed=p.name in pushed,
+                                                           passes_left=budget - spent)
+                                   if p else (False, ""))
+                    if why:
+                        print(f"flow: {p.name} — {why}.", file=sys.stderr)
+                    if not opened:
+                        print(f"flow: wave {k} did not merge; STOPPING — later waves not run.",
+                              file=sys.stderr)
+                        break
+                    # P reads PLANNED again: re-driven here, in this wave, through the same
+                    # Do → Check → sign-off as any bundle, on its PR's head. Whatever its
+                    # sign-off, nothing merges again in this run and no later wave runs:
+                    # the round's commit reaches no PR before #922.
+                    held_round.add(p.name)
+                    spent += _drive_wave(cfg, [p], by=by, today=today,
+                                         max_passes=min(allowance, budget - spent))
+                    rest = complete[complete.index(p) + 1:]   # merge_wave never got to them
+                    print(f"flow: wave {k} stopped on {p.name}'s remark round — "
+                          f"{remark_round.line(p)}. Not merged (never attempted): "
+                          f"{', '.join(d.name for d in rest) or 'none'}. Ignored "
+                          f"(non-collaborator): {remark_round.ignored_threads(p)}. "
+                          f"STOPPING — later waves not run.", file=sys.stderr)
                     break
             else:  # default: stack — fold onto a per-target integration branch
                 # An accepted, patched, targeted bundle whose branch was not pushed this run
@@ -3601,6 +3684,7 @@ def _drive_and_act(
         holds.update({n.replace("issue_", ""): "unpushed" for n in sorted(held_unpushed)})
         holds.update({n.replace("issue_", ""): "conflict" for n in held_conflict})
         holds.update({n.replace("issue_", ""): "base" for n in sorted(held_base)})
+        holds.update({n.replace("issue_", ""): "round" for n in sorted(held_round)})
         holds.update({n.replace("issue_", ""): why for n, why in late.items()})
     return results
 
@@ -3840,7 +3924,9 @@ def flow_ids(
     :func:`_drive_and_act`.
 
     ``holds`` is handed to :func:`_drive_and_act` unchanged (#693); an id skipped here is
-    never held.
+    never held, but for a terminal one with a live remark round (#921, ``"round"``),
+    accepted or discontinued: its round's work has reached no PR, or its PR is still open,
+    so the run does not end as a success.
     """
     today = today or datetime.date.today().isoformat()
 
@@ -3888,6 +3974,8 @@ def flow_ids(
             if hint:
                 print(f"  {hint}", file=sys.stderr)
             skipped[iid] = s
+            if holds is not None and remark_round.live(d):
+                holds[iid] = "round"      # #921: accepted or discontinued, its round still live
             seed = _is_split_parent(d)
             if claims is not None and not seed:
                 # Nothing to drive here, and nothing left to read either — which is the one

@@ -2630,7 +2630,18 @@ def _build_prompt(d: Path, cfg: Config | None = None, *,
         "runs the target's own hooks (formatter/linters), which no PDCA gate models, so a patch the target's "
         "commit hook would reject is not done even if every gate is green. Do NOT push, "
         "open, or mark any PR ready."
-    ) + (_retry_notice(d, dead_attempts, worktree_root) if dead_attempts else "") + rubric
+    ) + _round_notice(d) + (_retry_notice(d, dead_attempts, worktree_root)
+                            if dead_attempts else "") + rubric
+
+
+def _round_notice(d: Path) -> str:
+    """What a builder in a remark round (#921) is told beyond the standard prompt, which
+    asks for a diff against the target branch: the worktree is the PR's head, ``patch.diff``
+    is the diff against that head, and the threads to answer, read from the round's record
+    (``remark_round.builder_notice``) — the brief that listed them may have been archived by
+    an iterate-to-Plan. "" outside a round, so the prompt is byte-identical there."""
+    from . import remark_round
+    return remark_round.builder_notice(d)
 
 
 def _retry_notice(d: Path, dead_attempts: int, worktree_root: Path | None) -> str:

@@ -45,7 +45,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from . import state
+from . import remark_round, state
 from .config import Config
 
 # The record's key beside ``merge_eligible`` (#839): :func:`patch_hash` of the patch that
@@ -59,11 +59,15 @@ def is_merged(cfg: Config, dep_id: str) -> bool:
     A close/no-fix prereq (COMPLETE with no patch) ships nothing to merge ⇒ ``True``. A
     prereq not yet COMPLETE, or accepted-but-unpublished, ⇒ ``False`` (wait). Otherwise
     the recorded PR's ``state`` is queried; ``MERGED`` ⇒ ``True``, and any ``gh`` failure
-    is treated as not-merged.
+    is treated as not-merged. A prereq with a live remark round (#921) ⇒ ``False``, before
+    any of that: the round's work (its ``patch.diff``, a delta on the PR's head, empty or
+    not) is on no PR yet, so not even a merged PR holds what the prereq now ships.
     """
     d = cfg.find_bundle(dep_id)  # a merged prereq may be archived to completed/ (#171)
     if state.state(d) != state.COMPLETE:
         return False  # prereq hasn't even finished its own cycle
+    if remark_round.live(d):
+        return False  # a live remark round: its work has reached no PR (#921)
     patch = d / "patch.diff"
     if not patch.is_file() or not patch.read_text(encoding="utf-8").strip():
         return True  # close/no-fix disposition — no contribution to wait on
@@ -96,15 +100,18 @@ def merged_into(cfg: Config, dep_id: str, repo: str, base: str) -> bool:
     counts — :func:`is_merged`'s answer.
 
     Otherwise as :func:`is_merged`: a close/no-fix prereq (COMPLETE, empty or no patch) ⇒
-    ``True``; not COMPLETE, or no recorded PR ⇒ ``False``. Fail-closed: a ``gh`` failure,
-    ``gh`` missing included (:func:`pr_state` guards it), is "not merged", said on stderr —
-    never a traceback; a ``patch.diff`` that cannot be read is no close/no-fix, so its record
+    ``True``; not COMPLETE, no recorded PR, or a live remark round (#921, whatever its PR
+    reads, a merged one included) ⇒ ``False``. Fail-closed: a ``gh`` failure, ``gh``
+    missing included (:func:`pr_state` guards it), is "not merged", said on stderr — never a
+    traceback; a ``patch.diff`` that cannot be read is no close/no-fix, so its record
     decides (:func:`has_patch`, #839). Only ``flow._runnable`` and the pre-wave merge
     (``flow._merge_prereqs``, #839) call it; :func:`is_merged` and its callers keep their
     answer."""
     d = cfg.find_bundle(dep_id)  # a merged prereq may be archived to completed/ (#171)
     if state.state(d) != state.COMPLETE:
         return False
+    if remark_round.live(d):
+        return False  # a live remark round: its work has reached no PR (#921)
     if has_patch(d) is False:
         return True  # close/no-fix disposition — no contribution to wait on
     rec = _publish_record(d)
