@@ -533,7 +533,11 @@ the environment policies and the `doctor` rows all take the name from there.
   without a provenance attestation from the release workflow at that tag, and consumers
   verify with `gh attestation verify --signer-workflow <release workflow>
   --source-ref refs/tags/<tag> --deny-self-hosted-runners`, which an asset the App supplied
-  cannot pass. Path and ref alone do not prove the release went through the approved path:
+  cannot pass. That needs `gh` 2.102.0 or later: older versions match `--signer-workflow`
+  as a prefix, so a workflow named `release.yml-evil.yml` would pass for `release.yml`
+  (GHSA-wjmr-j3rp-mh2g), and before 2.97.0 the identity match also mishandles regex
+  metacharacters (GHSA-mm27-mwq9-fr5g). The auditor and the documented consumer check read
+  `gh --version` first and refuse to verify with an older one. Path and ref alone do not prove the release went through the approved path:
   an old workflow with `actions: write` could dispatch the release workflow on an existing
   tag whose older copy of that workflow lacked the environment. So the release workflow is
   triggered by tag pushes only (no `workflow_dispatch`), and the auditor and the documented
@@ -583,9 +587,17 @@ review aid, never the gate.
   or, for `release`, only `v*` tags, so a job on a driver branch gets nothing however its file is
   written. Every environment also **requires the maintainer's approval**, with no exception. Each environment also sets `prevent_self_review: false`, since the maintainer
   is the only reviewer and also the one who pushes tags and dispatches runs (with it on,
-  such runs would wait for ever), and `can_admins_bypass: false`: by default GitHub lets an
-  administrator start waiting jobs past the protection rules, which would release secrets
-  and OIDC tokens with no approval recorded and no cumulative review. A deployment policy alone is not enough: any
+  such runs would wait for ever), and administrator bypass off ("Allow administrators to
+  bypass configured protection rules"): by default GitHub lets an administrator start
+  waiting jobs past the protection rules, which would release secrets and OIDC tokens with
+  no approval recorded and no cumulative review. No API sets or reads that setting (neither
+  the REST environment endpoints nor GraphQL's `updateEnvironment`, checked 20.11.2026), so
+  `repo-settings.py` cannot set it and the auditor cannot see it: when `repo-settings.py`
+  creates an environment, it stops until the maintainer has turned bypass off in that
+  environment's settings and confirmed it, and records the confirmation. Only an admin can
+  turn it back on, and the maintainer is the only human with write access (section 6), so
+  this is an admin-only change of the threat model's kind, checked when the maintainer
+  applies settings; section 4's known limits record that it is manual. A deployment policy alone is not enough: any
   workflow token with `actions: write`, including one from an old commit on a driver branch,
   can re-run an earlier run whose ref was `main`, and the re-run passes the policy while
   executing that earlier commit's workflow. GitHub asks for approval again on every run
@@ -823,6 +835,10 @@ review aid, never the gate.
 - **Pages settings and content.** An old workflow with `pages: write` may change where a
   site is built from and publish something else; Pages holds no credential, the auditor
   detects the settings change, and the maintainer restores the site.
+- **Environment administrator bypass is confirmed by hand.** No API sets or reads
+  "Allow administrators to bypass configured protection rules", so that it is off in every
+  environment rests on the maintainer's confirmation when `repo-settings.py` creates the
+  environment; only an admin, the maintainer, can turn it back on (section 4).
 - **Repository-level runner scale sets** idle at zero runners are invisible to the runner
   APIs; that none exists rests on the maintainer's confirmation at setup.
 - **Enterprise runners.** The auditor cannot see enterprise runner groups; the rule that
@@ -1070,7 +1086,8 @@ allowlist the maintainer records (name and a hash of the value, each attested as
 credential), so a new or changed variable fails until the maintainer has looked at it;
 pattern matching alone would miss an opaque token or a plain password; every
 environment, whether it holds a secret or not, has the deployment policy and, where
-section 4 requires it, the approval rule, with `prevent_self_review` and `can_admins_bypass` false. The policy list API returns a policy's name but
+section 4 requires it, the approval rule, with `prevent_self_review` false (administrator
+bypass is not readable through the API; section 4 confirms it at setup instead). The policy list API returns a policy's name but
 not whether it matches branches or tags, so `repo-settings.py` records the IDs of the
 policies it created (with their type) and the auditor fails when an environment's policy
 IDs differ from that record: a `v*` branch policy put in place of the `v*` tag policy has
