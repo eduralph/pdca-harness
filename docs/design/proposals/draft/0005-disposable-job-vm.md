@@ -198,8 +198,11 @@ service account that reads the batch's input objects and writes its result prefi
 moves them to and from per-job disks; the job VMs never reach the storage service. Its
 egress is through NAT to the model endpoints (for the proxy) and the storage service (for
 the agent), nothing else. The driver runs outside the cloud and reaches the project with
-its cloud credential. ADR-0021's sovereignty note and its revisit rule (move to a
-self-hosted default when the monthly spend exceeds a server's amortised cost) apply here.
+its cloud credential, whose scope is ADR-0021 §4's (create and delete job hosts, read the
+result prefix) plus writing the batch's input prefix, where it uploads the inputs it
+built for each job; it writes nowhere else, and the agent only reads there. ADR-0021's
+sovereignty note and its revisit rule (move to a self-hosted default when the monthly
+spend exceeds a server's amortised cost) apply here.
 Whether nested virtualization's machine types and overhead suit wyrd is open question 3.
 
 ### 5. Choosing a backend
