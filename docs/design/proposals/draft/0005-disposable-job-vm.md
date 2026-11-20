@@ -34,10 +34,12 @@ met on a local machine. This proposal states the boundary backend-neutrally, add
 KVM backend as the default, and keeps Google Cloud as one backend for heavy targets such as
 wyrd, whose x86_64 SIMD paths and long CPU-bound builds were ADR-0021's main reason.
 
-Two other documents wait on this one. Proposal 0004 decided that the driver's App key is
-held by a minter under its own identity "on whichever backend the decision replacing
-ADR-0021 allows" (its decision Q4). And issue #965, the loop-host baseline split out of
-proposal 0004, asks whether host hardening becomes its own proposal or part of this one
+Two other documents wait on this one. Proposal 0004 (draft,
+[#961](https://github.com/eduralph/pdca-harness/pull/961)) decides that the driver's App key
+is held by a minter under its own identity, on whichever backend the decision replacing
+ADR-0021 allows (its decision Q4). And issue
+[#965](https://github.com/eduralph/pdca-harness/issues/965), the loop-host baseline split
+out of proposal 0004, asks whether host hardening becomes its own proposal or part of this one
 (open question 5).
 
 ## Threat model
@@ -52,7 +54,8 @@ inside the VM is assumed, not prevented. In scope is any way for it to:
   MAC key, a cloud credential, the tracker token);
 - forge a verdict: make red or green appear where the recorded inputs did not produce it,
   or reach the place where `check-gates.json` and the counts are written;
-- persist past its batch, or reach another batch's inputs and results;
+- persist past its batch, reach another batch's inputs and results, or reach a verify VM
+  from a produce VM;
 - reach any network destination beyond the job VM's allowlist, the host's own network and
   the local network included;
 - spend beyond the limits of the credentials the VM holds.
@@ -84,77 +87,96 @@ Every backend meets these requirements; a backend that cannot meet one is not a 
 1. **Own kernel.** Every produce and verify job runs inside a job VM: a virtual machine
    with its own kernel behind hardware virtualization. Containers inside it (section 2)
    are a layer within the VM, not a replacement for it.
-2. **Disposable.** A job VM is created for one batch from a pinned image (by digest) and
-   destroyed when the batch ends; its disk is never reused. Its maximum lifetime is
-   enforced **outside** the VM, by the hypervisor host or the provider, and holds if the
-   driver dies (ADR-0021 §2's 23 hours by default).
-3. **Nothing trusted inside.** The VM holds no repository credential, no MAC key, no cloud
-   credential beyond reading its own inputs and writing its own results, and no driver
-   code. Jobs and results cross the boundary only as data (item 5).
-4. **The driver never shares the job VM's kernel.** The driver runs on the host, in a
-   container on the host, or in its own VM, never inside the job VM (open question 4 picks
+2. **Verify apart from produce.** Produce and verify never share a VM. A batch's produce
+   jobs run in one **produce VM**; each bug's verify jobs run in a fresh **verify VM**,
+   created from the pinned image once that bug's inputs are recorded, in which no produce
+   job and no other bug's verify job ever ran. The threat model gives the adversary root in
+   the produce VM; a shared VM would let it rewrite later verify runs and their exit data
+   undetected, which no taint rule can bound.
+3. **Disposable.** A job VM is created from a pinned image (by digest) and destroyed when
+   its work ends; its disk is never reused. Its maximum lifetime is enforced **outside**
+   the VM, by the hypervisor host or the provider, and holds if the driver dies (ADR-0021
+   §2's 23 hours by default for the produce VM, the job limit for a verify VM).
+4. **Nothing trusted inside.** A job VM holds no repository credential, no MAC key, no
+   cloud credential beyond reading its own inputs and writing its own results, and no
+   driver code. Jobs and results cross the boundary only as data (item 6).
+5. **The driver never shares a job VM's kernel.** The driver runs on the host, in a
+   container on the host, or in its own VM, never inside a job VM (open question 4 picks
    the local default).
-5. **A narrow channel.** The driver writes a job's recorded inputs; the VM writes results
-   to one place the driver reads after the job, extracts as ADR-0021 §3 prescribes (a
-   plain tar with a fixed member list, `tarfile`'s data filter), and discards the rest.
-   Nothing is writable from both sides at once.
-6. **Egress allowlist outside the VM.** The VM reaches the configured model endpoints and,
-   where the backend needs them, its input and result stores; nothing else, the host and
-   the local network included. The rule is enforced outside the VM (the host's firewall
-   on the VM's network, or the provider's firewall) and logged in full.
-7. **A dedicated host.** No machine that serves personal use runs a job VM or the driver:
+6. **A narrow channel, parsed in userspace.** The driver writes a job's recorded inputs;
+   the VM writes its results as one bounded byte stream (a plain tar, no filesystem) that
+   the driver reads after the VM has stopped. The driver never mounts anything a job VM
+   wrote and never hands it to a kernel parser: it reads at most a configured number of
+   bytes as an unprivileged user and extracts them as ADR-0021 §3 prescribes (a fixed
+   member list, `tarfile`'s data filter), discarding the rest. Nothing is writable from
+   both sides at once.
+7. **Egress allowlist outside the VM.** A verify VM has no network at all. A produce VM
+   reaches the configured model endpoints and, where the backend needs them, its input and
+   result stores; nothing else, the local network included. The only host-side endpoint a
+   produce VM may reach is the egress proxy's single address and port (section 3); every
+   other host address, port and protocol is unreachable. The rule is enforced outside the
+   VM (the host's firewall on the VM's network, or the provider's firewall) and logged in
+   full.
+8. **A dedicated host.** No machine that serves personal use runs a job VM or the driver:
    no personal logins, sessions or keys on it (ADR-0021's first rejection, unchanged).
 
-### 2. What carries over from ADR-0021 unchanged
+### 2. What carries over from ADR-0021
 
 - **Three roles, three places** (§1): produce jobs under gVisor, verify jobs in rootless
   Podman without network, decide in the driver; nothing a produce job writes is evidence;
   verify runs from recorded inputs only.
 - **The batch** (§2): created only when the poll found work; intake cutoff, hard lifetime,
-  the job limit as the drain window, power-off when the queue is empty, the taint rule.
+  the job limit as the drain window, power-off when the queue is empty.
 - **Containers per job** inside the VM (§2): pinned images, read-only root, no
   capabilities, seccomp, user namespaces, cgroup limits; dependencies from a read-only
   cache a trusted job builds from the target's `main`.
 - **The driver's credentials** (§4), with the App key held by a minter under its own
-  identity rather than by the driver (proposal 0004, decision Q4).
+  identity rather than by the driver, as proposal 0004 (draft,
+  [#961](https://github.com/eduralph/pdca-harness/pull/961)) decides in its decision Q4.
 - **The runner seam** (§5): the backend is reached through the `LeafRunner` seam that
-  ADR-0010 is to decide, and talks to its provider through a CLI or plain HTTPS, never a cloud SDK
-  (ADR-0008).
+  ADR-0010 is to decide, and talks to its provider through a CLI or plain HTTPS, never a
+  cloud SDK (ADR-0008).
 
-What changes is ADR-0021 §5's "Google Cloud first": the backend becomes a per-instance
-choice, and the local backend below is the default.
+Two things change. ADR-0021 §2's "one VM, with a taint rule", which let produce and verify
+containers share a kernel and offered separate runners only as an option, is replaced by
+section 1 item 2; the taint rule stays for anomalies inside a verify VM, which mark that
+bug's verdicts tainted. And ADR-0021 §5's "Google Cloud first" becomes a per-instance
+choice, with the local backend below as the default.
 
 ### 3. Local KVM backend (the default)
 
 For a dedicated x86_64 host with KVM:
 
-- **The job VM** is created per batch with QEMU/KVM (libvirt or Firecracker, open question
-  2) from a pinned base image, booted with a throwaway copy-on-write overlay that is
-  deleted with the VM. A host-side timer destroys it at the hard lifetime whether or not
-  the driver is alive.
-- **Inputs and results without network storage.** The driver builds a read-only input disk
-  for the batch (the `git archive` exports, recorded tests and diffs, the runner commands
-  from `pdca.toml`) and attaches an empty result disk. The VM writes result bundles there;
-  the driver reads the result disk only after the VM has stopped, so no store is shared
-  while the VM runs.
-- **Network.** The VM sits on an isolated bridge with no route to the host's network or the
-  local network. A forwarding proxy on the host, reachable only from that bridge, admits
-  the configured model endpoints by name and nothing else; host firewall rules (nftables)
-  drop everything else and log it.
+- **Job VMs** are created with QEMU/KVM (libvirt or Firecracker, open question 2) from a
+  pinned base image, booted with a throwaway copy-on-write overlay that is deleted with the
+  VM: one produce VM per batch, one verify VM per bug. A host-side timer destroys each at
+  its hard lifetime whether or not the driver is alive.
+- **Inputs and results without network storage.** For each VM the driver builds a
+  read-only input disk (for a verify VM: the `git archive` export, the recorded test and
+  diff bytes, the runner command from `pdca.toml`) and attaches an empty raw result disk
+  of a fixed size. The VM writes one tar stream to that raw device; after the VM has
+  stopped, the driver reads the device's bytes up to the stream's end (section 1 item 6).
+- **Network.** A verify VM has no network device. A produce VM sits on an isolated bridge
+  with no route to the host's networks or the local network. Its only reachable host
+  endpoint is a forwarding proxy listening on one address and port on that bridge; the
+  proxy runs as its own unprivileged user that holds no driver credential, and admits the
+  configured model endpoints by name and nothing else. Host firewall rules (nftables) drop
+  every other packet from the bridge, to the host or beyond, and log it.
 - **The dependency cache** is a read-only disk built by a trusted job from the target's
-  `main`, attached to each batch's VM.
+  `main`, attached to each job VM.
 - **Machine size** is the operator's: the host's cores and memory bound the batch, and the
   job limit (ADR-0021 §2) is the budget.
 
 ### 4. Google Cloud backend
 
-ADR-0021 §2, §3 and §5 as written: one spot VM per batch in a dedicated project, no
+ADR-0021 §2, §3 and §5 for the produce VM: one spot VM per batch in a dedicated project, no
 external IP, egress through NAT to the model endpoints and the job and cache buckets, a
 service account that reads inputs and writes one result prefix, `max_run_duration` with
-`DELETE`. It meets section 1 as it stands; the driver may run outside Google Cloud and
-reach the project with its cloud credential. ADR-0021's sovereignty note and its revisit
-rule (move to a self-hosted default when the monthly spend exceeds a server's amortised
-cost) apply to this backend.
+`DELETE`. Each bug's verify jobs run in a separate small spot VM of the same kind with no
+egress beyond its own input and result objects, and a `max_run_duration` of the job limit.
+The driver may run outside Google Cloud and reach the project with its cloud credential.
+ADR-0021's sovereignty note and its revisit rule (move to a self-hosted default when the
+monthly spend exceeds a server's amortised cost) apply to this backend.
 
 ### 5. Choosing a backend
 
@@ -174,9 +196,11 @@ already says.
 - for the local backend: KVM is available, the job VM's bridge has no route to any
   network but the proxy, the firewall rules are in place, and the host-side lifetime timer
   is armed;
-- a **probe VM** created the way a batch creates one fails to reach a non-allowlisted
-  address, the host and the local network, and cannot see the driver's files, sockets or
-  processes; the probe runs when the backend is set up and whenever its image or network
+- a **probe produce VM** created the way a batch creates one reaches the proxy's one
+  address and port and nothing else on the host (every other port and protocol fails),
+  cannot reach a non-allowlisted address through the proxy or the local network, and
+  cannot see the driver's files, sockets or processes; a **probe verify VM** has no network
+  at all; the probes run when the backend is set up and whenever its image or network
   configuration changes, not before every batch.
 
 ## Alternatives considered
@@ -187,9 +211,12 @@ already says.
 - **Containers on a dedicated host, no VM.** gVisor narrows the kernel surface, but jobs
   and the driver would still share the host's kernel, and a kernel escape would reach the
   driver's keys and the verdicts. Rejected as the boundary; kept as a layer inside the VM.
+- **One VM per batch for produce and verify together** (ADR-0021 §2). Rejected: with root
+  in the VM assumed, a produce job could forge later verify results undetected.
 - **One VM per job.** ADR-0021 rejected it for minutes of cloud provisioning per job. A
-  local microVM boots in about a second, so the reason does not carry over; whether a
-  stricter per-job VM is worth its cost locally is open question 3.
+  local microVM boots in about a second, so the reason does not carry over; whether
+  per-job VMs, stricter than per-bug verify VMs and a per-batch produce VM, are worth
+  their cost locally is open question 3.
 - **The maintainer's own machines** (the desktop, a laptop): rejected for the reason
   ADR-0021 gives, personal credentials and sessions on the same machine.
 - **GitHub-hosted runners:** rejected for the reason ADR-0021 gives, workflows triggered by
@@ -198,10 +225,10 @@ already says.
 ## Graduation criteria
 
 1. **Pilot** on one instance with the local backend (open question 10): a batch creates a
-   job VM and destroys it at the end; killing the driver mid-batch still destroys the VM at
-   the lifetime; the probe VM's egress, host and driver probes fail as section 6 requires;
-   a deliberately induced anomaly (a container timeout) taints the batch and its verdicts
-   are re-verified in the next.
+   produce VM and one verify VM per bug and destroys each when its work ends; killing the
+   driver mid-batch still destroys them at their lifetimes; the probe VMs behave as
+   section 6 requires; a deliberately induced anomaly in a verify VM (a container timeout)
+   taints that bug's verdicts and they are re-verified in the next batch.
 2. **Proposal 0003** (draft) is updated: phase 1's runner backend names the local backend
    first and Google Cloud as the second backend.
 3. **An ADR records the decision** and supersedes ADR-0021 by ADR-0019's procedure, or
@@ -214,10 +241,11 @@ already says.
 
 The untrusted input is the same as ADR-0021's: issue text and everything a job shapes from
 it. This proposal moves the boundary that contains it from "a cloud VM per batch" to "a VM
-per batch on any dedicated host" and adds one new trusted component on the local backend,
-the host's egress proxy, which is reachable from the job VM and must not be usable to
-reach anything but the allowlist. The result disk is the same untrusted input as
-ADR-0021's result bundle, read after the VM stops.
+per batch on any dedicated host", separates verify from produce, and adds one new trusted
+component on the local backend, the host's egress proxy, which is the only host endpoint a
+produce VM reaches and must not be usable to reach anything but the allowlist. The result
+disk is the same untrusted input as ADR-0021's result bundle; it is read as bytes after the
+VM stops and never mounted.
 
 Accepted residuals:
 
@@ -227,8 +255,14 @@ Accepted residuals:
   question 6).
 - **Exfiltration through the allowed model endpoints**: a job can send what it sees (public
   code and public issues) to an allowed endpoint. Nothing non-public is in the VM.
-- **One VM per batch shares a kernel between produce and verify containers**, as in
-  ADR-0021; the taint rule bounds a container escape to one batch's verdicts.
+- **Produce jobs of one batch share a VM.** A hostile produce job with root there can
+  alter another bug's produce output in the same batch (its test or its diff) before the
+  driver takes it. Verify then judges those bytes honestly, so no verdict is forged, but a
+  bundle pull request can carry a planted change; the maintainer's review of that pull
+  request (ADR-0020 §7) is the bound, and open question 3 can remove it.
+- **A bug's verify jobs share a verify VM**: a hostile test can tamper with its own bug's
+  other verify runs, the same reach it has over its own result; the taint rule applies to
+  anomalies there.
 
 ## Backward compatibility
 
@@ -245,9 +279,10 @@ enable it choose a backend in `pdca.toml`; the Google Cloud infrastructure under
 2. **libvirt/QEMU or Firecracker** for the job VM? libvirt is familiar and manages disks
    and networks; Firecracker boots faster, has a smaller device model and no GPU or USB
    passthrough to misconfigure.
-3. **One VM per batch, or per job, on the local backend?** Per job removes the shared
-   kernel between produce and verify and makes the taint rule unnecessary, at the cost of
-   a boot per job and per-job input and result disks.
+3. **Finer VMs on the local backend?** A produce VM per bug, rather than per batch, removes
+   the residual that one bug's produce job can alter another's output; a VM per verify
+   run removes the shared kernel between a bug's verify runs. Each costs a boot and its
+   own input and result disks.
 4. **Where does the driver run on the local backend?** On the host as its own user, in a
    container on the host, or in its own VM. Its own VM puts a second hypervisor boundary
    between a job VM escape and the driver's keys; on the host it is simpler and relies on
