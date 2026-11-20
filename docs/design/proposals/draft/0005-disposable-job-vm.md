@@ -170,7 +170,13 @@ A dedicated x86_64 machine with KVM is the job host for every batch:
 
 - **Job VMs** are created with QEMU/KVM, through libvirt or Firecracker (open question 2),
   from a pinned base image, booted with a throwaway copy-on-write overlay that is deleted
-  with the VM. A host-side timer destroys each at its job limit.
+  with the VM. A job VM is never defined persistently, so nothing restarts it after a
+  host reboot. Its deadline is written to disk when it starts, and a host-side timer
+  destroys it at its job limit.
+- **Reconciliation at start.** When the job agent starts (after a crash or a reboot of the
+  host), it destroys every job VM still running, deletes every overlay, input and result
+  disk left from an earlier run, and reports the jobs concerned to the driver as
+  infrastructure failures, before it accepts new work.
 - **The batch on a standing machine.** When the driver starts a batch, the job agent arms a
   host-side watchdog (a systemd timer, not the driver) for the batch's hard lifetime; the
   agent takes no new job after the intake cutoff, and the watchdog destroys every job VM
@@ -227,10 +233,14 @@ already says.
 - on a local job host: KVM is available, the firewall rule set and the proxy's
   configuration match their recorded versions, and the batch watchdog can be armed;
 - on a cloud job host, read through the provider's CLI in the dedicated project: the
-  instance template sets `max_run_duration` with `DELETE`, no external IP, nested
-  virtualization enabled on a machine type that offers it, and the pinned job host image
-  (which runs no SSH server); the dedicated network has no ingress allow
-  rule at all, so nothing on the job host accepts a connection whatever runs there; the
+  instance template equals, **field by field**, the recorded template of the reference
+  infrastructure, and any field that differs or that the record does not hold fails.
+  The record fixes, among everything else, `max_run_duration` with termination action
+  `DELETE`, no external IP, nested virtualization on a machine type that offers it, the
+  pinned job host image (which runs no SSH server), the service account and its scopes,
+  every disk with `autoDelete` on, and metadata with no start-up script or cloud-init
+  payload; a list of fields to check would always miss one. The dedicated network has no
+  ingress allow rule at all, so nothing on the job host accepts a connection whatever runs there; the
   egress rules admit only the model endpoints and the storage service; and, in the
   project's and the buckets' IAM policies, the agent's service account holds only its
   read and write grants on the batch's objects. A value that cannot be read, or that
@@ -245,11 +255,11 @@ in advance; the job agent's fail-closed launch (section 1 item 3) is what checks
 the agent refuses to start any job VM where hardware virtualization (`/dev/kvm`) is
 missing, never falling back to software emulation. Likewise a cloud job host is created
 from the checked template, but creation can override template properties, so the driver
-reads the **created instance** before it uploads any input for it: its boot disk's
-immutable `sourceImageId` (read from the disk, since the instance does not report its
-image; a disk without one, from a snapshot say, fails), its service account and OAuth
-scopes, its network interfaces and external IP, nested virtualization and
-`max_run_duration`. It deletes the instance on any mismatch.
+reads the **created instance** before it uploads any input for it and compares it with the
+template the same way, field by field, with only the fields the driver sets itself (the
+instance's name and labels) allowed to differ; for the boot image it reads the boot
+disk's immutable `sourceImageId`, since the instance does not report its image (a disk
+without one, from a snapshot say, fails). It deletes the instance on any mismatch.
 
 Probe VMs, created the way the job agent creates real ones, run when a job host is set up
 and whenever its image or network configuration changes: a probe produce VM reaches the
@@ -282,7 +292,8 @@ network at all.
 1. **Pilot** on one instance with a local job host (open question 10): each job runs in its
    own VM, which is destroyed when the job ends; killing the driver mid-batch still
    destroys running job VMs at their job limit and the batch watchdog destroys any left at
-   the hard lifetime; a launch whose network rules cannot be installed starts no VM; the
+   the hard lifetime; after a reboot of the job host mid-job, no job VM restarts and no
+   disk of it remains; a launch whose network rules cannot be installed starts no VM; the
    probe VMs behave as section 6 requires; a Fix job made to time out leaves its partial
    diff through the grace-period stop, and the bundle opens with it and
    `track:needs-plan`.
