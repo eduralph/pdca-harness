@@ -181,12 +181,16 @@ A dedicated x86_64 machine with KVM is the job host for every batch:
   the cutoff, and the watchdog destroys every job VM still running at the deadline.
 - **A journal, replayed at start.** The job agent writes every side effect to a durable
   journal **before** making it: a batch with its deadlines and watchdog, and for each job
-  its VM, overlay, input and result disks, network rules and timer. An entry is cleared
-  only when the effect is undone and, for a job that did not finish, the driver has
-  acknowledged its report as an infrastructure failure. When the agent starts, after a
+  its VM, overlay, input and result disks, network rules and timer. An input disk is
+  journaled too: the agent reserves its path in the journal before the driver writes it.
+  A job's entries are cleared only when its effects are undone and the driver has
+  acknowledged that it has durably stored the job's outcome, its result or its report as
+  an infrastructure failure; until then the result disk is kept, so a driver crash after
+  the transfer loses nothing. When the agent starts, after a
   crash or a reboot of the host, it replays the journal before anything else: it removes
   every recorded resource of every unfinished job (each removal idempotent, so a replay
-  interrupted by another crash simply runs again), repeats every unacknowledged report,
+  interrupted by another crash simply runs again) and any file in its directories that
+  the journal does not hold, offers every unacknowledged result or report again,
   and restores each open batch with its original cutoff and deadline, re-arming and
   verifying its watchdog. It accepts work only once the replay has completed; if any step
   fails, it accepts none.
