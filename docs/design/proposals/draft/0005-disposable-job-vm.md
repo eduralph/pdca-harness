@@ -200,9 +200,9 @@ egress is through NAT to the model endpoints (for the proxy) and the storage ser
 the agent), nothing else. The driver runs outside the cloud and reaches the project with
 its cloud credential, whose scope is ADR-0021 §4's (create and delete job hosts, read the
 result prefix) plus writing the batch's input prefix, where it uploads the inputs it
-built for each job, and the read-only inspection section 6 needs (the instance and its
-template, the network's effective firewall rules, and the project's and buckets' IAM
-policies); it writes nowhere else, and the agent only reads there. ADR-0021's
+built for each job, and the read-only inspection section 6 needs (the instance, its
+template and its boot disk, the network's effective firewall rules, and the project's and
+buckets' IAM policies); it writes nowhere else, and the agent only reads there. ADR-0021's
 sovereignty note and its revisit rule (move to a self-hosted default when the monthly
 spend exceeds a server's amortised cost) apply here.
 Whether nested virtualization's machine types and overhead suit wyrd is open question 3.
@@ -245,9 +245,11 @@ in advance; the job agent's fail-closed launch (section 1 item 3) is what checks
 the agent refuses to start any job VM where hardware virtualization (`/dev/kvm`) is
 missing, never falling back to software emulation. Likewise a cloud job host is created
 from the checked template, but creation can override template properties, so the driver
-reads the **created instance** (its image, network interfaces, external IP, nested
-virtualization and `max_run_duration`) before it uploads any input for it, and deletes it
-on any mismatch.
+reads the **created instance** before it uploads any input for it: its boot disk's
+immutable `sourceImageId` (read from the disk, since the instance does not report its
+image; a disk without one, from a snapshot say, fails), its service account and OAuth
+scopes, its network interfaces and external IP, nested virtualization and
+`max_run_duration`. It deletes the instance on any mismatch.
 
 Probe VMs, created the way the job agent creates real ones, run when a job host is set up
 and whenever its image or network configuration changes: a probe produce VM reaches the
