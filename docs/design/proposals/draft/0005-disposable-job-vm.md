@@ -153,9 +153,15 @@ Changed:
   microVM on a running job host boots in about a second, so that reason no longer holds.
   The taint rule is no longer needed: a job that hits its limit is handled by ADR-0020's
   stage rules (a Fix job that does not turn the test green opens the bundle with the
-  partial diff and `track:needs-plan`, §6), and any other anomaly (a seccomp kill, a refused
-  connection, a VM that failed to launch) fails the job as an infrastructure failure, which
-  ADR-0020 §12 retries in a later batch without counting it as an attempt.
+  partial diff and `track:needs-plan`, §6), and any other anomaly (a seccomp kill, a
+  refused connection, a VM that failed to launch) fails the job as an infrastructure
+  failure, which ADR-0020 §12 retries in a later batch without counting it as an attempt.
+- **A stop before the limit.** So that a job cut off by its limit still leaves its partial
+  output (the Fix diff above), the job agent signals the VM a grace period before the job
+  limit (5 minutes by default); the job's supervisor then stops the leaf and writes what it
+  has to the result stream. The host-side timer still destroys the VM at the limit. A
+  stream that is empty or does not parse is an infrastructure failure, never a partial
+  diff.
 - **"Google Cloud first"** (§5) becomes a per-instance choice of where the job host is.
 
 ### 3. Local job host (the default)
@@ -212,11 +218,18 @@ already says.
 - `job_limit ≤ lifetime − intake_cutoff` (ADR-0021 §2);
 - on a local job host: KVM is available, the firewall rule set and the proxy's
   configuration match their recorded versions, and the batch watchdog can be armed;
-- on a cloud job host, read through the provider's CLI: the instance template sets
-  `max_run_duration` with `DELETE`, no external IP and no SSH; the agent's service account
-  holds exactly the read and write grants on the batch's objects and nothing else; the
-  egress rules admit only the model endpoints and the storage service. A value that cannot
-  be read, or that differs, blocks the batch.
+- on a cloud job host, read through the provider's CLI in the dedicated project: the
+  instance template sets `max_run_duration` with `DELETE`, no external IP, and the pinned
+  job host image (which runs no SSH server); the dedicated network has no ingress allow
+  rule at all, so nothing on the job host accepts a connection whatever runs there; the
+  egress rules admit only the model endpoints and the storage service; and, in the
+  project's and the buckets' IAM policies, the agent's service account holds only its
+  read and write grants on the batch's objects. A value that cannot be read, or that
+  differs, blocks the batch. Grants outside the dedicated project (another project's
+  bucket, a group the account was added to, an organization policy) are not visible from
+  there; the service account is created by the reference infrastructure for this purpose
+  only and is never added to a group, which the operator confirms at setup (Security
+  impact).
 
 Each job VM's own network rules and timer are created with it, so `doctor` cannot see them
 in advance; the job agent's fail-closed launch (section 1 item 3) is what checks those.
@@ -253,14 +266,15 @@ network at all.
    own VM, which is destroyed when the job ends; killing the driver mid-batch still
    destroys running job VMs at their job limit and the batch watchdog destroys any left at
    the hard lifetime; a launch whose network rules cannot be installed starts no VM; the
-   probe VMs behave as section 6 requires; a Fix job made to time out opens the bundle
-   with `track:needs-plan`.
+   probe VMs behave as section 6 requires; a Fix job made to time out leaves its partial
+   diff through the grace-period stop, and the bundle opens with it and
+   `track:needs-plan`.
 2. **Proposal 0003** (draft) is updated: phase 1's runner backend names the local job host
    first and the cloud job host second.
 3. **An ADR records the decision** and supersedes ADR-0021 by ADR-0019's procedure, or
    ADR-0021 is revised in place while it is still Proposed (open question 8).
-4. **The threat models** (`docs/design/architecture/14-threat-model.md`,
-   `.oss-scanner/threat_model.md`) gain the job VM boundary in the change that lands the
+4. **Architecture §8.10** (`docs/design/architecture/08-crosscutting-concepts.md`, the
+   repository's threat model) gains the job VM boundary in the change that lands the
    local job host.
 
 ## Security impact
@@ -281,6 +295,8 @@ Accepted residuals:
   (open question 6).
 - **Exfiltration through the allowed model endpoints**: a job can send what it sees (public
   code and public issues) to an allowed endpoint. Nothing non-public is in a job VM.
+- **The cloud agent's grants beyond the dedicated project** rest on the operator's
+  confirmation at setup, since `doctor` can read only that project's policies.
 - **A hostile test is judged by its own runs**: a verify job executes the recorded test,
   and a test can make its own result whatever it likes; ADR-0020's red-before /
   green-after rule and the maintainer's review of the bundle pull request are the bound,
