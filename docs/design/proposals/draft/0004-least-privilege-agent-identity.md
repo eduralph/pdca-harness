@@ -433,9 +433,12 @@ the environment policies and the `doctor` rows all take the name from there.
   not cover the set its mode requires; the driver re-reads `CODEOWNERS` from the PR's own base
   branch before every merge (GitHub applies the base branch's file, so `main` and each listed
   target branch are checked separately) and refuses to merge while it is short. It also inspects the PR's tree before merging and
-  refuses, in `merge` mode, any PR that adds or changes a symlink anywhere: a new symlink
-  can turn an ordinary directory into a governed one, which `CODEOWNERS` patterns written
-  for the target cannot see, so such a PR waits for the maintainer. Coverage is judged on the file GitHub actually
+  refuses, in `merge` mode, any PR that adds, changes or removes a symlink or a gitlink
+  (a submodule entry, mode `160000`) anywhere, or that touches `.gitmodules`: a new symlink
+  can turn an ordinary directory into a governed one, and a submodule update replaces every
+  file under its mount path while Git and GitHub see only the one gitlink, so `CODEOWNERS`
+  patterns written for files inside it (`vendor/policy/AGENTS.md`) never match; such a PR
+  waits for the maintainer. Coverage is judged on the file GitHub actually
   uses, not on a local parse: the check takes the first of `.github/CODEOWNERS`,
   `CODEOWNERS` and `docs/CODEOWNERS` that exists on that branch (GitHub's order), requires
   it to be under GitHub's 3 MB limit, and requires
