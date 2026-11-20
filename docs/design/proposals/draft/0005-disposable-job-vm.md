@@ -175,19 +175,21 @@ A dedicated x86_64 machine with KVM is the job host for every batch:
   with the VM. A job VM is never defined persistently, so nothing restarts it after a
   host reboot. Its deadline is written to disk when it starts, and a host-side timer
   destroys it at its job limit.
-- **Reconciliation at start.** When the job agent starts (after a crash or a reboot of the
-  host), it first writes the list of jobs it finds left from an earlier run to a durable
-  file, then destroys every job VM still running and deletes every overlay, input and
-  result disk of those jobs, and reports them to the driver as infrastructure failures. It
-  clears the file only once the driver has acknowledged the report, so a crash in between
-  repeats the report rather than losing it, and it accepts new work only after that.
-- **The batch on a standing machine.** When the driver starts a batch, the job agent writes
-  the batch's identity, intake cutoff and hard deadline to a durable file and arms a
-  host-side watchdog (a persistent systemd timer, not the driver) for the deadline; it
-  takes no new job after the cutoff, and the watchdog destroys every job VM still running
-  at the deadline. After a restart, reconciliation reads that file before accepting work:
-  the batch keeps its original cutoff and deadline, and once they have passed the agent
-  accepts no job for it.
+- **The batch on a standing machine.** When the driver starts a batch, the job agent records
+  the batch's identity, intake cutoff and hard deadline and arms a host-side watchdog (a
+  persistent systemd timer, not the driver) for the deadline; it takes no new job after
+  the cutoff, and the watchdog destroys every job VM still running at the deadline.
+- **A journal, replayed at start.** The job agent writes every side effect to a durable
+  journal **before** making it: a batch with its deadlines and watchdog, and for each job
+  its VM, overlay, input and result disks, network rules and timer. An entry is cleared
+  only when the effect is undone and, for a job that did not finish, the driver has
+  acknowledged its report as an infrastructure failure. When the agent starts, after a
+  crash or a reboot of the host, it replays the journal before anything else: it removes
+  every recorded resource of every unfinished job (each removal idempotent, so a replay
+  interrupted by another crash simply runs again), repeats every unacknowledged report,
+  and restores each open batch with its original cutoff and deadline, re-arming and
+  verifying its watchdog. It accepts work only once the replay has completed; if any step
+  fails, it accepts none.
 - **Disks** are files on the host: the driver writes input disks into a directory the job
   agent attaches read-only, and reads each result disk's bytes from the agent once the VM
   has stopped.
