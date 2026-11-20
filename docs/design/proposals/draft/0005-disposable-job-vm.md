@@ -91,15 +91,19 @@ Every backend meets these requirements; a backend that cannot meet one is not a 
    Containers inside the VM (section 2) are a layer within it, not a replacement for it.
 2. **A lifetime enforced outside.** Each job VM's lifetime is the job limit (ADR-0021 §2),
    enforced by the job host, not by anything inside the VM, and it holds if the driver
-   dies. The job host itself has the batch's hard lifetime (ADR-0021 §2's 23 hours by
-   default), enforced by whatever created it.
-3. **Nothing trusted inside.** A job VM holds no repository credential, no MAC key, no
+   dies. A batch has a hard lifetime (ADR-0021 §2's 23 hours by default) enforced the same
+   way: when it ends, every job VM of the batch is destroyed, whatever the driver does.
+3. **Launch fails closed.** The job agent starts a job VM only after its network rules (or,
+   for a verify VM, the absence of any network device) and its external timer are in
+   place and verified; if any of that fails, the VM is not started and the job fails as
+   an infrastructure failure.
+4. **Nothing trusted inside.** A job VM holds no repository credential, no MAC key, no
    cloud credential and no driver code. It has no access to any store; its inputs and
-   results cross the boundary only as disks (item 5).
-4. **The driver never shares a job VM's kernel.** The driver runs on the job host, in a
+   results cross the boundary only as disks (item 6).
+5. **The driver never shares a job VM's kernel.** The driver runs on the job host, in a
    container there, in its own VM, or on another machine, never inside a job VM (open
    question 4 picks the local default).
-5. **A narrow channel, parsed in userspace.** For each job, the job host attaches a
+6. **A narrow channel, parsed in userspace.** For each job, the job host attaches a
    read-only input disk the driver built (for a verify job: the `git archive` export, the
    recorded test and diff bytes, the runner command from `pdca.toml`) and an empty raw
    result disk of fixed size. The job writes one plain tar stream to the raw disk, with no
@@ -109,12 +113,12 @@ Every backend meets these requirements; a backend that cannot meet one is not a 
    fixed member list, `tarfile`'s data filter), discards the rest, and validates and
    persists what its stage owns before it queues the next job. Stages are chained by the
    driver, one job at a time per bug, never inside a VM.
-6. **Egress allowlist outside the VM.** A verify VM has no network device. A produce VM
+7. **Egress allowlist outside the VM.** A verify VM has no network device. A produce VM
    has one network path: to the job host's egress proxy, on a single address and port,
    which admits the configured model endpoints by name and nothing else. Every other
    address, port and protocol, on the job host, the local network or beyond, is
    unreachable; the job host enforces this outside the VM and logs every refusal.
-7. **A dedicated job host.** No machine that serves personal use is a job host or runs the
+8. **A dedicated job host.** No machine that serves personal use is a job host or runs the
    driver: no personal logins, sessions or keys on it (ADR-0021's first rejection,
    unchanged). The job host runs job VMs, the egress proxy and the job agent that creates
    VMs and moves disks, and nothing a job controls.
@@ -126,8 +130,10 @@ Carried over:
 - **Three roles, three places** (§1): produce jobs under gVisor, verify jobs in rootless
   Podman without network, decide in the driver; nothing a produce job writes is evidence;
   verify runs from recorded inputs only.
-- **The batch** (§2): a job host exists only when the poll found work; intake cutoff, hard
-  lifetime, the job limit as the drain window, power-off when the queue is empty.
+- **The batch** (§2): a batch starts only when the poll found work; intake cutoff, hard
+  lifetime, the job limit as the drain window. A cloud job host exists only for its batch
+  and powers off when the queue is empty; a local job host is a standing machine that runs
+  nothing between batches.
 - **Containers per job** inside the VM (§2): pinned images, read-only root, no
   capabilities, seccomp, user namespaces, cgroup limits; dependencies from a read-only
   cache disk a trusted job builds from the target's `main`.
@@ -145,9 +151,11 @@ Changed:
   assumed, a produce job there could rewrite later verify runs undetected, which no taint
   rule bounds. ADR-0021 rejected per-job VMs for minutes of cloud provisioning each; a
   microVM on a running job host boots in about a second, so that reason no longer holds.
-  The taint rule is no longer needed: an anomaly in a job (a seccomp kill, a timeout, a
-  refused connection) fails that job, and the driver retries it as a new job within the
-  bug's attempts (ADR-0020 §12).
+  The taint rule is no longer needed: a job that hits its limit is handled by ADR-0020's
+  stage rules (a Fix job that does not turn the test green opens the bundle with the
+  partial diff and `track:needs-plan`, §6), and any other anomaly (a seccomp kill, a refused
+  connection, a VM that failed to launch) fails the job as an infrastructure failure, which
+  ADR-0020 §12 retries in a later batch without counting it as an attempt.
 - **"Google Cloud first"** (§5) becomes a per-instance choice of where the job host is.
 
 ### 3. Local job host (the default)
@@ -157,6 +165,10 @@ A dedicated x86_64 machine with KVM is the job host for every batch:
 - **Job VMs** are created with QEMU/KVM, through libvirt or Firecracker (open question 2),
   from a pinned base image, booted with a throwaway copy-on-write overlay that is deleted
   with the VM. A host-side timer destroys each at its job limit.
+- **The batch on a standing machine.** When the driver starts a batch, the job agent arms a
+  host-side watchdog (a systemd timer, not the driver) for the batch's hard lifetime; the
+  agent takes no new job after the intake cutoff, and the watchdog destroys every job VM
+  still running when the lifetime ends.
 - **Disks** are files on the host: the driver writes input disks into a directory the job
   agent attaches read-only, and reads each result disk's bytes from the agent once the VM
   has stopped.
@@ -198,8 +210,16 @@ already says.
 
 - the job VM image and container images are pinned by digest and match the recorded ones;
 - `job_limit ≤ lifetime − intake_cutoff` (ADR-0021 §2);
-- on a local job host: KVM is available, each produce bridge has no route but to the
-  proxy, the firewall rules are in place, and the job agent's per-VM timer is armed.
+- on a local job host: KVM is available, the firewall rule set and the proxy's
+  configuration match their recorded versions, and the batch watchdog can be armed;
+- on a cloud job host, read through the provider's CLI: the instance template sets
+  `max_run_duration` with `DELETE`, no external IP and no SSH; the agent's service account
+  holds exactly the read and write grants on the batch's objects and nothing else; the
+  egress rules admit only the model endpoints and the storage service. A value that cannot
+  be read, or that differs, blocks the batch.
+
+Each job VM's own network rules and timer are created with it, so `doctor` cannot see them
+in advance; the job agent's fail-closed launch (section 1 item 3) is what checks those.
 
 Probe VMs, created the way the job agent creates real ones, run when a job host is set up
 and whenever its image or network configuration changes: a probe produce VM reaches the
@@ -231,8 +251,10 @@ network at all.
 
 1. **Pilot** on one instance with a local job host (open question 10): each job runs in its
    own VM, which is destroyed when the job ends; killing the driver mid-batch still
-   destroys running job VMs at their job limit; the probe VMs behave as section 6
-   requires; a job made to time out fails and is retried as a new job.
+   destroys running job VMs at their job limit and the batch watchdog destroys any left at
+   the hard lifetime; a launch whose network rules cannot be installed starts no VM; the
+   probe VMs behave as section 6 requires; a Fix job made to time out opens the bundle
+   with `track:needs-plan`.
 2. **Proposal 0003** (draft) is updated: phase 1's runner backend names the local job host
    first and the cloud job host second.
 3. **An ADR records the decision** and supersedes ADR-0021 by ADR-0019's procedure, or
