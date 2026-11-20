@@ -1240,9 +1240,10 @@ read-only and reveals configuration, secret names (not values), and through `Act
 the repositories' workflow logs and artifacts, which can carry secret-derived data GitHub's
 log masking misses, and through `Variables: read` the plaintext value of every repository
 and visible organization variable, a credential stored there by mistake included, so it is handled with the same care as the agent key; it is held by the same key
-user and, for the daily audit, in n8n. The threat models (`docs/design/architecture/14-threat-model.md`,
-`.oss-scanner/threat_model.md`) get the credential boundary, the CI secret rule and the
-protected paths in the same change that lands step 2.
+user and, for the daily audit, in n8n. The repository's threat model, the security section of
+the architecture ([§8.10](../../architecture/08-crosscutting-concepts.md#810-security)), gets the
+credential boundary, the CI secret rule and the protected paths in the same change that lands
+step 2.
 
 What it does not change: prompt injection through issues, comments and model output stays
 possible. A compromised loop user can obtain an App token for its allowlisted repositories
