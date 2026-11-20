@@ -110,8 +110,9 @@ Every backend meets these requirements; a backend that cannot meet one is not a 
    filesystem. After the VM has stopped, the job host hands the driver at most the disk's
    bytes; the driver never mounts anything a job VM wrote and never hands it to a kernel
    parser. It extracts the stream as an unprivileged user as ADR-0021 §3 prescribes (a
-   fixed member list, `tarfile`'s data filter), discards the rest, and validates and
-   persists what its stage owns before it queues the next job. Stages are chained by the
+   fixed member list, `tarfile`'s data filter) and rejects the whole stream if any member
+   falls outside that list; then it validates and persists what its stage owns before it
+   queues the next job. Stages are chained by the
    driver, one job at a time per bug, never inside a VM.
 7. **Egress allowlist outside the VM.** A verify VM has no network device. A produce VM
    has one network path: to the job host's egress proxy, on a single address and port,
@@ -198,20 +199,20 @@ A dedicated x86_64 machine with KVM is the job host for every batch:
 
 For targets too heavy for a local machine, the job host is a cloud VM created per batch:
 ADR-0021's spot VM, now running the local job host's software rather than the jobs
-themselves. It runs job VMs under nested virtualization; no external IP, no SSH;
-`max_run_duration` with `DELETE` enforces the batch's hard lifetime. Its job agent holds a
-service account that reads the batch's input objects and writes its result prefix, and
-moves them to and from per-job disks; the job VMs never reach the storage service. Its
-egress is through NAT to the model endpoints (for the proxy) and the storage service (for
-the agent), nothing else. The driver runs outside the cloud and reaches the project with
-its cloud credential, whose scope is ADR-0021 §4's (create and delete job hosts, read the
-result prefix) plus writing the batch's input prefix, where it uploads the inputs it
-built for each job, and the read-only inspection section 6 needs (the instance, its
-template and its boot disk, the network's effective firewall rules, and the project's and
-buckets' IAM policies); it writes nowhere else, and the agent only reads there. ADR-0021's
+themselves. It runs job VMs under nested virtualization, and meets section 1 like any job
+host: no external IP and no inbound connection at all, a hard lifetime that deletes the
+instance and its disks, a pinned image with nothing else executed at boot, egress only
+to the model endpoints (for the proxy) and the storage service (for the agent), and a job
+agent whose cloud identity reaches only the current batch's inputs and results, while
+the job VMs never reach the storage service. The driver runs outside the cloud. ADR-0021's
 sovereignty note and its revisit rule (move to a self-hosted default when the monthly
 spend exceeds a server's amortised cost) apply here.
-Whether nested virtualization's machine types and overhead suit wyrd is open question 3.
+
+How those properties are established and verified in a cloud project (the template and
+instance configuration, project-wide metadata, per-batch storage access, the IAM bindings
+an identity holds) is designed and reviewed when this backend is built, not in this
+proposal (open question 11). Until then `doctor` refuses a configuration that names the
+cloud backend, so no batch runs on an unverified cloud host.
 
 ### 5. Choosing a backend
 
@@ -232,34 +233,13 @@ already says.
   moves to 19 h 45 min; and `grace < job_limit` for the stop before the limit (section 2);
 - on a local job host: KVM is available, the firewall rule set and the proxy's
   configuration match their recorded versions, and the batch watchdog can be armed;
-- on a cloud job host, read through the provider's CLI in the dedicated project: the
-  instance template equals, **field by field**, the recorded template of the reference
-  infrastructure, and any field that differs or that the record does not hold fails.
-  The record fixes, among everything else, `max_run_duration` with termination action
-  `DELETE`, no external IP, nested virtualization on a machine type that offers it, the
-  pinned job host image (which runs no SSH server), the service account and its scopes,
-  every disk with `autoDelete` on, and metadata with no start-up script or cloud-init
-  payload; a list of fields to check would always miss one. The dedicated network has no
-  ingress allow rule at all, so nothing on the job host accepts a connection whatever runs there; the
-  egress rules admit only the model endpoints and the storage service; and, in the
-  project's and the buckets' IAM policies, the agent's service account holds only its
-  read and write grants on the batch's objects. A value that cannot be read, or that
-  differs, blocks the batch. Grants outside the dedicated project (another project's
-  bucket, a group the account was added to, an organization policy) are not visible from
-  there; the service account is created by the reference infrastructure for this purpose
-  only and is never added to a group, which the operator confirms at setup (Security
-  impact).
+- on a cloud job host: the checks open question 11 defines; until they exist, the
+  backend is refused.
 
 Each job VM's own network rules and timer are created with it, so `doctor` cannot see them
 in advance; the job agent's fail-closed launch (section 1 item 3) is what checks those, and
 the agent refuses to start any job VM where hardware virtualization (`/dev/kvm`) is
-missing, never falling back to software emulation. Likewise a cloud job host is created
-from the checked template, but creation can override template properties, so the driver
-reads the **created instance** before it uploads any input for it and compares it with the
-template the same way, field by field, with only the fields the driver sets itself (the
-instance's name and labels) allowed to differ; for the boot image it reads the boot
-disk's immutable `sourceImageId`, since the instance does not report its image (a disk
-without one, from a snapshot say, fails). It deletes the instance on any mismatch.
+missing, never falling back to software emulation.
 
 Probe VMs, created the way the job agent creates real ones, run when a job host is set up
 and whenever its image or network configuration changes: a probe produce VM reaches the
@@ -323,8 +303,6 @@ Accepted residuals:
   (open question 6).
 - **Exfiltration through the allowed model endpoints**: a job can send what it sees (public
   code and public issues) to an allowed endpoint. Nothing non-public is in a job VM.
-- **The cloud agent's grants beyond the dedicated project** rest on the operator's
-  confirmation at setup, since `doctor` can read only that project's policies.
 - **A hostile test is judged by its own runs**: a verify job executes the recorded test,
   and a test can make its own result whatever it likes; ADR-0020's red-before /
   green-after rule and the maintainer's review of the bundle pull request are the bound,
@@ -365,3 +343,10 @@ enable it choose a job host in `pdca.toml`; the Google Cloud infrastructure unde
    rented host large enough for its builds and seed sweeps.
 10. **Which instance pilots it?** A small one (nl-shell, depotbuch) proves the boundary
     cheaply; wyrd proves the size.
+11. **Verifying a cloud job host.** How the cloud backend proves section 1 before a batch:
+    comparing the created instance with a recorded configuration (normalized, since the
+    provider adds fields), project-wide metadata that could run at boot, per-batch
+    storage access for the agent (per-batch identities, downscoped credentials or signed
+    URLs), and IAM bindings held on individual resources, which project and bucket
+    policies do not show. This is designed with the cloud backend, and its review is part
+    of that work.
