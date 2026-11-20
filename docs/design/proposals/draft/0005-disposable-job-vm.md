@@ -188,9 +188,10 @@ A dedicated x86_64 machine with KVM is the job host for every batch:
   an infrastructure failure; until then the result disk is kept, so a driver crash after
   the transfer loses nothing. When the agent starts, after a
   crash or a reboot of the host, it replays the journal before anything else: it removes
-  every recorded resource of every unfinished job (each removal idempotent, so a replay
-  interrupted by another crash simply runs again) and any file in its directories that
-  the journal does not hold, offers every unacknowledged result or report again,
+  every recorded resource of every job, finished or not, except a result disk whose
+  outcome the driver has not yet acknowledged (each removal idempotent, so a replay
+  interrupted by another crash simply runs again), and any file in its directories that
+  the journal does not hold; it offers every unacknowledged result or report again,
   and restores each open batch with its original cutoff and deadline, re-arming and
   verifying its watchdog. It accepts work only once the replay has completed; if any step
   fails, it accepts none.
