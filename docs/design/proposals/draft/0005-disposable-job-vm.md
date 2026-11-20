@@ -181,10 +181,13 @@ A dedicated x86_64 machine with KVM is the job host for every batch:
   result disk of those jobs, and reports them to the driver as infrastructure failures. It
   clears the file only once the driver has acknowledged the report, so a crash in between
   repeats the report rather than losing it, and it accepts new work only after that.
-- **The batch on a standing machine.** When the driver starts a batch, the job agent arms a
-  host-side watchdog (a systemd timer, not the driver) for the batch's hard lifetime; the
-  agent takes no new job after the intake cutoff, and the watchdog destroys every job VM
-  still running when the lifetime ends.
+- **The batch on a standing machine.** When the driver starts a batch, the job agent writes
+  the batch's identity, intake cutoff and hard deadline to a durable file and arms a
+  host-side watchdog (a persistent systemd timer, not the driver) for the deadline; it
+  takes no new job after the cutoff, and the watchdog destroys every job VM still running
+  at the deadline. After a restart, reconciliation reads that file before accepting work:
+  the batch keeps its original cutoff and deadline, and once they have passed the agent
+  accepts no job for it.
 - **Disks** are files on the host: the driver writes input disks into a directory the job
   agent attaches read-only, and reads each result disk's bytes from the agent once the VM
   has stopped.
