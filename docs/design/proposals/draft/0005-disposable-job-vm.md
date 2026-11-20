@@ -200,7 +200,9 @@ egress is through NAT to the model endpoints (for the proxy) and the storage ser
 the agent), nothing else. The driver runs outside the cloud and reaches the project with
 its cloud credential, whose scope is ADR-0021 §4's (create and delete job hosts, read the
 result prefix) plus writing the batch's input prefix, where it uploads the inputs it
-built for each job; it writes nowhere else, and the agent only reads there. ADR-0021's
+built for each job, and the read-only inspection section 6 needs (the instance and its
+template, the network's effective firewall rules, and the project's and buckets' IAM
+policies); it writes nowhere else, and the agent only reads there. ADR-0021's
 sovereignty note and its revisit rule (move to a self-hosted default when the monthly
 spend exceeds a server's amortised cost) apply here.
 Whether nested virtualization's machine types and overhead suit wyrd is open question 3.
@@ -218,12 +220,16 @@ already says.
 `doctor` checks, before every batch, what the backend can show:
 
 - the job VM image and container images are pinned by digest and match the recorded ones;
-- `job_limit ≤ lifetime − intake_cutoff` (ADR-0021 §2);
+- `job_limit + collect_margin ≤ lifetime − intake_cutoff`: ADR-0021 §2's drain rule plus a
+  margin (15 minutes by default) to collect and upload the last job's result before the
+  batch ends, so with ADR-0021's 3-hour job limit and 23-hour lifetime the intake cutoff
+  moves to 19 h 45 min; and `grace < job_limit` for the stop before the limit (section 2);
 - on a local job host: KVM is available, the firewall rule set and the proxy's
   configuration match their recorded versions, and the batch watchdog can be armed;
 - on a cloud job host, read through the provider's CLI in the dedicated project: the
-  instance template sets `max_run_duration` with `DELETE`, no external IP, and the pinned
-  job host image (which runs no SSH server); the dedicated network has no ingress allow
+  instance template sets `max_run_duration` with `DELETE`, no external IP, nested
+  virtualization enabled on a machine type that offers it, and the pinned job host image
+  (which runs no SSH server); the dedicated network has no ingress allow
   rule at all, so nothing on the job host accepts a connection whatever runs there; the
   egress rules admit only the model endpoints and the storage service; and, in the
   project's and the buckets' IAM policies, the agent's service account holds only its
@@ -235,7 +241,13 @@ already says.
   impact).
 
 Each job VM's own network rules and timer are created with it, so `doctor` cannot see them
-in advance; the job agent's fail-closed launch (section 1 item 3) is what checks those.
+in advance; the job agent's fail-closed launch (section 1 item 3) is what checks those, and
+the agent refuses to start any job VM where hardware virtualization (`/dev/kvm`) is
+missing, never falling back to software emulation. Likewise a cloud job host is created
+from the checked template, but creation can override template properties, so the driver
+reads the **created instance** (its image, network interfaces, external IP, nested
+virtualization and `max_run_duration`) before it uploads any input for it, and deletes it
+on any mismatch.
 
 Probe VMs, created the way the job agent creates real ones, run when a job host is set up
 and whenever its image or network configuration changes: a probe produce VM reaches the
