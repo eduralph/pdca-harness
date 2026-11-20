@@ -285,8 +285,9 @@ network at all.
 1. **Pilot** on one instance with a local job host (open question 10): each job runs in its
    own VM, which is destroyed when the job ends; killing the driver mid-batch still
    destroys running job VMs at their job limit and the batch watchdog destroys any left at
-   the hard lifetime; after a reboot of the job host mid-job, no job VM restarts and no
-   disk of it remains; a launch whose network rules cannot be installed starts no VM; the
+   the hard lifetime; after a reboot of the job host mid-job, no job VM restarts, the job
+   is reported as an infrastructure failure, and once the driver has acknowledged that
+   report nothing of the job remains; a launch whose network rules cannot be installed starts no VM; the
    probe VMs behave as section 6 requires; a Fix job made to time out leaves its partial
    diff through the grace-period stop, and the bundle opens with it and
    `track:needs-plan`.
