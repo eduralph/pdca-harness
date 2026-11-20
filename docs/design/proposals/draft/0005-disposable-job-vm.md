@@ -53,8 +53,9 @@ inside the VM is assumed, not prevented. In scope is any way for it to:
 
 - reach the job host, the driver or anything the driver holds (the App key and its minter,
   the MAC key, a cloud credential, the tracker token);
-- forge a verdict: make red or green appear where the recorded inputs did not produce it,
-  or reach the place where `check-gates.json` and the counts are written;
+- forge a verdict beyond its own test's: change another job's result, or reach the place
+  where `check-gates.json` and the counts are written (a verify VM's report of its own
+  run is what the adversary's test decides anyway; see Security impact);
 - reach another job's VM, inputs or results, or persist past its own job;
 - reach any network destination beyond its job's allowlist, the job host's own services and
   the local network included;
@@ -175,9 +176,11 @@ A dedicated x86_64 machine with KVM is the job host for every batch:
   host reboot. Its deadline is written to disk when it starts, and a host-side timer
   destroys it at its job limit.
 - **Reconciliation at start.** When the job agent starts (after a crash or a reboot of the
-  host), it destroys every job VM still running, deletes every overlay, input and result
-  disk left from an earlier run, and reports the jobs concerned to the driver as
-  infrastructure failures, before it accepts new work.
+  host), it first writes the list of jobs it finds left from an earlier run to a durable
+  file, then destroys every job VM still running and deletes every overlay, input and
+  result disk of those jobs, and reports them to the driver as infrastructure failures. It
+  clears the file only once the driver has acknowledged the report, so a crash in between
+  repeats the report rather than losing it, and it accepts new work only after that.
 - **The batch on a standing machine.** When the driver starts a batch, the job agent arms a
   host-side watchdog (a systemd timer, not the driver) for the batch's hard lifetime; the
   agent takes no new job after the intake cutoff, and the watchdog destroys every job VM
@@ -306,10 +309,13 @@ Accepted residuals:
   (open question 6).
 - **Exfiltration through the allowed model endpoints**: a job can send what it sees (public
   code and public issues) to an allowed endpoint. Nothing non-public is in a job VM.
-- **A hostile test is judged by its own runs**: a verify job executes the recorded test,
-  and a test can make its own result whatever it likes; ADR-0020's red-before /
-  green-after rule and the maintainer's review of the bundle pull request are the bound,
-  as before.
+- **A hostile test decides its own result.** A verify job executes the recorded test,
+  which the adversary may have shaped; the test can choose its exit code and output, and
+  behave differently on the fixed tree, and with root in its verify VM it can also report
+  a run that did not happen. Neither reaches beyond that bug's own verdict: the verify VM
+  protects the driver and every other job, not the meaning of a test the adversary wrote.
+  ADR-0020's red-before / green-after rule and the maintainer's review of the test and
+  the diff in the bundle pull request (ADR-0020 §7) are the bound, as before.
 
 ## Backward compatibility
 
