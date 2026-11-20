@@ -277,8 +277,11 @@ network at all.
    probe VMs behave as section 6 requires; a Fix job made to time out leaves its partial
    diff through the grace-period stop, and the bundle opens with it and
    `track:needs-plan`.
-2. **Proposal 0003** (draft) is updated: phase 1's runner backend names the local job host
-   first and the cloud job host second.
+2. **Proposal 0003** (draft) is updated throughout phase 1 to this design: the runner
+   backend is a job host running one VM per job (local first, cloud second), not one
+   runner VM per batch; job kinds run in produce and verify VMs with the disk channel of
+   section 1; anomalies follow section 2 and the batch-wide taint rule is removed. Phase 1
+   does not start until that update is merged.
 3. **An ADR records the decision** and supersedes ADR-0021 by ADR-0019's procedure, or
    ADR-0021 is revised in place while it is still Proposed (open question 8).
 4. **Architecture §8.10** (`docs/design/architecture/08-crosscutting-concepts.md`, the
