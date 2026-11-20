@@ -186,7 +186,10 @@ A dedicated x86_64 machine with KVM is the job host for every batch:
   A job's entries are cleared only when its effects are undone and the driver has
   acknowledged that it has durably stored the job's outcome, its result or its report as
   an infrastructure failure; until then the result disk is kept, so a driver crash after
-  the transfer loses nothing. When the agent starts, after a
+  the transfer loses nothing. A job counts as finished only once the agent has seen its VM
+  stop, flushed the result disk and journaled a completion record with the result's
+  length; a result disk without that record (the host crashed while the VM ran or wrote)
+  is never offered as a result, and the job is an infrastructure failure. When the agent starts, after a
   crash or a reboot of the host, it replays the journal before anything else: it removes
   every recorded resource of every job, finished or not, except a result disk whose
   outcome the driver has not yet acknowledged (each removal idempotent, so a replay
