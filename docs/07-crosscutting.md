@@ -789,6 +789,57 @@ wave builds on, via `[driver].wave_mode`:
   so does one that conflicts only with a newer base the fold merged in during
   the wave (a PR of the wave merged and its branch was deleted meanwhile).
 
+  In a wave the fold runs after (not the last wave, publishing on, stack mode,
+  not a dry run), such a conflict is found at sign-off instead, before any PR
+  is opened. When you accept a bundle, the run checks it against the bundles of
+  its wave you already accepted for the same target, with the fold's own rule
+  and in the fold's order, on the commits publish would push, merged onto the
+  line as the fold will find it (the run's line for that target, or your base
+  when the run has none yet). If accepting it would make the fold hold one more
+  bundle of the wave, it is not accepted: it stays at `AWAITING_SIGNOFF` with an
+  open §6 row naming those bundles and the files, and no PR of it is opened.
+  To publish it anyway, tick that row and accept it again: it is published, and
+  the fold holds one of the two as above. Or declare `Conflicts with` in its
+  brief and iterate-plan it (`pdca signoff <id> --iterate-plan`, or in its
+  sign-off session); start that run once the other bundle's change is on your
+  base. The bundle accepted first is kept, whichever name sorts first, unless
+  an earlier override already has the fold holding a bundle of the wave: the
+  check counts the bundles the fold would hold, so once a ticked row has let
+  one through, an accept that only trades that hold for another goes through,
+  and the fold may then hold the bundle accepted first. A bundle of the wave you
+  accepted that publish cannot push is left out of the check, and stderr names
+  it: its patch no longer applies where publish would cut its branch (your base
+  moved since it was built), or publish cannot cut that branch at all (the
+  branch or commit it is cut from is gone, or a `Stacks on` prerequisite has no
+  published branch). The fold holds it as a bundle that pushed no branch, as
+  above. When the check cannot complete (a fetch fails, the commit publish
+  would push for the bundle you accept cannot be built, another step of
+  building those commits fails, or the shared integration worktree is left in
+  a state it cannot be put back to), the accept is refused too, with a row of
+  its own that names no cause (stderr does). A tick on that row only asks the
+  next accept to run the check again, never to accept without it: if the check
+  fails again, the row is opened again. A broken worktree does not stop the run
+  at sign-off, which would leave the bundles already accepted unpublished; the
+  fold after the wave stops on it, as above, if it is still broken. A refused
+  bundle is offered one more sign-off session; if that session records nothing
+  that settles it, the run offers it no more and names it at the end of the wave
+  with the conflict and the step, not with the pass budget. Each run offers it
+  one session again. An iterate-plan recorded for it while its row is open is
+  not applied in that run, where it would be rebuilt beside the same bundles:
+  the next `pdca flow` run that drives it archives and re-plans it before it
+  sets its waves, so a `Conflicts with` or `Depends on` the new brief declares
+  orders it in that run (`pdca flow <ids>` re-plans it in its Plan step with the
+  other ids; a `--from-csv` sweep, in a Plan session of its own after the
+  sweep's). If that archive fails, the bundle stays parked in that run too, and
+  the run after it tries again. An iterate-do is rebuilt in the same run, as
+  usual. The row lives only in SUMMARY §6, so a SUMMARY assembled again drops
+  it, and the next accept checks again. A conflict with work already on the line
+  — an earlier wave's, or a finished bundle the run carried onto it — is not a
+  conflict with the wave, so it is still found only at the fold, alone or
+  together with a bundle of the wave. The last wave, a run with one wave,
+  `--no-publish`, merge mode, a dry run and `pdca signoff --accept` do not
+  check.
+
   A held bundle is still COMPLETE, so the results `pdca flow` prints list it as
   COMPLETE. The exit code tells the two runs apart: a run in which every bundle
   finished, but a fold held one or more of them out of the line for either
@@ -800,7 +851,12 @@ wave builds on, via `[driver].wave_mode`:
   hold with a dependent in the run exits 1). So 0 means every bundle finished
   and none was held out of a fold the run performed. An accepted bundle of the
   last wave that pushed no branch is not covered: no fold runs after it, so the
-  run holds nothing.
+  run holds nothing. A bundle whose accept was refused at sign-off for a
+  conflict with its wave, or for a check that could not complete, is not
+  finished: it is `AWAITING_SIGNOFF`, so a run over several ids exits 1. In a
+  run over one id that adopts a split parent's children, `AWAITING_SIGNOFF`
+  counts as finished, so that run exits 0 or 3, and the §6 row and the stderr
+  line are the signal.
 
   To recover a run that stopped part-way (an integrity stop, the pass budget, a
   crash, Ctrl-C), re-issue the same `pdca flow <ids>`. The ids the earlier run
