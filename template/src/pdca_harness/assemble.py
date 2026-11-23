@@ -15,7 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
-from . import brief, doctor, size_signal, state
+from . import brief, doctor, remark_round, size_signal, state
 from .config import Config
 from .gates import canonical_elements
 
@@ -54,6 +54,14 @@ class NeedsHumanItem(NamedTuple):
     # handover, it would ask the human to clear a problem that had long since gone — or to
     # confirm the independence of a review of a patch that was thrown away.
     no_verdict: bool = False
+    # True for a HUMAN row that no rebuild can change, so it stops the auto-iterate loop by
+    # its kind, like the size backstop's item (`autoiterate.eligible`): today only two gate
+    # rows of a remark round (#921, marked `stops_rebuilds`). A failed PR-head check: the
+    # round was built on a commit its PR no longer points at, or one that cannot be read,
+    # and nothing in a rebuild moves it, so every rebuild would fail the same way. A gate
+    # read that failed closed: for its usual causes (worktrees off, no target checkout, a
+    # pinned_head that will not check out) a rebuild's Do refuses the round the same way.
+    stops_rebuilds: bool = False
 
 
 # The implementation/architectural split is NOT a new taxonomy — it is the `kind` already
@@ -461,11 +469,11 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
     cleared = plan_advisory_cleared(d)
     items += [it for it in _plan_advisory_items(d) if _norm_text(it.text) not in cleared]
     # The empirical size backstop (#324). HUMAN, never IMPL — the tag and the text
-    # together are the mechanism: `autoiterate.eligible()` rebuilds past every other HUMAN
-    # item (#409) but STOPS the rebuild loop on a HUMAN item `size_signal.is_size_item`
-    # recognises, which is what should happen to a bundle behaving oversized. Tagged IMPL
-    # it would instead count as a reason to rebuild, turning the backstop into an
-    # accelerator for the very failure it exists to stop.
+    # together are the mechanism: `autoiterate.eligible()` rebuilds past the other HUMAN
+    # items (#409), all but a `stops_rebuilds` row, but STOPS the rebuild loop on a HUMAN
+    # item `size_signal.is_size_item` recognises, which is what should happen to a bundle
+    # behaving oversized. Tagged IMPL it would instead count as a reason to rebuild,
+    # turning the backstop into an accelerator for the very failure it exists to stop.
     # `current`, not `read`: the recorded file wins, but its ABSENCE must not read as
     # "measured and small". A failed write would otherwise delete the backstop.
     size_reasons = size_signal.oversize_reasons(size_signal.current(d, cfg), cfg)
@@ -591,10 +599,20 @@ def assemble_summary(d: Path, cfg: Config) -> None:
     # declared dependency with no registered doctor row (#263) — all become `- [ ]` items
     # the C6 guard makes the human clear before accept. `collect_needs_human` is the single
     # source (it also tags each item IMPL/HUMAN for the auto-iterate decision, #264).
-    needs_human = [it.text for it in collect_needs_human(d, cfg)]
+    fresh = collect_needs_human(d, cfg)
+    needs_human = [it.text for it in fresh]
     # …plus every HUMAN finding an auto-iterate round deferred (#409), which lives only in
     # the ledger once its round's SUMMARY is archived.
     needs_human += _deferred_needs_human(d, needs_human)
+    # A remark round's reply plan (#921): each thread's verdict and exact reply, recorded in
+    # `remark-round.json` and shown before §9 for the human to sign off. A thread is held
+    # only by a row THIS Check raised, so the rows passed are `fresh` without the standing
+    # Validation row and without the plan-advisory findings, which reviewed the brief before
+    # the round; the deferred ledger's rows above were carried from earlier attempts.
+    planned = {_norm_text(it.text) for it in _plan_advisory_items(d)}
+    reply_plan = remark_round.record_reply_plan(
+        d, [it.text for it in fresh
+            if it.kind != STANDING and _norm_text(it.text) not in planned])
 
     advisory_block = "\n".join(
         f"\n### Advisory — {p.stem.removeprefix('check-advisory-')}\n\n{t.strip()}"
@@ -647,6 +665,7 @@ def assemble_summary(d: Path, cfg: Config) -> None:
             "- tracker-comment.md     (ALWAYS, every tracker item)",
             "- build-notes.md         (builder rationale — for the human, not the reviewer)",
             "",
+            *reply_plan,
             "## 9. Check sign-off                     ← human completes Check here",
             "- Disposition confirmed / overridden:",
             "- Outcome:",
@@ -785,12 +804,17 @@ def _failed_gating_items(gates: dict) -> list[NeedsHumanItem]:
 
     The kind comes from the row's structured ``element`` (issue #264), never from parsing
     its label — an instance names its own gates, so the label may not start with the id.
-    A blank / unrecognised element is HUMAN (fail safe).
+    A blank / unrecognised element is HUMAN (fail safe). So is a row the gate marked
+    ``stops_rebuilds`` (a remark round's failed PR-head check, or its gate read that failed
+    closed, #921), whatever its element: no rebuild can change it, so it also stops
+    auto-iterate (:class:`NeedsHumanItem`).
     """
     return [
         NeedsHumanItem(
             f"{r['check']} FAILED (gating) — {r['path_line'] or r['oracle'] or 'no reason given'}",
-            IMPL if r.get("element") in _GATE_ELEMENTS else HUMAN,
+            IMPL if r.get("element") in _GATE_ELEMENTS and not r.get("stops_rebuilds")
+            else HUMAN,
+            stops_rebuilds=bool(r.get("stops_rebuilds")),
         )
         for r in gates["rows"]
         if r.get("gating") and r.get("result") == "fail"

@@ -27,12 +27,18 @@ decorrelated from the builder (#605). The next Check runs the review, the gates 
 selection again, so its §6 carries that row exactly while the problem lasts, and a problem
 that has gone never needs clearing by hand at handover.
 
-Exactly two things stop the loop while implementation work remains, and neither is new:
+Exactly three things stop the loop while implementation work remains:
 
-* **the size backstop** (#324) — a HUMAN item ``size_signal.is_size_item`` recognises. It is
-  the one HUMAN item that stops the loop by its KIND rather than being deferred, because it
-  is evidence that more rebuilds are the wrong move. It fires at 2 rounds by default, below
-  the hard cap, on purpose (``rounds`` under ``[driver.size_signal]`` in ``pdca.toml``);
+* **the size backstop** (#324) — a HUMAN item ``size_signal.is_size_item`` recognises. It
+  stops the loop by its KIND rather than being deferred, because it is evidence that more
+  rebuilds are the wrong move. It fires at 2 rounds by default, below the hard cap, on
+  purpose (``rounds`` under ``[driver.size_signal]`` in ``pdca.toml``);
+* **a row no rebuild can change** (#921) — a HUMAN item marked
+  ``NeedsHumanItem.stops_rebuilds``: a remark round's failed PR-head check, or its gate read
+  that failed closed. The round is built on a commit its PR no longer points at (or one that
+  cannot be read), and nothing in a rebuild moves it; or its gates cannot have its tree
+  (worktrees off, no target checkout), and a rebuild's Do refuses the round the same way. So
+  every rebuild would fail the same way;
 * **the hard cap** — ``[driver].max_auto_iters``.
 
 The reviewer's ``Validation — fitness-to-purpose`` row (:data:`assemble.STANDING`) is neither
@@ -199,7 +205,7 @@ def _same_finding(a: str, b: str) -> bool:
 
 def eligible(items: list[NeedsHumanItem]) -> bool:
     """True iff a rebuild is the right next step: at least one IMPL finding, and no
-    size-backstop item.
+    size-backstop item or other item no rebuild can change.
 
     An **empty** §6 is deliberately not eligible — that is a clean bundle awaiting a human
     *accept*, and auto-iterate must never accept. Neither is a §6 of HUMAN items with no IMPL
@@ -211,17 +217,22 @@ def eligible(items: list[NeedsHumanItem]) -> bool:
     returns it to §6 at handover — because a finding that needs a human is not evidence that
     the implementation work is done. The veto made the loop fire on 13.5% of attempts.
 
-    The one HUMAN item that still stops the loop is the size backstop's (#324), and it stops
-    it by KIND: ``size_signal.is_size_item`` on a HUMAN item. Its whole message is "further
+    The HUMAN items that still stop the loop do it by KIND. One is the size backstop's
+    (#324): ``size_signal.is_size_item`` on a HUMAN item. Its whole message is "further
     rebuilds are the wrong move", so deferring it would turn the backstop into an
     accelerator for the spiral it exists to break. The same text tagged IMPL is not the
-    backstop's item and still rebuilds — the tag stays part of the mechanism.
+    backstop's item and still rebuilds — the tag stays part of the mechanism. The other is a
+    row no rebuild can change (``stops_rebuilds``, #921): a remark round's PR head that moved
+    or cannot be read fails every rebuild's Check the same way, beside any other finding, and
+    a round whose gates cannot have its tree (worktrees off, no target checkout) is refused
+    at every rebuild's Do.
 
     The STANDING `Validation` row never counted either way (#293): the reviewer's prompt
     emits it on every cycle whatever it found, so it is a constant, not evidence.
     """
     return (any(item.kind == IMPL for item in items)
-            and not any(item.kind == HUMAN and size_signal.is_size_item(item.text)
+            and not any(item.kind == HUMAN
+                        and (item.stops_rebuilds or size_signal.is_size_item(item.text))
                         for item in items))
 
 
@@ -465,7 +476,8 @@ def write_decision(d: Path, items: list[NeedsHumanItem]) -> None:
     """
     if not eligible(items):
         raise ValueError("auto-iterate: refusing to decide on a finding set with no "
-                         "implementation work, or one the size backstop has stopped")
+                         "implementation work, or one the size backstop or a row no "
+                         "rebuild can change has stopped")
     defer(d, items)
     attempt = bump(d)
     (d / SIGNOFF_DECISION).write_text(

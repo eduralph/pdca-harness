@@ -9,6 +9,10 @@ contribution:
 - the PR is **OPEN** (never landed) → **withdraw** it: ``gh pr close --delete-branch``.
 - the PR is already **CLOSED** → nothing to do.
 
+A bundle with a live remark round (``remark-round.json``, #921) is refused first, before
+the PR is read: its ``patch.diff`` is the round's delta on the PR's head, not what the PR
+holds, so neither path above would undo that PR.
+
 Records ``revert.json`` in the bundle. ``--dry-run`` prints the git/gh plan without
 mutating anything (it still reads the PR state). Fail-closed and loud, like publish/merge;
 STOP discipline holds — a revert PR opens as a draft for the human to merge. The mechanics
@@ -24,7 +28,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import publish
+from . import publish, remark_round
 from .config import Config
 
 REVERT_JSON = "revert.json"
@@ -34,6 +38,16 @@ def revert(cfg: Config, issue_id: str, *, dry_run: bool = False, by: str = "",
            today: str | None = None) -> int:
     """Undo the bundle's published contribution; return a process code."""
     d = cfg.bundle(issue_id)
+    if remark_round.live(d):
+        # A live remark round (#921), refused before the PR is read, in a dry run too: its
+        # patch.diff is the round's delta, which no PR holds, while its PR holds the accepted
+        # attempt the round archived. Reverse-applying the delta, or reading an empty one as
+        # "nothing to land", would not undo that PR, and withdrawing it would close the PR
+        # the round is answering.
+        print(f"revert: {d.name} — {remark_round.line(d)}. Not reverted: patch.diff is the "
+              "round's change, which no PR holds, and the PR holds the accepted attempt the "
+              "round archived; close or revert that PR by hand.", file=sys.stderr)
+        return 1
     today = today or datetime.date.today().isoformat()
     rec = publish._publish_record(d)
     pr_url = rec.get("pr_url") if rec else None

@@ -8,10 +8,12 @@ the run's line: one a seam keeps there (#727) — in these cases a ``Stacks on: 
 ``Depends on: W``, or a prerequisite the run carried. A dependent on a base of its own, or
 on the real base, is built from the base as fetched, which has the merge: for it the merge
 is enough (#729, tests/test_flow_merged_prereq_dependency_base.py). A dependent on the line
-is cut from the line, not from the base, and the line does not follow the base. So a merge
-after the line was started may not be on it, and the dependent must be held, named, with a
-way out that works: a re-run whose carry (#646) finds the line on origin continues it and
-holds the dependent again, so the line is deleted on origin first. The line has ``P``'s
+is cut from the line, not from the base, and within a run the line does not follow the
+base. So a merge after the line was started may not be on it, and the dependent must be
+held, named, with a way out that works: a re-run whose carry (#646) finds the line on
+origin continues it, brought up to date with the base before wave 0 (#893,
+tests/test_flow_continued_line_refresh.py), and builds the dependent; deleting the line on
+origin first works too. The line has ``P``'s
 work when it has the commit the merge put on the base (``mergeCommit``, which a squash merge
 has and ``headRefOid`` does not) or ``P``'s PR head (which the carry puts on a line it
 carries ``P`` onto).
@@ -292,8 +294,9 @@ class MergedPrereqOnTheLine(unittest.TestCase):
         # A resumed run (#646). An earlier run's line holds P's PR head; P's PR then merged
         # into main with a merge commit, which that line never took in. The re-issued run
         # names P, and E's plain `Depends on: P` has its carry continue the line, P's head
-        # already on it. D (`Depends on (merged): P`) is cut from that line: P's work is on
-        # it, though main's merge commit is not, so D is built, as before #655.
+        # already on it, brought up to date with main first (#893). D (`Depends on (merged):
+        # P`) is cut from that line: P's work is on it, and main's merge commit now too, so
+        # D is built, as before #655.
         p = self._prereq()
         d = self._planned("D", "- **Depends on (merged):** P\n")
         e = self._planned("E", "- **Depends on:** P\n")
@@ -305,18 +308,19 @@ class MergedPrereqOnTheLine(unittest.TestCase):
         self._run([d, e], batch)
         self.assertIn("carried issue_P", self.err)
         tip = self._built_on_line()
-        self.assertEqual(tip, old)
+        self.assertTrue(self.fx._ancestor(old, tip))
+        self.assertNotEqual(tip, old)
         self.assertTrue(self.fx._ancestor(self.fx._tip("fix/P"), tip))
-        self.assertFalse(self.fx._ancestor(self.merge_oid["P"], tip))
+        self.assertTrue(self.fx._ancestor(self.merge_oid["P"], tip))
         self.assertEqual(self.results["E"], state.COMPLETE)
 
     # -- the way out the held line gives, followed ------------------------------------------
 
-    def test_the_way_out_is_to_delete_the_line_then_re_run(self):
+    def test_the_way_out_is_a_re_run_that_brings_the_line_up_to_date(self):
         # D is held as in (1). W is finished, so a re-run of the same batch drives D alone,
-        # and its carry (#646) puts W on the line: while origin has the line, the carry
-        # continues it at the same tip and D is held again. Once the line is deleted on
-        # origin, the carry starts it from main, which has P's merge, and D is built on it.
+        # and its carry (#646) puts W on the line: origin still has the line, so the carry
+        # continues it, merging main into it first (#893), and D is built on a tip that has
+        # P's merge, W's branch and the line's old tip. Nothing is deleted.
         self._prereq()
         self.after_first_fold = self._merge
         w, d = self._wd(MERGED_EDGE, on_line=True)
@@ -324,8 +328,22 @@ class MergedPrereqOnTheLine(unittest.TestCase):
         self._held("does not have that merge")
         old = self.fx._tip(self.line)
         self._run([d], ["W", "D"])                   # a re-run, the line still on origin
-        self.assertEqual(self.fx._tip(self.line), old)
-        self._held("does not have that merge", "may continue it")
+        self.assertIn("carried issue_W", self.err)
+        tip = self._built_on_line()
+        self.assertNotEqual(tip, old)
+        self.assertTrue(self.fx._ancestor(old, tip))
+        self.assertTrue(self.fx._ancestor(self.merge_oid["P"], tip))
+        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/W"), tip))
+
+    def test_deleting_the_line_still_works(self):
+        # The hold's other step: once the line is deleted on origin, the carry starts it from
+        # main, which has P's merge, and D is built on it.
+        self._prereq()
+        self.after_first_fold = self._merge
+        w, d = self._wd(MERGED_EDGE, on_line=True)
+        self._run([w, d], ["W", "D"])
+        self._held("does not have that merge")
+        old = self.fx._tip(self.line)
         self.fx._delete(self.line)                   # the way out
         self._run([d], ["W", "D"])
         self.assertIn("carried issue_W", self.err)

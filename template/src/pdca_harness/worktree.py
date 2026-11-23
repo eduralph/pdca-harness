@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -73,14 +74,61 @@ def _git(repo: Path, *args: str) -> int:
                           capture_output=True, text=True).returncode
 
 
+def _refuse_round_without_worktree(d: Path) -> None:
+    """Raise :class:`WorktreeError` when bundle ``d`` has a live remark round (issue #921).
+
+    Asked where ``[driver].worktree`` is off, before the caller falls back to the primary
+    checkout: a round builds and is gated on its PR's head (:func:`_target`'s first rung),
+    which only a worktree checks out, so in place Do would build the round on the target
+    base and the gates would read that. Worktrees turned off after the round opened fail
+    the round closed, with the line a round that cannot open for the same reason gives. At
+    a gate read the failure row is the human's and stops auto-iterate
+    (``gates._run_checks``): a rebuild's Do is refused the same way."""
+    from . import remark_round  # lazy, as in _target
+    if remark_round.live(d):
+        raise WorktreeError(f"{d.name}: {remark_round.NEEDS_WORKTREE}. Failing closed; turn "
+                            "[driver].worktree back on, then re-run (the round stays live).")
+
+
+def _refuse_round_in_place(d: Path, why: str) -> None:
+    """Raise :class:`WorktreeError` when bundle ``d`` has a live remark round (issue #921).
+
+    Asked at each of :func:`ensure`'s fallbacks to running in place (no target checkout to
+    resolve, a worktree that cannot be reset or created, an error on the way), and at the
+    gate read's (:func:`for_gate`, :func:`rebuild_for_gate`: no target checkout to
+    resolve), with ``why`` it fell back. In place Do runs in the instance root with no
+    worktree, so a round would be built on whatever is checked out there instead of on its
+    PR's head, and every gate would read that tree. An ordinary bundle keeps the
+    best-effort fallback; a round fails closed and stays live. At a gate read the failure
+    row is the human's and stops auto-iterate (``gates._run_checks``): a rebuild's Do is
+    refused the same way."""
+    from . import remark_round  # lazy, as in _target
+    if remark_round.live(d):
+        raise WorktreeError(f"{d.name}: {why}. A remark round is built and gated only on its "
+                            "PR's head in a worktree, never in place; failing closed (the "
+                            "round stays live). Fix the worktree, then re-run.")
+
+
+# Why a bundle's worktree cannot be had when :func:`_target` resolves nothing.
+_NO_TARGET = ("its target checkout cannot be resolved (the brief's 'Repo + branch target', or "
+              "no git checkout for it)")
+
+
 def _target(d: Path, cfg: Config) -> tuple[Path, str] | None:
     """``(primary_checkout, base_ref)`` for bundle ``d``, or None if it can't be resolved.
 
     Single-sourced from the brief's "Repo + branch target" via the same resolution
     publish uses; ``base_ref`` is ``<base_remote>/<base>`` (the remote-tracking base the
     worktree branches off), falling back to the bare base / default branch.
+
+    A bundle with a live remark round (issue #921) builds on its PR's head instead: the
+    ``pinned_head`` commit its ``remark-round.json`` records, fetched when the round
+    opened. That rung comes first, so every caller (Do's :func:`ensure`, the gate's
+    :func:`rebuild_for_gate` / :func:`for_gate`, ``pdca try``'s :func:`stage`) uses it. A
+    record that names no usable commit gives a ref that resolves nowhere, so those callers
+    fail closed rather than build the round on the target base.
     """
-    from . import publish  # lazy: publish imports leaves→worktree; avoid an import cycle
+    from . import publish, remark_round  # lazy: publish imports leaves→worktree (a cycle)
     try:
         repo_spec, base, _slug = publish._resolve_target(d)
     except Exception:  # noqa: BLE001 — resolution is best-effort
@@ -90,6 +138,9 @@ def _target(d: Path, cfg: Config) -> tuple[Path, str] | None:
     primary = publish._checkout_path(cfg, repo_spec)
     if not (primary / ".git").exists():  # not a git checkout → can't worktree
         return None
+    pinned = remark_round.pinned_head(d)
+    if pinned is not None:
+        return primary, pinned or f"<no usable pinned_head in {remark_round.RECORD}>"
     base_ref = f"{cfg.base_remote}/{base}" if base else cfg.default_branch
     # Auto-stacked chain (#123): base the dependent's Do worktree on the prereq's produced
     # branch (on origin), not the target base, so Do builds + verifies on top of its diff.
@@ -234,14 +285,18 @@ def rebuild_for_gate(d: Path, cfg: Config) -> Path | None:
     in the primary checkout or over a mismatched tree; a red with a reason always beats
     a green for the wrong content. Returns ``None`` only where isolation legitimately
     doesn't apply (disabled / unresolved target / non-git checkout — unchanged
-    best-effort contract). A missing lane is created off the base (crash/standby
-    self-heal: the next gate run rebuilds from scratch). No fetch on the warm path —
-    the base ref must stay the one Do built against.
+    best-effort contract). For a bundle with a live remark round (issue #921) an
+    unresolved or non-git target raises instead (:func:`_refuse_round_in_place`); its
+    caller :func:`for_gate` refuses such a bundle with isolation disabled before it gets
+    here. A missing lane is created off the base (crash/standby self-heal: the next gate
+    run rebuilds from scratch). No fetch on the warm path — the base ref must stay the one
+    Do built against.
     """
     if not cfg.worktree:
         return None
     tgt = _target(d, cfg)
     if tgt is None:
+        _refuse_round_in_place(d, _NO_TARGET)
         return None
     primary, base_ref = tgt
     wt = _wt_dir(primary)
@@ -352,11 +407,16 @@ def ensure(d: Path, cfg: Config) -> Path | None:
     NOT one of those: it raises :class:`WorktreeError` rather than fall back to in-place
     (issue #235), because running Do/Check in the operator's primary checkout would violate
     never-mutate. The primary checkout is never modified (worktrees are separate trees).
+    Nor is a bundle with a live remark round (issue #921): it must build on its PR's head,
+    so with isolation disabled it raises (:func:`_refuse_round_without_worktree`), and so
+    does each fallback below that would run it in place (:func:`_refuse_round_in_place`).
     """
     if not cfg.worktree:
+        _refuse_round_without_worktree(d)
         return None
     tgt = _target(d, cfg)
     if tgt is None:
+        _refuse_round_in_place(d, _NO_TARGET)
         return None
     primary, base_ref = tgt
     wt = _wt_dir(primary)
@@ -377,6 +437,7 @@ def ensure(d: Path, cfg: Config) -> Path | None:
         if (wt / ".git").exists():
             # Reuse: drop the prior cycle's edits, return to a clean base.
             if _git(wt, "reset", "--hard", base_ref) != 0 or _git(wt, "clean", "-ffdq") != 0:
+                _refuse_round_in_place(d, f"could not reset {wt} to {base_ref}")
                 print(f"worktree: could not reset {wt} to {base_ref}; running in place",
                       file=sys.stderr)
                 return None
@@ -384,6 +445,7 @@ def ensure(d: Path, cfg: Config) -> Path | None:
             return wt
         # Create off the base. --force tolerates the base branch being checked out elsewhere.
         if _git(primary, "worktree", "add", "--force", str(wt), base_ref) != 0:
+            _refuse_round_in_place(d, f"could not create {wt} off {base_ref}")
             print(f"worktree: could not create {wt} off {base_ref}; running in place",
                   file=sys.stderr)
             return None
@@ -392,6 +454,7 @@ def ensure(d: Path, cfg: Config) -> Path | None:
     except WorktreeError:
         raise  # fail closed (#235) — do NOT degrade an unresolvable base to in-place
     except Exception as exc:  # noqa: BLE001 — isolation is best-effort, never fatal
+        _refuse_round_in_place(d, f"isolation unavailable ({exc})")
         print(f"worktree: isolation unavailable for {d.name} ({exc}); running in place",
               file=sys.stderr)
         return None
@@ -532,10 +595,16 @@ def _overflow_create(d: Path, primary: Path, base_ref: str) -> Path | None:
         return None
 
 
-def for_publish(d: Path, primary: Path, base_commit: str) -> Path:
+def for_publish(d: Path, primary: Path, base_commit: str, *,
+                patch: Path | None = None, expect_tree: str | None = None) -> Path:
     """Materialize an EPHEMERAL ``base_commit + patch.diff`` tree for the pre-push
     host-CI gate (``[gates] host_ci``, issue #311); the caller MUST tear it down with
-    ``overflow_remove(primary, tree)`` once the commands have run.
+    ``overflow_remove(primary, tree)`` once the commands have run. ``patch`` is the patch
+    applied, ``d/patch.diff`` by default (a remark round's publish passes the copy of it
+    that it commits, #922). ``expect_tree``, when given, is the git tree ``base_commit`` +
+    ``patch`` must make (the round's publish works it out first): the files materialized
+    here are checked against it before anything runs on them, so a post-checkout hook that
+    changed one is refused rather than certified (#922).
 
     Deliberately NOT the lane reconstruction (:func:`rebuild_for_gate`): the lane is
     warm and never fetches — a Check gate must attest the base Do built against —
@@ -558,14 +627,18 @@ def for_publish(d: Path, primary: Path, base_commit: str) -> Path:
     ovf = _overflow_path(primary)
     _git(primary, "worktree", "prune")  # drop admin entries for any vanished trees first
     if _git(primary, "worktree", "add", "--force", "--detach", str(ovf), base_commit) != 0:
+        # git keeps the worktree it made when only the post-checkout hook failed (#922).
+        overflow_remove(primary, ovf)
         raise WorktreeError(
             f"{d.name}: could not create a worktree at {base_commit[:12]} for the "
             "host-CI gate — the pinned base commit must be materializable")
     try:
-        patch = d / "patch.diff"
-        patch_text = patch.read_text(encoding="utf-8") if patch.is_file() else ""
-        if patch_text.strip():
-            if _GITLINK_RE.search(patch_text):
+        patch = patch or d / "patch.diff"
+        # Bytes: a patch need not be UTF-8 (a Latin-1 line is still one `git apply` takes),
+        # and a decode error would skip the teardown below (#922).
+        body = patch.read_bytes() if patch.is_file() else b""
+        if body.strip():
+            if _GITLINK_RE.search(body.decode("utf-8", "replace")):
                 # Same gitlink fail-closed as rebuild_for_gate (#296 review round 2):
                 # plain `git apply` exits 0 while skipping the gitlink, so this tree
                 # would carry the wrong submodule revision under a green run.
@@ -579,10 +652,36 @@ def for_publish(d: Path, primary: Path, base_commit: str) -> Path:
                     f"{d.name}: patch.diff does not apply onto the fetched base "
                     f"{base_commit[:12]} — the base advanced past the fix; "
                     "rebase/re-Check the bundle, then retry")
-    except WorktreeError:
+        if expect_tree is not None:
+            made = _tree_of(ovf, base_commit, patch if body.strip() else None)
+            if made != expect_tree:
+                raise WorktreeError(
+                    f"{d.name}: the tree made for the host-CI gate is "
+                    f"{made[:12] or 'unreadable'}, not {base_commit[:12]} + patch.diff "
+                    f"({expect_tree[:12]}) — a checkout hook changed it, so the declared CI "
+                    "would not run on the tree the push publishes")
+    except BaseException:   # any failure, an unexpected one included: never leave the tree
         overflow_remove(primary, ovf)
         raise
     return ovf
+
+
+def _tree_of(wt: Path, base_commit: str, patch: Path | None) -> str:
+    """The tree the files in worktree ``wt`` make, as ``git add --all`` then ``git
+    write-tree`` record them on top of ``base_commit`` (+ ``patch`` first, so a file it adds
+    counts even where it is ignored), through a throwaway index: ``wt``'s own index is left
+    as it is. "" when git cannot say. Ignored files are part of no tree, so none is read.
+    git's output is kept as bytes: a file name need not be UTF-8 (#922)."""
+    with tempfile.TemporaryDirectory(prefix="pdca-tree-") as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        steps = [("read-tree", base_commit),
+                 *([("apply", "--cached", str(patch.resolve()))] if patch else []),
+                 ("add", "--all"), ("write-tree",)]
+        for args in steps:
+            r = subprocess.run(["git", "-C", str(wt), *args], env=env, capture_output=True)
+            if r.returncode != 0:
+                return ""
+        return r.stdout.decode("ascii", "replace").strip()
 
 
 def for_gate(d: Path, cfg: Config,
@@ -611,11 +710,16 @@ def for_gate(d: Path, cfg: Config,
     ``ExitStack``) to keep the lock for the whole gate run — gates do, so a concurrent
     reconstruction can't clean their outputs mid-command; without it the lock guards only
     the reconstruction itself (direct/test callers). The overflow spill path never locks
-    the lane — it never touches it."""
+    the lane — it never touches it. With isolation disabled, a bundle with a live remark
+    round (issue #921) raises instead of reading the primary checkout: its gates must read
+    its PR's head plus ``patch.diff`` (:func:`_refuse_round_without_worktree`). So does one
+    whose target checkout cannot be resolved (:func:`_refuse_round_in_place`)."""
     if not cfg.worktree:
+        _refuse_round_without_worktree(d)
         return None, None
     tgt = _target(d, cfg)
     if tgt is None:
+        _refuse_round_in_place(d, _NO_TARGET)
         return None, None
     primary, base_ref = tgt
     wt = _wt_dir(primary)

@@ -9,6 +9,9 @@ narrow, auditable action set below. **Dry-run is the default.**
 
 Reconciliation matrix (local state × remote state):
 
+* bundle with a live remark round (``remark-round.json``, #921), whatever the tracker or
+  its PR reads → report only, decided first: its ``patch.diff`` is the round's delta, not
+  the contribution, so neither the no-fix close nor the merged-PR close below applies.
 * issue CLOSED, bundle briefless (a notes-only tracker) → write the ``resolved``
   object into ``notes.json`` — the bundle reads RESOLVED (#302). An unparseable
   existing ``notes.json`` is skipped with a note (never clobber what we can't read).
@@ -54,7 +57,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import brief, driver, flow, publish, signoff, sources, split, state
+from . import brief, driver, flow, publish, remark_round, signoff, sources, split, state
 from .config import Config
 
 _MID_FLIGHT = (state.PLANNED, state.BUILT, state.CHECKED,
@@ -314,6 +317,14 @@ def _plan_bundle(cfg: Config, d: Path, *, issue_side: bool, repo: str,
     st = state.state(d)
     number = d.name.removeprefix("issue_")
     numeric = number.isdigit()
+    if remark_round.live(d):
+        # A live remark round (#921), decided before anything is read: its patch.diff is the
+        # round's delta, not the contribution, and its PR holds the accepted attempt without
+        # the round's change. An empty delta (every thread declined) is no close/no-fix, and
+        # that PR merged by hand is not the round's work merged, so no row may close the
+        # issue or reconcile the bundle while the round is live.
+        return _Row(d.name, st, "-", f"live remark round — {remark_round.line(d)}; no "
+                    "action while it is live")
     if st == state.RESOLVED:
         # NOT unconditionally in sync (#300 review): the tracker can REOPEN an issue
         # after cleanup resolved its bundle, and RESOLVED ∈ HALTED would then suppress
