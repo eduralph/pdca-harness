@@ -1,21 +1,23 @@
-"""A merge-mode stop on collaborator review threads opens a remark round (#921).
+"""A merge-mode stop on review-bot threads opens a remark round (#921, #922).
 
 Before #921, merge mode stopped on a PR blocked by review remarks, named them in
 ``merge-remarks.json`` (#838), and left the fix to be made by hand outside the bundle. With
 ``[driver].remark_rounds`` above 0 the run now reopens the accepted bundle P on which
 ``merge_wave`` stopped: it archives the accepted attempt to ``iteration-v<n>/``, records the
-round in ``remark-round.json``, appends the collaborator threads to ``brief.md`` and drives
+round in ``remark-round.json``, appends the bots' threads to ``brief.md`` and drives
 P again in the same wave, built on its PR's own head (``pinned_head``), with the per-fix
 verifier on ``PDCA_BASE=origin/<branch>`` (a head that moved since fails it, saying the round
 is out of date and how to discontinue it; that failure is the human's, and auto-iterate stops
 on it rather than rebuild on the same head). The round's SUMMARY.md carries a reply plan
 (addressed / held / declined, and the exact reply text, which T4 checks; no reply can start a
-line of its own there). Nothing is pushed,
-replied to, resolved or merged; after the round's sign-off the run stops, non-zero, with or
-without publishing (``pdca signoff`` too), on a line that says the round ends only when its
-record is deleted after the PR has merged; a live round refuses every publish with one
-line, and its dependents wait while it is live, with or without publishing, even once its
-PR is merged by hand. ``pdca cleanup`` and ``pdca revert`` leave a live round alone, a
+line of its own there). Nothing is replied to, resolved or
+merged; after the round's sign-off the run stops, non-zero, with or without publishing
+(``pdca signoff`` too); a live round is never published the ordinary way, and its dependents
+wait while it is live, with or without publishing, even once its PR is merged by hand. The
+round's own publish (#922), which pushes its commit onto the PR, is
+tests/test_merge_remark_round_publish.py's: the host here lists no open PR for the branch,
+so that publish stops at its open-PR step and pushes nothing. ``pdca cleanup`` and
+``pdca revert`` leave a live round alone, a
 discontinued one is named on a later run, and with worktrees turned off, or a worktree or
 target checkout that cannot be had, its Do and its gates fail closed (that gate failure is
 the human's too, and auto-iterate stops on it). No round opens on a PR
@@ -29,8 +31,10 @@ gates (a C4 verifier row that records its environment) and the real ``merge._mer
 The builder, reviewer and sign-off leaves are stubbed (the builder edits the real Do
 worktree and writes its ``git diff``), ``flow._publish_bundle`` cuts and pushes the PR
 branch the way publish does, and ``gh`` is a stub in front of ``subprocess.run`` that
-reports the PR blocked by threads (with ``authorAssociation``). The publisher is not in
-stub mode: that turns the merge into a dry run.
+reports the PR blocked by threads, each by a review bot (``__typename: Bot``, a login
+``[driver].review_bots`` lists; who opens a round at all is the #922 test's), and answers the
+round's change-request read by its query text. The publisher is not in stub mode: that turns
+the merge into a dry run.
 
 Only modules are imported (never a symbol the change adds), so with the production change
 reverted these cases still load and run, and fail on their assertions.
@@ -75,19 +79,28 @@ REMARKS = "merge-remarks.json"
 A = "".join(f"a line {i}\n" for i in range(1, 21))
 B = "".join(f"b line {i}\n" for i in range(1, 11))
 C = "".join(f"c line {i}\n" for i in range(1, 6))
-T9_BODY = "SECRET-T9-BODY: please rewrite the whole module"
 MERGE_ERROR = ("GraphQL: Pull request is not mergeable: the base branch policy prohibits the "
                "merge. (mergePullRequest)")
 # The §9 outcomes an accept is recorded as (`signoff.record`: `accept` → merged-wider).
 ACCEPT_TOKENS = ("merged-wider", "accepted")
-ACCEPTED = (f"remark round 1 for {PR} accepted; round publish not available yet — apply "
-            f"patch.diff to {BRANCH} by hand")
-# How a live round ends (nothing ends it yet): the accepted round's line says it, after the
-# line above, without suggesting `pdca publish`.
+# An accepted round whose commit is not on its PR (#922): `pdca publish` pushes it.
+ACCEPTED = (f"remark round 1 for {PR} accepted; its commit is not on the PR yet — "
+            f"`pdca publish {P}` pushes it")
+ACCEPTED_LINE = ACCEPTED
+# The flow's stop after the round's publish stopped (here, at its open-PR step), and that
+# publish's own line.
+NOT_PUBLISHED = "its round publish did not complete — see the publish line above"
+OPEN_PR_STOP = f"publish: issue_{P} — the round publish stopped at the open-PR lookup"
+# How a live round ends (nothing ends it yet): the line of a round whose publish is done says
+# it, after the rest, as the no-change line of an accepted round that changed nothing does.
 ENDS = (f"The round ends only when {ROUND} is deleted, and only after the PR has merged: "
         "deleted before that, the next publish of this bundle would force-push patch.diff, "
         "this delta alone, over the PR")
-ACCEPTED_LINE = f"{ACCEPTED}. {ENDS}"
+NO_CHANGE = (f"remark round 1 for {PR} accepted with no code change; replying to and "
+             "resolving its threads and merging are not available yet — do them at the PR. "
+             f"{ENDS}")
+# The review bots the threads below are by (#922).
+BOTS = ["lint-bot", "codex-bot", "style-bot", "docs-bot"]
 DISCONTINUED = (f"remark round 1 for {PR} discontinued; the PR is still open and is the "
                 "human's to close")
 
@@ -108,21 +121,19 @@ with open(sys.argv[1], "a", encoding="utf-8") as fh:
 '''
 
 
-def _node(tid: str, path: str, line: int | None, body: str, who: str, assoc: str | None, *,
+def _node(tid: str, path: str, line: int | None, body: str, who: str, kind: str = "Bot", *,
           outdated: bool = False, original: int | None = None) -> dict:
-    """One unresolved `reviewThreads` node as the host returns it."""
-    first = {"body": body, "url": f"{PR}#{tid}", "author": {"login": who}}
-    if assoc is not None:
-        first["authorAssociation"] = assoc
+    """One unresolved `reviewThreads` node as the host returns it: by a review bot, an
+    account the host reports as a `Bot` (an app's comment carries `authorAssociation: NONE`)."""
+    first = {"body": body, "url": f"{PR}#{tid}", "authorAssociation": "NONE",
+             "author": {"__typename": kind, "login": who}}
     return {"id": tid, "isResolved": False, "isOutdated": outdated, "path": path,
             "line": line, "originalLine": original if original is not None else line,
             "comments": {"nodes": [first]}}
 
 
-T1 = _node("T1", "a.py", 12, "a.py:12 reads past the end of the list", "alice",
-           "COLLABORATOR")
-T2 = _node("T2", "b.py", 3, "b.py:3 should keep the old default", "bob", "MEMBER")
-T9 = _node("T9", "c.py", 1, T9_BODY, "mallory", "CONTRIBUTOR")
+T1 = _node("T1", "a.py", 12, "a.py:12 reads past the end of the list", "lint-bot")
+T2 = _node("T2", "b.py", 3, "b.py:3 should keep the old default", "codex-bot")
 
 
 def _edit(text: str, lines: dict[int, str]) -> str:
@@ -157,6 +168,7 @@ class RemarkRoundOpen(unittest.TestCase):
         self.cfg.merge_wait_secs = 0
         self.cfg.max_passes = 3
         self.cfg.remark_rounds = 1
+        self.cfg.review_bots = list(BOTS)
         for name, text in {"a.py": A, "b.py": B, "c.py": C}.items():
             (self.fx.primary / name).write_text(text, encoding="utf-8")
         sb._git(self.fx.primary, "add", "--all")
@@ -170,8 +182,8 @@ class RemarkRoundOpen(unittest.TestCase):
             "scope": "bundle", "cmd": " ".join(shlex.quote(str(x)) for x in
                                                (sys.executable, script, self.verify_log))}]
         # The host.
-        self.threads = [T1, T2, T9]
-        self.reviews: list[dict] = []
+        self.threads = [T1, T2]
+        self.reviews: list[dict] = []                # latestReviews, and the standing ones
         self.graphql_fails = False
         self.rollup: dict[str, str] = {}             # id → bucket (default pass)
         self.merged_prs: set[str] = set()            # ids whose PR the host reads MERGED
@@ -218,6 +230,10 @@ class RemarkRoundOpen(unittest.TestCase):
         if args[1:3] == ["api", "graphql"]:
             if self.graphql_fails:
                 return subprocess.CompletedProcess(args, 1, "", "HTTP 502: Bad Gateway")
+            query = next((str(x) for x in args if str(x).startswith("query=")), "")
+            if "latestOpinionatedReviews" in query:      # a round's change-request read (#922)
+                return ok(json.dumps({"data": {"resource": {"latestOpinionatedReviews": {
+                    "pageInfo": {"hasNextPage": False}, "nodes": self.reviews}}}}))
             return ok(json.dumps({"data": {"resource": {"reviewThreads": {
                 "pageInfo": {"hasNextPage": False, "endCursor": None},
                 "nodes": self.threads}}}}))
@@ -228,6 +244,8 @@ class RemarkRoundOpen(unittest.TestCase):
                                      {"state": "OPEN", "stateReason": "", "closedAt": ""}))
             return ok()
         verb, url = args[2], str(args[3]) if len(args) > 3 else ""
+        if verb == "list":                           # no open PR for the branch: a round's
+            return ok("[]")                          # publish stops there (#922)
         iid = url.rsplit("/", 1)[-1]
         if verb == "view":
             branch = f"fix/{iid}"
@@ -392,7 +410,7 @@ class RemarkRoundOpen(unittest.TestCase):
 
     def _scenario(self, **kw) -> Path:
         """P (wave 0) and Q, which depends on it (wave 1), driven by one merge-mode run.
-        P's PR is blocked by T1, T2 and T9 unless a test changes the host."""
+        P's PR is blocked by T1 and T2 unless a test changes the host."""
         self._plan(P)
         self._plan(Q, f"- **Depends on:** {P}\n")
         self._run([P, Q], **kw)
@@ -439,7 +457,7 @@ class RemarkRoundOpen(unittest.TestCase):
 
     def _q_held_on_the_round(self) -> None:
         """In the last run Q, which depends on P, was not built, nothing was pushed, and Q
-        was held on one line carrying P's round line (and no `pdca publish`)."""
+        was held on one line carrying P's round line."""
         self.assertEqual(self.results.get(Q), state.PLANNED, self.err)
         self.assertEqual([b for b in self.builds[self.builds_before:]
                           if b["bundle"] == f"issue_{Q}"], [], self.err)
@@ -448,10 +466,9 @@ class RemarkRoundOpen(unittest.TestCase):
         held = [x for x in self.err.splitlines() if x.startswith(f"flow: issue_{Q} held")]
         self.assertEqual(len(held), 1, self.err)
         self.assertIn(ACCEPTED, held[0])
-        self.assertNotIn("pdca publish", held[0])
         self.assertNotEqual(self.rc, 0)
 
-    def _cleanup_leaves_the_round_alone(self, d: Path) -> None:
+    def _cleanup_leaves_the_round_alone(self, d: Path, line: str = ACCEPTED) -> None:
         """`pdca cleanup P --apply`, the tracker issue open: one report-only row with the
         round's line, and no tracker write."""
         mark = len(self.calls)
@@ -466,10 +483,10 @@ class RemarkRoundOpen(unittest.TestCase):
                           and c[2] != "view"], [], said)
         row = [x for x in said.splitlines() if x.startswith(f"issue_{P} [")]
         self.assertEqual(len(row), 1, said)
-        self.assertIn(f"— note: live remark round — {ACCEPTED}", row[0])
+        self.assertIn(f"— note: live remark round — {line}", row[0])
         self.assertEqual(state.state(d), state.COMPLETE)
 
-    def _revert_refuses_the_round(self, d: Path) -> None:
+    def _revert_refuses_the_round(self, d: Path, line: str = ACCEPTED) -> None:
         """`pdca revert P`: refused with the round's line before the PR is even read; no
         git step, no PR closed or opened, no record."""
         mark = len(self.calls)
@@ -479,14 +496,14 @@ class RemarkRoundOpen(unittest.TestCase):
             rc = revert.revert(self.cfg, P, by="T", today=TODAY)
         said = err.getvalue()
         self.assertEqual(rc, 1, said)
-        self.assertIn(ACCEPTED, said)
+        self.assertIn(line, said)
         self.assertNotIn("close/no-fix", said)
         self.assertEqual(self.calls[mark:], [], said)
         self.assertFalse((d / revert.REVERT_JSON).exists())
 
     # -- (1)–(4): the round opens on the PR head, stops at its sign-off, then the run stops -----
 
-    def test_a_collaborator_block_reopens_p_as_a_round_built_on_its_pr_head(self):
+    def test_a_review_bot_block_reopens_p_as_a_round_built_on_its_pr_head(self):
         d = self._scenario()
         pinned = self.head_at_refusal
         self.assertTrue(pinned, self.err)
@@ -503,7 +520,7 @@ class RemarkRoundOpen(unittest.TestCase):
         self.assertEqual(rec["pinned_head"], pinned)
         self.assertEqual(rec["contribution"], ["iteration-v1"])
         self.assertEqual({t: e["status"] for t, e in rec["threads"].items()},
-                         {"T1": "open", "T2": "open", "T9": "ignored: non-collaborator"})
+                         {"T1": "open", "T2": "open"})
         builds = self._round_builds()
         self.assertEqual(len(builds), 1, self.err)
         self.assertEqual(builds[0]["state"], state.PLANNED)
@@ -511,12 +528,10 @@ class RemarkRoundOpen(unittest.TestCase):
         self.assertEqual(builds[0]["brief"], brief)
         block = brief[brief.index("## Remark round 1 — carry-forward"):]
         self.assertNotIn("\n## ", block)                 # the block ends the brief
-        self.assertIn("`T1` — a.py:12 by alice", block)
-        self.assertIn("`T2` — b.py:3 by bob", block)
+        self.assertIn("`T1` — a.py:12 by lint-bot", block)
+        self.assertIn("`T2` — b.py:3 by codex-bot", block)
         self.assertIn(RESPONSES, block)
         self.assertNotIn("## Iteration 1 — carry-forward", brief)
-        self.assertNotIn(T9_BODY, brief)
-        self.assertNotIn("T9", block)
 
         # (2) built on the PR head (and a real builder is told so); the verifier verified there.
         self.assertEqual(builds[0]["head"], pinned)
@@ -537,7 +552,6 @@ class RemarkRoundOpen(unittest.TestCase):
         plan = _section(summary, "Remark round 1 — reply plan")
         for tid in ("T1", "T2"):
             self.assertIn(json.dumps(self.responses[tid]["reply"]), plan)
-        self.assertNotIn(T9_BODY, summary)
         rec = self._record(d)
         self.assertEqual((rec["threads"]["T1"]["verdict"], rec["threads"]["T1"]["reply"]),
                          ("addressed", self.responses["T1"]["reply"]))
@@ -548,16 +562,17 @@ class RemarkRoundOpen(unittest.TestCase):
                           and any("mutation" in a for a in c)], [])
         self.assertEqual(self.publishes, [f"issue_{P}"])
 
-        # (4) accepted: the run stops non-zero on one line; Q is not built.
-        stop = [x for x in self.err.splitlines() if ACCEPTED in x]
+        # (4) accepted: its publish (#922) finds no open PR here, so it pushes nothing, and the
+        # run stops non-zero on one line; Q is not built.
+        stop = [x for x in self.err.splitlines() if NOT_PUBLISHED in x]
         self.assertEqual(len(stop), 1, self.err)
         self.assertIn("STOPPING", stop[0])
+        self.assertIn(OPEN_PR_STOP, self.err)
         self.assertEqual(state.state(d), state.COMPLETE)
         self.assertNotEqual(self.rc, 0)
         self.assertEqual(self.holds.get(P), "round")
         self.assertEqual(self.results[Q], state.PLANNED)
         self.assertEqual(self._first_builds(Q), [])
-        self.assertNotIn("pdca publish", self.err)
         self.assertFalse((d / "auto-iterate.json").exists())
 
     def test_a_re_run_opens_no_second_round_and_q_is_held_on_the_round_line(self):
@@ -572,7 +587,6 @@ class RemarkRoundOpen(unittest.TestCase):
         held = [x for x in self.err.splitlines() if x.startswith(f"flow: issue_{Q} held")]
         self.assertEqual(len(held), 1, self.err)
         self.assertIn(ACCEPTED, held[0])
-        self.assertNotIn("pdca publish", self.err)
         self.assertNotIn("rm -rf", self.err)
         self.assertNotEqual(self.rc, 0)
 
@@ -592,7 +606,6 @@ class RemarkRoundOpen(unittest.TestCase):
         held = [x for x in self.err.splitlines() if x.startswith(f"flow: issue_{Q} held")]
         self.assertEqual(len(held), 1, self.err)
         self.assertIn(ACCEPTED, held[0])
-        self.assertNotIn("pdca publish", self.err)
         self.assertNotEqual(self.rc, 0)
         with mock.patch.object(subprocess, "run", self._sub):
             self.assertFalse(merged.merged_into(self.cfg, P, "org/repo", "main"))
@@ -605,7 +618,7 @@ class RemarkRoundOpen(unittest.TestCase):
             self._revert_refuses_the_round(d)
 
     def test_a_bundle_whose_branch_this_run_did_not_push_opens_no_round(self):
-        # Rounds off: P's first attempt is published, and its PR is blocked by T1, T2, T9.
+        # Rounds off: P's first attempt is published, and its PR is blocked by T1 and T2.
         self.cfg.remark_rounds = 0
         d = self._scenario()
         first = self.fx._tip(BRANCH)
@@ -654,7 +667,6 @@ class RemarkRoundOpen(unittest.TestCase):
         self.assertEqual(len(failed), 1, six)
         self.assertIn(way_out, failed[0])
         self.assertIn(moved, failed[0])
-        self.assertNotIn("pdca publish", self.err)
 
     # A failed head check is the human's: no rebuild moves pinned_head, so auto-iterate,
     # on, with room for three rounds and the size backstop at its default of two, stops on
@@ -774,7 +786,8 @@ class RemarkRoundOpen(unittest.TestCase):
             "pr_url": PR}), encoding="utf-8")
         threads = {t: {"path": p, "line": n, "author": a, "outdated": False, "url": "",
                        "status": "open", "round": 1}
-                   for t, p, n, a in (("T1", "a.py", 12, "alice"), ("T2", "b.py", 3, "bob"))}
+                   for t, p, n, a in (("T1", "a.py", 12, "lint-bot"),
+                                      ("T2", "b.py", 3, "codex-bot"))}
         (d / ROUND).write_text(json.dumps({
             "rounds": 1, "pr_url": PR, "branch": BRANCH,
             "pinned_head": self.fx._tip("main"), "contribution": ["iteration-v1"],
@@ -784,9 +797,9 @@ class RemarkRoundOpen(unittest.TestCase):
             p = next(b for b in bundles if b.name == f"issue_{P}")
             (p / REMARKS).write_text(json.dumps({"pr_url": PR, "threads": [
                 {"id": "T1", "path": "a.py", "line": 12, "outdated": False, "body": "x",
-                 "author": "alice", "url": "", "association": "COLLABORATOR"},
+                 "author": "lint-bot", "url": "", "author_type": "Bot"},
                 {"id": "T3", "path": "b.py", "line": 7, "outdated": False, "body": "y",
-                 "author": "bob", "url": "", "association": "OWNER"}]}), encoding="utf-8")
+                 "author": "codex-bot", "url": "", "author_type": "Bot"}]}), encoding="utf-8")
             if kw.get("stopped") is not None:
                 kw["stopped"].append(p)
             return 1
@@ -799,6 +812,9 @@ class RemarkRoundOpen(unittest.TestCase):
             self.assertIn(part, line[0])
         self.assertEqual(self._record(d)["rounds"], 1)
         self.assertFalse((d / "iteration-v2").exists())
+        # The cap comes before the hold (#922): a round at its cap asks the host nothing more.
+        self.assertEqual([c for c in self.calls if c[:3] == ["gh", "api", "graphql"]
+                          and any("latestOpinionatedReviews" in x for x in c)], [])
 
     def test_c_a_round_leaves_auto_iterate_alone_and_needs_no_auto_iterate(self):
         d = self._plan(P)
@@ -863,8 +879,8 @@ class RemarkRoundOpen(unittest.TestCase):
         sb._git(self.fx.primary, "add", "--all")
         sb._git(self.fx.primary, "commit", "-q", "-m", "more base files")
         sb._git(self.fx.primary, "push", "-q", "origin", "main")
-        self.threads = [_node("T1", "café.py", 2, "café line 2 is off by one", "alice",
-                              "COLLABORATOR"), T2]
+        self.threads = [_node("T1", "café.py", 2, "café line 2 is off by one", "lint-bot"),
+                        T2]
         self.round_edits = {"café.py": {2: "café line 2 - round fix"},
                             "notes.sql": {1: "++ b.py"}}
         self.responses = {"T1": {"addressed": True, "reply": "Fixed at café.py:2."},
@@ -894,10 +910,9 @@ class RemarkRoundOpen(unittest.TestCase):
         sb._git(self.fx.primary, "add", "--all")
         sb._git(self.fx.primary, "commit", "-q", "-m", "files with spaces")
         sb._git(self.fx.primary, "push", "-q", "origin", "main")
-        self.threads = [_node("T1", "c.py", 1, "c line 1 is wrong", "alice", "COLLABORATOR"),
-                        _node("T2", "a b/c.py", 1, "spaced line 1 is wrong", "bob", "MEMBER"),
-                        _node("T3", "old name.py", 2, "this file is misnamed", "carol",
-                              "OWNER")]
+        self.threads = [_node("T1", "c.py", 1, "c line 1 is wrong", "lint-bot"),
+                        _node("T2", "a b/c.py", 1, "spaced line 1 is wrong", "codex-bot"),
+                        _node("T3", "old name.py", 2, "this file is misnamed", "style-bot")]
         self.round_edits = {"a b/c.py": {1: "spaced line 1 - round fix"},
                             "my file.py": {1: "mine - round fix"}}
         self.round_renames = {"old name.py": "new name.py"}
@@ -923,7 +938,7 @@ class RemarkRoundOpen(unittest.TestCase):
         sb._git(self.fx.primary, "commit", "-q", "-m", "a file git quotes")
         sb._git(self.fx.primary, "push", "-q", "origin", "main")
         self.threads = [T1, T2, _node("T3", "old café.py", 2, "this file is misnamed",
-                                      "carol", "OWNER")]
+                                      "style-bot")]
         self.round_copies = {"a.py": "a copy.py"}
         self.round_renames = {"old café.py": "new café.py"}
         self.round_edits = {"a copy.py": {1: "a line 1 - only in the copy"}}
@@ -973,7 +988,6 @@ class RemarkRoundOpen(unittest.TestCase):
         held = [x for x in self.err.splitlines() if x.startswith(f"flow: issue_{Q} held")]
         self.assertEqual(len(held), 1, self.err)
         self.assertIn(ACCEPTED, held[0])
-        self.assertNotIn("pdca publish", self.err)
         self.assertNotEqual(self.rc, 0)
         # drift still checks the base plus the accepted attempt the PR holds.
         row = drift.check_bundle(self.cfg, d)
@@ -1142,7 +1156,7 @@ class RemarkRoundOpen(unittest.TestCase):
 
     def test_j_a_dry_run_opens_no_round(self):
         # All a round needs is there but a real run: P's PR branch is on origin, its publish
-        # record names that PR, and a remarks file for it names collaborator threads (a
+        # record names that PR, and a remarks file for it names review-bot threads (a
         # dry run never removes one). The dry run's merge step stops on P, so the flow
         # reaches its dry-run check with P as the bundle the wave stopped on.
         d = self._plan(P)
@@ -1153,9 +1167,9 @@ class RemarkRoundOpen(unittest.TestCase):
             "pr_url": PR}), encoding="utf-8")
         remarks = json.dumps({"pr_url": PR, "threads": [
             {"id": "T1", "path": "a.py", "line": 12, "outdated": False, "body": "x",
-             "author": "alice", "url": "", "association": "COLLABORATOR"},
+             "author": "lint-bot", "url": "", "author_type": "Bot"},
             {"id": "T2", "path": "b.py", "line": 3, "outdated": False, "body": "y",
-             "author": "bob", "url": "", "association": "MEMBER"}]})
+             "author": "codex-bot", "url": "", "author_type": "Bot"}]})
         (d / REMARKS).write_text(remarks, encoding="utf-8")
         dry: list[bool] = []
 
@@ -1268,26 +1282,26 @@ class RemarkRoundOpen(unittest.TestCase):
             rc = cli._contribcheck(self.cfg, argparse.Namespace(issue_id=P, no_issue=False))
         return rc, err.getvalue()
 
-    def test_m_after_the_rounds_accept_every_publish_refuses_with_the_round_line(self):
+    def test_m_a_round_accepted_later_is_never_published_the_ordinary_way(self):
         self.decisions[P] = ["accept"] + [None] * 5     # the round waits for its sign-off
         d = self._scenario()
         self.assertEqual(state.state(d), state.AWAITING_SIGNOFF, self.err)
         self.assertIn(f"remark round 1 for {PR} is AWAITING_SIGNOFF", self.err)
-        # A re-run signs it off (accept): its publish loop refuses it, and nothing merges.
+        # A re-run signs it off (accept): its publish loop skips it, and nothing merges.
         self.publishes.clear()
         self.drafts.clear()
         self.decisions[P] = ["accept"]
         self._run([P, Q])
         self.assertEqual(state.state(d), state.COMPLETE, self.err)
-        self.assertIn(f"flow: issue_{P} — {ACCEPTED_LINE}; NOT published this run.", self.err)
+        self.assertIn(f"flow: issue_{P} — {ACCEPTED_LINE}.", self.err)
         self.assertEqual((self.publishes, self.drafts), ([], []))
         run = self.calls[self.mark:]
         self.assertEqual([c for c in run if c[:3] == ["gh", "pr", "merge"]], [])
         self.assertEqual([c for c in run if c[:1] == ["git"] and "push" in c], [])
         self.assertEqual(self._first_builds(Q), [])
-        self.assertNotIn("pdca publish", self.err)
         self.assertNotEqual(self.rc, 0)
-        # `pdca publish P`: refused before anything is drafted, cut or pushed.
+        # `pdca publish P` takes the round's own publish (#922), never the ordinary one: here
+        # it stops at its open-PR step, before anything is drafted, cut or pushed.
         (d / publish.COMMIT_MSG).write_text(f"fix\n\nFixes #{P}\n", encoding="utf-8")
         (d / publish.PR_BODY).write_text(f"**User impact:** x\n\nFixes #{P}\n",
                                          encoding="utf-8")
@@ -1297,7 +1311,7 @@ class RemarkRoundOpen(unittest.TestCase):
                 redirect_stdout(io.StringIO()):
             rc = publish.publish(self.cfg, P, by="T", today=TODAY)
         self.assertNotEqual(rc, 0)
-        self.assertIn(ACCEPTED, err.getvalue())
+        self.assertIn(OPEN_PR_STOP, err.getvalue())
         calls = self.calls[mark:]
         self.assertEqual([c for c in calls if "push" in c or "checkout" in c
                           or c[:3] == ["gh", "pr", "create"]], [])
@@ -1312,11 +1326,9 @@ class RemarkRoundOpen(unittest.TestCase):
         self.assertEqual(state.state(d), state.COMPLETE, self.err)
         line = [x for x in self.err.splitlines()
                 if ACCEPTED in x and not x.startswith(f"flow: issue_{Q} held")]
-        self.assertEqual(line, [f"flow: issue_{P} — {ACCEPTED_LINE}; NOT published this run."],
-                         self.err)
+        self.assertEqual(line, [f"flow: issue_{P} — {ACCEPTED_LINE}."], self.err)
         self.assertEqual(self.holds.get(P), "round")
         self.assertNotEqual(self.rc, 0)
-        self.assertNotIn("pdca publish", self.err)
         run = self.calls[self.mark:]
         self.assertEqual([c for c in run if c[:3] == ["gh", "pr", "merge"]], [])
         self.assertEqual([c for c in run if c[:1] == ["git"] and "push" in c], [])
@@ -1369,18 +1381,20 @@ class RemarkRoundOpen(unittest.TestCase):
         self.assertEqual(state.state(d), state.COMPLETE, said)
         self.assertEqual(rc, 1, said)
         self.assertIn(f"signoff: issue_{P} — {ACCEPTED_LINE}; nothing was pushed.", said)
-        self.assertNotIn("pdca publish", said)
         self.assertTrue((d / ROUND).is_file())
         self._nothing_left_the_bundle()
 
-    def test_m_signoff_accept_on_a_live_round_says_so_once_and_fails(self):
+    def test_m_signoff_accept_on_a_live_round_goes_on_to_its_publish(self):
+        # Like any accept (#922): here the round's publish stops at its open-PR step, and its
+        # own line is the only one that says so.
         d = self._round_at_signoff()
         rc, said = self._signoff_cli("accept", no_publish=False)
         self.assertEqual(state.state(d), state.COMPLETE, said)
         self.assertEqual(rc, 1, said)
-        self.assertEqual([x for x in said.splitlines() if ACCEPTED in x],
-                         [f"signoff: issue_{P} — {ACCEPTED_LINE}; nothing was pushed."], said)
-        self.assertNotIn("pdca publish", said)
+        self.assertEqual([x for x in said.splitlines() if x.startswith(OPEN_PR_STOP)],
+                         [x for x in said.splitlines() if "publish" in x], said)
+        self.assertEqual(len([x for x in said.splitlines() if x.startswith(OPEN_PR_STOP)]), 1)
+        self.assertNotIn(f"signoff: issue_{P}", said)
         self._nothing_left_the_bundle()
 
     def test_m_signoff_discontinue_on_a_live_round_names_the_open_pr_and_fails(self):
@@ -1406,20 +1420,18 @@ class RemarkRoundOpen(unittest.TestCase):
         self.assertNotIn("rm -rf", self.err)
         self.assertNotEqual(self.rc, 0)
 
-    def test_m_an_accepted_rounds_line_says_the_round_ends_only_after_its_pr_merged(self):
-        # Nothing in this stage ends a live round. Its stop line says how it ends — its
-        # record deleted, and only once the PR has merged — and what deleting it earlier
-        # does, without suggesting `pdca publish`; so does a later run's hold line for Q.
+    def test_m_an_accepted_round_not_on_its_pr_says_publish_pushes_it(self):
+        # Its publish stopped (no open PR here): the stop line says so and points at that
+        # publish's line, without the round's line, which would say `pdca publish` pushes it;
+        # a later run's hold line for Q carries the round's line, which says just that.
         self._scenario()
-        stop = [x for x in self.err.splitlines() if ACCEPTED in x]
+        stop = [x for x in self.err.splitlines() if NOT_PUBLISHED in x]
         self.assertEqual(len(stop), 1, self.err)
-        self.assertIn(ACCEPTED_LINE, stop[0])
-        self.assertNotIn("pdca publish", stop[0])
+        self.assertNotIn(ACCEPTED, stop[0])
         self._run([P, Q])
         held = [x for x in self.err.splitlines() if x.startswith(f"flow: issue_{Q} held")]
         self.assertEqual(len(held), 1, self.err)
         self.assertIn(ACCEPTED_LINE, held[0])
-        self.assertNotIn("pdca publish", held[0])
 
     def test_m_cleanup_and_revert_leave_a_round_with_an_empty_delta_alone(self):
         # The round declines every thread and changes nothing, and is accepted: patch.diff
@@ -1427,17 +1439,19 @@ class RemarkRoundOpen(unittest.TestCase):
         self.round_edits = {}
         self.responses = {"T1": {"addressed": False, "reply": "Kept: the loop stops at 20."},
                           "T2": {"addressed": False, "reply": "Kept: the new default stays."}}
+        # Its publish (#922) records it as done with no code change, which needs no PR.
         d = self._scenario()
         self.assertEqual(state.state(d), state.COMPLETE, self.err)
         self.assertEqual((d / "patch.diff").read_text(encoding="utf-8"), "")
+        self.assertIn(NO_CHANGE, self.err)
         for host in ("OPEN", "MERGED"):
             if host == "MERGED":
                 self.fx._merge_pr(P)
                 self.merged_prs.add(P)
             with self.subTest(pr=host, command="cleanup --apply"):
-                self._cleanup_leaves_the_round_alone(d)
+                self._cleanup_leaves_the_round_alone(d, NO_CHANGE)
             with self.subTest(pr=host, command="revert"):
-                self._revert_refuses_the_round(d)
+                self._revert_refuses_the_round(d, NO_CHANGE)
 
     def test_n_the_accepted_attempt_a_round_archives_is_no_round_spent(self):
         # One rejected attempt, then the accepted one, which the round archives: one round
@@ -1485,7 +1499,7 @@ class RemarkRoundOpen(unittest.TestCase):
         self.assertEqual(signoff.outcome_token(d / "iteration-v2" / "SUMMARY.md"),
                          "iterated-to-Do")
         self.assertIn("## Remark round 1 — carry-forward", builds[1]["brief"])
-        self.assertIn(ACCEPTED, self.err)
+        self.assertIn(NOT_PUBLISHED, self.err)
         # One round spent (the rejected delta); the accepted attempt archived is not one.
         rebuilt = [s for s in self.signoffs if s.in_round]
         self.assertEqual(len(rebuilt), 2)
@@ -1512,19 +1526,18 @@ class RemarkRoundOpen(unittest.TestCase):
         again = builds[1]
         self.assertNotIn("## Remark round", again["brief"])
         self.assertEqual(again["head"], self.head_at_refusal)
-        for part in ("`T1` — a.py:12 by alice", T1["comments"]["nodes"][0]["body"],
-                     "`T2` — b.py:3 by bob", T2["comments"]["nodes"][0]["body"], RESPONSES):
+        for part in ("`T1` — a.py:12 by lint-bot", T1["comments"]["nodes"][0]["body"],
+                     "`T2` — b.py:3 by codex-bot", T2["comments"]["nodes"][0]["body"],
+                     RESPONSES):
             self.assertIn(part, again["prompt"])
-        self.assertNotIn("`T9`", again["prompt"])
-        self.assertNotIn(T9_BODY, again["prompt"])
         rebuilt = [s for s in self.signoffs if s.in_round]
         self.assertEqual(len(rebuilt), 2)
         self.assertEqual(self._plan_of(rebuilt[1].summary), {"T1": "addressed", "T2": "declined"})
-        self.assertIn(ACCEPTED, self.err)
+        self.assertIn(NOT_PUBLISHED, self.err)
 
     def test_p_a_stale_remarks_file_on_a_sibling_opens_no_round(self):
         # S is P's wave-0 sibling. This run builds, accepts and pushes it, and its record
-        # names the very PR a stale remarks file in it names, with a collaborator thread:
+        # names the very PR a stale remarks file in it names, with a review-bot thread:
         # all a round on S needs. But the wave stops on P (a failing check), before S is
         # attempted, so S's file is an earlier run's and opens nothing.
         d = self._plan(P)
@@ -1533,7 +1546,7 @@ class RemarkRoundOpen(unittest.TestCase):
         s_pr = f"https://example.test/pr/{S}"
         (s / REMARKS).write_text(json.dumps({"pr_url": s_pr, "threads": [
             {"id": "T7", "path": "c.py", "line": 2, "outdated": False, "body": "old",
-             "author": "alice", "url": "", "association": "COLLABORATOR"}]}),
+             "author": "lint-bot", "url": "", "author_type": "Bot"}]}),
             encoding="utf-8")
         self.rollup[P] = "fail"                          # the wave stops on P, not on S
         self._run([P, S, Q])
@@ -1560,7 +1573,7 @@ class RemarkRoundOpen(unittest.TestCase):
             (p / REMARKS).write_text(json.dumps({
                 "pr_url": "https://example.test/pr/999", "threads": [
                     {"id": "T1", "path": "a.py", "line": 12, "outdated": False, "body": "x",
-                     "author": "alice", "url": "", "association": "COLLABORATOR"}]}),
+                     "author": "lint-bot", "url": "", "author_type": "Bot"}]}),
                 encoding="utf-8")
             if kw.get("stopped") is not None:
                 kw["stopped"].append(p)
@@ -1872,9 +1885,9 @@ class RemarkRoundOpen(unittest.TestCase):
 
     def test_s_an_outdated_and_a_whole_file_thread_are_eligible(self):
         self.threads = [
-            _node("T1", "a.py", None, "a.py:12 reads past the end", "alice", "COLLABORATOR",
+            _node("T1", "a.py", None, "a.py:12 reads past the end", "lint-bot",
                   outdated=True, original=12),
-            _node("T5", "a.py", None, "this file needs a header", "dana", "OWNER"),
+            _node("T5", "a.py", None, "this file needs a header", "docs-bot"),
             T2]
         self.responses = {"T1": {"addressed": True, "reply": "Fixed."},
                           "T5": {"addressed": True, "reply": "Header added."},
@@ -1886,8 +1899,8 @@ class RemarkRoundOpen(unittest.TestCase):
                          ("open", 12, True))
         self.assertEqual((rec["T5"]["status"], rec["T5"]["line"]), ("open", None))
         brief = (d / "brief.md").read_text(encoding="utf-8")
-        self.assertIn("`T1` — a.py:12 (outdated) by alice", brief)
-        self.assertIn("`T5` — a.py by dana", brief)
+        self.assertIn("`T1` — a.py:12 (outdated) by lint-bot", brief)
+        self.assertIn("`T5` — a.py by docs-bot", brief)
         self.assertEqual(self._plan_of(self._round_summary()),
                          {"T1": "held", "T5": "addressed", "T2": "declined"})
 

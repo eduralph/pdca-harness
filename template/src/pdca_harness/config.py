@@ -395,12 +395,19 @@ class Config:
     # would be the weakest reading and merge what the operator configured against).
     expected_checks_error: str = ""
     # Merge-mode remark rounds (issue #921): how many times a non-final wave's accepted
-    # bundle may be reopened, on its PR's own head, when collaborator review threads block
-    # its merge (the remarks issue #838 names). 0 (the default) is off: the run stops on the
-    # remarks as before. Counted per bundle in its `remark-round.json`, the only cap on
-    # rounds; auto-iterate's budget is not touched. A value that is not a non-negative
-    # integer warns and reads as 0. [driver].remark_rounds.
+    # bundle may be reopened, on its PR's own head, when review-bot threads block its merge
+    # (the remarks issue #838 names). 0 (the default) is off: the run stops on the remarks
+    # as before. Counted per bundle in its `remark-round.json`, the only cap on rounds;
+    # auto-iterate's budget is not touched. A value that is not a non-negative integer
+    # warns and reads as 0. [driver].remark_rounds.
     remark_rounds: int = 0
+    # The review bots whose threads open a remark round (issue #922): logins, matched
+    # ignoring case and a trailing `[bot]`, and only for an author the host reports as a Bot.
+    # Empty (the default) names none, so no round opens: rounds need this and
+    # `remark_rounds` both. A thread or a change request from anyone else holds the PR for
+    # the human. A value that is not a list of logins warns and reads as empty.
+    # [driver].review_bots.
+    review_bots: tuple[str, ...] = ()
     # Optional integration re-gate (#wave-model): after each wave folds onto the
     # integration branch, run the repo-scoped gates over that tip before the next wave
     # builds on it, so a combination that is red though each fix was green alone STOPs the
@@ -779,6 +786,20 @@ class Config:
             print(f"config: [driver].remark_rounds must be a non-negative integer, got "
                   f"{remark_rounds!r} — using 0 (remark rounds off)", file=sys.stderr)
             remark_rounds = 0
+        # The review bots whose threads open a round (issue #922). The whole value is read
+        # or none of it: a list whose every entry can match a login, read as the matching
+        # reads it (`review_bot_login`: surrounding whitespace, case and a trailing `[bot]`
+        # dropped, and nothing left or whitespace inside means it never can). Anything else
+        # warns and reads as empty, as remark_rounds above falls back: no thread is then a
+        # bot's, so no round opens.
+        review_bots = driver_cfg.get("review_bots", [])
+        if not isinstance(review_bots, list) or not all(
+                isinstance(b, str) and review_bot_login(b) for b in review_bots):
+            print(f"config: [driver].review_bots must be a list of review-bot logins (each "
+                  f"one a login once case, surrounding whitespace and a trailing [bot] are "
+                  f"dropped, with no whitespace inside), got {review_bots!r} — using [] (no "
+                  "thread is a review bot's, so no remark round opens)", file=sys.stderr)
+            review_bots = []
         # Checks a complete rollup must contain (issue #621). A bad value warns and fails
         # CLOSED like merge_requires above — never to the empty default, the weakest reading.
         expected_checks, expected_checks_error = _expected_checks(
@@ -895,6 +916,7 @@ class Config:
             merge_requires=merge_requires,
             merge_wait_secs=merge_wait_secs,
             remark_rounds=remark_rounds,
+            review_bots=tuple(review_bots),
             expected_checks=expected_checks,
             expected_checks_error=expected_checks_error,
             regate_between_waves=regate_between_waves,
@@ -918,6 +940,16 @@ class Config:
                 "subject", "chore(records): record {n} result bundle(s)")),
             records_issue=str(records_cfg.get("issue", "") or ""),
         )
+
+
+def review_bot_login(login: str) -> str:
+    """``login`` in the form review bots are matched in (issue #922): surrounding whitespace,
+    case and a trailing ``[bot]`` (the REST form, ``name[bot]``; GraphQL gives the bare
+    ``name``) dropped. "" when what is left can never match a login: nothing, or whitespace
+    inside it. The one reading of a login both ``[driver].review_bots``' check below and
+    ``remark_round``'s matching use, so an entry the check takes is one that can match."""
+    bare = login.strip().lower().removesuffix("[bot]")
+    return "" if not bare or any(c.isspace() for c in bare) else bare
 
 
 def _expected_checks(raw: object) -> tuple[tuple[str, ...], str]:

@@ -494,8 +494,8 @@ def flow(
         # is LOUD (#97) — never silently leave a COMPLETE bundle unpublished.
         rc = publish.publish(cfg, issue_id, dry_run=cfg.publisher.mode == "stub",
                              by=by, today=today, skip_if_no_target=True)
-        # A remark round (#921) is refused by publish with its own way out; `pdca publish`
-        # would only refuse again.
+        # A remark round's publish (#922) says on its own line why it stopped, and whether
+        # `pdca publish` is the retry (it is not once the round's commit is on the PR).
         if rc and not remark_round.live(d):
             print(f"flow: issue_{issue_id} is COMPLETE but publish did not complete "
                   f"(rc {rc}) — NOT published; run `pdca publish {issue_id}`.", file=sys.stderr)
@@ -664,8 +664,8 @@ def _publish_bundle(cfg: Config, d: Path, *, by: str, today: str,
         cfg, d.name.removeprefix("issue_"),
         dry_run=cfg.publisher.mode == "stub", by=by, today=today, skip_if_no_target=True,
         texts_prevalidated=texts_prevalidated))
-    # A remark round (#921) is refused by publish with its own way out, which `pdca publish`
-    # would only repeat.
+    # A remark round's publish (#922) says on its own line why it stopped, and whether
+    # `pdca publish` is the retry (it is not once the round's commit is on the PR).
     if rc not in (0, None) and not remark_round.live(d):  # None ⇒ _isolate logged it
         print(f"flow: {d.name} is COMPLETE but publish did not complete (rc {rc}) — NOT "
               f"published; run `pdca publish {d.name.removeprefix('issue_')}`.", file=sys.stderr)
@@ -705,8 +705,9 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
     ready, whichever field names it — e.g. a prereq DISCONTINUED earlier never gets there,
     and its dependent is skipped loudly. Nor is one with a live remark round (#921), whatever
     its state, in this batch or not, publishing or not: its ``patch.diff`` is a delta on its
-    PR's head that no PR holds yet, so no base of this run has that work, even once the PR
-    is merged by hand. Its dependent is held, named on ONE stderr line with the round's own
+    PR's head that is merged nowhere yet (pushed to the PR or not, #922), so no base of this
+    run has that work, even once the PR is merged by hand. Its dependent is held, named on
+    ONE stderr line with the round's own
     line (``remark_round.line``). A prerequisite **in this run's batch** is carried
     into the dependent's base by the wave fold once it reaches COMPLETE (it sits in an
     earlier wave), so COMPLETE is the bar. An in-batch prerequisite named in ``held``
@@ -904,8 +905,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
         if rounds:
             ways = "; ".join(f"{n}: {why}" for n, why in rounds)
             print(f"flow: {d.name} held — prerequisite(s) {', '.join(n for n, _w in rounds)} "
-                  f"in a live remark round, whose work no PR holds yet; not built on a base "
-                  f"missing it. {ways}.", file=sys.stderr)
+                  f"in a live remark round, whose work is merged nowhere yet; not built on a "
+                  f"base missing it. {ways}.", file=sys.stderr)
         if unmerged and in_merge_mode:
             ways = "; ".join(f"{n}: " + (merge_notes.get((n, repo, base))
                                          or _merge_way_out(cfg, n, d.name, repo, base))
@@ -1825,6 +1826,11 @@ def _merge_prereqs(cfg: Config, bundles: list[Path], claims: drive_claim.Run | N
         held = f"{', '.join(who)} {'is' if len(who) == 1 else 'are'} held"
         rc = _isolate(p, "merge before wave 0", lambda: merge._merge_one(
             cfg, p, dry_run=False, method=cfg.merge_method, fetched=fetched, held=held))
+        # A live remark round, refused above whatever its PR reads (#921): at its cap, no
+        # further round opens for it, as the trigger says of a wave's stop (#922).
+        capped = remark_round.exhausted(cfg, p) if rc and remark_round.live(p) else ""
+        if capped:
+            print(f"flow: {name} — {capped}.", file=sys.stderr)
         if rc is None:      # `_isolate` caught and named an error: `_merge_one` decided nothing
             notes[name, repo, base] = ("its merge stopped on an error, see its `flow:` line "
                                        "above; fix that, then re-run")
@@ -3230,8 +3236,9 @@ def _drive_and_act(
     built (:func:`_bundle_bases`): not driven this run — PLANNED in the map, for one not
     built yet — and named on stderr with the cause and the fix. ``"round"`` (#921) for one
     with a live remark round this run met: reopened here after its PR was blocked by review
-    threads, or driven in a wave, with or without publishing, whatever its sign-off — no
-    publish of a round exists yet, so none is published or merged. ``cli._flow`` reads this
+    threads, or driven in a wave, with or without publishing, whatever its sign-off — a round
+    reopened here is published onto its PR once accepted (#922), but none is merged while it
+    is live. ``cli._flow`` reads this
     to exit 3 instead of 0 (``cli._results_rc``). It
     also names each bundle whose carried branch was rewritten after the run's last fold
     read it (#695, :func:`_report_late_rewrites`), a branch a base's refusal named included:
@@ -3500,15 +3507,15 @@ def _drive_and_act(
         complete = [d for d in sorted(runnable, key=lambda p: p.name)
                     if state.state(d) == state.COMPLETE]
         _audit_wave_overlap(complete)
-        # A remark round (#921) this wave drove, publishing or not (`--no-publish`): whatever
-        # its sign-off, its work is on no PR, and no publish of a round exists yet — its
+        # A remark round (#921) this wave drove, publishing or not (`--no-publish`): its
         # patch.diff is a delta on the PR's head, and publishing it the ordinary way would
-        # overwrite the PR with the delta. Named with the state it is in and the round's way
-        # out, held, so the run does not end as a success; never drafted or published.
+        # overwrite the PR with the delta. Only the round this run reopened is published, by
+        # the merge step below (`publish.publish`'s round path, #922); this one is named with
+        # the round's line, which says whether its commit is on the PR yet and the way on,
+        # and held, so the run does not end as a success; never drafted or published here.
         for d in sorted(runnable, key=lambda p: p.name):
             if remark_round.live(d) and d.name not in held_round:
-                done = "; NOT published this run" if state.state(d) == state.COMPLETE else ""
-                print(f"flow: {d.name} — {remark_round.line(d)}{done}.", file=sys.stderr)
+                print(f"flow: {d.name} — {remark_round.line(d)}.", file=sys.stderr)
                 published.add(d.name)
                 held_round.add(d.name)
         if do_publish:
@@ -3579,17 +3586,36 @@ def _drive_and_act(
                               file=sys.stderr)
                         break
                     # P reads PLANNED again: re-driven here, in this wave, through the same
-                    # Do → Check → sign-off as any bundle, on its PR's head. Whatever its
-                    # sign-off, nothing merges again in this run and no later wave runs:
-                    # the round's commit reaches no PR before #922.
+                    # Do → Check → sign-off as any bundle, on its PR's head. Accepted, its
+                    # round is published (#922): one commit pushed onto its PR's branch, by
+                    # the real publisher this path always has (`dry` is False here) and with
+                    # no `texts_prevalidated`, so the round gates its own texts once. Whatever
+                    # its sign-off, nothing merges again in this run and no later wave runs:
+                    # the round's threads are still open (#923).
                     held_round.add(p.name)
                     spent += _drive_wave(cfg, [p], by=by, today=today,
                                          max_passes=min(allowance, budget - spent))
                     rest = complete[complete.index(p) + 1:]   # merge_wave never got to them
-                    print(f"flow: wave {k} stopped on {p.name}'s remark round — "
-                          f"{remark_round.line(p)}. Not merged (never attempted): "
-                          f"{', '.join(d.name for d in rest) or 'none'}. Ignored "
-                          f"(non-collaborator): {remark_round.ignored_threads(p)}. "
+                    pid = p.name.removeprefix("issue_")
+                    outcome = remark_round.line(p)
+                    if state.state(p) == state.COMPLETE:
+                        try:
+                            rc = publish.publish(cfg, pid, dry_run=cfg.publisher.mode == "stub",
+                                                 by=by, today=today)
+                        except Exception as exc:  # noqa: BLE001 — named; the run stops anyway
+                            outcome = (f"its round publish raised ({type(exc).__name__}: "
+                                       f"{exc}); check {remark_round.RECORD}'s "
+                                       f"`{remark_round.PUSHED}` before running "
+                                       f"`pdca publish {pid}`")
+                        else:
+                            # Not `line(p)` after a failure: once the commit is pushed and a
+                            # record write failed, publish says not to re-run it, and the
+                            # line would say `pdca publish` pushes it.
+                            outcome = (remark_round.line(p) if rc == 0 else "its round "
+                                       "publish did not complete — see the publish line above")
+                    print(f"flow: wave {k} stopped on {p.name}'s remark round — {outcome}. "
+                          f"Not merged (never attempted): "
+                          f"{', '.join(d.name for d in rest) or 'none'}. "
                           f"STOPPING — later waves not run.", file=sys.stderr)
                     break
             else:  # default: stack — fold onto a per-target integration branch

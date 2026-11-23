@@ -545,7 +545,8 @@ def _refuse(d: Path, pr_url: str, why: str, held: str | None = None,
 # its URL: GraphQL `resource(url:)` takes the URL `publish.json` records, so no owner /
 # repo / number has to be parsed out of it (only the host, to send the query there). The
 # first comment of a thread is its remark. The host serves the threads at most 100 a page;
-# `$cursor` asks for the page after one.
+# `$cursor` asks for the page after one. `__typename` is the kind of account the author is
+# (`User`, `Bot`, …), which a remark round reads (issue #922).
 _THREADS_QUERY = """\
 query($url: URI!, $cursor: String) {
   resource(url: $url) {
@@ -554,8 +555,27 @@ query($url: URI!, $cursor: String) {
         pageInfo { hasNextPage endCursor }
         nodes {
           id isResolved isOutdated path line originalLine
-          comments(first: 1) { nodes { body url authorAssociation author { login } } }
+          comments(first: 1) {
+            nodes { body url authorAssociation author { __typename login } }
+          }
         }
+      }
+    }
+  }
+}"""
+
+# The reviews of a PR that still stand (issue #922): `latestOpinionatedReviews` keeps each
+# reviewer's latest review that approved or requested changes, so a COMMENTED review — which
+# a reply in a thread is stored as — does not hide an earlier CHANGES_REQUESTED, as it does
+# in `latestReviews` (one entry per reviewer, whatever its state). No `writersOnly`: a change
+# request from someone who cannot write to the repo holds a remark round too.
+_CHANGE_REQUESTS_QUERY = """\
+query($url: URI!) {
+  resource(url: $url) {
+    ... on PullRequest {
+      latestOpinionatedReviews(first: 100) {
+        pageInfo { hasNextPage }
+        nodes { state author { __typename login } }
       }
     }
   }
@@ -586,10 +606,19 @@ def _login(node: dict) -> str:
     return str(author.get("login") or "") if isinstance(author, dict) else ""
 
 
+def _author_type(node: dict) -> str | None:
+    """The kind of account ``node``'s ``author`` is (GraphQL ``__typename``: ``User``,
+    ``Bot``, …), or None when the host gives none (a deleted account, an older answer)."""
+    author = node.get("author")
+    kind = author.get("__typename") if isinstance(author, dict) else None
+    return kind if isinstance(kind, str) else None
+
+
 def _review_threads(pr_url: str) -> list[dict] | None:
     """PR ``pr_url``'s UNRESOLVED review threads (``gh api graphql``), one dict per thread
-    — ``id``, ``path``, ``line``, ``outdated``, ``body``, ``author``, ``url``, and
-    ``association`` (the ``authorAssociation`` of its first comment, issue #921) — or None when
+    — ``id``, ``path``, ``line``, ``outdated``, ``body``, ``author``, ``url``,
+    ``association`` (the ``authorAssociation`` of its first comment, issue #921) and
+    ``author_type`` (the kind of account that comment's author is, issue #922) — or None when
     a query fails or its answer cannot be read, whatever earlier pages held: None means
     unknown, and a list always means all of them. It never raises, because it runs while the
     PR is still marked ready. Every page is read, each one asked for with the end cursor of
@@ -633,10 +662,14 @@ def _review_threads(pr_url: str) -> list[dict] | None:
                     "url": first.get("url") or "",
                     # Issue #921: the first comment's author's relation to the repo, as
                     # the host reports it (OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, …),
-                    # or None when it gave none. Only a remark round reads it.
+                    # or None when it gave none. Kept for the reader of the file; no
+                    # remark round decides on it (issue #922).
                     "association": (first.get("authorAssociation")
                                     if isinstance(first.get("authorAssociation"), str)
                                     else None),
+                    # Issue #922: a remark round opens only for a thread whose author the
+                    # host reports as a Bot and `[driver].review_bots` lists.
+                    "author_type": _author_type(first),
                 })
             more, cursor = conn["pageInfo"].get("hasNextPage"), conn["pageInfo"].get("endCursor")
             if not more:
@@ -647,6 +680,59 @@ def _review_threads(pr_url: str) -> list[dict] | None:
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         # A URL that cannot be parsed, `gh` missing, or an answer that is not the shape the
         # query asks for.
+        return None
+
+
+def _standing_review(node: object) -> tuple[str, dict] | None:
+    """``(state, {"login", "type"})`` of one ``latestOpinionatedReviews`` node, or None when
+    it cannot be read: not an object, a ``state`` that is not a string, no ``author``, or an
+    author that is neither null (a deleted account: ``login`` "", ``type`` None) nor an
+    object with a string ``login`` and ``__typename`` — the fields the query asks for."""
+    if not (isinstance(node, dict) and isinstance(node.get("state"), str)
+            and "author" in node):
+        return None
+    author = node["author"]
+    if author is None:
+        return node["state"], {"login": "", "type": None}
+    if not (isinstance(author, dict) and isinstance(author.get("login"), str)
+            and isinstance(author.get("__typename"), str)):
+        return None
+    return node["state"], {"login": author["login"], "type": author["__typename"]}
+
+
+def change_requests(pr_url: str) -> list[dict] | None:
+    """The change requests that still stand on PR ``pr_url`` (issue #922): one
+    ``{"login", "type"}`` per CHANGES_REQUESTED review in its ``latestOpinionatedReviews``
+    (``login`` "" for a deleted account, ``type`` its ``__typename`` or None), read with
+    ``gh api graphql`` on the host in ``pr_url`` as :func:`_review_threads` reads the threads.
+    ``[]`` when none stands. None when it is unknown: the query fails, its answer cannot be
+    read (``nodes`` not a list, or any node :func:`_standing_review` cannot read, whatever its
+    state may have been), or it reports a next page, which this does not follow — never
+    "none".
+
+    Only a remark round asks (``remark_round.open_round``, at its hold, and nowhere before
+    it), so a merge with rounds off makes no such call; ``_remarks_block`` and the
+    ``merge-remarks.json`` it writes go on reading ``latestReviews``. Never raises."""
+    try:
+        host = urlsplit(pr_url).hostname
+        if not host:
+            return None
+        r = subprocess.run(["gh", "api", "graphql", "--hostname", host,
+                            "-f", f"query={_CHANGE_REQUESTS_QUERY}", "-f", f"url={pr_url}"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return None
+        conn = json.loads(r.stdout or "")["data"]["resource"]["latestOpinionatedReviews"]
+        if conn["pageInfo"].get("hasNextPage") is not False:
+            return None
+        nodes = conn["nodes"]
+        if not isinstance(nodes, list):
+            return None
+        read = [_standing_review(n) for n in nodes]
+        if any(x is None for x in read):
+            return None
+        return [who for st, who in read if st == "CHANGES_REQUESTED"]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 
 
@@ -783,14 +869,16 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
     if state.state(d) != state.COMPLETE:
         return 0  # not accepted — nothing of this bundle's to merge
     # Issue #921: a bundle with a live remark round holds, as its patch.diff, a delta built
-    # on its PR's head that nothing has pushed yet, so its PR's head is the pre-round one.
-    # Readying or merging that PR would land the very head the remarks blocked, so it is
-    # refused before any `gh` call, in a dry run too, and before the remarks file is touched.
-    # It comes before the no-fix return below: a round that changed nothing (every thread
-    # declined) has an empty delta, yet its PR still holds the accepted work, unmerged.
+    # on its PR's head. Until the round's publish pushes it (#922) the PR's head is the
+    # pre-round one, and even once it is pushed the round's threads are still open: nothing
+    # here replies to or resolves them (#923). Readying or merging that PR would land a head
+    # the remarks still block, so it is refused before any `gh` call, in a dry run too, and
+    # before the remarks file is touched, for as long as the round is live. It comes before
+    # the no-fix return below: a round that changed nothing (every thread declined) has an
+    # empty delta, yet its PR still holds the accepted work, unmerged.
     if remark_round.live(d):
         end = _next(held, "STOP: later waves are NOT run.",
-                    "it is held until the round's commit reaches its PR")
+                    "it is held until the round ends")
         print(f"\n!!! merge: {d.name} was NOT merged — it has a live remark round "
               f"({state.state(d)}): {remark_round.line(d)}. {end}\n", file=sys.stderr)
         return 1

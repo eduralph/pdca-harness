@@ -1,26 +1,38 @@
-"""Merge-mode remark rounds, stage one (issue #921, the first child of #840).
+"""Merge-mode remark rounds (issue #921, the first child of #840; #922, the second).
 
 In merge mode a non-final wave's PR can be green and still be refused because review
 threads are open on it; issue #838 names them in ``merge-remarks.json`` and the run stops.
-With ``[driver].remark_rounds`` above 0 (default 0, off) the flow instead **reopens** the
-accepted bundle as a *remark round*: it archives the accepted attempt, records the round in
-``remark-round.json``, appends the collaborator threads to ``brief.md`` and drives the
-bundle again, built on the PR's own head. This stage stops at the round's sign-off: it
-pushes, replies to, resolves and merges nothing. A later stage (#922) pushes the round's
-commit; until then :func:`line` is the one sentence every refusal of a round bundle gives,
-and nothing here ends a live round: the human deletes its record, and only once the PR has
-merged (:data:`ENDS`, which an accepted round's line carries).
+With ``[driver].remark_rounds`` above 0 (default 0, off) and ``[driver].review_bots`` naming
+the review bots, the flow instead **reopens** the accepted bundle as a *remark round* when
+every remark on its PR is a review bot's: it archives the accepted attempt, records the
+round in ``remark-round.json``, appends the bots' threads to ``brief.md`` and drives the
+bundle again, built on the PR's own head. Once the round is accepted, ``publish.publish``
+pushes its ``patch.diff`` as one commit onto the PR's branch (#922); the record's ``pushed``
+entry for the round says that is done (:func:`pushed_entry`). Nothing here replies to,
+resolves or merges anything (#923): :func:`line` is the one sentence every refusal of a
+round bundle gives, and nothing here ends a live round: the human deletes its record, and
+only once the PR has merged (:data:`ENDS`, which the line of a round whose commit is pushed
+carries).
 
 What opens a round (:func:`open_round`), checked in this order, each "no" leaving the run
 exactly as #838 leaves it:
 
 * the knob is above 0, and the bundle ``merge_wave`` stopped on has a ``merge-remarks.json``
-  for the PR its ``publish.json`` records, with a non-empty ``threads`` list;
-* at least one thread is a collaborator's: the first comment's ``authorAssociation`` is
-  exactly OWNER, MEMBER or COLLABORATOR. Any other value, or none, is recorded as
-  ``ignored: non-collaborator``; its body never reaches ``brief.md``;
-* fewer rounds are recorded than the knob allows ("remark rounds exhausted" otherwise), and
-  at least one collaborator thread is new to the record;
+  for the PR its ``publish.json`` records;
+* fewer rounds are recorded than the knob allows ("remark rounds exhausted" otherwise). A
+  later run says that too for a live round at its cap, read from its record alone
+  (:func:`exhausted`), when the merge step refuses the round, in a wave or before wave 0;
+* nothing on the PR is the human's (:func:`_human_remarks`). Every open thread is a review
+  bot's: its first comment's author is a login ``[driver].review_bots`` lists (case and a
+  trailing ``[bot]`` aside) whom the host reports as a ``Bot``. No change request stands but
+  a review bot's (``merge.change_requests``, read there and nowhere before). Threads that
+  could not be read, a thread with no id, a change request by anyone else, one that cannot be
+  read, or a ``reviewDecision`` of CHANGES_REQUESTED with no change request standing hold the
+  PR for the human instead: one line names them (never their text), no round opens, and the
+  run stops as #838 leaves it, the PR unmerged and its dependents held. A person's reply
+  inside a bot thread is not seen (only a thread's first comment is read): #923 reads every
+  comment of a thread before it resolves one or merges;
+* at least one thread is open, and at least one is new to the record;
 * this run pushed the bundle's branch, so its PR holds the patch accepted here (an earlier
   attempt's PR head would leave that patch out of the round);
 * ``[driver].worktree`` is on (the round must build in a worktree on the PR head), and a
@@ -42,9 +54,11 @@ per-fix verifier ``PDCA_BASE = origin/<branch>`` after checking the PR head has 
 ``patch.diff`` (:func:`contribution_patches`), and adds the reply plan to SUMMARY.md
 (:func:`record_reply_plan`) whose texts T4 checks (:func:`reply_problems`). The driver never
 merges its PR, and no dependent is built while the round is live, publishing or not
-(``flow._runnable``; ``merged.merged_into`` reads it as not merged whatever its PR reads),
-since no PR holds the round's work yet. Nothing else may take ``patch.diff``, the round's
-delta, for the contribution either: with ``[driver].worktree`` off a live round is neither
+(``flow._runnable``; ``merged.merged_into`` reads it as not merged whatever its PR reads):
+until its commit is pushed no PR holds the round's work, and once it is, its threads are
+still open. Nothing else may take ``patch.diff``, the round's delta, for the contribution
+either: the round's publish commits it onto ``pinned_head`` alone; with ``[driver].worktree``
+off a live round is neither
 built nor gated (``worktree.ensure`` / ``for_gate`` fail closed with :data:`NEEDS_WORKTREE`),
 nor is it with no worktree to be had for it (``ensure`` / ``for_gate`` /
 ``rebuild_for_gate`` fail closed rather than run in place), ``pdca cleanup`` only reports
@@ -67,7 +81,7 @@ import sys
 from pathlib import Path
 
 from . import state
-from .config import Config
+from .config import Config, review_bot_login
 
 RECORD = state.REMARK_ROUND
 RESPONSES = state.REMARK_RESPONSES
@@ -75,10 +89,14 @@ RESPONSES = state.REMARK_RESPONSES
 # branch to origin (`integrate._published_ref`), and merge mode refuses every other record
 # (`merge._merge_one`, #658) before it can be blocked by remarks.
 REMOTE = "origin"
-# The `authorAssociation` values whose threads open a round (Plan decision 1, #840).
-ELIGIBLE = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 OPEN = "open"
-IGNORED = "ignored: non-collaborator"
+# The account kind (GraphQL `__typename`) a review bot's threads and reviews must carry
+# (#922): a login alone could be a person's who took a listed bot's bare name.
+BOT = "Bot"
+# The record's key for what the round's publish did (#922), keyed by round number as a
+# string: the commit it pushed, or NO_CHANGE for an accepted round with an empty delta.
+PUSHED = "pushed"
+NO_CHANGE = "no-change"
 # A reply is posted as one comment line on the thread: one line, and short.
 MAX_REPLY = 500
 # Why a round needs worktrees: said when one cannot open (:func:`open_round`) and when a
@@ -86,8 +104,8 @@ MAX_REPLY = 500
 NEEDS_WORKTREE = ("a remark round needs [driver].worktree = true — it builds on the PR's own "
                   "head in a worktree, and with worktrees off Do would build on the target "
                   "base")
-# How a live round ends in this stage, which has nothing that ends one (#922, #923): by hand,
-# and only once its PR has merged. Deleted before that, the bundle reads as an ordinary
+# How a live round ends in this stage, which has nothing that ends one (#923): by hand, and
+# only once its PR has merged. Deleted before that, the bundle reads as an ordinary
 # accepted one, whose publish cuts a fresh branch off the base and force-pushes it over the
 # PR (`publish.publish`): patch.diff, the round's delta, without the accepted work.
 ENDS = (f"The round ends only when {RECORD} is deleted, and only after the PR has merged: "
@@ -151,21 +169,58 @@ def _branch(rec: dict) -> str:
     return b if isinstance(b, str) and b else ""
 
 
+def pushed_entry(rec: dict) -> tuple[str | None, str]:
+    """What round record ``rec`` says its current round's publish did (#922): ``(entry,
+    "")``, the entry being the commit it pushed, :data:`NO_CHANGE` (accepted with an empty
+    delta), or None (no entry: not done). ``(None, why)`` when that cannot be read: the
+    record's ``pushed`` is there but not a JSON object, or its entry for ``rounds`` is
+    neither a 40/64-hex sha nor exactly :data:`NO_CHANGE`. The one place "this round is done"
+    is read from; entries for other rounds are history, never read."""
+    if PUSHED not in rec:
+        return None, ""
+    got = rec[PUSHED]
+    if not isinstance(got, dict):
+        return None, f"`{PUSHED}` is {type(got).__name__}, not a JSON object"
+    key = str(rec.get("rounds"))
+    if key not in got:
+        return None, ""
+    entry = got[key]
+    if isinstance(entry, str) and (entry == NO_CHANGE or _SHA.fullmatch(entry)):
+        return entry, ""
+    return None, (f"`{PUSHED}[\"{key}\"]` is {json.dumps(entry)}, neither a commit sha nor "
+                  f"\"{NO_CHANGE}\"")
+
+
 def line(d: Path) -> str:
-    """The one sentence that says what a round bundle is waiting for. No pushing, replying
-    or merging of a round exists yet (#922, #923), so it never advises ``pdca publish``.
-    An accepted round's also says how the round ends (:data:`ENDS`)."""
+    """The one sentence that says what a round bundle is waiting for, keyed on the current
+    round's :func:`pushed_entry` once it is accepted: not pushed yet (``pdca publish`` pushes
+    it), pushed, or accepted with no code change. Replying to and resolving the threads and
+    merging the PR are not built yet (#923), so a round whose publish is done says to do them
+    at the PR, and how the round ends (:data:`ENDS`)."""
     rec = read(d) or {}
     n = rec.get("rounds", "?")
     url = rec.get("pr_url") or "?"
+    iid = d.name.removeprefix("issue_")
     st = state.state(d)
     if st == state.COMPLETE:
-        return (f"remark round {n} for {url} accepted; round publish not available yet — "
-                f"apply patch.diff to {_branch(rec) or '?'} by hand. {ENDS}")
+        entry, bad = pushed_entry(rec)
+        if bad:
+            return (f"remark round {n} for {url}: its {RECORD} `{PUSHED}` entry cannot be "
+                    f"read — check it before running `pdca publish {iid}`")
+        if entry is None:
+            return (f"remark round {n} for {url} accepted; its commit is not on the PR yet — "
+                    f"`pdca publish {iid}` pushes it")
+        rest = ("replying to and resolving its threads and merging are not available yet — "
+                f"do them at the PR. {ENDS}")
+        if entry == NO_CHANGE:
+            return f"remark round {n} for {url} accepted with no code change; {rest}"
+        return (f"remark round {n} for {url}: round commit {entry} pushed to "
+                f"{_branch(rec) or '?'}; {rest}")
     if st == state.DISCONTINUED:
         return (f"remark round {n} for {url} discontinued; the PR is still open and is the "
                 "human's to close")
-    return f"remark round {n} for {url} is {st}; round publish not available yet"
+    return (f"remark round {n} for {url} is {st}; its commit reaches the PR only once the "
+            "round is accepted and published")
 
 
 def _write(path: Path, data: dict) -> None:
@@ -183,9 +238,40 @@ def _write(path: Path, data: dict) -> None:
 
 # -- threads -----------------------------------------------------------------------------
 
-def _eligible(t: dict) -> bool:
-    a = t.get("association")
-    return isinstance(a, str) and a in ELIGIBLE
+def _bare(login: str) -> str:
+    """``login`` as review bots are matched (#922): ``config.review_bot_login``, the reading
+    ``[driver].review_bots`` is checked with, so every entry the config takes can match
+    (surrounding whitespace, case and a trailing ``[bot]`` dropped; "" for one that never
+    can)."""
+    return review_bot_login(login)
+
+
+def _bots(cfg: Config) -> set[str]:
+    """The listed review bots (``[driver].review_bots``), as :func:`_bare` matches them."""
+    listed = getattr(cfg, "review_bots", ())
+    if not isinstance(listed, (list, tuple)):
+        return set()
+    return {_bare(b) for b in listed if isinstance(b, str) and _bare(b)}
+
+
+def _is_bot(login: object, kind: object, bots: set[str]) -> bool:
+    """An author is a review bot's when the host reports it as a :data:`BOT` AND its login
+    is a listed one: the list keeps out any other app installed on the repo, the kind a
+    person whose login is a listed bot's bare name. A deleted account (no login) is not."""
+    return kind == BOT and isinstance(login, str) and bool(login) and _bare(login) in bots
+
+
+def _tid(t: object) -> str:
+    """Thread ``t``'s id, or "" when it has none that could be recorded."""
+    tid = t.get("id") if isinstance(t, dict) else None
+    return tid if isinstance(tid, str) else ""
+
+
+def _bot_thread(t: object, bots: set[str]) -> bool:
+    """A thread of ``merge-remarks.json`` is a review bot's when it can be recorded (an
+    object with an id) and its first comment's author is a review bot (:func:`_is_bot`)."""
+    return (bool(_tid(t)) and isinstance(t, dict)
+            and _is_bot(t.get("author"), t.get("author_type"), bots))
 
 
 def _where(t: dict) -> str:
@@ -195,30 +281,88 @@ def _where(t: dict) -> str:
     return str(path) if ln is None else f"{path}:{ln}"
 
 
-def _listing(threads: list[dict]) -> str:
-    return ", ".join(f"{t['id']} {_where(t)}{' (outdated)' if t.get('outdated') else ''} "
-                     f"by {t.get('author') or '?'}" for t in threads)
+def _listing(threads: list) -> str:
+    """Each thread as a stop line names it: ``id path:line by <author>``, ``?`` for an id, a
+    place or an author it lacks (an entry that is not even an object is all ``?``)."""
+    out = []
+    for t in threads:
+        if not isinstance(t, dict):
+            out.append("? ? by ?")
+            continue
+        out.append(f"{_tid(t) or '?'} {_where(t)}{' (outdated)' if t.get('outdated') else ''} "
+                   f"by {t.get('author') or '?'}")
+    return ", ".join(out)
 
 
-def _ignored_text(threads: list[dict]) -> str:
-    return (f"; ignored (non-collaborator): {_listing(threads)}" if threads else "")
+def _exhausted(pr_url: str, used: int, cap: int, threads: str) -> str:
+    return (f"remark rounds exhausted for {pr_url}: {used} of [driver].remark_rounds = {cap} "
+            f"used; {threads}")
 
 
-def _remarks(d: Path, pr_url: str) -> list[dict]:
-    """The threads of ``d``'s ``merge-remarks.json``, when it describes ``pr_url``: a file
-    for another PR, an unreadable one, or ``threads`` that is not a non-empty list gives
-    none. A thread with no id cannot be recorded, so it is left out."""
+def exhausted(cfg: Config, d: Path) -> str:
+    """The cap line for bundle ``d`` when its live round has used every round
+    ``[driver].remark_rounds`` allows, else "" (rounds off, no round, one below the cap, or a
+    record that cannot be read). From the record alone: once a round is live no merge reads
+    its PR's remarks again (``merge._merge_one`` refuses it first) and the reopen archived the
+    remarks file that opened it, so this is how a later run that meets the round says no
+    further one opens — the trigger (:func:`open_round`) and the merge before wave 0 that
+    refuses it (``flow._merge_prereqs``). It lists the threads its record still has open: no
+    stage before #923 resolves one."""
+    cap = getattr(cfg, "remark_rounds", 0)
+    rec = read(d)
+    if not isinstance(cap, int) or cap <= 0 or not rec or _rounds(rec) < cap:
+        return ""
+    known = rec.get("threads")
+    still = [{**t, "id": tid} for tid, t in (known.items() if isinstance(known, dict) else ())
+             if isinstance(t, dict) and t.get("status") == OPEN]
+    return _exhausted(rec.get("pr_url") or "?", _rounds(rec), cap,
+                      f"threads open in its {RECORD}: {_listing(still) or 'none'}")
+
+
+def _remarks(d: Path, pr_url: str) -> dict | None:
+    """``d``'s ``merge-remarks.json`` as an object, when it describes ``pr_url``; None for
+    none, one that cannot be read or is not an object, or one for another PR. Its ``threads``
+    are left as they are, whatever they hold, for :func:`open_round` to judge."""
     try:
         data = json.loads((d / state.MERGE_REMARKS).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []
+        return None
     if not isinstance(data, dict) or data.get("pr_url") != pr_url:
-        return []
-    threads = data.get("threads")
+        return None
+    return data
+
+
+def _human_remarks(cfg: Config, pr_url: str, threads: object, decision: object) -> str:
+    """What on PR ``pr_url`` is the human's to answer, so no remark round may act on it, or
+    "" (#922). ``threads`` is the raw ``threads`` value of its ``merge-remarks.json``, and
+    ``decision`` that file's ``reviewDecision``. Held: threads that are unknown (not a list:
+    the host could not be read), any open thread that is not a review bot's
+    (:func:`_bot_thread`; one with no id is not), and any change request that stands but a
+    review bot's (``merge.change_requests``, asked here and only here), that one when it is
+    unknown, and a ``reviewDecision`` of CHANGES_REQUESTED with none standing. Named as stop
+    lines name them; a thread's text never is."""
+    from . import merge    # lazy: merge imports this module
+
+    bots = _bots(cfg)
+    parts = []
     if not isinstance(threads, list):
-        return []
-    return [t for t in threads if isinstance(t, dict) and isinstance(t.get("id"), str)
-            and t["id"]]
+        parts.append("its review threads could not be read: ?")
+    else:
+        people = [t for t in threads if not _bot_thread(t, bots)]
+        if people:
+            parts.append(f"open review thread(s) {_listing(people)}")
+    asks = merge.change_requests(pr_url)
+    if asks is None:
+        parts.append("changes requested by ? (its standing reviews could not be read)")
+    else:
+        people = [a for a in asks if not _is_bot(a.get("login"), a.get("type"), bots)]
+        if people:
+            parts.append(", ".join(f"changes requested by {a.get('login') or '?'}"
+                                   for a in people))
+        elif not asks and decision == "CHANGES_REQUESTED":
+            parts.append("changes requested by ? (its reviewDecision is CHANGES_REQUESTED, and "
+                         "no review requesting them stands)")
+    return "; ".join(parts)
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -359,12 +503,16 @@ def open_round(cfg: Config, d: Path, *, pushed: bool,
     would be archived and never driven. Returns
     ``(True, what opened)`` with ``d`` back at PLANNED, or ``(False, why not)``: ``why`` is
     "" where the run stops exactly as #838 leaves it with nothing to add (rounds off, no
-    remarks file for this PR, no threads in it), else the one line to add to that stop.
-    Nothing is fetched before every check up to the fetch has passed, and nothing is moved
-    or written before the PR head's check after it. A reopen that fails part-way puts back
-    every file it moved or wrote (the brief and the record included) and returns why; one
-    that is interrupted (Ctrl-C) puts them back the same way, says so on stderr, and lets
-    the interrupt go on.
+    remarks file for this PR, no thread in it and nothing held), else the one line to add to
+    that stop. The checks run in this order: the knob, the PR, its remarks file (with none,
+    a live round at its cap still gives the cap line, :func:`exhausted`: its own stop never
+    has one), a record that cannot be read, the cap, then the hold for the human
+    (:func:`_human_remarks`, the only place the PR's change requests are read, so a run that
+    stops earlier asks the host nothing more), then the rest below. Nothing is fetched
+    before every check up to the fetch has passed, and nothing is moved or written before
+    the PR head's check after it. A reopen that fails part-way puts back every file it moved
+    or wrote (the brief and the record included) and returns why; one that is interrupted
+    (Ctrl-C) puts them back the same way, says so on stderr, and lets the interrupt go on.
     """
     # lazy: each of these imports this module, directly or through another
     from . import assemble, autoiterate, driver, integrate, publish
@@ -376,29 +524,36 @@ def open_round(cfg: Config, d: Path, *, pushed: bool,
     pr_url = pub.get("pr_url") if isinstance(pub, dict) else None
     if not isinstance(pr_url, str) or not pr_url:
         return False, ""
-    threads = _remarks(d, pr_url)
-    if not threads:
-        return False, ""
+    remarks = _remarks(d, pr_url)
+    if remarks is None:
+        # No remarks of this stop for this PR. A live round's stop never has any (the merge
+        # refuses it before it reads them, and the reopen archived the file that opened it),
+        # so a round at its cap says so from its record; anything else stops as #838 leaves it.
+        return False, exhausted(cfg, d)
+    raw = remarks.get("threads")
     old = read(d)
     if old == {}:
         return False, (f"remark round not opened for {pr_url}: its {RECORD} exists but "
                        "cannot be read")
-    eligible = [t for t in threads if _eligible(t)]
-    ignored = [t for t in threads if not _eligible(t)]
-    if not eligible:
-        return False, (f"remark round not opened for {pr_url}: no open thread is a "
-                       f"collaborator's{_ignored_text(ignored)}")
     used = _rounds(old) if old else 0
     if used >= cap:
-        return False, (f"remark rounds exhausted for {pr_url}: {used} of [driver]."
-                       f"remark_rounds = {cap} used; open collaborator threads: "
-                       f"{_listing(eligible)}{_ignored_text(ignored)}")
+        listed = (_listing(raw) or "none") if isinstance(raw, list) else "? (unknown)"
+        return False, _exhausted(pr_url, used, cap, f"open threads: {listed}")
+    held = _human_remarks(cfg, pr_url, raw, remarks.get("reviewDecision"))
+    if held:
+        return False, (f"remark round not opened for {pr_url}: held for the human — {held}. "
+                       "These are not a listed review bot's, so they are the human's to "
+                       "answer at the PR; this run does not act on it, merge it or build its "
+                       "dependents")
+    if not raw:
+        return False, ""
+    threads = list(raw)    # every one a review bot's, with an id (`_human_remarks`)
     known = (old or {}).get("threads")
     known = known if isinstance(known, dict) else {}
-    new = [t for t in eligible if t["id"] not in known]
+    new = [t for t in threads if t["id"] not in known]
     if not new:
-        return False, (f"remark round not opened for {pr_url}: every open collaborator "
-                       f"thread ({', '.join(t['id'] for t in eligible)}) was answered in "
+        return False, (f"remark round not opened for {pr_url}: every open review-bot "
+                       f"thread ({', '.join(t['id'] for t in threads)}) was answered in "
                        "an earlier round")
     if not pushed:
         return False, (f"remark round not opened for {pr_url}: this run pushed no branch for "
@@ -459,18 +614,15 @@ def open_round(cfg: Config, d: Path, *, pushed: bool,
             "contribution": [*_names(old), arch],
             "threads": dict(known),
         }
-        for t in eligible + ignored:
-            if t["id"] not in known:
-                record["threads"][t["id"]] = {
-                    "path": t.get("path"), "line": t.get("line"),
-                    "author": t.get("author") or "", "outdated": bool(t.get("outdated")),
-                    "url": t.get("url") or "", "status": OPEN if _eligible(t) else IGNORED,
-                    "round": rounds}
-                if _eligible(t):
-                    # Kept for the builder (:func:`builder_notice`): an iterate-to-Plan
-                    # archives the brief and the block below with it. Never a
-                    # non-collaborator's text, which no builder is shown.
-                    record["threads"][t["id"]]["body"] = str(t.get("body") or "")
+        for t in new:
+            record["threads"][t["id"]] = {
+                "path": t.get("path"), "line": t.get("line"),
+                "author": t.get("author") or "", "outdated": bool(t.get("outdated")),
+                "url": t.get("url") or "", "status": OPEN, "round": rounds,
+                # Kept for the builder (:func:`builder_notice`): an iterate-to-Plan archives
+                # the brief and the block below with it. Only a review bot's text is ever
+                # here: a PR with anyone else's thread opens no round (:func:`_human_remarks`).
+                "body": str(t.get("body") or "")}
         _write(d / RECORD, record)
         step = "appending the round's carry-forward to brief.md"
         with (d / "brief.md").open("a", encoding="utf-8") as fh:
@@ -486,10 +638,9 @@ def open_round(cfg: Config, d: Path, *, pushed: bool,
             print(f"flow: {d.name} — {why}.", file=sys.stderr)
             raise
         return False, why
-    fresh_ignored = [t for t in ignored if t["id"] not in known]
     return True, (f"remark round {rounds} opened for {pr_url} on {pinned} "
-                  f"({REMOTE}/{branch}); the accepted attempt is in {arch}/; collaborator "
-                  f"threads: {_listing(new)}{_ignored_text(fresh_ignored)}")
+                  f"({REMOTE}/{branch}); the accepted attempt is in {arch}/; review-bot "
+                  f"threads: {_listing(new)}")
 
 
 def _names(rec: dict | None) -> list[str]:
@@ -568,7 +719,7 @@ def _undo(d: Path, moved: list[tuple[Path, Path]], arch: str,
 
 def _carry_forward(n: int, pr_url: str, branch: str, pinned: str, arch: str,
                    threads: list[dict]) -> str:
-    """The round's block for ``brief.md``: the threads to answer and how. Only collaborator
+    """The round's block for ``brief.md``: the threads to answer and how. Only the review-bot
     threads new to this round appear in it."""
     out = [f"\n## Remark round {n} — carry-forward (review threads on {pr_url})\n",
            "- This bundle was accepted and published, and merging its PR was blocked by the "
@@ -582,7 +733,8 @@ def _carry_forward(n: int, pr_url: str, branch: str, pinned: str, arch: str,
                "`addressed: true` counts only if `patch.diff` changes that thread's file. "
                f"The reply is the exact text a later step posts on the thread: one line, at "
                f"most {MAX_REPLY} characters.\n")
-    out.append("- Nothing is pushed, replied to, resolved or merged in this round: the human "
+    out.append("- Once the round is accepted, `patch.diff` is pushed as one commit onto "
+               f"{branch}; nothing is replied to, resolved or merged in this round: the human "
                "signs off the reply plan in SUMMARY.md.\n")
     return "".join(out)
 
@@ -702,7 +854,8 @@ def responses(d: Path) -> tuple[dict | None, str]:
 
 
 def _this_round(rec: dict) -> list[tuple[str, dict]]:
-    """The collaborator threads the current round opened, in record order."""
+    """The review-bot threads the current round opened, in record order. The round's publish
+    leaves their ``status`` as it is, so they stay here for the replies (#923)."""
     threads = rec.get("threads")
     n = _rounds(rec)
     return [(tid, e) for tid, e in (threads.items() if isinstance(threads, dict) else ())
@@ -862,7 +1015,7 @@ def record_reply_plan(d: Path, rows: list[str]) -> list[str]:
         plan.append((tid, e))
     _write(d / RECORD, rec)
     out = [f"## Remark round {n} — reply plan", "",
-           "Each collaborator thread this round answers, the verdict the driver gives it and "
+           "Each review-bot thread this round answers, the verdict the driver gives it and "
            "the exact reply a later step posts (nothing is posted, resolved or merged by this "
            "round). T4 checks every reply.", ""]
     if missing:
@@ -874,11 +1027,6 @@ def record_reply_plan(d: Path, rows: list[str]) -> list[str]:
         out.append(f"- `{_shown(tid)}` {_shown(_where(e))}"
                    f"{' (outdated)' if e.get('outdated') else ''} by "
                    f"{_shown(e.get('author') or '?')} — **{e['verdict']}** — reply: {reply}")
-    ignored = [tid for tid, e in (rec.get("threads") or {}).items()
-               if isinstance(e, dict) and e.get("status") == IGNORED and e.get("round") == n]
-    if ignored:
-        out.append("- Not answered (non-collaborator): "
-                   f"{', '.join(f'`{_shown(t)}`' for t in ignored)}")
     out.append("")
     return out
 
@@ -900,9 +1048,9 @@ def _shown(text: object) -> str:
 
 def reply_problems(d: Path) -> list[str]:
     """The T4 rules for a round's replies, checked as the commit message and PR body are
-    (``cli.contribution_problems``): every collaborator thread of the current round has a
-    reply that is not empty, is one line, and is at most :data:`MAX_REPLY` characters.
-    ``[]`` with no round."""
+    (``cli.contribution_problems``): every review-bot thread of the current round has a reply
+    that is not empty, is one line, and is at most :data:`MAX_REPLY` characters, whether or
+    not the round's commit is pushed yet. ``[]`` with no round."""
     rec = read(d)
     if rec is None:
         return []
@@ -914,18 +1062,9 @@ def reply_problems(d: Path) -> list[str]:
         reply = _reply(resp, tid)
         about = f"the reply to review thread {tid} ({_where(e)}) in {RESPONSES}"
         if not reply.strip():
-            out.append(f"{about} is empty — each collaborator thread gets a one-line reply")
+            out.append(f"{about} is empty — each review-bot thread gets a one-line reply")
         elif _LINE_BREAK.search(reply):
             out.append(f"{about} is not one line")
         elif len(reply) > MAX_REPLY:
             out.append(f"{about} is {len(reply)} characters, over {MAX_REPLY}")
     return out
-
-
-def ignored_threads(d: Path) -> str:
-    """The non-collaborator threads ``d``'s record ignored, for a stop line, or "none"."""
-    threads = (read(d) or {}).get("threads")
-    names = [f"{tid} {_where(e)}" for tid, e in (threads.items()
-             if isinstance(threads, dict) else ()) if isinstance(e, dict)
-             and e.get("status") == IGNORED]
-    return ", ".join(names) or "none"

@@ -1330,7 +1330,7 @@ def contribution_problems(d: Path, *, no_issue: bool = False) -> list[str]:
         if not needle.search(commit_text):
             problems.append(f"{publish.COMMIT_MSG} does not reference the tracker id #{issue_id}")
     # 3) A remark round's replies (#921, Plan decision 2 of #840): the exact text a later
-    #    step posts on each collaborator thread, held to its own rules here, beside the
+    #    step posts on each review-bot thread (#922), held to its own rules here, beside the
     #    commit message and the PR body.
     problems += remark_round.reply_problems(d)
     return problems
@@ -1569,24 +1569,30 @@ def _signoff(cfg: Config, args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
 
-    # A remark round (#921) the sign-off just closed — accepted or discontinued — with or
-    # without `--no-publish`: its work is on no PR yet and no publish of a round exists, so
-    # the decision did not finish the contribution. Say so with the round's own line and
-    # exit non-zero, before the publish below (which would only refuse it the same way).
-    if final in (state.COMPLETE, state.DISCONTINUED) and remark_round.live(d):
+    # Accept → publish by default, like `flow`'s closing step (#97): a standalone
+    # `signoff --accept` otherwise left bundles COMPLETE-but-unpublished with no signal.
+    # `--no-publish` opts out (then the bundle is deliberately, not silently, unpublished).
+    publishing = action == "accept" and not getattr(args, "no_publish", False)
+
+    # A remark round (#921) the sign-off just closed without publishing it — discontinued,
+    # or accepted with `--no-publish`: its work is not on its PR, so the decision did not
+    # finish the contribution. Say so with the round's own line and exit non-zero. An accept
+    # that publishes goes on to the round's publish below (#922), like any accept.
+    if remark_round.live(d) and (final == state.DISCONTINUED
+                                 or (final == state.COMPLETE and not publishing)):
         print(f"signoff: {d.name} — {remark_round.line(d)}; nothing was pushed.",
               file=sys.stderr)
         return 1
 
-    # Accept → publish by default, like `flow`'s closing step (#97): a standalone
-    # `signoff --accept` otherwise left bundles COMPLETE-but-unpublished with no signal.
-    # `--no-publish` opts out (then the bundle is deliberately, not silently, unpublished).
-    if action == "accept" and final == state.COMPLETE and not getattr(args, "no_publish", False):
+    if publishing and final == state.COMPLETE:
         rc = publish.publish(cfg, args.issue_id, dry_run=cfg.publisher.mode == "stub",
                              by=args.by, skip_if_no_target=True)
-        if rc != 0:
+        # A round's publish says on its own line whether `pdca publish` is the retry: once
+        # its commit is on the PR and a record write failed, it is not.
+        if rc != 0 and not remark_round.live(d):
             print(f"  publish did not complete (rc {rc}) — {d.name} is COMPLETE but NOT "
                   f"published; fix and re-run `pdca publish {args.issue_id}`.", file=sys.stderr)
+        if rc != 0:
             return rc
     return 0
 
