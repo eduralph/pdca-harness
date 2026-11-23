@@ -61,13 +61,15 @@ def is_merged(cfg: Config, dep_id: str) -> bool:
     the recorded PR's ``state`` is queried; ``MERGED`` ⇒ ``True``, and any ``gh`` failure
     is treated as not-merged. A prereq with a live remark round (#921) ⇒ ``False``, before
     any of that: the round's work (its ``patch.diff``, a delta on the PR's head, empty or
-    not) is on no PR yet, so not even a merged PR holds what the prereq now ships.
+    not) is merged nowhere while the round is live — its commit may not be on the PR yet,
+    and once it is (#922) the round's threads are still open — so not even a merged PR
+    counts as holding what the prereq now ships.
     """
     d = cfg.find_bundle(dep_id)  # a merged prereq may be archived to completed/ (#171)
     if state.state(d) != state.COMPLETE:
         return False  # prereq hasn't even finished its own cycle
     if remark_round.live(d):
-        return False  # a live remark round: its work has reached no PR (#921)
+        return False  # a live remark round: its work is merged nowhere yet (#921, #922)
     patch = d / "patch.diff"
     if not patch.is_file() or not patch.read_text(encoding="utf-8").strip():
         return True  # close/no-fix disposition — no contribution to wait on
@@ -111,7 +113,7 @@ def merged_into(cfg: Config, dep_id: str, repo: str, base: str) -> bool:
     if state.state(d) != state.COMPLETE:
         return False
     if remark_round.live(d):
-        return False  # a live remark round: its work has reached no PR (#921)
+        return False  # a live remark round: its work is merged nowhere yet (#921, #922)
     if has_patch(d) is False:
         return True  # close/no-fix disposition — no contribution to wait on
     rec = _publish_record(d)

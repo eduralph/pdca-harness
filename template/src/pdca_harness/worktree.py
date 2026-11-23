@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -594,10 +595,16 @@ def _overflow_create(d: Path, primary: Path, base_ref: str) -> Path | None:
         return None
 
 
-def for_publish(d: Path, primary: Path, base_commit: str) -> Path:
+def for_publish(d: Path, primary: Path, base_commit: str, *,
+                patch: Path | None = None, expect_tree: str | None = None) -> Path:
     """Materialize an EPHEMERAL ``base_commit + patch.diff`` tree for the pre-push
     host-CI gate (``[gates] host_ci``, issue #311); the caller MUST tear it down with
-    ``overflow_remove(primary, tree)`` once the commands have run.
+    ``overflow_remove(primary, tree)`` once the commands have run. ``patch`` is the patch
+    applied, ``d/patch.diff`` by default (a remark round's publish passes the copy of it
+    that it commits, #922). ``expect_tree``, when given, is the git tree ``base_commit`` +
+    ``patch`` must make (the round's publish works it out first): the files materialized
+    here are checked against it before anything runs on them, so a post-checkout hook that
+    changed one is refused rather than certified (#922).
 
     Deliberately NOT the lane reconstruction (:func:`rebuild_for_gate`): the lane is
     warm and never fetches — a Check gate must attest the base Do built against —
@@ -620,14 +627,18 @@ def for_publish(d: Path, primary: Path, base_commit: str) -> Path:
     ovf = _overflow_path(primary)
     _git(primary, "worktree", "prune")  # drop admin entries for any vanished trees first
     if _git(primary, "worktree", "add", "--force", "--detach", str(ovf), base_commit) != 0:
+        # git keeps the worktree it made when only the post-checkout hook failed (#922).
+        overflow_remove(primary, ovf)
         raise WorktreeError(
             f"{d.name}: could not create a worktree at {base_commit[:12]} for the "
             "host-CI gate — the pinned base commit must be materializable")
     try:
-        patch = d / "patch.diff"
-        patch_text = patch.read_text(encoding="utf-8") if patch.is_file() else ""
-        if patch_text.strip():
-            if _GITLINK_RE.search(patch_text):
+        patch = patch or d / "patch.diff"
+        # Bytes: a patch need not be UTF-8 (a Latin-1 line is still one `git apply` takes),
+        # and a decode error would skip the teardown below (#922).
+        body = patch.read_bytes() if patch.is_file() else b""
+        if body.strip():
+            if _GITLINK_RE.search(body.decode("utf-8", "replace")):
                 # Same gitlink fail-closed as rebuild_for_gate (#296 review round 2):
                 # plain `git apply` exits 0 while skipping the gitlink, so this tree
                 # would carry the wrong submodule revision under a green run.
@@ -641,10 +652,36 @@ def for_publish(d: Path, primary: Path, base_commit: str) -> Path:
                     f"{d.name}: patch.diff does not apply onto the fetched base "
                     f"{base_commit[:12]} — the base advanced past the fix; "
                     "rebase/re-Check the bundle, then retry")
-    except WorktreeError:
+        if expect_tree is not None:
+            made = _tree_of(ovf, base_commit, patch if body.strip() else None)
+            if made != expect_tree:
+                raise WorktreeError(
+                    f"{d.name}: the tree made for the host-CI gate is "
+                    f"{made[:12] or 'unreadable'}, not {base_commit[:12]} + patch.diff "
+                    f"({expect_tree[:12]}) — a checkout hook changed it, so the declared CI "
+                    "would not run on the tree the push publishes")
+    except BaseException:   # any failure, an unexpected one included: never leave the tree
         overflow_remove(primary, ovf)
         raise
     return ovf
+
+
+def _tree_of(wt: Path, base_commit: str, patch: Path | None) -> str:
+    """The tree the files in worktree ``wt`` make, as ``git add --all`` then ``git
+    write-tree`` record them on top of ``base_commit`` (+ ``patch`` first, so a file it adds
+    counts even where it is ignored), through a throwaway index: ``wt``'s own index is left
+    as it is. "" when git cannot say. Ignored files are part of no tree, so none is read.
+    git's output is kept as bytes: a file name need not be UTF-8 (#922)."""
+    with tempfile.TemporaryDirectory(prefix="pdca-tree-") as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        steps = [("read-tree", base_commit),
+                 *([("apply", "--cached", str(patch.resolve()))] if patch else []),
+                 ("add", "--all"), ("write-tree",)]
+        for args in steps:
+            r = subprocess.run(["git", "-C", str(wt), *args], env=env, capture_output=True)
+            if r.returncode != 0:
+                return ""
+        return r.stdout.decode("ascii", "replace").strip()
 
 
 def for_gate(d: Path, cfg: Config,

@@ -207,20 +207,28 @@ merge_wait_secs = 300
 #   []   (default) — declare nothing.
 #   ["dco", "e2e"] — merge only once both have reported and passed.
 # expected_checks = ["dco", "e2e"]
-# Remark rounds (merge mode; issue #921). When a non-final wave's PR is green but its merge
-# is blocked by unresolved review threads (the remarks `merge-remarks.json` names), the run
-# can reopen that accepted bundle as a "remark round" instead of stopping: it archives the
+# Remark rounds (merge mode; issues #921, #922). When a non-final wave's PR is green but its
+# merge is blocked by unresolved review threads (the remarks `merge-remarks.json` names), the
+# run can reopen that accepted bundle as a "remark round" instead of stopping: it archives the
 # accepted attempt to `iteration-v<n>/`, records the round in `remark-round.json`, adds the
 # threads to brief.md, and rebuilds the bundle on the PR's own head, so `patch.diff` is then
-# the change ON TOP of that head. Only threads opened by an OWNER, MEMBER or COLLABORATOR
-# count; others are listed and ignored. The round's SUMMARY.md shows the reply each thread
-# would get, and T4 checks those replies. A round needs `worktree = true` above. This stage
-# pushes, replies to, resolves and merges nothing: after the round's sign-off the run stops,
-# and the round's `patch.diff` is applied to the PR branch by hand. The value is how many
-# rounds one bundle may have; any value that is not a whole number >= 0 warns and means 0.
+# the change ON TOP of that head. A round opens only when every open thread is a review
+# bot's (`review_bots` below) and no one else has requested changes; anything else leaves
+# the PR, and the bundles that depend on it, to you. The round's SUMMARY.md shows the reply
+# each thread would get, and T4 checks those replies. A round needs `worktree = true` above.
+# Once the round is accepted, its `patch.diff` is pushed as one commit onto the PR's branch
+# (a plain push, made in a throwaway worktree: your checkout is not touched); replying to and
+# resolving the threads and merging the PR are still yours. The value is how many rounds one
+# bundle may have; any value that is not a whole number >= 0 warns and means 0.
 #   0    (default) — off: the run stops on the remarks, as before.
 #   1    — at most one round per bundle.
 # remark_rounds = 0
+# The review bots whose threads open a remark round: their logins, matched ignoring case and
+# a trailing `[bot]`, and only for an account GitHub reports as a bot. Empty (the default)
+# names none, so no round opens: rounds need both this and `remark_rounds` set. A value that
+# is not a list of logins (an entry blank, only "[bot]", or with a space inside) warns and
+# means [].
+# review_bots = ["chatgpt-codex-connector"]
 # Optional integration re-gate (#wave-model). After each wave folds (stack mode), run the
 # repo-scoped gates over the folded integration tip before the next wave builds on it, so a
 # combination that is red though each fix was green ALONE stops the run. Off by default

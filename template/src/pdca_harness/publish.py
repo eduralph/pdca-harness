@@ -23,15 +23,18 @@ fallback). The issue trailer the T4 gate enforces is ``[tracker].issue_trailer``
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-from . import brief, gates, leaves, progress, remark_round, state, waves, worktree
+from . import brief, gates, leaves, merged, progress, remark_round, state, waves, worktree
 # Aliased: `publish()` builds a local `record = {...}` (its publish.json payload,
 # below) that would shadow the module name at the #317 call-in.
 from . import record as record_mod
@@ -151,19 +154,21 @@ def publish(
     stateful T4 command that passed the pre-pass but failed here would recreate the
     half-published wave the pre-pass exists to prevent. Direct ``pdca publish`` never
     sets it, keeping the lazy draft+gate path self-contained.
+
+    A bundle with a live remark round goes to :func:`_publish_round` before anything else,
+    which reads none of ``texts_prevalidated``, ``open_pr`` or ``skip_if_no_target``: a
+    round is pushed onto the PR it answers, and gates its own texts once.
     """
     d = cfg.bundle(issue_id)
     today = today or datetime.date.today().isoformat()
 
     # A live remark round (issue #921): patch.diff is a delta built on the PR's own head, and
-    # this path cuts a fresh branch off the base and force-pushes it over the PR (the
-    # `--force-with-lease` push below), which would replace the PR's work with the delta
-    # alone. Until a round can be published (#922), refuse before anything is drafted, cut
-    # or pushed.
+    # the paths below cut a fresh branch off the base and force-push it over the PR (the
+    # `--force-with-lease` push), which would replace the PR's work with the delta alone. So
+    # a round is published its own way (#922), before anything below is drafted, cut or
+    # pushed: one commit on top of the PR's head, pushed onto its branch with a plain push.
     if remark_round.live(d):
-        print(f"publish: {d.name} — {remark_round.line(d)}; nothing was pushed.",
-              file=sys.stderr)
-        return 1
+        return _publish_round(cfg, d, issue_id, dry_run=dry_run, pending_id=pending_id)
 
     # Guard — publish is Check's CLOSING act: only on an accepted bundle.
     s = state.state(d)
@@ -589,6 +594,328 @@ def _publish_stacked(
     # Recording call-in (#317): same contract as the new-PR path — strictly after
     # this path's publish.json write, best-effort, no-op under mode "off".
     record_mod.after_publish(cfg)
+    return 0
+
+
+def _git_says(r: subprocess.CompletedProcess) -> str:
+    """What a failed git (or gh) step said, on one line: its ``error:`` / ``fatal:`` lines,
+    a push's ``! [rejected]`` line and what the remote said, else its last line on stderr
+    (where git puts a failing hook's own output: ``worktree add`` prints "HEAD is now at …"
+    on stdout even when its post-checkout hook fails), else on stdout, else its exit code."""
+    err = [ln.strip() for ln in (r.stderr or "").splitlines() if ln.strip()]
+    out = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+    said = [ln for ln in err + out if ln.startswith(("error:", "fatal:", "!", "remote:"))]
+    return " / ".join(said or err[-1:] or out[-1:]) or f"exit {r.returncode}"
+
+
+def _publish_round(cfg: Config, d: Path, issue_id: str, *, dry_run: bool,
+                   pending_id: bool) -> int:
+    """Publish bundle ``d``'s accepted remark round (issue #922): its ``patch.diff``, the
+    round's delta on the PR's head, as ONE commit whose only parent is the round's
+    ``pinned_head``, pushed onto the PR's existing branch with a plain push. Return a process
+    code.
+
+    In order: the round is accepted; ``remark-round.json`` and ``publish.json`` are readable
+    and name the same PR and branch, and the round's ``contribution`` ends in its archive; a
+    round already done (its ``pushed`` entry, ``remark_round.pushed_entry``) pushes nothing.
+    ``patch.diff`` is then read once (the snapshot): everything after uses those bytes, host
+    CI included, and the bundle's file is compared with them just before the push, so a
+    publisher leaf or a hook that edits it stops the push. An empty delta is recorded as
+    ``no-change`` and pushes nothing; a gitlink change is refused. A dry run prints the plan.
+    Then: the open PR for the branch must be the recorded one; the first publish's texts
+    move into the round's archive and fresh ones are drafted and T4-gated, once; the
+    expected tree is computed from ``pinned_head`` + the snapshot in a temporary index (no
+    working tree, no hook); host CI runs on ``pinned_head`` + the snapshot, once its
+    worktree's files are found to make the expected tree; the branch is
+    fetched; the commit is made in a throwaway detached worktree at ``pinned_head`` (the
+    repo's hooks run there), checked — its tree is the expected tree, its only parent is
+    ``pinned_head``, ``patch.diff`` is unchanged — and pushed from there, never forced. Only
+    once the push succeeded are the records written: ``remark-round.json``'s ``pushed`` entry
+    first, then ``publish.json`` (``round_commits`` appended; the merge marker's hash moved to
+    the snapshot only where the PR is already marked).
+
+    The operator's checkout is never touched: against it run only ``remote``, ``fetch``,
+    ``rev-parse``, the temporary-index commands and ``worktree add`` / ``remove`` / ``prune``
+    — never ``stash``, ``checkout``, ``reset``, ``add`` or ``commit``. Any failing step stops
+    with one line naming the bundle, the step and what the tool said, records nothing, and
+    removes the worktree (one whose post-checkout hook failed included) and the snapshot;
+    ``pdca publish <id>`` is the retry. Nothing tries to work out why a step failed (a branch
+    someone else moved on surfaces as git's own refusal of the push; one rewound to an
+    ancestor of ``pinned_head`` is not refused, as the push fast-forwards it). A record write
+    that fails after the push is the one failure not to retry: its line says the commit is
+    already on the PR and lists what to record by hand, with the values — the ``pushed``
+    entry unless that write succeeded, ``round_commits``, and the merge marker's hash where
+    the PR is marked."""
+    retry = f"pdca publish {issue_id}"
+    record_name = remark_round.RECORD
+
+    def fail(step: str, why: str) -> int:
+        print(f"publish: {d.name} — the round publish stopped at {step}: {why}. Nothing was "
+              f"pushed or recorded; retry with `{retry}`.", file=sys.stderr)
+        return 1
+
+    # 1. Only an accepted round is published.
+    if state.state(d) != state.COMPLETE:
+        print(f"publish: {d.name} — {remark_round.line(d)}; nothing was pushed.",
+              file=sys.stderr)
+        return 1
+
+    # 2. Both records readable, and naming the same PR, before anything else is done.
+    rec = remark_round.read(d) or {}
+    pinned, branch, pr_url = rec.get("pinned_head"), rec.get("branch"), rec.get("pr_url")
+    rounds = rec.get("rounds")
+    done, unread = remark_round.pushed_entry(rec)
+    # The round's archive, where the first publish's texts go (step 8): the last entry of
+    # `contribution`, an `iteration-v<n>` directory of the bundle. Anything else (none, "",
+    # ".") would name the bundle itself, so the round would commit with those texts.
+    names = rec.get("contribution")
+    archive = names[-1] if isinstance(names, list) and names else None
+    pub = _publish_record(d)
+    commits = pub.get("round_commits", []) if isinstance(pub, dict) else []
+    bad = ""
+    if not rec:
+        bad = f"{record_name} cannot be read as a JSON object"
+    elif not (isinstance(pinned, str) and remark_round._SHA.fullmatch(pinned)):
+        bad = f"{record_name}'s `pinned_head` is {pinned!r}, not a 40- or 64-hex commit"
+    elif not (isinstance(branch, str) and branch):
+        bad = f"{record_name}'s `branch` is {branch!r}, not a branch name"
+    elif not (isinstance(pr_url, str) and pr_url):
+        bad = f"{record_name}'s `pr_url` is {pr_url!r}, not a PR URL"
+    elif isinstance(rounds, bool) or not isinstance(rounds, int) or rounds < 1:
+        bad = f"{record_name}'s `rounds` is {rounds!r}, not a round number of 1 or more"
+    elif unread:
+        bad = f"{record_name}'s {unread}"
+    elif not (isinstance(archive, str) and remark_round._ARCHIVE.fullmatch(archive)
+              and (d / archive).is_dir()):
+        bad = (f"{record_name}'s `contribution` is {names!r}: its last entry must be the "
+               "round's archive, an `iteration-v<n>` directory of the bundle")
+    elif not isinstance(pub, dict):
+        bad = "publish.json cannot be read as a JSON object"
+    elif pub.get("mode") == "stacked":
+        bad = ("publish.json's `mode` is \"stacked\" (an `Onto branch` commit on an existing "
+               "PR), which no remark round is opened for")
+    elif pub.get("pr_url") != pr_url:
+        bad = f"publish.json's `pr_url` {pub.get('pr_url')!r} is not the round's {pr_url!r}"
+    elif pub.get("branch") != branch:
+        bad = f"publish.json's `branch` {pub.get('branch')!r} is not the round's {branch!r}"
+    elif not isinstance(commits, list):
+        bad = f"publish.json's `round_commits` is {commits!r}, not a list"
+    if bad:
+        return fail("its records", bad)
+
+    # 3. This round is done already: nothing to push.
+    if done is not None:
+        print(f"publish: {d.name} — {remark_round.line(d)}.")
+        return 0
+
+    # 3a. The snapshot: patch.diff read once. A missing one is an empty delta, as everywhere a
+    # round's patch is read (`merged.has_patch`, `remark_round._changed_files`).
+    try:
+        snap = (d / "patch.diff").read_bytes()
+    except FileNotFoundError:
+        snap = b""
+    except OSError as exc:
+        return fail("reading patch.diff", str(exc))
+    key = str(rounds)
+    history = rec.get(remark_round.PUSHED) or {}
+
+    # 4. An accepted round that changed nothing (every thread declined): nothing to commit.
+    if not snap.strip():
+        if dry_run:
+            print(f"publish --dry-run — {d.name}: remark round {rounds} changed nothing "
+                  f"(patch.diff is empty): would record {remark_round.PUSHED}[\"{key}\"] = "
+                  f"\"{remark_round.NO_CHANGE}\" in {record_name}; no commit, no push")
+            return 0
+        rec[remark_round.PUSHED] = {**history, key: remark_round.NO_CHANGE}
+        try:
+            remark_round._write(d / record_name, rec)
+        except OSError as exc:
+            return fail(f"writing {record_name}", str(exc))
+        print(f"publish: {d.name} — {remark_round.line(d)}.")
+        return 0
+
+    # 5. A submodule gitlink change, refused as `worktree.for_publish` refuses it: `git apply`
+    # would leave the submodule as it is and still exit 0.
+    if worktree._GITLINK_RE.search(snap.decode("utf-8", "replace")):
+        return fail("the submodule check", "patch.diff changes a submodule gitlink (mode "
+                    "160000), which `git apply` skips without a word, so the commit would not "
+                    "be pinned_head + patch.diff (#296)")
+
+    repo_spec = _resolve_target(d)[0]
+    repo = _checkout_path(cfg, repo_spec) if repo_spec else None
+    pr_list = ["gh", "pr", "list", "--repo", repo_spec or "?", "--head", branch,
+               "--state", "open", "--json", "url,number,headRefName,headRepositoryOwner"]
+
+    # 6. The plan, and nothing else.
+    if dry_run:
+        at = repo if repo is not None else "<the target checkout>"
+        tmp = f"{at}{worktree._OVF_SUFFIX}<n>"
+        print(f"publish --dry-run — {d.name} → remark round {rounds}: one commit onto "
+              f"{branch} ({pr_url}), on top of pinned_head {pinned}:")
+        print("  " + " ".join(shlex.quote(x) for x in pr_list)
+              + f"   # the open PR for {branch} must be {pr_url}")
+        print(f"  # texts: the first publish's {COMMIT_MSG} / {PR_BODY} move into {archive}/; "
+              "fresh ones are drafted and T4-gated, once")
+        print(f"  # expected tree: {pinned} + patch.diff in a temporary index (read-tree, apply "
+              "--cached, write-tree): no working tree, no hook")
+        if cfg.host_ci_checks:
+            print(f"  # host CI gate (#311): {len(cfg.host_ci_checks)} declared command(s) "
+                  f"against {pinned} + patch.diff as read in an ephemeral worktree — ANY "
+                  "non-zero exit blocks the push")
+        print(f"  git -C {shlex.quote(str(at))} fetch origin {shlex.quote(branch)}")
+        print(f"  git -C {shlex.quote(str(at))} worktree add --force --detach {tmp} {pinned}"
+              "   # a throwaway worktree: the checkout itself is not touched")
+        print(f"  git -C {tmp} apply --index <patch.diff as read>")
+        print(f"  git -C {tmp} commit -s -F {shlex.quote(str((d / COMMIT_MSG).resolve()))}")
+        print(f"  # check: the commit's tree is the expected tree, its only parent is {pinned}, "
+              "and patch.diff is unchanged")
+        print(f"  git -C {tmp} push origin HEAD:refs/heads/{shlex.quote(branch)}"
+              "   # a plain push, never forced: the host takes only a fast-forward")
+        print(f"  git -C {shlex.quote(str(at))} worktree remove --force {tmp}")
+        return 0
+
+    # 7. The checkout, and the PR: the open one for the branch must be the one recorded.
+    if repo is None:
+        return fail("the checkout", "the brief names no `Repo + branch target`, so there is "
+                    "no checkout to publish the round from")
+    if _check_repo(repo, repo_spec, required_remotes={"origin"}) != 0:
+        return fail("the checkout", "see the line above")
+    owner = _fork_owner(repo) or repo_spec.split("/")[0]
+    try:
+        found = _existing_pr(pr_list, branch, owner)
+    except OSError as exc:
+        return fail("the open-PR lookup", f"`gh pr list` could not run ({exc})")
+    if found != pr_url:
+        return fail("the open-PR lookup", f"`gh pr list --head {branch} --state open` finds "
+                    f"{found or 'no open PR'} for {owner}:{branch}, not the round's {pr_url}")
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="pdca-round-"))
+    wt: Path | None = None
+    try:
+        snapshot = tmp_dir / "patch.diff"
+        snapshot.write_bytes(snap)
+
+        # 8. The texts: the first publish's go with the attempt they described (the round's
+        # archive, checked at step 2), unless it holds them already (a retry); then fresh
+        # ones, T4-gated once.
+        try:
+            for name in (COMMIT_MSG, PR_BODY):
+                src, dst = d / name, d / archive / name
+                if src.is_file() and not (dst.exists() or dst.is_symlink()):
+                    src.rename(dst)
+        except OSError as exc:
+            return fail("the texts", f"the first publish's texts could not be moved into "
+                        f"{archive}/ ({exc})")
+        if not _ensure_texts(cfg, d):
+            return fail("the texts", f"{COMMIT_MSG} / {PR_BODY} could not be drafted")
+        if not _t4_passes(cfg, d, pending_id=pending_id):
+            return fail("the T4 gate", f"{COMMIT_MSG} / {PR_BODY} did not pass it (its output "
+                        "is above); fix them")
+
+        # 9. The expected tree, from pinned_head + the snapshot in a temporary index.
+        env = {**os.environ, "GIT_INDEX_FILE": str(tmp_dir / "index")}
+        for args in (("read-tree", pinned), ("apply", "--cached", str(snapshot)),
+                     ("write-tree",)):
+            r = subprocess.run(["git", "-C", str(repo), *args], env=env,
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                return fail("the expected tree", f"`git {' '.join(args[:2])}` on {pinned}: "
+                            f"{_git_says(r)}")
+        expected = r.stdout.strip()
+
+        # 10. Host CI, certifying pinned_head + the snapshot: the tree the commit must have,
+        # whatever the bundle's patch.diff holds by now (never the fetched branch either).
+        # Its worktree's files are checked against that tree before any command runs.
+        ci_ok, _certified = _host_ci_passes(cfg, d, repo, "origin", pinned, patch=snapshot,
+                                            expect_tree=expected)
+        if not ci_ok:
+            return fail("the host CI gate", f"see the lines above and {d.name}/{HOST_CI_JSON}")
+
+        # 11. The branch must still be on origin: nothing here recreates it.
+        r = subprocess.run(["git", "-C", str(repo), "fetch", "origin", branch],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return fail("the fetch", f"`git fetch origin {branch}`: {_git_says(r)}")
+
+        # 12. The commit, in a throwaway worktree at pinned_head (`worktree.for_publish`'s
+        # shape: a crash leftover is reclaimed by the overflow sweep), checked, then pushed.
+        def in_wt(*args: str) -> subprocess.CompletedProcess:
+            return subprocess.run(["git", "-C", str(wt), *args], capture_output=True, text=True)
+
+        path = worktree._overflow_path(repo)
+        subprocess.run(["git", "-C", str(repo), "worktree", "prune"], capture_output=True)
+        # Removed in the `finally` whatever the add returns: git keeps the worktree it made
+        # when only the post-checkout hook failed.
+        wt = path
+        r = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--force", "--detach",
+                            str(path), pinned], capture_output=True, text=True)
+        if r.returncode != 0:
+            return fail("the throwaway worktree", f"`git worktree add --detach` at {pinned}: "
+                        f"{_git_says(r)}")
+        r = in_wt("apply", "--index", str(snapshot))
+        if r.returncode != 0:
+            return fail("the apply", f"patch.diff does not apply onto {pinned}: {_git_says(r)}")
+        r = in_wt("commit", "-s", "-F", str((d / COMMIT_MSG).resolve()))
+        if r.returncode != 0:
+            return fail("the commit", f"`git commit` (the repo's hooks run): {_git_says(r)}")
+        tree = in_wt("rev-parse", "--verify", "HEAD^{tree}").stdout.strip()
+        parents = in_wt("rev-list", "--parents", "-n", "1", "HEAD").stdout.split()
+        try:
+            now = (d / "patch.diff").read_bytes()
+        except OSError:
+            now = None
+        if tree != expected:
+            return fail("the tree check", "the commit's tree is not pinned_head + patch.diff — "
+                        "a commit hook changed it")
+        if parents[1:] != [pinned]:
+            return fail("the tree check", f"the commit's parents are {parents[1:]}, not "
+                        f"pinned_head {pinned} alone")
+        if now != snap:
+            return fail("the tree check", "patch.diff in the bundle is not what this publish "
+                        "read and committed — the publisher leaf or a hook edited it")
+        sha = parents[0]
+        print(f"→ git push origin HEAD:refs/heads/{branch}   (round {rounds}, {sha})")
+        r = in_wt("push", "origin", f"HEAD:refs/heads/{branch}")
+        if r.returncode != 0:
+            return fail("the push", f"`git push origin HEAD:refs/heads/{branch}`: "
+                        f"{_git_says(r)}")
+    finally:
+        if wt is not None:
+            worktree.overflow_remove(repo, wt)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # 13. The records, only now, in this order: the round's first, then publish.json. Each
+    # write that fails leaves its own edit and every later one to the human, so its line
+    # lists them all, with the values to write.
+    marked = pub.get("merge_eligible") is True
+    by_hand = [f"in {record_name}, set `{remark_round.PUSHED}[\"{key}\"]` to \"{sha}\"",
+               f"in publish.json, append \"{sha}\" to `round_commits`"]
+    if marked:
+        by_hand.append(f"in publish.json, set `{merged.MARKED_PATCH}` to "
+                       f"\"{hashlib.sha256(snap).hexdigest()}\" (the sha256 of the patch.diff "
+                       "pushed), so the PR stays marked for it")
+
+    def unrecorded(name: str, exc: OSError, todo: list[str]) -> int:
+        print(f"publish: {d.name} — round commit {sha} is pushed to {branch} ({pr_url}), but "
+              f"writing {name} failed ({exc}). The commit is already on the PR: do NOT re-run "
+              f"`{retry}`. Record it by hand: {'; '.join(todo)}.", file=sys.stderr)
+        return 1
+
+    rec[remark_round.PUSHED] = {**history, key: sha}
+    try:
+        remark_round._write(d / record_name, rec)
+    except OSError as exc:
+        return unrecorded(record_name, exc, by_hand)
+    pub["round_commits"] = [*commits, sha]
+    if marked:
+        # The marker stays tied to the patch the PR now holds the commit of (#839).
+        pub[merged.MARKED_PATCH] = hashlib.sha256(snap).hexdigest()
+    try:
+        leaves._replace_record(d / "publish.json", json.dumps(pub, indent=2) + "\n")
+    except OSError as exc:
+        return unrecorded("publish.json", exc, by_hand[1:])
+    record_mod.after_publish(cfg)
+    print(f"publish: {d.name} — {remark_round.line(d)}.")
     return 0
 
 
@@ -1048,7 +1375,8 @@ def _pin_checkout(steps: list[list[str]], git, branch: str, base_commit: str) ->
 
 
 def _host_ci_passes(cfg: Config, d: Path, repo: Path, fetch_remote: str,
-                    base_ref: str) -> tuple[bool, str]:
+                    base_ref: str, *, patch: Path | None = None,
+                    expect_tree: str | None = None) -> tuple[bool, str]:
     """Run the declared host-only CI commands (``[gates] host_ci``, issue #311) against
     the exact tree the push would publish; ``(False, "")`` blocks the publish before
     anything is pushed.
@@ -1062,7 +1390,12 @@ def _host_ci_passes(cfg: Config, d: Path, repo: Path, fetch_remote: str,
     the resolved base commit, materializes an ephemeral ``base + patch.diff`` tree at
     that commit (``worktree.for_publish``), runs the commands there, and returns the
     pinned SHA so the push's ``checkout -B`` builds on it — certified tree == pushed
-    tree, by construction.
+    tree, by construction. ``patch`` is the patch that tree is made of, the bundle's
+    ``patch.diff`` by default; a remark round's publish passes the copy it read once and
+    commits (``_publish_round``), so a ``patch.diff`` edited after that read and put back
+    before the commit cannot have been what CI certified (#922). It passes ``expect_tree``
+    too, the tree its commit must have: the materialized files are checked against it before
+    any command runs, so a post-checkout hook that edits one is refused, not certified.
 
     Nothing declared ⇒ ``(True, "")`` with no work at all — an instance that opts out
     is byte-identical to today (criterion c). EVERY command that does not pass blocks
@@ -1090,8 +1423,11 @@ def _host_ci_passes(cfg: Config, d: Path, repo: Path, fetch_remote: str,
     sha, err = _pinned_base(repo, fetch_remote, base_ref)
     if not sha:
         return _refuse(f"cannot pin the base commit the push would build on — {err}", [])
+    # Only a remark round names a patch and a tree; every other path's call is the one it was.
+    named = {k: v for k, v in (("patch", patch), ("expect_tree", expect_tree))
+             if v is not None}
     try:
-        wt = worktree.for_publish(d, repo, sha)
+        wt = worktree.for_publish(d, repo, sha, **named)
     except worktree.WorktreeError as exc:
         return _refuse(f"no pushed-tree to run against ({exc})", [], base=sha)
     rows: list[dict] = []

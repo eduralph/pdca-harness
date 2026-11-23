@@ -1133,11 +1133,21 @@ wave builds on, via `[driver].wave_mode`:
   bundle's next merge attempt removes the file first).
   With `[driver].remark_rounds` above 0 (default 0, off) such a stop can open a
   **remark round** instead. It counts only for the bundle the merge stopped on,
-  only when at least one open thread was started by an OWNER, MEMBER or
-  COLLABORATOR (other threads are listed as ignored and never reach the brief),
-  and only while the bundle has rounds left. A round needs the run to have pushed
-  the bundle's branch (so the PR holds what was accepted), `[driver].worktree =
-  true`, a pass of the run's pass budget left to drive it, and a PR branch it can
+  and only while the bundle has rounds left. It opens only for review bots: every
+  open thread must have been started by a login `[driver].review_bots` lists
+  (case and a trailing `[bot]` aside) that GitHub reports as a bot, and no change
+  request may stand except a listed bot's (read from the PR's
+  `latestOpinionatedReviews`, so a reviewer's later comment does not hide an
+  earlier request). Any other thread, a thread with no id, threads that could not
+  be read, any other change request, one that could not be read, or a
+  `reviewDecision` of `CHANGES_REQUESTED` with no request standing holds the PR
+  for you instead: the run stops as before, the PR unmerged and its dependents
+  held, with one line naming each of them (never their text). Only a thread's
+  first comment is read, so a person's reply inside a bot's thread is not seen.
+  With `review_bots` empty (the default) no round opens. A round needs the run
+  to have pushed the bundle's branch (so the PR holds what was accepted),
+  `[driver].worktree = true`, a pass of the run's pass budget left to drive it,
+  and a PR branch it can
   fetch whose head holds only what the run pushed: that commit, with at most its
   base merged in (as the merge step's own update of a branch behind its base
   does). A commit someone else pushed on top, such as a reviewer's committed
@@ -1167,16 +1177,48 @@ wave builds on, via `[driver].wave_mode`:
   `git apply --numstat` reads it), `held` (a §6 row of this Check names its id or
   its exact `path:line`) or `declined`, with the exact reply, which T4 checks
   (any character that would end a line of SUMMARY.md is shown as its `\u`
-  escape, so no reply can start a heading of its own there). A
-  round pushes, replies to, resolves and merges nothing yet. After its sign-off
-  the run stops, non-zero (with `--no-publish` too, and `pdca signoff` exits
-  non-zero the same way), and while `remark-round.json` exists the bundle is
-  never published or merged: every path says to apply `patch.diff` to the PR
-  branch by hand. A discontinued round's PR stays open, the human's to close.
+  escape, so no reply can start a heading of its own there). Once the round is
+  accepted, its publish (in the same run, through `pdca signoff <id> --accept`,
+  or `pdca publish <id>`) pushes `patch.diff` as one commit onto the PR's
+  existing branch. The open PR for that branch must be the one the round
+  records. The commit message is freshly drafted and T4-gated, and the first
+  publish's texts move into the round's archive. The tree the commit must have
+  is worked out first, from the round's PR head plus `patch.diff`, in a
+  temporary index. The commit is made in a throwaway worktree at that head, with
+  the repository's hooks running as for any commit, and it is pushed only if its
+  tree is that tree, its only parent is that head, and `patch.diff` is unchanged
+  since the publish read it. With `[gates] host_ci` declared, its commands run in
+  another throwaway worktree, and only once that worktree's files are found to
+  make the same tree (a post-checkout hook that changed one stops the publish).
+  The push is a plain one, never forced, so a branch someone else moved on is
+  refused by git. A branch rewound to an ancestor of the round's head is not
+  refused: the push fast-forwards it to the round's commit. Your checkout is
+  never touched: no stash, checkout, reset or commit runs in it.
+  `remark-round.json` records the pushed commit under `pushed` (or `no-change`
+  for a round with an empty `patch.diff`, which pushes nothing), `publish.json`
+  appends it to `round_commits`, and a publish of a round already done pushes
+  nothing. A step that fails up to and including the push stops with one line
+  naming it and what the tool said, records nothing, and `pdca publish <id>`
+  retries it. Writing the records after a push that succeeded is different: if
+  that fails, the commit is already on the PR, so the line names the commit and
+  the file and says not to re-run `pdca publish <id>`. Repair the records by
+  hand instead; the line lists each edit with the value to write: the round's
+  entry under `pushed` in `remark-round.json` (when that was the write that
+  failed), the commit appended to `round_commits` in `publish.json`, and, when
+  the PR is marked for merge (`merge_eligible`), `merge_eligible_patch` set to
+  the sha256 of the `patch.diff` that was pushed, so the PR stays marked for it.
+  A later run that meets a live round with no rounds left (its merge is refused
+  while the round is live) says `remark rounds exhausted`, read from
+  `remark-round.json` alone. Replying to and resolving the
+  threads and merging are not built yet: the run still stops non-zero after the
+  round, with `--no-publish` too, and the bundle is never published the ordinary
+  way or merged while `remark-round.json` exists. A discontinued round's PR stays
+  open, the human's to close.
   Its dependents wait for as long as the round is live, with or without
-  publishing, even if its PR is merged by hand, since that PR lacks the round's
-  change; an empty `patch.diff` (every thread declined) is no no-fix close
-  either, so `pdca cleanup` only reports the bundle and `pdca revert` refuses it.
+  publishing, even if its PR is merged by hand, since that PR may lack the
+  round's change and its threads are still open; an empty `patch.diff` (every
+  thread declined) is no no-fix close either, so `pdca cleanup` only reports the
+  bundle and `pdca revert` refuses it.
   With `[driver].worktree` turned off while a round is live, its Do and its gates
   fail instead of running on the target base; its Do also fails, instead of
   running in place, when its worktree cannot be resolved, created or reset, and
@@ -1186,12 +1228,11 @@ wave builds on, via `[driver].wave_mode`:
   accepted attempt the round archives is not counted as a spent round by the
   size backstop. `remark_rounds` is the only cap; auto-iterate's budget is not
   used. Nothing in this release ends a live round. It ends only when you delete
-  `remark-round.json`, and only after the PR has merged with the round's
-  `patch.diff` applied to its branch by hand. Deleted before that, the bundle
-  reads as an ordinary accepted one, and `pdca publish` then cuts a fresh branch
-  off the base and force-pushes `patch.diff`, the round's delta alone, over the
-  PR, dropping the accepted work the PR holds. The accepted round's stop line
-  says the same.
+  `remark-round.json`, and only after the PR has merged with the round's commit
+  on it. Deleted before that, the bundle reads as an ordinary accepted one, and
+  `pdca publish` then cuts a fresh branch off the base and force-pushes
+  `patch.diff`, the round's delta alone, over the PR, dropping the accepted work
+  the PR holds. The stop line of a round whose publish is done says the same.
   Under either setting, before it readies a PR the driver reads the PR's base on
   the host and compares it with the bundle's own target base (the `Repo + branch
   target` publish used). If they differ, the driver retargets the PR

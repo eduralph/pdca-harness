@@ -56,7 +56,7 @@ DEPENDENCY_ADJUDICATION = "dependency-adjudication.json"
 MERGE_REMARKS = "merge-remarks.json"
 
 # A merge-mode remark round (issue #921): the record of an accepted bundle reopened on its
-# PR's own head because collaborator review threads blocked the merge. A round is LIVE while
+# PR's own head because review-bot threads blocked the merge (#922). A round is LIVE while
 # this file exists. It holds the round count, the PR head the round builds on, the archives
 # already on the PR and every thread seen, so it must outlive each rebuild of the round:
 # listed in CYCLE_EVIDENCE_ONLY below, never archived.
