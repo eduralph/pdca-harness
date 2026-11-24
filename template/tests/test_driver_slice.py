@@ -8,9 +8,13 @@ plus the C6 accept-gate, the independence contract, and an iterate transition.
 
 from __future__ import annotations
 
+import fnmatch
 import io
 import json
+import os
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -24,6 +28,15 @@ from pdca_harness.config import DEFAULT_CLOSE_DISPOSITIONS, Config, LeafConfig
 
 TOY_BRIEF = Path(__file__).resolve().parents[1] / "examples" / "toy" / "brief.md"
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
+
+
+def _js_units(text: str) -> str:
+    """``text`` as JavaScript counts it: a character above U+FFFF (an emoji) becomes its two
+    UTF-16 surrogates, so a regex `.` matches one code unit, as `[^/]` with no `u` flag does
+    in Claude Code's matchers (#935)."""
+    return "".join(chr(0xD800 + ((ord(c) - 0x10000) >> 10))
+                   + chr(0xDC00 + ((ord(c) - 0x10000) & 0x3FF)) if ord(c) > 0xFFFF else c
+                   for c in text)
 
 
 def _stub_config(root: Path) -> Config:
@@ -548,7 +561,12 @@ class AdvisoryReviewResilience(unittest.TestCase):
         (cdir / "settings.json").write_text(json.dumps(payload), encoding="utf-8")
 
     def _capture_sandbox_settings(self) -> dict:
-        """Run the sandboxed reviewer, returning what landed at <sandbox>/.claude/settings.json."""
+        """Run the sandboxed reviewer, returning what landed at <sandbox>/.claude/settings.json.
+
+        Against a fake host (:meth:`_fake_host`) unless the test set one up itself: since #935
+        every seed lists the operator's credential locations, and no test reads the CI host's."""
+        if getattr(self, "_host", None) is None:
+            self._fake_host()
         (self.d / "patch.diff").write_text("x\n", encoding="utf-8")
         (self.d / "check-gates.json").write_text("{}\n", encoding="utf-8")
         seen: dict = {}
@@ -582,7 +600,960 @@ class AdvisoryReviewResilience(unittest.TestCase):
         self.assertIs(seen["content"]["sandbox"]["network"]["allowLocalBinding"], True)
         # ONLY the loopback grant travels — the project's Edit/Write allow-list must not
         # widen the reviewer's surface past what its `tools:` frontmatter grants.
-        self.assertNotIn("permissions", seen["content"])
+        self.assertEqual(self._grants(seen["content"]),
+                         {"sandbox": {"network": {"allowLocalBinding": True}}})
+        # …and beside it, the harness's own credential deny (#935): deny rules only.
+        content = seen["content"]
+        self.assertTrue(self._deny_read(content))
+        self.assertTrue(self._env_entries(content))
+        self.assertEqual(set(content.get("permissions", {})), {"deny"})
+        self.assertIn("Read(//proc/**)", self._deny_rules(content))
+        self.assertFalse([r for r in self._deny_rules(content)
+                          if not r.startswith("Read(")])
+
+    def _grants(self, content: dict) -> dict:
+        """The seeded file with the harness's credential deny (#935) set aside: what is left is
+        exactly what was GRANTED, for the tests that pin the grant allow-list. The deny itself
+        is pinned by the `test_seed_*` cases below; here it is held to being deny-only — a
+        `filesystem` with nothing but `denyRead`, `credentials` with nothing but `deny`
+        entries, `permissions` with nothing but `Read(...)` denies — so no grant can hide in it.
+        """
+        content = json.loads(json.dumps(content))      # a copy; the caller's stays whole
+        sandbox = content.get("sandbox", {})
+        self.assertLessEqual(set(sandbox.pop("filesystem", {})), {"denyRead"})
+        credentials = sandbox.pop("credentials", {})
+        self.assertLessEqual(set(credentials), {"envVars"})
+        self.assertTrue(all(e.get("mode") == "deny" for e in credentials.get("envVars", [])))
+        permissions = content.pop("permissions", {})
+        self.assertLessEqual(set(permissions), {"deny"})
+        self.assertTrue(all(r.startswith("Read(") for r in permissions.get("deny", [])))
+        return content
+
+    # Lookups that come back empty, not KeyError, on a seed with no deny: the red leg then
+    # fails on the assertion that names the missing rule.
+    @staticmethod
+    def _deny_read(content: dict) -> list:
+        return content.get("sandbox", {}).get("filesystem", {}).get("denyRead", [])
+
+    @staticmethod
+    def _deny_rules(content: dict) -> list:
+        return content.get("permissions", {}).get("deny", [])
+
+    @staticmethod
+    def _env_entries(content: dict) -> list:
+        return content.get("sandbox", {}).get("credentials", {}).get("envVars", [])
+
+    # ---- #935: every seeded policy denies the operator's credentials ----------------------
+    # The brief's named minimum, written out HERE rather than read from `leaves`, so these
+    # tests pin the list itself and not whatever the code holds. (path under a home, is a dir)
+    _HOME_LOCATIONS = (
+        (".claude.json", False), (".codex", True), (".gemini", True), (".config/gh", True),
+        (".config/glab-cli", True), (".ssh", True), (".git-credentials", False),
+        (".config/git/credentials", False), (".netrc", False), (".aws", True), (".kube", True),
+        (".docker/config.json", False), (".dockercfg", False),
+        (".config/containers/auth.json", False), (".npmrc", False),
+        (".cargo/credentials.toml", False), (".cargo/credentials", False), (".pypirc", False),
+        (".gem/credentials", False), (".local/share/gem/credentials", False),
+        (".cache/huggingface/stored_tokens", False),
+        (".terraform.d/credentials.tfrc.json", False), (".terraformrc", False),
+        (".config/gcloud", True), (".azure", True),
+    )
+    # (variable, path under it, is a dir)
+    _VAR_LOCATIONS = (
+        ("CODEX_HOME", "", True), ("GH_CONFIG_DIR", "", True), ("XDG_CONFIG_HOME", "gh", True),
+        ("XDG_CONFIG_HOME", "glab-cli", True), ("XDG_CONFIG_HOME", "git/credentials", False),
+        ("XDG_CONFIG_HOME", "containers/auth.json", False), ("XDG_CONFIG_HOME", "gcloud", True),
+        ("GLAB_CONFIG_DIR", "", True), ("NETRC", "", False),
+        ("AWS_SHARED_CREDENTIALS_FILE", "", False), ("AWS_CONFIG_FILE", "", False),
+        ("AWS_WEB_IDENTITY_TOKEN_FILE", "", False),
+        ("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", "", False),
+        ("DOCKER_CONFIG", "config.json", False), ("REGISTRY_AUTH_FILE", "", False),
+        ("XDG_RUNTIME_DIR", "containers/auth.json", False), ("NPM_CONFIG_USERCONFIG", "", False),
+        ("CARGO_HOME", "credentials.toml", False), ("CARGO_HOME", "credentials", False),
+        ("XDG_DATA_HOME", "gem/credentials", False), ("HF_HOME", "stored_tokens", False),
+        ("XDG_CACHE_HOME", "huggingface/stored_tokens", False),
+        ("TF_CLI_CONFIG_FILE", "", False), ("CLOUDSDK_CONFIG", "", True),
+        ("GOOGLE_APPLICATION_CREDENTIALS", "", False), ("AZURE_CONFIG_DIR", "", True),
+        ("AZURE_CLIENT_CERTIFICATE_PATH", "", False), ("AZURE_FEDERATED_TOKEN_FILE", "", False),
+    )
+    _CLAUDE_CONFIG_FILES = (".credentials.json", "settings.json", "settings.local.json",
+                            "history.jsonl", "daemon.json")
+    _CLAUDE_CONFIG_DIRS = ("file-history", "paste-cache", "session-env", "shell-snapshots",
+                           "sessions", "todos", "plans", "ide", "debug", "backups", "jobs",
+                           "daemon")
+    _DENIED_VARS = (
+        "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY",
+        "GEMINI_API_KEY", "GOOGLE_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN", "AWS_CONTAINER_AUTHORIZATION_TOKEN", "NPM_TOKEN",
+        "CARGO_REGISTRY_TOKEN", "DOCKER_AUTH_CONFIG", "SSH_AUTH_SOCK", "GH_TOKEN", "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+        "ACTIONS_RUNTIME_TOKEN", "GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "GL_TOKEN",
+        "CI_JOB_TOKEN", "TWINE_PASSWORD", "GEM_HOST_API_KEY", "COMPOSER_AUTH", "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN", "VAULT_TOKEN", "AZURE_CLIENT_SECRET",
+        "AZURE_CLIENT_CERTIFICATE_PASSWORD", "AZURE_PASSWORD",
+    )
+
+    def _fake_host(self, **env: str) -> dict:
+        """Point every seed at a FAKE host for the rest of the test, never the CI host's own.
+
+        The environment is cleared (only PATH kept, so `git` still runs) and holds just
+        `HOME`, `CLAUDE_CONFIG_DIR` and ``env``. `HOME` is a symlink to the real home dir, so
+        every home location has two spellings; the password database says the real one. The
+        home's `.claude` holds the CLI's login, an entry the CLI's own list does not name, and
+        another session's `projects/` folder with its transcript — plus a folder whose name
+        carries pattern characters. `$CLAUDE_CONFIG_DIR` is a second config dir. Nothing
+        under the home but `.claude` exists: a missing location must still be denied."""
+        base = self.tmp.resolve() / "host"
+        real = base / "home"
+        claude = real / ".claude"
+        (claude / "projects" / "-tmp-old-session").mkdir(parents=True)
+        (claude / "projects" / "-tmp-old-session" / "f00d.jsonl").write_text("{}\n")
+        (claude / "projects" / "we[ir]d name").mkdir()
+        (claude / ".credentials.json").write_text("{}\n")
+        (claude / "statsig").mkdir()
+        link = base / "home-link"
+        link.symlink_to(real, target_is_directory=True)
+        config = base / "claude-config"
+        (config / "projects" / "-tmp-other").mkdir(parents=True)
+        self.enterContext(mock.patch.dict(os.environ, {
+            "PATH": os.environ.get("PATH", ""), "HOME": str(link),
+            "CLAUDE_CONFIG_DIR": str(config), **env}, clear=True))
+        self.enterContext(mock.patch("pwd.getpwuid", return_value=mock.Mock(pw_dir=str(real))))
+        self._host = {"base": base, "real": real, "link": link, "config": config}
+        return self._host
+
+    @staticmethod
+    def _as_written(path: Path | str) -> str:
+        """``path`` as a rule writes it: each glob character (`* ? [ ] { } \\`) as `?`, every
+        other character as it is. (A NAME read off the disk is written stricter, per the brief;
+        the tests that read one spell its rule out.) The identity on every path these tests
+        build under an ordinary temp dir; the two path-character cases pin it."""
+        return re.sub(r"[][*?{}\\]", "?", str(path))
+
+    @staticmethod
+    def _rule_covers(rule: str, path: Path | str) -> bool:
+        """Whether the Read rule ``rule`` could match ``path``, read generously: `*` and `?`
+        match across `/` too, case is not told apart, a rule matches everything under what it
+        names, and it matches through its "physical twin" too — Claude Code 2.1.322 applies
+        each rule again with the part before its first wildcard resolved through symlinks. A
+        rule that misses here misses under any stricter reading, the vendor's included. Like
+        the vendor's, a `?` is one UTF-16 code unit, so a character above U+FFFF takes two.
+        A rule for `/`, or one whose twin is `/` (it names a link to the root), covers every
+        path."""
+        pattern = rule[len("Read(/"):-1].removesuffix("/**").rstrip("/")
+        parts = pattern.split("/")
+        cut = next((i for i, part in enumerate(parts) if "*" in part or "?" in part),
+                   len(parts))
+        twins = [pattern] + (["/".join([os.path.realpath("/".join(parts[:cut])).rstrip("/"),
+                                        *parts[cut:]])]
+                             if cut > 1 else [])
+        return any(re.fullmatch("".join(".*" if c == "*" else "." if c == "?" else re.escape(c)
+                                        for c in _js_units(twin)) + "(/.*)?",
+                                _js_units(str(path)), re.IGNORECASE)
+                   for twin in twins)
+
+    def _covering(self, deny: list, path: Path) -> list:
+        """The Read rules in ``deny`` that could match ``path`` (:meth:`_rule_covers`)."""
+        return [rule for rule in deny if self._rule_covers(rule, path)]
+
+    def _assert_denied(self, content: dict, path: Path, is_dir: bool) -> None:
+        """``path`` is denied to the leaf's commands AND to its Read tool, absolute, in the
+        spelling given (here) — callers pass each spelling they need."""
+        written = self._as_written(path)
+        rule = f"Read(/{written}/**)" if is_dir else f"Read(/{written})"
+        self.assertIn(written, self._deny_read(content))
+        self.assertIn(rule, self._deny_rules(content))
+
+    def test_seed_denies_every_named_credential_location_under_the_home(self) -> None:
+        # (b) The exemption seed — written AND enabled on this code — lists each named home
+        # location in `denyRead` and as a Read deny, in the given (`$HOME`, a symlink) and the
+        # resolved spelling, whether or not it exists; the containers logins under /run always;
+        # and `Read(//proc/**)`, written to `permissions.deny` only (the brief). Whether Claude
+        # Code then hides `/proc` from the commands as well is the live check's to settle. Red
+        # before #935: no `filesystem`, no `Read(...)`.
+        h = self._fake_host()
+        self._exempt("cargo xtask fdb-conformance")
+        content = self._capture_sandbox_settings()["content"]
+        for rel, is_dir in self._HOME_LOCATIONS:
+            for home in (h["link"], h["real"]):
+                with self.subTest(home=str(home), location=rel):
+                    self.assertFalse((home / rel).exists())     # missing, and denied anyway
+                    self._assert_denied(content, home / rel, is_dir)
+        uid = os.getuid()
+        for path in (f"/run/user/{uid}/containers/auth.json", f"/run/containers/{uid}/auth.json"):
+            self._assert_denied(content, Path(path), False)     # no $XDG_RUNTIME_DIR set
+        self.assertIn("Read(//proc/**)", self._deny_rules(content))
+        self.assertFalse([p for p in self._deny_read(content)
+                          if p == "/proc" or p.startswith("/proc/")])   # not in `denyRead`
+        self.assertTrue(all(os.path.isabs(p) for p in self._deny_read(content)))
+
+    def test_seed_denies_the_locations_the_variables_name(self) -> None:
+        # (b) A variable-named location is denied when the variable is set and non-empty —
+        # each `$KUBECONFIG` entry too — and an empty one names nothing (it is not the cwd).
+        base = self.tmp.resolve() / "vars"
+        env = {var: str(base / var) for var, _, _ in self._VAR_LOCATIONS}
+        env["KUBECONFIG"] = os.pathsep.join([str(base / "kube-a"), str(base / "kube-b")])
+        h = self._fake_host(**env)
+        self._exempt("cargo xtask fdb-conformance")
+        content = self._capture_sandbox_settings()["content"]
+        for var, under, is_dir in self._VAR_LOCATIONS:
+            with self.subTest(var=var, under=under):
+                self._assert_denied(content, base / var / under if under else base / var,
+                                    is_dir)
+        for entry in ("kube-a", "kube-b"):
+            self._assert_denied(content, base / entry, False)
+        with mock.patch.dict(os.environ, {"GH_CONFIG_DIR": "", "NETRC": ""}):
+            content = self._capture_sandbox_settings()["content"]
+        deny_read = self._deny_read(content)
+        self.assertNotIn(self._as_written(os.getcwd()), deny_read)
+        self.assertNotIn(self._as_written(base / "GH_CONFIG_DIR"), deny_read)
+        self.assertIn(self._as_written(h["real"] / ".netrc"), deny_read)  # the default still is
+
+    def test_seed_denies_a_variable_path_with_a_tilde_or_a_variable_where_it_expands(
+            self) -> None:
+        # (b) A value with a literal `~` or `$VAR` in it — a systemd `Environment=` line, a
+        # `docker --env-file` or a quoted `.env` export leaves it unexpanded — names the file a
+        # tool that expands it reads: botocore runs `expandvars` then `expanduser` on its file
+        # paths, npm expands a leading `~/`. So that spelling is denied, in both home
+        # spellings, beside the value as written (a tool that takes it literally reads it
+        # against its cwd). Each `$KUBECONFIG` entry the same. Red on round 5's code, which
+        # denied only `<cwd>/~/work/aws-creds`, and `aws` in the re-run read the real file.
+        h = self._fake_host(
+            AWS_SHARED_CREDENTIALS_FILE="~/work/aws-creds",
+            GOOGLE_APPLICATION_CREDENTIALS="$HOME/keys/sa.json",
+            GH_CONFIG_DIR="${HOME}/gh-alt", DOCKER_CONFIG="~/docker-alt",
+            KUBECONFIG=os.pathsep.join(["~/kube/a", "$HOME/kube/b"]))
+        self._exempt("cargo xtask fdb-conformance")
+        content = self._capture_sandbox_settings()["content"]
+        for rel, is_dir in (("work/aws-creds", False), ("keys/sa.json", False),
+                            ("gh-alt", True), ("docker-alt/config.json", False),
+                            ("kube/a", False), ("kube/b", False)):
+            for home in (h["link"], h["real"]):
+                with self.subTest(home=str(home), location=rel):
+                    self._assert_denied(content, home / rel, is_dir)
+        for literal in ("~/work/aws-creds", "$HOME/keys/sa.json", "~/kube/a"):
+            with self.subTest(as_written=literal):
+                self._assert_denied(content, Path.cwd() / literal, False)
+
+    def test_seed_still_denies_a_variable_that_names_the_home_entry_by_entry(self) -> None:
+        # (b) Fail closed: a path a variable names is a credential location on the operator's
+        # own word, even when it is the home itself (`$GH_CONFIG_DIR` set to it: `gh` keeps
+        # `hosts.yml` there). Unlike a LINK to the home, which the walk passes by, it is
+        # denied: whole to the commands, and entry by entry to the Read tool, so its login is
+        # refused while the config dir in it keeps its own rules and the leaf its outputs.
+        h = self._fake_host()
+        (h["real"] / "hosts.yml").write_text("not a token\n")
+        self._exempt("cargo xtask fdb-conformance")
+        with mock.patch.dict(os.environ, {"GH_CONFIG_DIR": str(h["link"])}):
+            content = self._capture_sandbox_settings()["content"]
+        deny_read, deny = self._deny_read(content), self._deny_rules(content)
+        for home in (h["link"], h["real"]):
+            with self.subTest(home=str(home)):
+                self.assertIn(self._as_written(home), deny_read)
+                self.assertIn(f"Read(/{self._as_written(home)}/hosts.yml)", deny)
+                self.assertEqual(self._covering(deny, home / ".claude" / self._LEAF_OUTPUT), [])
+
+    def test_seed_denies_the_claude_config_dir_whole_to_commands_and_by_entry_to_read(
+            self) -> None:
+        # (b) `~/.claude` and `$CLAUDE_CONFIG_DIR`: whole in `denyRead`; to the Read tool the
+        # CLI's own names (existing or not) and every entry there now, `projects` never whole —
+        # its existing folders by name and the session history by pattern — so the leaf's
+        # own session folder, made after the seed, keeps its `tool-results/` readable.
+        h = self._fake_host()
+        self._exempt("cargo xtask fdb-conformance")
+        content = self._capture_sandbox_settings()["content"]
+        deny = self._deny_rules(content)
+        for given in (h["link"] / ".claude", h["real"] / ".claude", h["config"]):
+            config = self._as_written(given)
+            with self.subTest(config=config):
+                self.assertIn(config, self._deny_read(content))
+                self.assertNotIn(f"Read(/{config}/**)", deny)
+                for name in self._CLAUDE_CONFIG_FILES:
+                    self.assertIn(f"Read(/{config}/{name})", deny)
+                for name in self._CLAUDE_CONFIG_DIRS:
+                    self.assertIn(f"Read(/{config}/{name}/**)", deny)
+                projects = f"{config}/projects"
+                self.assertNotIn(f"Read(/{projects}/**)", deny)
+                self.assertNotIn(f"Read(/{projects})", deny)
+                under = sorted(r for r in deny if r.startswith(f"Read(/{projects}/"))
+                existing = (["-tmp-other"] if given == h["config"]
+                            else ["-tmp-old-session", "we?ir?d?name"])
+                self.assertEqual(under, sorted(
+                    [f"Read(/{projects}/{name}/**)" for name in existing]
+                    + [f"Read(/{projects}/*/*.jsonl)", f"Read(/{projects}/*/*/subagents/**)",
+                       f"Read(/{projects}/*/memory/**)"]))
+        for given in (h["link"] / ".claude", h["real"] / ".claude"):
+            self.assertIn(f"Read(/{self._as_written(given)}/statsig/**)", deny)  # there now
+
+    def test_seed_denies_where_a_link_in_a_denied_directory_points(self) -> None:
+        # (b) Both spellings hold INSIDE a denied directory too. The CLI's login linked to a
+        # file elsewhere, `projects` moved to another disk and linked back, a session folder
+        # in it linked from a third place, a key linked into `~/.ssh`: denying the directory
+        # hides each link, not what it points at, which the leaf's commands and its Read tool
+        # could still open by its own path. So each target is denied too, and the moved
+        # `projects` the way `projects` is: to the Read tool folder by folder and by pattern,
+        # never whole, so the leaf's own session folder made there during the run stays
+        # readable. Red on round 1's code, which resolved the config dir but not its entries.
+        h = self._fake_host()
+        claude, data = h["real"] / ".claude", h["base"] / "data"
+        login = data / "secret" / "cred.json"
+        login.parent.mkdir(parents=True)
+        login.write_text("{}\n")
+        (claude / ".credentials.json").unlink()
+        (claude / ".credentials.json").symlink_to(login)
+        moved = data / "cc-projects"
+        (claude / "projects").rename(moved)
+        (claude / "projects").symlink_to(moved, target_is_directory=True)
+        linked_session = data / "old-session"
+        linked_session.mkdir()
+        (moved / "-tmp-linked").symlink_to(linked_session, target_is_directory=True)
+        key = data / "keys" / "id_ed25519"
+        key.parent.mkdir()
+        key.write_text("not a key\n")
+        (h["real"] / ".ssh").mkdir()
+        (h["real"] / ".ssh" / "id_ed25519").symlink_to(key)
+        self._exempt("cargo xtask fdb-conformance")
+        content = self._capture_sandbox_settings()["content"]
+        deny = self._deny_rules(content)
+        self._assert_denied(content, login, False)
+        self._assert_denied(content, key, False)
+        self._assert_denied(content, linked_session, True)
+        projects = self._as_written(moved)
+        self.assertIn(projects, self._deny_read(content))       # whole, to the commands
+        self.assertNotIn(f"Read(/{projects}/**)", deny)
+        self.assertNotIn(f"Read(/{projects})", deny)
+        self.assertEqual(
+            sorted(r for r in deny if r.startswith(f"Read(/{projects}/")),
+            sorted([f"Read(/{projects}/{name}/**)"
+                    for name in ("-tmp-old-session", "-tmp-linked", "we?ir?d?name")]
+                   + [f"Read(/{projects}/*/*.jsonl)", f"Read(/{projects}/*/*/subagents/**)",
+                      f"Read(/{projects}/*/memory/**)"]))
+        for given in (h["link"] / ".claude", claude):          # the links' own spellings too
+            config = self._as_written(given)
+            self.assertIn(f"Read(/{config}/.credentials.json)", deny)
+            self.assertIn(f"Read(/{config}/projects/-tmp-linked/**)", deny)
+            self.assertNotIn(f"Read(/{config}/projects/**)", deny)
+
+    # Paths a leaf reads that no credential rule may take: a tool, the inputs in its temp cwd,
+    # an ordinary file in the home (the target often sits there).
+    def _ordinary(self, h: dict) -> list:
+        return [Path("/usr/bin/env"), self.tmp.resolve() / "pdca-review-leaf" / "brief.md",
+                h["real"] / "src" / "main.py"]
+
+    def test_seed_does_not_deny_a_link_to_root_or_to_a_home_where_it_points(self) -> None:
+        # (b) A link in a denied directory to `/` (`~/.ssh/r`), to the home (`~/.ssh/h`) or to
+        # a directory holding it (`~/.ssh/up`) is left out, with a warning. Denied where it
+        # points, it would take every file there from the leaf — its toolchain, the target,
+        # the inputs in its cwd — and the credential locations it holds are denied under their
+        # own names anyway. `~/.ssh` itself stays denied, and a link to an ordinary place is
+        # still followed. Red on round 5's code, which put `/` in `denyRead` and wrote
+        # `Read(///**)`, refusing the leaf's commands and its Read tool every file.
+        h = self._fake_host()
+        ssh = h["real"] / ".ssh"
+        ssh.mkdir()
+        (ssh / "r").symlink_to("/", target_is_directory=True)
+        (ssh / "h").symlink_to(h["link"], target_is_directory=True)
+        (ssh / "up").symlink_to(h["base"], target_is_directory=True)
+        key = h["base"] / "keys" / "id_ed25519"
+        key.parent.mkdir()
+        key.write_text("not a key\n")
+        (ssh / "id_ed25519").symlink_to(key)
+        self._exempt("cargo xtask fdb-conformance")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            content = self._capture_sandbox_settings()["content"]
+        deny_read, deny = self._deny_read(content), self._deny_rules(content)
+        for target in ("/", h["real"], h["link"], h["base"]):
+            with self.subTest(target=str(target)):
+                self.assertNotIn(self._as_written(target), deny_read)
+        for path in self._ordinary(h):
+            with self.subTest(ordinary=str(path)):
+                self.assertEqual(self._covering(deny, path), [])
+        with self.subTest(deny_read="only the fake host and /run"):
+            self.assertEqual([p for p in deny_read if not p.startswith(str(h["base"]))
+                              and not p.startswith("/run/")], [])
+        for home in (h["link"], h["real"]):
+            self._assert_denied(content, home / ".ssh", True)
+        self._assert_denied(content, key, False)            # an ordinary link is still followed
+        for name in ("r", "h", "up"):
+            self.assertIn(f"{ssh / name} links to", err.getvalue())
+
+    def test_seed_writes_a_pattern_character_in_a_path_as_a_wildcard(self) -> None:
+        # (b) The vendor reads a path that holds a glob character as a pattern, so in every
+        # path — a home, a path a variable names, a `$KUBECONFIG` entry — each of
+        # `* ? [ ] { } \` is written as `?`. Written raw, `home[1]` is a character class that
+        # matches `home1`, never the real `home[1]`; written `home?1?`, the rule matches it.
+        h = self._fake_host()
+        odd = h["base"] / "odd"
+        home = odd / "home[1]"
+        (home / ".ssh").mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"HOME": str(home), "GH_CONFIG_DIR": str(odd / "gh{x}"),
+                                          "KUBECONFIG": str(odd / "kube*")}):
+            self._exempt("cargo xtask fdb-conformance")
+            content = self._capture_sandbox_settings()["content"]
+        deny_read, deny = self._deny_read(content), self._deny_rules(content)
+        written = f"{self._as_written(odd)}/home?1?"
+        for path, rule in ((f"{written}/.ssh", f"Read(/{written}/.ssh/**)"),
+                           (f"{written}/.claude.json", f"Read(/{written}/.claude.json)"),
+                           (f"{self._as_written(odd)}/gh?x?",
+                            f"Read(/{self._as_written(odd)}/gh?x?/**)"),
+                           (f"{self._as_written(odd)}/kube?",
+                            f"Read(/{self._as_written(odd)}/kube?)")):
+            with self.subTest(path=path):
+                self.assertIn(path, deny_read)
+                self.assertIn(rule, deny)
+        self.assertIn(f"{written}/.claude", deny_read)
+        self.assertIn(f"Read(/{written}/.claude/.credentials.json)", deny)
+        # No path in the file carries a pattern of its own: no `[ ] { } \` anywhere, no `*`
+        # in `denyRead`, and in a Read rule only the `*` of `/**` and of the session-history
+        # patterns (longest first, so `…/subagents/**)` is not cut at its `/**)`).
+        tails = ("/*/*/subagents/**)", "/*/memory/**)", "/*/*.jsonl)", "/**)")
+        for path in deny_read:
+            self.assertNotRegex(path, r"[][{}\\*]")
+        for rule in deny:
+            head = next((rule[:-len(t)] for t in tails if rule.endswith(t)), rule)
+            self.assertNotRegex(head, r"[][{}\\*]")
+        # …and as a glob the written spelling matches the real path, where the raw one misses.
+        self.assertTrue(fnmatch.fnmatchcase(str(home / ".ssh"), f"{written}/.ssh"))
+        self.assertFalse(fnmatch.fnmatchcase(str(home / ".ssh"), str(home / ".ssh")))
+
+    def test_seed_writes_an_ordinary_character_in_a_path_as_it_is(self) -> None:
+        # (b) Only a glob character is rewritten. A space, `@`, `+`, `~` or `,` in a home or
+        # in a path a variable names is written as it is, so the vendor keeps reading the path
+        # as a literal path — the handling the by-hand check (h) runs — not as a glob, whose
+        # branch skips a link that does not resolve and denies a directory only where it finds
+        # files in it. (An SSSD home is `/home/jdoe@corp.example`.) Red on round 2's code,
+        # which wrote every such character as `?`.
+        h = self._fake_host()
+        odd = h["base"] / "odd"
+        home = odd / "jdoe@corp.example"
+        (home / ".claude" / "projects" / "-tmp-old").mkdir(parents=True)
+        gh = odd / "john smith" / "gh+1~,x"
+        with mock.patch.dict(os.environ, {"HOME": str(home), "GH_CONFIG_DIR": str(gh)}):
+            self._exempt("cargo xtask fdb-conformance")
+            content = self._capture_sandbox_settings()["content"]
+        deny_read, deny = self._deny_read(content), self._deny_rules(content)
+        for path, is_dir in ((home / ".ssh", True), (home / ".netrc", False),
+                             (home / ".claude.json", False), (gh, True)):
+            with self.subTest(path=str(path)):
+                self._assert_denied(content, path, is_dir)
+                self.assertIn(str(path), deny_read)                 # written as it is
+        claude = self._as_written(home / ".claude")
+        self.assertIn(claude, deny_read)
+        self.assertIn(f"Read(/{claude}/.credentials.json)", deny)
+        self.assertIn(f"Read(/{claude}/projects/-tmp-old/**)", deny)
+        self.assertIn(f"Read(/{claude}/projects/*/*.jsonl)", deny)
+        # Nothing under those two paths is written with a `?`.
+        self.assertEqual([p for p in deny_read + deny
+                          if (str(home) in p or str(gh) in p) and "?" in p], [])
+
+    def test_seed_denies_all_of_projects_when_it_cannot_be_listed(self) -> None:
+        # (b) Fail closed: a `projects` that exists but cannot be listed may hold any number
+        # of other sessions' folders, none of which can be told from the leaf's own, so the
+        # Read tool is denied all of it, plain and `/**` — whether `projects` is a file or a
+        # directory the harness may not list (root lists one anyway, so that leg needs a
+        # non-root run). The listable `projects` beside it is still denied folder by folder.
+        h = self._fake_host()
+        projects = h["config"] / "projects"
+        shutil.rmtree(projects)
+        projects.write_text("not a directory\n")
+        self._exempt("cargo xtask fdb-conformance")
+        cases = [("a file", self._capture_sandbox_settings()["content"])]
+        if os.geteuid() != 0:
+            projects.unlink()
+            (projects / "-tmp-other").mkdir(parents=True)
+            projects.chmod(0)
+            try:
+                cases.append(("a directory it may not list",
+                              self._capture_sandbox_settings()["content"]))
+            finally:
+                projects.chmod(0o755)
+        written = self._as_written(projects)
+        listable = self._as_written(h["real"] / ".claude" / "projects")
+        for case, content in cases:
+            with self.subTest(projects=case):
+                deny = self._deny_rules(content)
+                self.assertIn(f"Read(/{written})", deny)
+                self.assertIn(f"Read(/{written}/**)", deny)
+                self.assertIn(f"Read(/{written}/*/*.jsonl)", deny)
+                self.assertNotIn(f"Read(/{listable}/**)", deny)
+                self.assertIn(f"Read(/{listable}/-tmp-old-session/**)", deny)
+
+    # Where the CLI saves one of the LEAF's oversized outputs, under a config dir: a folder
+    # named after the leaf's fresh temp cwd, so made only once the leaf runs.
+    _LEAF_OUTPUT = "projects/-tmp-pdca-review-leaf/0b1e2c3d/tool-results/toolu_01.txt"
+
+    def _profiles(self, h: dict) -> Path:
+        """A profile layout inside the fake home's `.claude`: `profiles/work`, a config dir
+        with its own login and another session's folder; `profiles/personal`, another
+        profile's login; and a file beside them. Returns `profiles`."""
+        profiles = h["real"] / ".claude" / "profiles"
+        (profiles / "work" / "projects" / "-tmp-old-work").mkdir(parents=True)
+        (profiles / "work" / "projects" / "-tmp-old-work" / "5e55.jsonl").write_text("{}\n")
+        (profiles / "work" / ".credentials.json").write_text("{}\n")
+        (profiles / "personal").mkdir()
+        (profiles / "personal" / ".credentials.json").write_text("{}\n")
+        (profiles / "notes.txt").write_text("x\n")
+        return profiles
+
+    def test_seed_leaves_a_config_dir_inside_another_to_its_own_rules(self) -> None:
+        # (b) The leaf can still Read its own saved output when `$CLAUDE_CONFIG_DIR` sits
+        # inside `~/.claude` — a profile layout, `~/.claude/profiles/work`: no rule of the
+        # outer dir covers the inner one. `profiles` is denied entry by entry instead, so the
+        # profile and the file beside `work` stay denied, and `work` keeps its own rules. The
+        # same when `profiles` is a link out of `~/.claude` (its target is opened up the same
+        # way), and for an inner dir in a folder of `projects`. Red on round 2's code, which
+        # denied `~/.claude/profiles/**` whole.
+        h = self._fake_host()
+        profiles = self._profiles(h)
+        self._exempt("cargo xtask fdb-conformance")
+        w = self._as_written
+        work = h["link"] / ".claude" / "profiles" / "work"
+        # As given, and through the real home: resolved, until `profiles` is a link below.
+        inner = (work, h["real"] / ".claude" / "profiles" / "work")
+
+        def seed(config: Path) -> tuple[list, list]:
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(config)}):
+                content = self._capture_sandbox_settings()["content"]
+            return self._deny_read(content), self._deny_rules(content)
+
+        covering = self._covering
+        deny_read, deny = seed(work)
+        for spelling in inner:
+            with self.subTest(layout="profiles a directory", inner=str(spelling)):
+                self.assertEqual(covering(deny, spelling / self._LEAF_OUTPUT), [])
+                self.assertIn(w(spelling), deny_read)
+                self.assertIn(f"Read(/{w(spelling)}/.credentials.json)", deny)
+                self.assertIn(f"Read(/{w(spelling)}/projects/-tmp-old-work/**)", deny)
+                self.assertTrue(covering(deny, spelling / "projects/-tmp-old-work/5e55.jsonl"))
+        for home in (h["link"], h["real"]):
+            outer = w(home / ".claude" / "profiles")
+            with self.subTest(layout="profiles a directory", outer=outer):
+                self.assertIn(w(home / ".claude"), deny_read)
+                self.assertNotIn(f"Read(/{outer}/**)", deny)
+                self.assertNotIn(f"Read(/{outer}/work/**)", deny)
+                self.assertIn(f"Read(/{outer}/personal/**)", deny)
+                self.assertIn(f"Read(/{outer}/notes.txt)", deny)
+
+        data = h["base"] / "data" / "profiles"         # moved to another disk, linked back
+        data.parent.mkdir()
+        profiles.rename(data)
+        profiles.symlink_to(data, target_is_directory=True)
+        deny_read, deny = seed(work)
+        for spelling in (*inner, data / "work"):
+            with self.subTest(layout="profiles linked out", inner=str(spelling)):
+                self.assertEqual(covering(deny, spelling / self._LEAF_OUTPUT), [])
+        self.assertIn(w(data), deny_read)                      # whole, to the commands
+        self.assertNotIn(f"Read(/{w(data)}/**)", deny)
+        self.assertIn(f"Read(/{w(data)}/personal/**)", deny)
+        self.assertIn(f"Read(/{w(data)}/notes.txt)", deny)
+        self.assertIn(f"Read(/{w(data)}/work/.credentials.json)", deny)
+        self.assertTrue(covering(deny, data / "personal" / ".credentials.json"))
+
+        session = h["link"] / ".claude" / "projects" / "-tmp-old-session"
+        (session / "cfg" / "projects").mkdir(parents=True)
+        deny_read, deny = seed(session / "cfg")
+        for home in (h["link"], h["real"]):
+            folder = home / ".claude" / "projects" / "-tmp-old-session"
+            with self.subTest(layout="in a projects folder", folder=str(folder)):
+                self.assertEqual(covering(deny, folder / "cfg" / self._LEAF_OUTPUT), [])
+                self.assertNotIn(f"Read(/{w(folder)}/**)", deny)
+                self.assertIn(f"Read(/{w(folder)}/f00d.jsonl)", deny)
+
+    def test_seed_denies_a_dir_holding_a_config_dir_whole_when_it_cannot_be_listed(
+            self) -> None:
+        # (b) Fail closed: a directory that holds a config dir but cannot be listed (here
+        # `profiles` at mode 0311, passable but not listable) has entries the policy cannot
+        # name, so the Read tool is denied all of it, the inner dir's saved outputs with it.
+        # The inner dir's own rules are still written. Root lists it anyway.
+        if os.geteuid() == 0:
+            self.skipTest("root lists a directory whatever its mode")
+        h = self._fake_host()
+        profiles = self._profiles(h)
+        self._exempt("cargo xtask fdb-conformance")
+        work = h["link"] / ".claude" / "profiles" / "work"
+        profiles.chmod(0o311)
+        try:
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(work)}):
+                deny = self._deny_rules(self._capture_sandbox_settings()["content"])
+        finally:
+            profiles.chmod(0o755)
+        for home in (h["link"], h["real"]):
+            self.assertIn(f"Read(/{self._as_written(home / '.claude' / 'profiles')}/**)", deny)
+        self.assertIn(f"Read(/{self._as_written(work)}/.credentials.json)", deny)
+
+    def test_seed_keeps_the_active_profile_clear_of_a_rule_written_for_a_sibling(
+            self) -> None:
+        # (b) Claude Code matches a Read rule as a pattern, case aside (2.1.322: gitignore
+        # rules, matched case-insensitively), so a rule written for a SIBLING of the active
+        # config dir can match the active one: `prod@us`, a name read off the disk and so
+        # written `prod?us`, matches `prod-us`, and so does `PROD-US`. Denied whole, the sibling
+        # would refuse the leaf the outputs it saves under `prod-us/projects`. It is denied
+        # entry by entry instead, so its login and its sessions stay denied. Red on round 3's
+        # code, which compared the sibling's path, not the rule written for it.
+        h = self._fake_host()
+        profiles = h["real"] / ".claude" / "profiles"
+        (profiles / "prod-us" / "projects" / "-tmp-old-prod").mkdir(parents=True)
+        (profiles / "prod-us" / ".credentials.json").write_text("{}\n")
+        self._exempt("cargo xtask fdb-conformance")
+        active = h["link"] / ".claude" / "profiles" / "prod-us"
+        for sibling, written in (("prod@us", "prod?us"), ("PROD-US", "PROD-US")):
+            with self.subTest(sibling=sibling):
+                if (profiles / sibling).exists():
+                    self.skipTest("a case-blind filesystem: `PROD-US` is `prod-us` there")
+                (profiles / sibling / "projects" / "-tmp-old-other").mkdir(parents=True)
+                (profiles / sibling / ".credentials.json").write_text("{}\n")
+                try:
+                    with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(active)}):
+                        deny = self._deny_rules(self._capture_sandbox_settings()["content"])
+                finally:
+                    shutil.rmtree(profiles / sibling)
+                for spelling in (active, profiles / "prod-us"):
+                    self.assertEqual(self._covering(deny, spelling / self._LEAF_OUTPUT), [])
+                for home in (h["link"], h["real"]):
+                    other = f"{self._as_written(home / '.claude' / 'profiles')}/{written}"
+                    self.assertNotIn(f"Read(/{other}/**)", deny)
+                    self.assertIn(f"Read(/{other}/.credentials.json)", deny)
+                    self.assertIn(f"Read(/{other}/projects/-tmp-old-other/**)", deny)
+
+    def test_seed_keeps_a_config_dir_clear_of_a_rule_applied_through_a_link(self) -> None:
+        # (b) Claude Code applies each Read rule twice: as written, and as its "physical twin",
+        # the part before its first wildcard resolved through symlinks (2.1.322). Here `$HOME`
+        # is a link and `$CLAUDE_CONFIG_DIR` names the real path, so a rule written for
+        # `<link>/.claude/profiles` is applied to `<real home>/.claude/profiles` too, which
+        # holds the active config dir. That entry is denied entry by entry by the link as well,
+        # so the other profile and the file beside it stay denied. Red on round 3's code, which
+        # wrote `Read(//<link>/.claude/profiles/**)`.
+        h = self._fake_host()
+        self._profiles(h)
+        self._exempt("cargo xtask fdb-conformance")
+        work = h["real"] / ".claude" / "profiles" / "work"
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(work)}):
+            deny = self._deny_rules(self._capture_sandbox_settings()["content"])
+        for spelling in (work, h["link"] / ".claude" / "profiles" / "work"):
+            with self.subTest(inner=str(spelling)):
+                self.assertEqual(self._covering(deny, spelling / self._LEAF_OUTPUT), [])
+        for home in (h["link"], h["real"]):
+            outer = self._as_written(home / ".claude" / "profiles")
+            with self.subTest(outer=outer):
+                self.assertNotIn(f"Read(/{outer}/**)", deny)
+                self.assertIn(f"Read(/{outer}/personal/**)", deny)
+                self.assertIn(f"Read(/{outer}/notes.txt)", deny)
+        self.assertIn(f"Read(/{self._as_written(work)}/.credentials.json)", deny)
+
+    def test_seed_denies_whole_what_reaches_a_config_dir_but_cannot_be_opened_up(
+            self) -> None:
+        # (b) Fail closed: a path whose rule would reach the active config dir's `projects`
+        # but that has no entries to deny one by one — a FILE `prod@us` (written `prod?us`)
+        # beside an active `prod-us`; a `$GH_CONFIG_DIR` holding `$CLAUDE_CONFIG_DIR`, neither
+        # made yet — is denied whole, the leaf's own saved outputs with it. A credential
+        # location that does not exist is still listed. The second is red on round 3's code,
+        # which wrote no Read rule at all for a missing directory that held a config dir.
+        h = self._fake_host()
+        profiles = h["real"] / ".claude" / "profiles"
+        (profiles / "prod-us" / "projects").mkdir(parents=True)
+        (profiles / "prod@us").write_text("not a directory\n")
+        active = h["link"] / ".claude" / "profiles" / "prod-us"
+        gh = h["base"] / "gh"
+        self._exempt("cargo xtask fdb-conformance")
+        for case, env in (("a file", {"CLAUDE_CONFIG_DIR": str(active)}),
+                          ("missing", {"CLAUDE_CONFIG_DIR": str(gh / "claude"),
+                                       "GH_CONFIG_DIR": str(gh)})):
+            with self.subTest(case=case), mock.patch.dict(os.environ, env):
+                content = self._capture_sandbox_settings()["content"]
+                deny_read, deny = self._deny_read(content), self._deny_rules(content)
+                if case == "a file":
+                    for home in (h["link"], h["real"]):
+                        other = f"{self._as_written(home / '.claude' / 'profiles')}/prod?us"
+                        self.assertIn(f"Read(/{other})", deny)
+                else:
+                    self.assertFalse(gh.exists())
+                    self.assertIn(self._as_written(gh), deny_read)
+                    self.assertIn(f"Read(/{self._as_written(gh)}/**)", deny)
+
+    # How long a seed may take before a test calls it hung. One takes milliseconds here.
+    _SEED_SECONDS = 10
+
+    def _seed_in_bounded_time(self) -> dict:
+        """The seeded policy (:meth:`_capture_sandbox_settings`), failing the test when the
+        seed runs past :data:`_SEED_SECONDS` instead of hanging the suite (where the platform
+        has SIGALRM and this is the main thread; elsewhere it just runs). The alarm's
+        exception is no `Exception` at all, so the seed's own fallback, which takes any
+        `Exception`, cannot swallow it."""
+
+        class Hung(BaseException):
+            pass
+
+        def hung(signum, frame):
+            raise Hung
+
+        try:
+            previous = signal.signal(signal.SIGALRM, hung)
+        except (AttributeError, ValueError):     # no SIGALRM here, or not the main thread
+            return self._capture_sandbox_settings()["content"]
+        signal.alarm(self._SEED_SECONDS)
+        try:
+            return self._capture_sandbox_settings()["content"]
+        except Hung:
+            self.fail(f"the seed was still running after {self._SEED_SECONDS}s")
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+
+    def test_seed_stops_at_a_link_back_to_a_config_dir(self) -> None:
+        # (b) A link inside a config dir that leads back to a config dir — `~/.claude/alias-0`
+        # to `~/.claude` by its real path, `alias-1` to it as `.`, and one in
+        # `$CLAUDE_CONFIG_DIR` to `~/.claude` by the symlinked home — IS that config dir,
+        # known by where it resolves. It gets no rule of its own: the config dir's own rules
+        # deny what it holds, and Claude Code checks a path it reads in its resolved spelling
+        # too. So the seed is written, the logins stay denied, and the leaf can still read its
+        # own saved outputs. Red on round 4's code, which walked the config dir again through
+        # each link, without end once there were two.
+        h = self._fake_host()
+        claude = h["real"] / ".claude"
+        (claude / "alias-0").symlink_to(claude, target_is_directory=True)
+        (claude / "alias-1").symlink_to(".", target_is_directory=True)
+        (h["config"] / "home-claude").symlink_to(h["link"] / ".claude",
+                                                 target_is_directory=True)
+        self._exempt("cargo xtask fdb-conformance")
+        deny = self._deny_rules(self._seed_in_bounded_time())
+        for config in (h["link"] / ".claude", claude, h["config"]):
+            with self.subTest(config=str(config)):
+                self.assertIn(f"Read(/{self._as_written(config)}/.credentials.json)", deny)
+                self.assertEqual(self._covering(deny, config / self._LEAF_OUTPUT), [])
+        for link in (claude / "alias-0", claude / "alias-1", h["link"] / ".claude" / "alias-0",
+                     h["config"] / "home-claude"):
+            with self.subTest(link=str(link)):
+                self.assertEqual([r for r in deny if f"{self._as_written(link)}/" in r], [])
+                # What it holds is denied where it resolves, which the Read tool checks too.
+                self.assertTrue(self._covering(
+                    deny, Path(os.path.realpath(link / ".credentials.json"))))
+                self.assertTrue(self._covering(
+                    deny, Path(os.path.realpath(link / "projects" / "-tmp-old-session"
+                                                / "f00d.jsonl"))))
+
+    def test_seed_stops_at_a_link_back_to_a_directory_it_is_opening_up(self) -> None:
+        # (b) The same for a link back to a directory the policy is opening up entry by entry
+        # rather than to a config dir: `profiles` (it holds the active config dir) linked from
+        # inside itself, a `projects` linked from inside itself, and a `$GH_CONFIG_DIR` that
+        # holds `$CLAUDE_CONFIG_DIR` linked from inside itself. No rule of its own, the seed is
+        # written, and what each leads to stays denied under its own name. Red on round 4's
+        # code, which walked each directory again through each link.
+        h = self._fake_host()
+        profiles = self._profiles(h)
+        (profiles / "up-0").symlink_to(".", target_is_directory=True)
+        (profiles / "up-1").symlink_to(profiles, target_is_directory=True)
+        projects = h["real"] / ".claude" / "projects"
+        (projects / "loop-0").symlink_to(".", target_is_directory=True)
+        (projects / "loop-1").symlink_to(projects, target_is_directory=True)
+        gh = h["base"] / "gh"
+        (gh / "claude" / "projects").mkdir(parents=True)
+        (gh / "hosts.yml").write_text("not a token\n")
+        (gh / "loop-0").symlink_to(".", target_is_directory=True)
+        (gh / "loop-1").symlink_to(gh, target_is_directory=True)
+        self._exempt("cargo xtask fdb-conformance")
+        work = h["link"] / ".claude" / "profiles" / "work"
+        for case, config in (("profiles", work), ("gh", gh / "claude")):
+            with self.subTest(case=case), mock.patch.dict(os.environ, {
+                    "CLAUDE_CONFIG_DIR": str(config), "GH_CONFIG_DIR": str(gh)}):
+                deny = self._deny_rules(self._seed_in_bounded_time())
+                self.assertEqual(
+                    [r for r in deny if "/up-" in r or "/loop-" in r], [])
+                self.assertEqual(self._covering(deny, config / self._LEAF_OUTPUT), [])
+                self.assertTrue(self._covering(deny, projects / "-tmp-old-session" / "f00d.jsonl"))
+                if case == "profiles":
+                    for home in (h["link"], h["real"]):
+                        outer = self._as_written(home / ".claude" / "profiles")
+                        self.assertIn(f"Read(/{outer}/personal/**)", deny)
+                        self.assertNotIn(f"Read(/{outer}/**)", deny)
+                else:
+                    self.assertIn(f"Read(/{self._as_written(gh)}/hosts.yml)", deny)
+                    self.assertNotIn(f"Read(/{self._as_written(gh)}/**)", deny)
+
+    def test_seed_writes_no_rule_for_a_link_in_a_config_dir_to_root_or_to_a_home(self) -> None:
+        # (b) A link in a config dir to `/` (`~/.claude/r`), or from a `$CLAUDE_CONFIG_DIR`
+        # outside the home to the home (`h`), gets no Read rule and is not denied where it
+        # points. Claude Code applies a rule again with its path resolved, so a rule for
+        # `~/.claude/r` is a rule for `/`: it would refuse the leaf every file, and a walk into
+        # it would deny the whole tree, or the whole home, entry by entry. What such a link
+        # leads to is denied under its own names, and the Read tool checks a path in its
+        # resolved spelling too. Red on round 5's code, which read a rule for `/` as reaching
+        # nothing: it kept `Read(//…/.claude/r/**)`, put `/` in `denyRead`, and walked `h`.
+        h = self._fake_host()
+        claude = h["real"] / ".claude"
+        (claude / "r").symlink_to("/", target_is_directory=True)
+        (h["config"] / "h").symlink_to(h["link"], target_is_directory=True)
+        (h["real"] / ".ssh").mkdir()
+        self._exempt("cargo xtask fdb-conformance")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            content = self._seed_in_bounded_time()
+        deny_read, deny = self._deny_read(content), self._deny_rules(content)
+        for link in (h["link"] / ".claude" / "r", claude / "r", h["config"] / "h"):
+            written = self._as_written(link)
+            with self.subTest(link=str(link)):
+                self.assertEqual([r for r in deny if f"{written}/" in r or f"{written})" in r],
+                                 [])
+                self.assertIn(f"{link} links to", err.getvalue())
+        for target in ("/", h["real"], h["link"]):
+            with self.subTest(target=str(target)):
+                self.assertNotIn(self._as_written(target), deny_read)
+        for path in self._ordinary(h):
+            with self.subTest(ordinary=str(path)):
+                self.assertEqual(self._covering(deny, path), [])
+        for config in (h["link"] / ".claude", claude, h["config"]):
+            with self.subTest(config=str(config)):
+                self.assertIn(self._as_written(config), deny_read)
+                self.assertIn(f"Read(/{self._as_written(config)}/.credentials.json)", deny)
+                self.assertEqual(self._covering(deny, config / self._LEAF_OUTPUT), [])
+        # What each link leads to stays denied where it resolves, which the Read tool checks.
+        through_r = claude / "r" / str(claude).lstrip("/")
+        for path in (through_r / ".credentials.json",
+                     through_r / "projects" / "-tmp-old-session" / "f00d.jsonl",
+                     h["config"] / "h" / ".ssh" / "id_ed25519",
+                     h["config"] / "h" / ".claude" / ".credentials.json"):
+            with self.subTest(through=str(path)):
+                self.assertTrue(self._covering(deny, Path(os.path.realpath(path))))
+
+    def test_seed_writes_a_character_above_u_ffff_in_a_name_as_two_wildcards(self) -> None:
+        # (b) Claude Code matches its Read rules as JavaScript strings (2.1.322: `?` becomes
+        # `[^/]`, no `u` flag), so a `?` stands for one UTF-16 code unit, and a character above
+        # U+FFFF — an emoji — is two. A name read off the disk writes such a character `??`:
+        # `🔑keys` is `??keys`, which the CLI matches; `?keys` is a character short, and the
+        # Read tool could open the entry. Red on round 4's code, which wrote one `?` for it.
+        h = self._fake_host()
+        claude = h["real"] / ".claude"
+        (claude / "🔑keys").mkdir()
+        (claude / "🔑keys" / "k.txt").write_text("not a key\n")
+        (claude / "notes-🎉.txt").write_text("x\n")
+        (claude / "projects" / "-tmp-🚀").mkdir()
+        (claude / "projects" / "-tmp-🚀" / "c0de.jsonl").write_text("{}\n")
+        self._exempt("cargo xtask fdb-conformance")
+        deny = self._deny_rules(self._capture_sandbox_settings()["content"])
+        for home in (h["link"], h["real"]):
+            config = self._as_written(home / ".claude")
+            with self.subTest(home=str(home)):
+                self.assertIn(f"Read(/{config}/??keys/**)", deny)
+                self.assertIn(f"Read(/{config}/notes-??.txt)", deny)
+                self.assertIn(f"Read(/{config}/projects/-tmp-??/**)", deny)
+                for path in (home / ".claude" / "🔑keys" / "k.txt",
+                             home / ".claude" / "notes-🎉.txt",
+                             home / ".claude" / "projects" / "-tmp-🚀" / "subagents"):
+                    self.assertTrue(self._covering(deny, path), path)
+
+    def test_seed_counts_a_character_above_u_ffff_as_the_cli_does_for_a_sibling(self) -> None:
+        # (b) …and the check that keeps the active config dir's `projects` clear of a rule
+        # written for a SIBLING counts the same way. Beside an active `profiles/😀a`, a sibling
+        # `🔑a` is written `??a`, which Claude Code matches against `😀a` too. Denied whole,
+        # the sibling would refuse the leaf its own saved outputs; it is denied entry by entry
+        # instead, its login and its sessions with it. Red on round 4's code.
+        h = self._fake_host()
+        profiles = h["real"] / ".claude" / "profiles"
+        (profiles / "😀a" / "projects").mkdir(parents=True)
+        (profiles / "🔑a" / "projects" / "-tmp-old-other").mkdir(parents=True)
+        (profiles / "🔑a" / ".credentials.json").write_text("{}\n")
+        self._exempt("cargo xtask fdb-conformance")
+        active = h["link"] / ".claude" / "profiles" / "😀a"
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(active)}):
+            deny = self._deny_rules(self._capture_sandbox_settings()["content"])
+        for spelling in (active, profiles / "😀a"):
+            with self.subTest(active=str(spelling)):
+                self.assertEqual(self._covering(deny, spelling / self._LEAF_OUTPUT), [])
+        for home in (h["link"], h["real"]):
+            other = f"{self._as_written(home / '.claude' / 'profiles')}/??a"
+            with self.subTest(sibling=other):
+                self.assertNotIn(f"Read(/{other}/**)", deny)
+                self.assertIn(f"Read(/{other}/.credentials.json)", deny)
+                self.assertIn(f"Read(/{other}/projects/-tmp-old-other/**)", deny)
+                self.assertTrue(self._covering(
+                    deny, home / ".claude" / "profiles" / "🔑a" / ".credentials.json"))
+
+    def test_seed_denies_the_password_database_home_when_home_is_unusable_or_differs(
+            self) -> None:
+        # (b) Home spelling: when `$HOME` is empty, `/`, relative, or another directory than
+        # the password database's, that home is denied too.
+        h = self._fake_host()
+        self._exempt("cargo xtask fdb-conformance")
+        elsewhere = h["base"] / "elsewhere"
+        elsewhere.mkdir()
+        for home in ("", "/", "relative/home", str(elsewhere)):
+            with self.subTest(HOME=home), mock.patch.dict(os.environ, {"HOME": home}):
+                content = self._capture_sandbox_settings()["content"]
+                deny_read = self._deny_read(content)
+                self._assert_denied(content, h["real"] / ".ssh", True)
+                self._assert_denied(content, h["real"] / ".config" / "gh", True)
+                self.assertIn(self._as_written(h["real"] / ".claude"), deny_read)
+                self.assertTrue(all(os.path.isabs(p) for p in deny_read))
+                if home == str(elsewhere):
+                    self._assert_denied(content, elsewhere / ".ssh", True)
+
+    def test_seed_unsets_the_credential_variables_and_masks_nothing(self) -> None:
+        # (c) Each named variable has a `mode: "deny"` entry. (d) Nothing anywhere in the
+        # file is masked, and no `tlsTerminate` is written: a masked token still leaves with
+        # the leaf's traffic.
+        self._fake_host(GH_TOKEN="canary-not-a-secret")
+        self._exempt("cargo xtask fdb-conformance")
+        self._project_settings({"sandbox": {"network": {"allowedDomains": ["github.com"]}}})
+        content = self._capture_sandbox_settings()["content"]
+        entries = self._env_entries(content)
+        self.assertLessEqual(set(self._DENIED_VARS),
+                             {e["name"] for e in entries if e.get("mode") == "deny"})
+        found: list = []
+
+        def walk(node) -> None:
+            if isinstance(node, dict):
+                found.extend(k for k in node if k == "tlsTerminate")
+                found.extend(["mask"] if node.get("mode") == "mask" else [])
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        walk(content)
+        self.assertEqual(found, [])
+        self.assertNotIn("canary-not-a-secret", json.dumps(content))
+
+    def test_network_only_seed_carries_the_same_deny(self) -> None:
+        # (j) Only a network grant, no exemption: the seed is written as today and carries
+        # the same deny blocks. It still turns nothing on and adds no `--setting-sources`
+        # on this code (#936 changes that) — the deny rides beside, it decides nothing.
+        h = self._fake_host()
+        self.cfg.reviewer = LeafConfig(mode="stub", family="claude")
+        self._project_settings({"sandbox": {"network": {"allowedDomains": ["github.com"]}}})
+        seen = self._capture_sandbox_settings()
+        content = seen["content"]
+        self.assertEqual(self._grants(content),
+                         {"sandbox": {"network": {"allowedDomains": ["github.com"]}}})
+        self._assert_denied(content, h["link"] / ".config" / "gh", True)
+        self._assert_denied(content, h["real"] / ".ssh", True)
+        self.assertIn(self._as_written(h["config"]), self._deny_read(content))
+        self.assertIn("Read(//proc/**)", self._deny_rules(content))
+        self.assertLessEqual(set(self._DENIED_VARS),
+                             {e["name"] for e in self._env_entries(content)})
+        self.assertNotIn("enabled", content["sandbox"])
+        self.assertNotIn("--setting-sources", seen["extra_argv"])
+
+    def test_grants_still_merge_beside_the_deny(self) -> None:
+        # (f) `excludedCommands` and the network grants land exactly as before, beside the
+        # deny blocks; nothing granted still writes no file at all.
+        self._fake_host()
+        self._exempt("cargo xtask fdb-conformance")
+        self._project_settings({"sandbox": {"network": {
+            "allowLocalBinding": True, "allowedDomains": ["api.github.com"]}}})
+        seen = self._capture_sandbox_settings()
+        self.assertEqual(self._grants(seen["content"]), {"sandbox": {
+            "network": {"allowLocalBinding": True, "allowedDomains": ["api.github.com"]},
+            "enabled": True,
+            "excludedCommands": ["cargo xtask fdb-conformance"],
+            "allowUnsandboxedCommands": False,
+            "failIfUnavailable": True}})
+        self.assertIn("filesystem", seen["content"]["sandbox"])
+        self.assertEqual(seen["extra_argv"][seen["extra_argv"].index("--setting-sources") + 1],
+                         "project")
+        self.cfg.leaf_unsandboxed_commands = []
+        (self.cfg.root / ".claude" / "settings.json").unlink()
+        self.assertFalse(self._capture_sandbox_settings()["exists"])
 
     def test_never_seeds_excluded_commands_or_the_whole_sandbox_block(self) -> None:
         # PR #268 review (codex): docs 05 tells a project to use `sandbox.excludedCommands`
@@ -600,12 +1571,12 @@ class AdvisoryReviewResilience(unittest.TestCase):
             "network": {"allowLocalBinding": True, "allowedDomains": ["api.github.com"]},
         }})
         seen = self._capture_sandbox_settings()
-        self.assertEqual(seen["content"], {"sandbox": {"network": {
+        self.assertEqual(self._grants(seen["content"]), {"sandbox": {"network": {
             "allowLocalBinding": True, "allowedDomains": ["api.github.com"]}}})
         # the load-bearing exclusions
         self.assertNotIn("excludedCommands", seen["content"]["sandbox"])
         self.assertNotIn("enabled", seen["content"]["sandbox"])
-        self.assertNotIn("permissions", seen["content"])
+        self.assertNotIn("permissions", self._grants(seen["content"]))
 
     def test_network_grant_is_seeded_for_the_prior_art_check(self) -> None:
         # #277: the reviewer's prior-art check needs the closed/rejected-PR corpus via
@@ -628,7 +1599,8 @@ class AdvisoryReviewResilience(unittest.TestCase):
         self._project_settings({"sandbox": {"network": {
             "allowLocalBinding": True, "allowedDomains": []}}})
         seen = self._capture_sandbox_settings()
-        self.assertEqual(seen["content"], {"sandbox": {"network": {"allowLocalBinding": True}}})
+        self.assertEqual(self._grants(seen["content"]),
+                         {"sandbox": {"network": {"allowLocalBinding": True}}})
 
     def test_denied_domains_are_carried(self) -> None:
         self._project_settings({"sandbox": {"network": {"deniedDomains": ["evil.example"]}}})
@@ -685,7 +1657,7 @@ class AdvisoryReviewResilience(unittest.TestCase):
         self._exempt("cargo xtask fdb-conformance")
         self.assertFalse((self.cfg.root / ".claude" / "settings.json").is_file())
         seen = self._capture_sandbox_settings()
-        self.assertEqual(seen["content"], {"sandbox": {
+        self.assertEqual(self._grants(seen["content"]), {"sandbox": {
             "enabled": True,
             "excludedCommands": ["cargo xtask fdb-conformance"],
             "allowUnsandboxedCommands": False,
@@ -715,7 +1687,7 @@ class AdvisoryReviewResilience(unittest.TestCase):
         self._exempt("cargo xtask tikv-conformance")
         self._project_settings({"permissions": {"allow": ["Read"]}})
         seen = self._capture_sandbox_settings()
-        self.assertEqual(seen["content"], {"sandbox": {
+        self.assertEqual(self._grants(seen["content"]), {"sandbox": {
             "enabled": True,
             "excludedCommands": ["cargo xtask tikv-conformance"],
             "allowUnsandboxedCommands": False,
@@ -778,6 +1750,28 @@ class AdvisoryReviewResilience(unittest.TestCase):
             seen = self._capture_sandbox_settings()
         self.assertFalse(seen["exists"])                            # nothing on disk…
         self.assertNotIn("--setting-sources", seen["extra_argv"])   # …so don't drop the ambient
+        self.assertIn("did NOT take effect", buf.getvalue())
+
+    def test_a_seed_that_fails_while_building_the_deny_takes_the_same_fallback(self) -> None:
+        # (f) Building the credential deny (#935) walks the operator's home and config dirs,
+        # so more than the write can fail, and not only with an OSError: a RecursionError
+        # from a deep walk, say. That is a failed seed like a failed write — nothing on disk,
+        # `--setting-sources` withheld, the operator's ambient sandbox kept, and the Check goes
+        # on. Red on round 5's code, which caught only OSError, so the error ended the Check.
+        self._fake_host()
+        self._exempt("cargo xtask fdb-conformance")
+        buf = io.StringIO()
+        # `create=True`: the red leg runs this against code with no deny builder at all.
+        with mock.patch.object(leaves, "_entries", create=True,
+                               side_effect=RecursionError("maximum recursion depth exceeded")), \
+                redirect_stderr(buf):
+            try:
+                seen = self._capture_sandbox_settings()
+            except RecursionError:
+                self.fail("a failure while building the deny escaped the seed: the Check ended")
+        self.assertFalse(seen["exists"])
+        self.assertNotIn("--setting-sources", seen["extra_argv"])
+        self.assertIn("RecursionError", buf.getvalue())
         self.assertIn("did NOT take effect", buf.getvalue())
 
     def test_an_exempted_leaf_actually_has_a_sandbox_to_be_bounded_by(self) -> None:
@@ -965,6 +1959,7 @@ class AdvisoryReviewResilience(unittest.TestCase):
     def test_advisory_sandbox_seeds_settings_too(self) -> None:
         # The advisory leaves hit the same bind wall as the main reviewer (#261 names
         # advisory explicitly), so they get the same policy.
+        self._fake_host()            # the seed now lists credential locations (#935)
         self._project_settings({"sandbox": {"network": {"allowLocalBinding": True}}})
         (self.d / "patch.diff").write_text("x\n", encoding="utf-8")
         (self.d / "check-gates.json").write_text("{}\n", encoding="utf-8")
@@ -984,6 +1979,9 @@ class AdvisoryReviewResilience(unittest.TestCase):
         finally:
             leaves._invoke = orig
         self.assertIs(seen["content"]["sandbox"]["network"]["allowLocalBinding"], True)
+        # …and the advisory leaf's seed carries the same credential deny (#935).
+        self._assert_denied(seen["content"], self._host["real"] / ".ssh", True)
+        self.assertIn("Read(//proc/**)", self._deny_rules(seen["content"]))
 
 
 class AdvisoryReviewers(unittest.TestCase):

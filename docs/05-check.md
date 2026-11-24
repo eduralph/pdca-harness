@@ -628,12 +628,224 @@ Claude Code loads project settings relative to the subprocess cwd — the same
 walk-up that finds `.claude/agents`.
 
 What travels is an **allow-list of named `sandbox.network` keys** — never a
-copy of the `sandbox` block, and never `permissions` (whose allow-list carries
-`Edit`/`Write`). In particular `sandbox.excludedCommands`, covered just below
-for your **gates**, makes a command bypass the sandbox *entirely*: carrying it
-into the reviewer's cwd would let the reviewer run your test runner
-unconfined, so it is never seeded however you configure it. Widening the seed
-means adding a key to that list, deliberately.
+copy of the `sandbox` block, and never your project's `permissions` (whose
+allow-list carries `Edit`/`Write`). In particular `sandbox.excludedCommands`,
+covered just below for your **gates**, makes a command bypass the sandbox
+*entirely*: carrying it into the reviewer's cwd would let the reviewer run
+your test runner unconfined, so it is never seeded however you configure it.
+Widening the seed means adding a key to that list, deliberately.
+
+Beside whatever is granted, the seeded file also carries the harness's own
+credential deny ([below](#the-seeded-policy-denies-credential-reads)). Its
+`Read(...)` rules are the only `permissions` the seed writes, and they only
+take away.
+
+#### The seeded policy denies credential reads
+
+The reviewer's red→green re-run executes the bundle's patch and tests **on
+this host**. The vendor sandbox confines what those tests may *write* and
+which hosts they may reach — not what they may *read*. On its own, a test
+could read your `gh` token, your SSH keys or the CLI's own login and send it
+to any host in `allowedDomains`. So **every** sandbox policy the harness
+seeds into a leaf's temp cwd — the Check seed above and the plan reviewer's
+— also carries a credential deny (issue #935):
+
+- **credential reads denied**: every location below, in
+  `sandbox.filesystem.denyRead` *and* as a `Read(...)` permission deny (the
+  model's own Read tool runs outside the sandbox and answers to the
+  permission rules instead), absolute, in both the given and the
+  symlink-resolved spelling. A denied file reads `Permission denied`; a
+  denied directory reads as empty. A location that does not exist yet is
+  listed too: the Read tool is refused it once it exists, and the sandbox,
+  which places its denies as each command starts, denies it to every
+  command started after that (a path written as a pattern, below, has a
+  gap here). An entry of a denied directory that is itself
+  a symlink out of it (a key linked into `~/.ssh` from a secrets store, a
+  `~/.claude/projects` moved to another disk) is denied where it points as
+  well; that is one level deep, and a link further down is not followed.
+  The exception is a link to `/` or to a directory that holds your home
+  (`~/.ssh/r` → `/`, `~/.ssh/h` → `~`): denied where it points, it would
+  take every file there from the leaf, its toolchain and the target
+  included. The harness leaves such a link out and says so on stderr; the
+  locations below that it leads to stay denied under their own names. A
+  glob character in a path (`*`, `?`, `[`, `]`, `{`, `}`, `\`) is written
+  as `?` (one character, any), so the rule still matches the path: a home
+  named `home[1]` is written `home?1?`, where `[1]` would match only
+  `home1`. Every other character is written as it is
+  (`/home/jdoe@corp.example` stays as it is), so the sandbox reads the path
+  as a plain path, not a pattern; it handles a pattern its own way,
+  skipping a link that does not resolve and denying a matched directory
+  only where it finds files in it. A name read off the disk (an entry of
+  the config dir below) is written stricter: each character other than a
+  letter, a digit, `.`, `_` and `-` as `?`, and a character above U+FFFF
+  (an emoji, say) as `??`, because Claude Code counts it as two UTF-16
+  units and its `?` matches one. The Read tool is also denied
+  `/proc` (another process's environment). The harness writes that rule
+  for the Read tool only, but Claude Code merges `Read(...)` deny rules
+  into the sandbox's own read deny, so sandboxed commands may be denied
+  `/proc` as well, and a tool that finds itself through `/proc/self/exe`
+  could then fail in the re-run. Claude Code's own config dir is the one
+  location denied differently to the two (below);
+- **credential variables unset** for every sandboxed command
+  (`sandbox.credentials.envVars`, `mode: "deny"`).
+
+Nothing is *masked* (shown to the command as a stand-in value and swapped
+back in on the way out): a masked token still leaves with the leaf's
+traffic, which is the thing this exists to stop.
+
+**Where it holds.** The deny rides in every seeded file; it does not change
+*when* a file is seeded:
+
+| Leaf | Seeded file | The deny |
+|---|---|---|
+| plan reviewer (claude) | always, sandbox on, `--setting-sources project` | enforced |
+| claude Check leaf with `unsandboxed_commands` | yes, sandbox on, `--setting-sources project` | enforced |
+| claude Check leaf with only a network grant (`allowLocalBinding`, `allowedDomains`) | yes, `enabled` left to your own settings | the `Read(...)` rules bind the Read tool; the `sandbox` blocks bind only when your own settings turn the sandbox on |
+| Check leaf with nothing granted | none | none: the leaf runs under your ambient settings |
+
+Seeding every claude Check leaf with the sandbox on and confined to the
+seed is tracked in #936. A codex leaf reads none of this file
+([the two grants](#the-codex-leaf-reaches-docker-a-different-way)). The plan
+reviewer runs no bundle code, so there the deny is defence in depth.
+
+**The locations denied.** A named minimum, not the whole rule: a credential
+location missing here is a gap in "the re-run holds none of your
+credentials", and the fix is to add it. A `$VAR` entry counts only when the
+variable is set and non-empty. Its value is denied as written and, when it
+holds a `~` or a `$VARIABLE` (a systemd `Environment=` line or a
+`docker --env-file` leaves them in), also with those expanded:
+`AWS_SHARED_CREDENTIALS_FILE='~/work/creds'` is `~/work/creds` to the AWS
+tools, which expand it. `~` is your `$HOME` **and** your home as the
+system records it (the password database, which is what OpenSSH reads):
+both are denied when they differ, and an empty or relative `$HOME` counts as
+none. When no home can be found at all, only the locations a variable names
+and the `/run` ones are denied, and the harness says so on stderr.
+
+| Tool | Locations |
+|---|---|
+| Claude Code | `~/.claude.json`; `~/.claude` and `$CLAUDE_CONFIG_DIR` in their own way (below) |
+| Codex | `~/.codex`, `$CODEX_HOME` |
+| Gemini | `~/.gemini` |
+| GitHub CLI | `~/.config/gh`, `$GH_CONFIG_DIR`, `$XDG_CONFIG_HOME/gh` |
+| GitLab CLI | `~/.config/glab-cli`, `$GLAB_CONFIG_DIR`, `$XDG_CONFIG_HOME/glab-cli` |
+| SSH | `~/.ssh` |
+| git credential store | `~/.git-credentials`, `~/.config/git/credentials`, `$XDG_CONFIG_HOME/git/credentials` |
+| netrc | `~/.netrc`, `$NETRC` |
+| AWS | `~/.aws`, `$AWS_SHARED_CREDENTIALS_FILE`, `$AWS_CONFIG_FILE`, `$AWS_WEB_IDENTITY_TOKEN_FILE`, `$AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` |
+| Kubernetes | `~/.kube`, each path in `$KUBECONFIG` |
+| Docker | `~/.docker/config.json`, `$DOCKER_CONFIG/config.json`, `~/.dockercfg` |
+| Podman, Buildah, Skopeo (registry logins) | `$REGISTRY_AUTH_FILE`, `$XDG_RUNTIME_DIR/containers/auth.json`, `/run/user/<uid>/containers/auth.json`, `/run/containers/<uid>/auth.json`, `~/.config/containers/auth.json`, `$XDG_CONFIG_HOME/containers/auth.json` |
+| npm | `~/.npmrc`, `$NPM_CONFIG_USERCONFIG` |
+| Cargo | `~/.cargo/credentials.toml`, `~/.cargo/credentials`, `$CARGO_HOME/credentials.toml`, `$CARGO_HOME/credentials` |
+| PyPI | `~/.pypirc` |
+| RubyGems | `~/.gem/credentials`, `~/.local/share/gem/credentials`, `$XDG_DATA_HOME/gem/credentials` |
+| Hugging Face | `~/.cache/huggingface/stored_tokens`, `$HF_HOME/stored_tokens`, `$XDG_CACHE_HOME/huggingface/stored_tokens` (not the `token` file beside it — below) |
+| Terraform | `~/.terraform.d/credentials.tfrc.json`, `~/.terraformrc`, `$TF_CLI_CONFIG_FILE` |
+| gcloud | `~/.config/gcloud`, `$XDG_CONFIG_HOME/gcloud`, `$CLOUDSDK_CONFIG`, `$GOOGLE_APPLICATION_CREDENTIALS` |
+| Azure | `~/.azure`, `$AZURE_CONFIG_DIR`, `$AZURE_CLIENT_CERTIFICATE_PATH`, `$AZURE_FEDERATED_TOKEN_FILE` |
+
+The two `/run/...` paths are denied whether or not `$XDG_RUNTIME_DIR` is set:
+a flow started from cron, a systemd service or a plain ssh session may not
+have it, while a desktop `podman login` still wrote to `/run/user/<uid>`.
+
+**The Claude Code config dir** (`~/.claude`, `$CLAUDE_CONFIG_DIR`) is
+denied two ways. To the leaf's commands it is denied whole: the re-run sees
+an empty directory. To the model's Read tool it is denied entry by entry —
+every entry except `projects` (those present when the policy is written,
+plus the CLI's own by name: `.credentials.json`, `settings.json`,
+`settings.local.json`, `history.jsonl`, `daemon.json`, `file-history`,
+`paste-cache`, `session-env`, `shell-snapshots`, `sessions`, `todos`,
+`plans`, `ide`, `debug`, `backups`, `jobs`, `daemon`); under `projects`,
+every folder present when the policy is written, by name, and in any folder
+every session transcript (`projects/*/*.jsonl`), the sub-agent transcripts
+and the project's `memory`. A `projects` that is a symlink is denied the
+same way where it points; one that exists but cannot be listed is denied
+whole. The reason: when a tool output is too large,
+Claude Code saves it under `projects/<project>/<session>/tool-results/` and
+the model opens it with Read. A deny of the whole directory refused the leaf
+its own saved outputs. Claude Code names a session's folder after its
+working directory, and each leaf runs in a fresh temporary one, so the
+leaf's own folder does not exist yet when the policy is written, and every
+folder that does is another session's. What stays readable to the Read tool
+(never to the leaf's commands) is the saved outputs in a folder made after
+the policy was written: the leaf's own, and those of another session started
+in a new directory while the leaf runs. The policy carries one rule per
+folder: on a host with 900 past sessions, about 900 rules. If you set
+`CLAUDE_CODE_PROJECT_DIR_NAME` (Claude Code reads it beside
+`$CLAUDE_CONFIG_DIR`), every session shares that one folder; once it exists
+it is denied, and the leaf cannot open its own saved outputs. The leaf's
+commands cannot read its saved outputs either, so a `grep` over one fails;
+the model reads it with Read.
+
+A config dir inside another (a `$CLAUDE_CONFIG_DIR` of
+`~/.claude/profiles/work`, say) keeps its own rules: no Read rule written
+for the outer dir reaches the inner one's `projects`, as Claude Code
+matches a rule. Claude Code checks a path under more than one spelling,
+reads a `?` as any one character, ignores case, and also applies each rule
+with the plain part of its path resolved through symlinks. So the outer
+dir's entry that holds the inner one (`profiles`) is denied entry by entry
+in turn, and so is any entry whose rule would match the inner one: a
+sibling `prod@us` (written `prod?us`) or `PROD-US` beside an active
+`prod-us`, or `profiles` by way of a symlinked `$HOME` when
+`$CLAUDE_CONFIG_DIR` gives the real path. The other profiles stay denied.
+An entry made in such a directory during the run is not denied to the Read
+tool. One that cannot be opened up this way (it cannot be listed, is a
+file, or does not exist yet) is denied whole, the inner dir's saved outputs
+with it. A symlink met on the way that leads back to a config dir
+(`~/.claude/alias` → `~/.claude`), to a directory already being opened up
+or to one above it (`~/.claude/r` → `/`), or to a directory that holds your
+home, gets no rule of its own: what it leads to is denied under its own
+name, and the Read tool checks a path in its resolved spelling too.
+Followed instead, a link back would be walked again on every visit, and
+the policy would never be written; and a rule for a link to `/` or to your
+home would refuse the leaf every file there, because Claude Code also
+applies a rule to the path it resolves to.
+
+**Known gaps.** `~/.gitconfig` is deliberately **not** listed: git treats an
+existing but unreadable global config as a fatal error, which would break
+the re-run's own `git stash`. Keep tokens in a credential store listed
+above, not in `.gitconfig`. The same goes for Maven (`~/.m2/settings.xml`,
+`settings-security.xml`), Gradle (`gradle.properties` in `~/.gradle` or
+`$GRADLE_USER_HOME`) and Composer (`auth.json` in `~/.config/composer`,
+`~/.composer`, `$COMPOSER_HOME` or `$XDG_CONFIG_HOME/composer`): each tool
+reads its file every time it starts and stops when it cannot, so denying it
+would break every re-run that builds with that tool. Likewise Hugging Face's
+`token` file (`~/.cache/huggingface/token`, `$HF_HOME/token`,
+`$HF_TOKEN_PATH`) and Vault's `~/.vault-token`: with `HF_TOKEN` and
+`VAULT_TOKEN` unset for the leaf's commands (below), each tool reads its
+file on every call, and an unreadable one is an error to it, not a missing
+token. **A token kept in one of these files stays readable to the re-run.**
+On a host that runs Check leaves, keep such tokens out of them (Composer,
+for instance, reads `COMPOSER_AUTH`, which is unset for the leaf's
+commands).
+
+A home, or a path a variable names, that holds one of `*`, `?`, `[`, `]`,
+`{`, `}` or `\` is written as a pattern (above), and the sandbox denies a
+pattern only as far as it matches when each command starts. It hides a
+matched directory whole only when a file sits directly in it, otherwise
+denies the files it finds one by one, and skips a link that does not
+resolve. So under such a path, a credential file that appears while a
+command runs is not denied to that command, and the names inside a denied
+directory can stay visible to it. The Read tool's rules match the pattern
+whenever they are checked, so the Read tool is not affected. A home or
+variable path without those characters is denied as a plain path, with no
+such gap.
+
+**The variables unset** (a named minimum too): `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`,
+`GEMINI_API_KEY`, `GOOGLE_API_KEY`, `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
+`AWS_CONTAINER_AUTHORIZATION_TOKEN`, `NPM_TOKEN`, `CARGO_REGISTRY_TOKEN`,
+`DOCKER_AUTH_CONFIG`, `SSH_AUTH_SOCK`, `GH_TOKEN`, `GITHUB_TOKEN`,
+`GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`,
+`ACTIONS_ID_TOKEN_REQUEST_TOKEN`, `ACTIONS_RUNTIME_TOKEN`, `GITLAB_TOKEN`,
+`GITLAB_ACCESS_TOKEN`, `GL_TOKEN`, `CI_JOB_TOKEN`, `TWINE_PASSWORD`,
+`GEM_HOST_API_KEY`, `COMPOSER_AUTH`, `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`,
+`VAULT_TOKEN`, `AZURE_CLIENT_SECRET`, `AZURE_CLIENT_CERTIFICATE_PASSWORD`,
+`AZURE_PASSWORD`. The leaf *process* keeps them — its own auth is read
+there — so this moves nobody's auth; only the commands it runs lose them. A
+variable known only by a pattern (`CARGO_REGISTRIES_<NAME>_TOKEN`,
+`TF_TOKEN_<host>`) cannot be listed this way and stays set.
 
 #### Letting the reviewer settle prior art mechanically (opt-in)
 
@@ -660,6 +872,17 @@ Opt in by naming the hosts:
 An **empty list seeds nothing** — that is what "off" means here — so this is
 an explicit choice, not a default. Scoped to the hosts you name;
 `deniedDomains` is carried too.
+
+**`gh` does not authenticate inside a claude leaf's sandbox when the
+harness seeds its policy.** Its credential — `~/.config/gh`,
+`$GH_CONFIG_DIR`, `GH_TOKEN` / `GITHUB_TOKEN` — is denied to every
+sandboxed command by design
+([above](#the-seeded-policy-denies-credential-reads)): the same leaf re-runs
+untrusted tests, and a token they could read they could send to any allowed
+host. So with the sandbox on, `gh pr list --state closed` fails there even
+with `github.com` granted, and for a claude reviewer the closed-PR half of
+the prior-art check stays NEEDS-HUMAN. Having the driver fetch that corpus
+outside the sandbox is tracked in #913.
 
 Domain scoping is **claude** only. A `codex` leaf has no `allowedDomains`
 equivalent — its `--sandbox workspace-write` denies the network wholesale — so
@@ -804,10 +1027,10 @@ same time. This is the one line Wyrd's `pdca.toml` carries under
 **The two grants have different shapes, and neither is strictly tighter.**
 Read them together:
 
-| | what escapes | what stays confined |
-|---|---|---|
-| **claude** — `unsandboxed_commands` | a **named command**, fully (filesystem too) | every *other* command |
-| **codex** — `network_access` | the **socket/network layer**, for *every* command (no per-domain scoping) | the **filesystem**, for every command |
+| | what escapes | what stays confined | reads | env |
+|---|---|---|---|---|
+| **claude** — `unsandboxed_commands` | a **named command**, fully (filesystem too) | every *other* command | credential locations **denied** to every other command ([the seeded policy](#the-seeded-policy-denies-credential-reads)); the named command can read them | credential variables **unset** for every other command; the named command inherits them |
+| **codex** — `network_access` | the **socket/network layer**, for *every* command (no per-domain scoping) | the **filesystem** (writes), for every command | **not confined**: codex reads none of the seeded policy, so a re-run can read your credentials | inherited by every command |
 
 So they are deliberately **separate keys**. `unsandboxed_commands` promises
 *"only these commands leave the sandbox"* — a promise codex's grant would not
