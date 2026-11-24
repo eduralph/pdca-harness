@@ -333,4 +333,11 @@ grep -ao 'Sandbox required but unavailable\|Sandbox Error: ' "$B" | sort -u
 
 As with the section above, the reader degrades to today's behaviour on anything it does not
 recognise: a Bash failure without one of these prefixes, or a single Bash call that ran,
-leaves the run in the class it had before #526.
+leaves the run in the class it had before #526. Since #934 the shapes are exact, not
+"somewhere in the text": a helper line counts only as the WHOLE Bash result (an optional
+`Exit code N` line, then that one line, then at most a newline), and a refusal only when it
+opens a line (after whitespace, `Error: ` or `❌ `). A failed run whose stream has any
+`assistant` event is never read as a refusal: the refused CLI above exits before it asks the
+model anything (one `result`, `num_turns: 0`), and once the model has had a turn the report
+line can be the leaf's own closing text. `test_driver_slice.CheckLeafSandboxRefusal` replays
+the files above and adds one synthetic case per rule, built inline, so no file is added here.
