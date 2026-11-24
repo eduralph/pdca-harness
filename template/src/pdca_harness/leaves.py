@@ -761,7 +761,13 @@ def _invoke_leaf_resilient(
         kw.setdefault("memory_log", memory_log)
     records: list[str] = []
     last: Exception | None = None
+    # An `on_event` observer that keeps state (`_BashSandboxProbe`) starts each attempt
+    # empty (#934): a retry is a fresh invocation, so what it reads must be the live
+    # attempt's stream alone, never a dead predecessor's.
+    reset = getattr(kw.get("on_event"), "reset", None)
     for attempt in range(1, attempts + 1):
+        if callable(reset):
+            reset()
         try:
             _invoke(leaf, workdir, prompt(attempt) if callable(prompt) else prompt, **kw)
             # Success — leave no error log behind, as before (#138). Now that a failed
@@ -896,9 +902,10 @@ class _LeafHarvest:
         self._failed_reason = failed_reason
         # A site's own, more specific account of a run that files nothing — given the
         # final exception, or None when the live attempt exited 0 and wrote nothing — as
-        # ``(reason, failure)``, or None to keep the generic one. Only the plan reviewer
-        # has one (#526: a vendor sandbox that could not start). It never decides WHETHER
-        # an artifact is filed, only how a placeholder explains why none was.
+        # ``(reason, failure)``, or None to keep the generic one. All three sites pass the
+        # same one, :func:`_sandbox_account` (#526, #934: a vendor sandbox that could not
+        # start). It never decides WHETHER an artifact is filed, only how a placeholder
+        # explains why none was.
         self._explain = explain
         self._unowned: str | None = None  # why the path can no longer be attributed
         # What was left ON the path and could not be withdrawn, by filesystem identity.
@@ -3339,13 +3346,17 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
         # placeholder; the failed attempts' stderr and stream report land in error_log.
         # `_LeafHarvest` owns check-review.md across those attempts (#541): a file a dead
         # attempt left in the sandbox is withdrawn into error_log as that attempt dies, so
-        # what lands in the bundle is the LIVE attempt's own work or nothing at all.
+        # what lands in the bundle is the LIVE attempt's own work or nothing at all. A
+        # vendor sandbox that could not start is filed as such (#934): `bash` reads the live
+        # attempt's stream, and the shared account turns it into `sandbox-empty`.
+        bash = _BashSandboxProbe()
+        empty = "reviewer produced no check-review.md"
         _LeafHarvest(
             produced=sandbox / "check-review.md", dest=d / "check-review.md",
             unavailable=lambda reason, failure: _review_unavailable(
                 d, reason, failure=failure, error_log=error_log),
             failed_reason="reviewer leaf failed",
-            empty_reason="reviewer produced no check-review.md",
+            empty_reason=empty, explain=_sandbox_account(bash, empty),
         ).run(
             # The closing instruction goes AFTER the project rubric (#541), so it is the
             # last thing the reviewer reads, rubric or not.
@@ -3356,7 +3367,7 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
             label=f"Check review {d.name}",
             status=lambda: progress.bundle_activity(sandbox, ("check-review.md",)),
             stream_json=True,  # Tier 3 (no-op unless the reviewer family has a stream)
-            env=env, extra_argv=extra_argv, cfg=cfg,
+            env=env, extra_argv=extra_argv, cfg=cfg, on_event=bash,
         )
 
 
@@ -3740,19 +3751,22 @@ def _run_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict, 
         # The same artifact owner as the main reviewer (#541) — one implementation, so a
         # dead attempt's residue cannot be filed as a live attempt's findings HERE either;
         # every failure still degrades to the §6 placeholder (advisory never crashes the
-        # cycle), which is what `unavailable` writes.
+        # cycle), which is what `unavailable` writes. A sandbox that could not start is
+        # filed as such (#934), on the probe's reading of the live attempt's stream.
+        bash = _BashSandboxProbe()
+        empty = "produced no artifact"
         _LeafHarvest(
             produced=out, dest=advisory_artifact(d, leaf_id),
             unavailable=lambda reason, failure: _advisory_unavailable(
                 d, leaf_id, reason, failure=failure, error_log=error_log),
-            empty_reason="produced no artifact",
+            empty_reason=empty, explain=_sandbox_account(bash, empty),
         ).run(
             leaf, sandbox,
             _advisory_prompt(spec, leaf_id, rubric_mod.for_reviewer(d, cfg)),
             error_log=error_log,
             label=f"Advisory {leaf_id} {d.name}",
             status=lambda: progress.bundle_activity(sandbox, (out.name,)),
-            stream_json=True, env=env, extra_argv=extra, cfg=cfg)
+            stream_json=True, env=env, extra_argv=extra, cfg=cfg, on_event=bash)
 
 
 def _stub_advisory(d: Path, spec: dict, leaf_id: str) -> None:
@@ -4046,18 +4060,31 @@ def _pinned_plan_target(d: Path, cfg: Config):
 # denied` — the command itself never started. `apply-seccomp:` is the sandbox's
 # seccomp/userns helper (the binary carries `apply-seccomp: write /proc/self/uid_map`,
 # `…: unshare(CLONE_NEWUSER)`, `…: prctl(PR_SET_SECCOMP)` and kin); `bwrap:` is
-# bubblewrap's own prefix for the same failure one layer out. Anchored at a line start, so
-# a command that merely PRINTS one of these words (a grep hit, a cat of this very file)
-# is not the sandbox failing. (template/tests/fixtures/README.md pins the observed bytes.)
-_SANDBOX_HELPER_ERROR_RE = re.compile(r"^(?:apply-seccomp|bwrap): .+$", re.MULTILINE)
+# bubblewrap's own prefix for the same failure one layer out. It must be the WHOLE result
+# (#934): the vendor's optional `Exit code N` line, then that one helper line, then at most
+# a newline. A sandbox that cannot start fails before the command does, so there is no
+# other output; a `bwrap:` line anywhere else — a grep hit, a cat of this very file, a
+# project's own test that runs bubblewrap and fails among other output — is the command's,
+# not the sandbox failing. (template/tests/fixtures/README.md pins the observed bytes.)
+_SANDBOX_HELPER_ERROR_RE = re.compile(
+    r"\A(?:Exit code \d+\n)?((?:apply-seccomp|bwrap): [^\n]+)\n?\Z")
 # The CLI's own refusal to start, the other face of `failIfUnavailable` (#526). Observed
 # (2.1.277, bubblewrap absent): exit 1, stderr `Error: sandbox required but unavailable:
 # sandbox is enabled but dependencies are missing: bubblewrap (bwrap) not installed · …`,
 # and a `result` event whose `errors` say `Sandbox required but unavailable: …`. `Sandbox
 # Error:` is its message when the sandbox fails to initialise at startup (read out of the
-# binary: `❌ Sandbox Error: ${…}` then exit 1 — not observed on a host).
+# binary: `❌ Sandbox Error: ${…}` then exit 1 — not observed on a host). The phrase must
+# OPEN a line (#934), after at most leading whitespace, `Error: ` or `❌ `: each is a line
+# the CLI writes itself, so a line that only QUOTES the phrase mid-sentence — a hook's or a
+# test's output, this repo's own fixtures — is not the CLI refusing. The stream channel
+# lands the same way: the harness renders the `result` event's report on its own line under
+# `progress._TERMINAL_REPORT_HEADER` (progress.py:402), and its `errors` entry leads with
+# the phrase. But that line is the LEAF's own closing text when the event has no `errors`
+# (`progress._claude_result_texts`), so no anchor can say whose line it is: the output is
+# read only for a run whose stream shows no turn at all (`_sandbox_account`).
 _SANDBOX_REFUSAL_RE = re.compile(
-    r"^.*(?:[Ss]andbox required but unavailable|Sandbox Error:).*$", re.MULTILINE)
+    r"^[ \t]*(?:Error: |❌ )?(?:[Ss]andbox required but unavailable|Sandbox Error:).*$",
+    re.MULTILINE)
 _EVIDENCE_MAX = 300  # one line of evidence in a placeholder, not a transcript
 
 
@@ -4088,14 +4115,38 @@ class _BashSandboxProbe:
     anywhere a caller looks; the leaf's closing text is only its own paraphrase. The
     tool results are the vendor's evidence, so they are what is read. Each result is
     matched to its call by the ``tool_use`` id, so a Read or Grep result never counts
-    as a Bash one."""
+    as a Bash one.
+
+    It also counts ``turns`` (#934): the stream's ``assistant`` events — the model's
+    replies, every tool call among them, and any API error the CLI reports in place of
+    one. The CLI refuses to start without its sandbox before it asks the model anything
+    (``tests/fixtures/claude_sandbox_refused.stream.jsonl``: one ``result``, ``num_turns:
+    0``), so a run with a turn was not refused, and its failed output may hold the leaf's
+    own words.
+
+    It holds ONE attempt's calls: :func:`_invoke_leaf_resilient` calls :meth:`reset` on
+    its ``on_event`` hook before each attempt (#934)."""
 
     def __init__(self) -> None:
         self._bash_ids: set[str] = set()
+        self.turns = 0               # `assistant` events: the CLI got past its startup
         self.ran = 0                 # Bash results that were NOT errors
         self.errors: list[str] = []  # the text of every Bash result that was one
 
+    def reset(self) -> None:
+        """Forget the calls so far (#934). A retry re-invokes the whole leaf from scratch,
+        so what an earlier, dead attempt's Bash did says nothing about the sandbox the next
+        attempt got: kept, a call that ran hid a later attempt's dead sandbox, a dead call
+        condemned a later attempt that never tried Bash, and a turn hid a later attempt's
+        refusal."""
+        self._bash_ids.clear()
+        self.turns = 0
+        self.ran = 0
+        self.errors.clear()
+
     def __call__(self, ev: dict) -> None:
+        if ev.get("type") == "assistant":
+            self.turns += 1
         message = ev.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         for block in content if isinstance(content, list) else []:
@@ -4114,12 +4165,13 @@ class _BashSandboxProbe:
     def sandbox_start_failure(self) -> str:
         """The vendor's startup error, iff the leaf made Bash calls and EVERY one failed
         with it; else ``""``. One call that ran means the sandbox started; one failure
-        without the vendor's prefix means something else went wrong. Either way this is
-        not a sandbox that could not start, and the run keeps the class it has today."""
+        whose whole result is not the vendor's startup error means something else went
+        wrong. Either way this is not a sandbox that could not start, and the run keeps the
+        class it has today."""
         if self.ran or not self.errors:
             return ""
         hits = [_SANDBOX_HELPER_ERROR_RE.search(text) for text in self.errors]
-        return _evidence_line(hits[0].group(0)) if all(hits) else ""
+        return _evidence_line(hits[0].group(1)) if all(hits) else ""
 
 
 def _sandbox_refusal(output: str) -> str:
@@ -4127,6 +4179,54 @@ def _sandbox_refusal(output: str) -> str:
     output (its stderr tail, plus the stream report #506 retains), or ``""``."""
     m = _SANDBOX_REFUSAL_RE.search(output or "")
     return _evidence_line(m.group(0)) if m else ""
+
+
+def _sandbox_account(bash: _BashSandboxProbe, empty_reason: str
+                     ) -> Callable[[Exception | None], tuple[str, str] | None]:
+    """#526's reading of a run that filed nothing, as a :class:`_LeafHarvest` ``explain``:
+    a vendor sandbox that could not start is ``sandbox-empty`` infra, on the vendor's own
+    evidence. ``None`` keeps the generic account. ``bash`` must be the run's ``on_event``,
+    so it holds the live attempt's calls only (:meth:`_BashSandboxProbe.reset`).
+    ``empty_reason`` is the site's own words for a run that exited 0 and wrote nothing —
+    the same string it gives :class:`_LeafHarvest`, so it has no default to fall back on.
+
+    ONE reading for every site that spawns a sandboxed leaf (#934): the plan reviewer, where
+    #526 found it, the Check reviewer and each Check advisory leaf.
+
+    * Every Bash call dead in the sandbox's own startup is ``sandbox-empty`` however the
+      CLI exited — it can exit non-zero after each command it tried was refused (Ubuntu
+      24.04's AppArmor userns restriction).
+    * Past that, a failed run that took a turn is not a refusal
+      (:attr:`_BashSandboxProbe.turns`): the CLI refuses before it asks the model
+      anything, so a run with any Bash result — any tool call at all, or only text — was
+      not refused, whatever its output says. That output can be the leaf's own words: the
+      stream report renders a ``result`` event's text on its own line, and the leaf
+      writes that text (``progress._claude_result_texts``).
+    * Only then is the failed run's output read, for the CLI's own refusal line
+      (:data:`_SANDBOX_REFUSAL_RE`). A command that never launched (``startup``) has no
+      such output to read."""
+    def account(err: Exception | None) -> tuple[str, str] | None:
+        dead = bash.sandbox_start_failure()
+        if err is None:
+            if dead:
+                return (f"{empty_reason}; every Bash call it made failed before running, "
+                        f"because the vendor sandbox could not start: {dead}", _FAIL_SANDBOX)
+            return None
+        if dead:
+            return ("the leaf failed, and every Bash call it made failed before running, "
+                    f"because the vendor sandbox could not start: {dead}", _FAIL_SANDBOX)
+        # A Bash result counts only after its own call (`_bash_ids`), and every call rides
+        # in an `assistant` event, so `ran`/`errors` imply a turn: this one test is "any
+        # Bash result" and "any other turn" both.
+        if bash.turns:
+            return None
+        refusal = (_sandbox_refusal(getattr(err, "output", ""))
+                   if _failure_class(err) != _FAIL_STARTUP else "")
+        if refusal:  # the CLI refused to start without its sandbox
+            return ("the vendor sandbox could not start, so the CLI refused to "
+                    f"run: {refusal}", _FAIL_SANDBOX)
+        return None
+    return account
 
 
 def _run_plan_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict,
@@ -4176,36 +4276,18 @@ def _run_plan_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: d
         out = sandbox / f"plan-advisory-{leaf_id}.md"
         error_log = d / f"plan-advisory-{leaf_id}.error.log"
         bash = _BashSandboxProbe()
-
-        def sandbox_account(err: Exception | None) -> tuple[str, str] | None:
-            """#526's reading of a run that filed nothing: a vendor sandbox that could not
-            start is ``sandbox-empty`` infra, on the vendor's own evidence — the CLI's
-            refusal (a failed run) or every Bash call dying in the sandbox's startup (a run
-            that exited 0 and wrote nothing). ``None`` keeps the generic account."""
-            if err is not None:
-                refusal = (_sandbox_refusal(getattr(err, "output", ""))
-                           if _failure_class(err) != _FAIL_STARTUP else "")
-                if refusal:  # the CLI refused to start without its sandbox
-                    return ("the vendor sandbox could not start, so the CLI refused to "
-                            f"run: {refusal}", _FAIL_SANDBOX)
-                return None
-            dead = bash.sandbox_start_failure()
-            if dead:
-                return ("produced no artifact; every Bash call it made failed before "
-                        f"running, because the vendor sandbox could not start: {dead}",
-                        _FAIL_SANDBOX)
-            return None
-
         # The third site on the SAME artifact owner (#541): the plan reviewer's sandbox is
         # no different, so a dead attempt's residue must not be filed as the brief's review
         # here either. A fix that landed at the two Check sites and not at this one is
-        # exactly the shape this shared owner exists to make impossible. What is this
-        # site's own — #526's sandbox evidence — rides in as `explain`, not as a copy.
+        # exactly the shape this shared owner exists to make impossible. #526's sandbox
+        # evidence rides in as `explain` — the one reading every sandboxed site shares
+        # (#934), of the live attempt's calls alone, as is the note below.
+        empty = "produced no artifact"
         filed = _LeafHarvest(
             produced=out, dest=plan_advisory_artifact(d, leaf_id),
             unavailable=lambda reason, failure: _plan_advisory_unavailable(
                 d, leaf_id, reason, failure=failure, error_log=error_log),
-            empty_reason="produced no artifact", explain=sandbox_account,
+            empty_reason=empty, explain=_sandbox_account(bash, empty),
         ).run(
             leaf, sandbox, _plan_advisory_prompt(spec, leaf_id),
             error_log=error_log,

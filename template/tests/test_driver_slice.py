@@ -1239,5 +1239,327 @@ class ActTooling(unittest.TestCase):
         self.assertIn("Act review — 2026-06-04", log.read_text(encoding="utf-8"))
 
 
+class CheckLeafSandboxRefusal(unittest.TestCase):
+    """#934: a Check leaf whose vendor sandbox could not start is filed `sandbox-empty`.
+
+    Only the plan-review site read the vendor's sandbox evidence (#526); the Check reviewer
+    and each Check advisory leaf filed the same host fault as transient or substantive. Each
+    leg runs a REAL site entry point with a stand-in `claude` that replays vendor bytes — the
+    pinned fixtures (tests/fixtures/README.md), or events built inline in the CLI's own
+    shapes where no observed bytes exist — so the production spawn, stream drain, retry loop
+    and harvest all run, and the class is read off the placeholder the bundle actually
+    holds. Offline, no model."""
+
+    _FIXTURES = Path(__file__).resolve().parent / "fixtures"
+    # The stand-in: argv[1] names a JSON plan — one entry per attempt (stdout, stderr, rc),
+    # the last repeating — and a counter file, so a retried leaf can change its output and a
+    # leg can assert how many attempts really ran. `_invoke` appends its flags (ignored).
+    _FAKE_CLAUDE = (
+        "import json,pathlib,sys\n"
+        "sys.stdin.read()\n"
+        "plan=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))\n"
+        "cnt=pathlib.Path(plan['counter'])\n"
+        "n=len(cnt.read_text()) if cnt.exists() else 0\n"
+        "cnt.write_text('x'*(n+1))\n"
+        "a=plan['attempts'][min(n,len(plan['attempts'])-1)]\n"
+        "sys.stdout.buffer.write(a['stdout'].encode('utf-8'))\n"
+        "sys.stderr.buffer.write(a['stderr'].encode('utf-8'))\n"
+        "sys.exit(a['rc'])\n"
+    )
+
+    class _NoSleep:
+        """`leaves.time` minus the retry backoff's wall clock; everything else is real."""
+
+        def __init__(self, real) -> None:
+            self._real = real
+
+        def sleep(self, _seconds: float) -> None:
+            return None
+
+        def __getattr__(self, name: str):
+            return getattr(self._real, name)
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = _stub_config(self.tmp)
+        self.runs = 0
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # -- vendor bytes ------------------------------------------------------------------
+    def _fixture(self, name: str) -> str:
+        return (self._FIXTURES / name).read_text(encoding="utf-8")
+
+    @staticmethod
+    def _jsonl(*events: dict) -> str:
+        return "".join(json.dumps(ev) + "\n" for ev in events)
+
+    @staticmethod
+    def _tool_use(tid: str, name: str, tool_input: dict) -> dict:
+        return {"type": "assistant", "parent_tool_use_id": None,
+                "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": tid, "name": name, "input": tool_input}]}}
+
+    def _bash_call(self, tid: str, command: str) -> dict:
+        return self._tool_use(tid, "Bash", {"command": command})
+
+    @staticmethod
+    def _tool_result(tid: str, text: str, is_error: bool) -> dict:
+        return {"type": "user", "parent_tool_use_id": None,
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": tid, "content": text,
+                     "is_error": is_error}]}}
+
+    @staticmethod
+    def _closing(text: str) -> dict:
+        return {"type": "assistant", "parent_tool_use_id": None,
+                "message": {"role": "assistant",
+                            "content": [{"type": "text", "text": text}]}}
+
+    # The vendor's own report of a transient death (an overload), so the attempt is retried.
+    _OVERLOADED = {"type": "assistant", "is_api_error_message": True, "error": "overloaded",
+                   "parent_tool_use_id": None,
+                   "message": {"role": "assistant", "content": [
+                       {"type": "text", "text": "API Error: 529 Overloaded"}]}}
+    # A failed run's `result` that QUOTES every refusal form mid-line (a leaf reporting what
+    # a test printed); none opens a line, so none is the CLI refusing.
+    _QUOTING_RESULT = {
+        "type": "result", "subtype": "success", "is_error": True, "session_id": "q",
+        "result": ("The re-run's log shows Error: sandbox required but unavailable, then "
+                   "Sandbox required but unavailable: bwrap not installed, then ❌ Sandbox "
+                   "Error: init failed — all from tests/fixtures, not this run.")}
+
+    # -- driving the real sites ----------------------------------------------------------
+    def _run_site(self, site: str, attempts: list[dict]) -> tuple[str, int]:
+        """One site, end to end, over a fresh bundle. Returns the artifact the bundle holds
+        and how many attempts the stand-in actually served."""
+        self.runs += 1
+        n = self.runs
+        d = self.cfg.bundle(f"SBX{n}")
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "brief.md").write_text("- **Slug:** sandbox-refusal\n", encoding="utf-8")
+        (d / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
+        (d / "check-gates.json").write_text('{"overall": "pass", "rows": []}\n',
+                                            encoding="utf-8")
+        counter = self.tmp / f"attempts-{n}"
+        plan = self.tmp / f"plan-{n}.json"
+        plan.write_text(json.dumps({"counter": str(counter), "attempts": [
+            {"stdout": a.get("stdout", ""), "stderr": a.get("stderr", ""),
+             "rc": a.get("rc", 0)} for a in attempts]}), encoding="utf-8")
+        leaf = LeafConfig(mode="command", family="claude", interactive=False,
+                          argv=[sys.executable, "-c", self._FAKE_CLAUDE, str(plan)])
+        self.cfg.reviewer = leaf
+        runners = {
+            "review": (lambda: leaves._run_review_sandboxed(d, self.cfg),
+                       d / "check-review.md"),
+            "advisory": (lambda: leaves._run_advisory_sandboxed(
+                d, self.cfg, leaf, {"id": "lens"}, "lens"),
+                leaves.advisory_artifact(d, "lens")),
+            "plan-review": (lambda: leaves._run_plan_advisory_sandboxed(
+                d, self.cfg, leaf, {"id": "plan-reviewer"}, "plan-reviewer"),
+                leaves.plan_advisory_artifact(d, "plan-reviewer")),
+        }
+        run, artifact = runners[site]
+        with mock.patch.object(leaves, "time", self._NoSleep(leaves.time)), \
+                redirect_stderr(io.StringIO()):
+            run()
+        served = len(counter.read_text()) if counter.exists() else 0
+        return artifact.read_text(encoding="utf-8"), served
+
+    def _refusals(self) -> dict:
+        """Runs the vendor's own evidence says could not start a sandbox: (attempts, the
+        evidence the placeholder must quote, attempts the stand-in must serve). Each form
+        the two shapes accept has a row only it lets through, so dropping any one of them
+        turns a row red: `Error: `, `❌ `, leading whitespace and the report's own line for
+        a refusal; the `Exit code` line (present, absent), `apply-seccomp:` / `bwrap:` and
+        the trailing newline for a dead Bash result."""
+        stream = self._fixture("claude_sandbox_refused.stream.jsonl")
+        stderr = self._fixture("claude_sandbox_refused.stderr.txt")
+        dead = self._fixture("claude_sandbox_cannot_start.stream.jsonl")
+        ran = self._fixture("claude_bash_ran.stream.jsonl").splitlines(keepends=True)
+        # The helper line itself is the evidence quoted, not the `Exit code` line above it.
+        seccomp = "could not start: apply-seccomp: write /proc/self/setgroups"
+        uid_map = "bwrap: setting up uid map: Permission denied"
+        bare = self._jsonl(self._bash_call("t1", "echo hello"),
+                           self._tool_result("t1", uid_map + "\n", True),
+                           self._closing("The command failed in the sandbox."))
+        return {
+            "refused, both channels": (
+                [{"stdout": stream, "stderr": stderr, "rc": 1}],
+                "sandbox required but unavailable", 1),
+            "refused, stderr only": (   # no stream: a transient-shaped death, retried
+                [{"stderr": stderr, "rc": 1}], "sandbox required but unavailable", 3),
+            "refused, the result's errors only": (
+                [{"stdout": stream, "rc": 1}], "Sandbox required but unavailable", 1),
+            "the CLI's startup form, ❌ Sandbox Error (synthetic)": (
+                [{"stderr": "❌ Sandbox Error: sandbox initialization failed\n", "rc": 1}],
+                "Sandbox Error: sandbox initialization failed", 3),
+            "refused, on an indented line (synthetic)": (
+                [{"stderr": "  Sandbox required but unavailable: bwrap not installed\n",
+                  "rc": 1}], "Sandbox required but unavailable: bwrap not installed", 3),
+            "every Bash call dead at startup, CLI exits 0": (
+                [{"stdout": dead, "rc": 0}], seccomp, 1),
+            "every Bash call dead at startup, CLI exits 1 (Ubuntu 24.04 AppArmor)": (
+                [{"stdout": dead, "rc": 1}], seccomp, 1),
+            "every Bash call dead, a bare bwrap: line and a newline (synthetic)": (
+                [{"stdout": bare, "rc": 0}], "could not start: " + uid_map, 1),
+            "retried: an earlier attempt ran Bash, the final one is dead at startup": (
+                [{"stdout": "".join(ran[:2]) + self._jsonl(self._OVERLOADED), "rc": 1},
+                 {"stdout": dead, "rc": 0}], seccomp, 2),
+            # The earlier attempt's turns must not hide the final attempt's refusal.
+            "retried: an earlier attempt took turns, the final one was refused": (
+                [{"stdout": "".join(ran[:2]) + self._jsonl(self._OVERLOADED), "rc": 1},
+                 {"stdout": stream, "stderr": stderr, "rc": 1}],
+                "sandbox required but unavailable", 2),
+        }
+
+    def _not_refusals(self) -> dict:
+        """Runs that are NOT a sandbox that could not start — filed as on `main`, which for
+        every one of these is `human-empty`: (attempts, attempts the stand-in must serve).
+
+        The brief's (a) and (b) are each answered by TWO rules at once — the run took a turn
+        and its text only quotes the refusal mid-line — so they could not tell if either
+        rule went missing. Each rule therefore also has a row that only it decides:
+        * the turn rule (the CLI refuses before it asks the model anything, so a failed run
+          with any `assistant` event is not a refusal): the CLI's own refusal line after a
+          Bash result, once per half of `ran`/`errors`; and a leaf's closing text that
+          OPENS with the refusal phrase after a Read call, and after no tool call at all;
+        * the line anchor: a run with no turn whose report quotes the phrase mid-line;
+        * the whole-result shape: a helper line that opens a longer result, and one that
+          ends it."""
+        stream = self._fixture("claude_sandbox_refused.stream.jsonl")
+        stderr = self._fixture("claude_sandbox_refused.stderr.txt")
+        dead = self._fixture("claude_sandbox_cannot_start.stream.jsonl")
+        ran = self._fixture("claude_bash_ran.stream.jsonl")
+        test_log = ("Exit code 1\ntest_isolation (tests.test_box) ... FAIL\n"
+                    "bwrap: setting up uid map: Permission denied\nFAILED (failures=1)")
+        quoted = self._jsonl(self._QUOTING_RESULT)
+        bash_ok = self._jsonl(self._bash_call("t1", "echo hi"),
+                              self._tool_result("t1", "hi", False))
+        bash_failed = self._jsonl(
+            self._bash_call("t1", "python -m unittest"),
+            self._tool_result("t1", "Exit code 1\nFAILED (failures=3)", True))
+        # A failed run whose `result` is the leaf's own text and OPENS with the phrase: the
+        # report puts it on its own line, so the line anchor lets it through.
+        own_words = ("Sandbox required but unavailable: is how the fixture reads; the patch "
+                     "handles it.")
+        opens_with_phrase = self._jsonl({"type": "result", "subtype": "success",
+                                         "is_error": True, "session_id": "o",
+                                         "result": own_words})
+        # A leaf that READ this repo's refusal fixture (not a Bash call)…
+        read_only = self._jsonl(
+            self._tool_use("r1", "Read",
+                           {"file_path": "tests/fixtures/claude_sandbox_refused.stderr.txt"}),
+            self._tool_result("r1", stderr, False))
+        # …and one that made no tool call at all: its closing text is the `result` above.
+        text_only = self._jsonl(self._closing(own_words))
+        bwrap_inside = self._jsonl(self._bash_call("t1", "make test"),
+                                   self._tool_result("t1", test_log, True),
+                                   self._closing("The suite failed."))
+        bwrap_first = self._jsonl(
+            self._bash_call("t1", "make test"),
+            self._tool_result("t1", "Exit code 1\nbwrap: execvp pytest: No such file or "
+                              "directory\nFAILED (errors=1)", True),
+            self._closing("The suite failed."))
+        bwrap_last = self._jsonl(
+            self._bash_call("t1", "make test"),
+            self._tool_result("t1", "Exit code 1\nrunning test_box\n"
+                              "bwrap: setting up uid map: Permission denied", True),
+            self._closing("The suite failed."))
+        return {
+            "(a) Bash ran and exited 0, then an is_error result quoting the refusal": (
+                [{"stdout": bash_ok + quoted, "rc": 1}], 1),
+            "(a) Bash ran and exited 0, then the CLI's own refusal (turn rule only)": (
+                [{"stdout": bash_ok + stream, "rc": 1}], 1),
+            "(b) Bash ran and exited 1 (FAILED), then the same quoting result": (
+                [{"stdout": bash_failed + quoted, "rc": 1}], 1),
+            "(b) Bash ran and exited 1, then the CLI's own refusal (turn rule only)": (
+                [{"stdout": bash_failed + stream, "rc": 1}], 1),
+            "a Read, no Bash call, then a result opening with the phrase (turn rule only)": (
+                [{"stdout": read_only + opens_with_phrase, "rc": 1}], 1),
+            "text only, no tool call, then a result opening with the phrase (turn rule only)": (
+                [{"stdout": text_only + opens_with_phrase, "rc": 1}], 1),
+            "no turn, a result quoting the refusal mid-line (line anchor only; synthetic)": (
+                [{"stdout": quoted, "rc": 1}], 1),
+            "(c) a bwrap: line inside a longer Bash result, CLI exits 0": (
+                [{"stdout": bwrap_inside, "rc": 0}], 1),
+            "(c) a bwrap: line inside a longer Bash result, CLI exits 1": (
+                [{"stdout": bwrap_inside, "rc": 1}], 1),
+            "(c) a result that opens with a bwrap: line and goes on (end anchor only)": (
+                [{"stdout": bwrap_first, "rc": 0}], 1),
+            "(c) a result that ends with a bwrap: line (start anchor only)": (
+                [{"stdout": bwrap_last, "rc": 0}], 1),
+            "(d) retried: an earlier attempt was refused, the final one ran Bash": (
+                [{"stderr": stderr, "rc": 1}, {"stdout": ran, "rc": 0}], 2),
+            "(d) retried: an earlier attempt's Bash was dead, the final one ran Bash": (
+                [{"stdout": dead + self._jsonl(self._OVERLOADED), "rc": 1},
+                 {"stdout": ran, "rc": 0}], 2),
+            "(d) retried: an earlier attempt's Bash was dead, the final one made no call": (
+                [{"stdout": dead + self._jsonl(self._OVERLOADED), "rc": 1},
+                 {"stdout": self._jsonl(self._closing("Nothing to add.")), "rc": 0}], 2),
+        }
+
+    def _assert_refusals(self, sites: tuple[str, ...]) -> None:
+        for case, (attempts, evidence, served) in self._refusals().items():
+            for site in sites:
+                with self.subTest(site=site, case=case):
+                    text, n = self._run_site(site, attempts)
+                    self.assertEqual(n, served)                  # the fault really ran
+                    self.assertEqual(assemble.leaf_status(text), "sandbox-empty", text)
+                    self.assertIn("could not start", text)
+                    self.assertIn(evidence, text)                # on the vendor's evidence
+
+    def _assert_not_refusals(self, sites: tuple[str, ...]) -> None:
+        for case, (attempts, served) in self._not_refusals().items():
+            for site in sites:
+                with self.subTest(site=site, case=case):
+                    text, n = self._run_site(site, attempts)
+                    self.assertEqual(n, served)
+                    self.assertEqual(assemble.leaf_status(text), "human-empty", text)
+                    self.assertNotIn("could not start", text)
+
+    def test_a_check_leaf_its_sandbox_refused_is_filed_as_sandbox_infra(self) -> None:
+        # Criteria (1)+(2): the Check reviewer and a Check advisory leaf, refused or with
+        # every Bash call dead at startup, are `sandbox-empty`; on `main` they were filed
+        # transient or substantive, telling the operator the review failed.
+        self._assert_refusals(("review", "advisory"))
+        # Criterion (3): what is NOT a refusal keeps the class it has on `main`.
+        self._assert_not_refusals(("review", "advisory"))
+
+    def test_the_plan_review_site_reads_the_same_account(self) -> None:
+        # Criterion (4): one account for every sandboxed site, so the plan reviewer gets
+        # the tightened reading too — the not-refusal table included. Its own #526 tests
+        # (test_plan_advisory.py) stay green on the observed fixtures.
+        self._assert_refusals(("plan-review",))
+        self._assert_not_refusals(("plan-review",))
+
+    def test_a_probe_passed_as_on_event_starts_each_attempt_empty(self) -> None:
+        # Criterion (5): the retry owner resets a stateful `on_event` before each attempt,
+        # so the probe reads the live attempt alone, not the dead ones before it.
+        probe = leaves._BashSandboxProbe()
+        seen: list[tuple[int, int, list[str], set[str]]] = []
+
+        def attempt(leaf, workdir, prompt, *, on_event=None, **kw):
+            n = len(seen)
+            seen.append((getattr(on_event, "turns", None), on_event.ran,
+                         list(on_event.errors), set(on_event._bash_ids)))
+            for ev in (self._bash_call(f"t{n}", "echo hi"),
+                       self._tool_result(f"t{n}", f"Exit code 1\nbwrap: attempt {n}", True)):
+                on_event(ev)
+            raise leaves.LeafError(1, ["claude"], output="", produced=False)  # transient
+
+        with mock.patch.object(leaves, "_invoke", side_effect=attempt), \
+                redirect_stderr(io.StringIO()):
+            err = leaves._invoke_leaf_resilient(
+                LeafConfig(mode="command", family="claude", argv=["claude"]), self.tmp,
+                "p", error_log=self.tmp / "x.error.log", backoff=0.0, on_event=probe)
+        self.assertTrue(getattr(err, "transient", False))
+        self.assertEqual(seen, [(0, 0, [], set())] * 3)   # each attempt starts empty
+        # …and what is left is the last attempt's alone: one turn, one dead Bash call.
+        self.assertEqual((getattr(probe, "turns", None), probe.errors),
+                         (1, ["Exit code 1\nbwrap: attempt 2"]))
+
+
 if __name__ == "__main__":
     unittest.main()
