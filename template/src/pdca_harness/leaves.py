@@ -3002,6 +3002,599 @@ _SEEDED_NETWORK_KEYS = {
     "deniedDomains": lambda v: isinstance(v, list) and bool(v),            # its counterpart
 }
 
+# The operator's credential locations every seeded sandbox policy DENIES reading (#935). The
+# Check reviewer re-runs the bundle's patch and tests on the workflow host, and the vendor
+# sandbox confines WRITES, not reads: without these a test could read the host's tokens and
+# send them to any host in `allowedDomains`. A NAMED MINIMUM, not the invariant — a credential
+# location missing here is a hole in "the re-run holds no operator credential" (docs 05), and
+# the fix is to add it. Each is (path under a home, is a directory); a directory is denied whole.
+#
+# `~/.gitconfig` is deliberately NOT listed: git treats an existing but unreadable global config
+# as FATAL, which would break the re-run's own `git stash`. The tokens live in the credential
+# files below, not there. Nor, for the same reason, are Maven's `~/.m2/settings.xml` and
+# `settings-security.xml`, Gradle's `gradle.properties` and Composer's `auth.json`: each tool
+# reads its file at every start and stops when it cannot, so denying one breaks every re-run
+# that builds with that tool. Nor Hugging Face's `token` file (`~/.cache/huggingface/token`)
+# and Vault's `~/.vault-token`: with the variable that would stand in for each unset below
+# (`HF_TOKEN`, `VAULT_TOKEN`), the tool reads its file at every call, and an unreadable one is
+# an error to it, not an absent token. A token kept in one of these files stays readable — a
+# known gap (docs 05).
+#
+# The CLI's own config dir is not here either: it is denied its own way
+# (:data:`_CLAUDE_CONFIG_ENTRIES`) — whole to the leaf's commands, entry by entry to its Read
+# tool, which must still open the oversized outputs the CLI saves for it under that dir.
+_CREDENTIAL_HOME_PATHS = (
+    (".claude.json", False),
+    (".codex", True),
+    (".gemini", True),
+    (".config/gh", True),
+    (".config/glab-cli", True),
+    (".ssh", True),
+    (".git-credentials", False), (".config/git/credentials", False),
+    (".netrc", False),
+    (".aws", True),
+    (".kube", True),
+    (".docker/config.json", False), (".dockercfg", False),
+    (".config/containers/auth.json", False),
+    (".npmrc", False),
+    (".cargo/credentials.toml", False), (".cargo/credentials", False),
+    (".pypirc", False),
+    (".gem/credentials", False), (".local/share/gem/credentials", False),
+    (".cache/huggingface/stored_tokens", False),
+    (".terraform.d/credentials.tfrc.json", False), (".terraformrc", False),
+    (".config/gcloud", True),
+    (".azure", True),
+)
+# Locations a variable NAMES, denied BESIDE the default one: (variable, path under it, is a
+# directory). Only when the variable is set and non-empty — an unset one names nothing. Paths
+# that do not exist are still denied: a file created later must not be readable either. A
+# value holding `~` or a `$VAR` is denied as written AND as expanded (:func:`_as_named`). Two
+# kinds belong here: a variable that MOVES a listed default (`$NETRC` for `~/.netrc`,
+# `$AWS_CONFIG_FILE` for the other file in `~/.aws` — static keys are read from it too,
+# `$XDG_DATA_HOME` / `$XDG_CACHE_HOME` for the `~/.local/share` / `~/.cache` ones), and one
+# that names a credential file wherever it sits (`$GOOGLE_APPLICATION_CREDENTIALS`, a
+# service-account key; `$AWS_WEB_IDENTITY_TOKEN_FILE`, a token; `$REGISTRY_AUTH_FILE`, a
+# container-registry login; `$TF_CLI_CONFIG_FILE`, whose `credentials` blocks hold tokens).
+# The containers tools (podman, buildah, skopeo) keep that login under `$XDG_RUNTIME_DIR` by
+# default, and read `$XDG_CONFIG_HOME` / `~/.config` and the Docker files after it
+# (containers-auth.json(5)).
+_CREDENTIAL_ENV_PATHS = (
+    ("CODEX_HOME", "", True),
+    ("GH_CONFIG_DIR", "", True),
+    ("XDG_CONFIG_HOME", "gh", True),
+    ("GLAB_CONFIG_DIR", "", True),
+    ("XDG_CONFIG_HOME", "glab-cli", True),
+    ("XDG_CONFIG_HOME", "git/credentials", False),
+    ("NETRC", "", False),
+    ("AWS_SHARED_CREDENTIALS_FILE", "", False),
+    ("AWS_CONFIG_FILE", "", False),
+    ("AWS_WEB_IDENTITY_TOKEN_FILE", "", False),
+    ("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", "", False),
+    ("DOCKER_CONFIG", "config.json", False),
+    ("REGISTRY_AUTH_FILE", "", False),
+    ("XDG_RUNTIME_DIR", "containers/auth.json", False),
+    ("XDG_CONFIG_HOME", "containers/auth.json", False),
+    ("NPM_CONFIG_USERCONFIG", "", False),
+    ("CARGO_HOME", "credentials.toml", False),
+    ("CARGO_HOME", "credentials", False),
+    ("XDG_DATA_HOME", "gem/credentials", False),
+    ("HF_HOME", "stored_tokens", False),
+    ("XDG_CACHE_HOME", "huggingface/stored_tokens", False),
+    ("TF_CLI_CONFIG_FILE", "", False),
+    ("XDG_CONFIG_HOME", "gcloud", True),
+    ("CLOUDSDK_CONFIG", "", True),
+    ("GOOGLE_APPLICATION_CREDENTIALS", "", False),
+    ("AZURE_CONFIG_DIR", "", True),
+    ("AZURE_CLIENT_CERTIFICATE_PATH", "", False),
+    ("AZURE_FEDERATED_TOKEN_FILE", "", False),
+)
+# …and `$KUBECONFIG`, which is a LIST of files (`os.pathsep`-separated): each one is denied.
+_KUBECONFIG_VAR = "KUBECONFIG"
+# …and the containers tools' per-user logins under /run, named by uid, denied WHATEVER the
+# harness's own environment says: `/run/user/<uid>` is where a desktop session's
+# `$XDG_RUNTIME_DIR` points (`podman login` writes there), and a flow started from cron, a
+# systemd service or a plain ssh session may have no `$XDG_RUNTIME_DIR` to name it by; and
+# `/run/containers/<uid>` is the tools' default when it is unset — always so for root (a CI
+# job running as root, say).
+_CONTAINERS_UID_AUTH = ("/run/user/{uid}/containers/auth.json",
+                        "/run/containers/{uid}/auth.json")
+# Credential variables the leaf inherits from the operator (`_invoke` spawns with
+# `{**os.environ, **env}`), UNSET for the leaf's sandboxed commands. The leaf PROCESS keeps
+# them — its own auth is read there — so this moves nobody's auth. A named minimum too.
+# A family of names (`CARGO_REGISTRIES_<NAME>_TOKEN`, `TF_TOKEN_<host>`) cannot be listed here.
+_DENIED_ENV_VARS = (
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY",
+    "GEMINI_API_KEY", "GOOGLE_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN", "AWS_CONTAINER_AUTHORIZATION_TOKEN", "NPM_TOKEN",
+    "CARGO_REGISTRY_TOKEN", "DOCKER_AUTH_CONFIG", "SSH_AUTH_SOCK", "GH_TOKEN", "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    "ACTIONS_RUNTIME_TOKEN", "GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "GL_TOKEN", "CI_JOB_TOKEN",
+    "TWINE_PASSWORD", "GEM_HOST_API_KEY", "COMPOSER_AUTH", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN",
+    "VAULT_TOKEN", "AZURE_CLIENT_SECRET", "AZURE_CLIENT_CERTIFICATE_PASSWORD", "AZURE_PASSWORD",
+)
+# The model's own Read tool must not read another process's environment either. Written to
+# `permissions.deny` only, never to `denyRead`. That does not keep it from the leaf's commands:
+# Claude Code merges `Read(...)` deny rules into the sandbox's own read deny (its `denyRead`
+# schema, 2.1.322 to 2.1.325: "Merged with paths from Read(...) deny permission rules"), so
+# the commands may be denied `/proc` too. Whether they still run then — a toolchain that finds
+# itself through `/proc/self/exe` — is not settled offline.
+_PROC_READ_DENY = "Read(//proc/**)"
+# The Claude Code config dir — `~/.claude`, or `$CLAUDE_CONFIG_DIR`. It holds the CLI's login
+# (`.credentials.json`), its settings and every session's transcript, and ALSO the oversized
+# tool outputs the CLI saves for the leaf's own session
+# (`projects/<project>/<session>/tool-results/`), which the model is meant to open with its
+# Read tool. The Read tool checks the deny rules BEFORE its own "tool result files are allowed
+# for reading" (Claude Code 2.1.322), so a deny of the whole dir refuses the leaf its own saved
+# outputs (#916 round 5, seen live). Hence two denies of it:
+# * to the leaf's COMMANDS — the re-run's untrusted code — the dir WHOLE (`denyRead`): they see
+#   it empty, an entry made during the run included;
+# * to its Read TOOL entry by entry: each one but `projects`; under `projects`, each folder
+#   there when the policy is written, by name (#916 round 6), and the session history in any
+#   folder by pattern — every transcript, the sub-agent transcripts, each project's memory.
+#   Every folder there is ANOTHER session's: the CLI names a session's folder after its cwd
+#   (each character but a letter or digit made `-`), and the leaf's cwd is a fresh temp dir,
+#   so its own folder is made only once it runs. What stays readable, to that tool alone, is
+#   the saved outputs in a folder made after the policy was written: the leaf's own (the
+#   point), and another session's that started in a new cwd during the run. (A fixed
+#   `CLAUDE_CODE_PROJECT_DIR_NAME`, which the CLI honours beside `$CLAUDE_CONFIG_DIR`, puts every
+#   session in one folder; once that exists, it is denied, the leaf's own outputs with it.)
+# The entries are those there when the policy is written plus these, the CLI's own, denied by
+# name so that one created during the run is denied too. A config dir inside another (a
+# `$CLAUDE_CONFIG_DIR` of `~/.claude/profiles/work`) keeps its own rules: the outer dir's
+# entry that holds it — or any entry whose rule, as the CLI matches it, would reach its
+# `projects` — is denied entry by entry in turn, and a link on the way back to a config dir, to
+# a directory being opened up or to one above it, or to a directory holding a home, gets no
+# rule of its own (:func:`_read_rules_around`).
+_CLAUDE_CONFIG_ENTRIES = (
+    (".credentials.json", False), ("settings.json", False), ("settings.local.json", False),
+    ("history.jsonl", False), ("file-history", True), ("paste-cache", True),
+    ("session-env", True), ("shell-snapshots", True), ("sessions", True), ("todos", True),
+    ("plans", True), ("ide", True), ("debug", True), ("backups", True), ("jobs", True),
+    ("daemon", True), ("daemon.json", False),
+)
+_CLAUDE_PROJECTS = "projects"
+_CLAUDE_PROJECT_DENIES = ("*/*.jsonl", "*/*/subagents/**", "*/memory/**")
+# A path as it goes into a rule — a `denyRead` entry or a `Read(...)` deny. A glob character
+# makes the vendor read a path as a pattern (Claude Code 2.1.322): a `denyRead` entry, or a
+# Read rule merged into that list, holding one of `* ? [ ]` goes down a separate glob branch;
+# the Read tool matches its rules as gitignore patterns, where `\` escapes; and the glob
+# matchers the CLI bundles expand `{a,b}`. So a `[1]` in a home or in a path a variable names
+# would be a character class, and the rule for `home[1]` would match `home1`. Each of
+# `* ? [ ] { } \` in a path is written `?` instead, the one-character wildcard, which matches
+# the character it stands for. Every OTHER character is written as it is: a space, `@` or `+`
+# in a home is common (`/home/jdoe@corp.example`), and a path with no glob character keeps the
+# vendor's literal handling. The glob branch has rules of its own — it skips a link that does
+# not resolve, and denies a directory it matches only where it finds files in it, so a file
+# that appears while a command runs is not denied to that command (a known gap, docs 05) — so
+# a path goes there only when a glob character in it leaves no choice.
+_PATH_GLOB = re.compile(r"[][*?{}\\]")
+# A NAME read off the disk — an entry of a config dir, a folder under its `projects`, an entry
+# of a directory opened up around a nested config dir (:func:`_read_rules_around`) — is written
+# stricter: each character outside `[A-Za-z0-9._-]` as `?`. Such a name exists when the policy
+# is written, and it goes only into the Read tool's rules. Claude Code matches those rules as
+# JavaScript strings, where `?` becomes `[^/]` with no `u` flag and so stands for ONE UTF-16
+# code unit (2.1.322): a character above U+FFFF, an emoji say, is two units and is written
+# `??`, or the rule for `🔑keys` would be a character short of the entry (:func:`_utf16`).
+_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _rule_path(path: str) -> str:
+    """``path`` as it goes into a rule (:data:`_PATH_GLOB`)."""
+    return _PATH_GLOB.sub("?", path)
+
+
+def _utf16(text: str) -> list[str]:
+    """``text`` as Claude Code's matchers count it: one item per UTF-16 code unit, so a
+    character above U+FFFF is two (its surrogates). A lone surrogate — an undecodable byte of
+    a name read off the disk — stays one."""
+    data = text.encode("utf-16-le", "surrogatepass")
+    return [chr(int.from_bytes(data[i:i + 2], "little")) for i in range(0, len(data), 2)]
+
+
+def _rule_name(name: str) -> str:
+    """A name read off the disk as it goes into a rule (:data:`_NAME_UNSAFE`): each unsafe
+    character as one ``?`` per UTF-16 code unit."""
+    return _NAME_UNSAFE.sub(lambda unsafe: "?" * len(_utf16(unsafe.group())), name)
+
+
+def _read_rule(written: str, is_dir: bool) -> str:
+    """The Read-tool deny for one absolute path as it goes into a rule (:func:`_rule_path`):
+    ``Read(//abs/**)`` for a directory, ``Read(//abs)`` for a file."""
+    return f"Read(/{written}/**)" if is_dir else f"Read(/{written})"
+
+
+def _spellings(p: Path) -> list[str]:
+    """``p`` absolute, as given and as resolved — a symlinked home or config dir must not slip
+    past a rule written for the other spelling (the reason the `Edit` rules carry both, #526).
+    A relative ``p`` (a ``$VAR`` set to one) is made absolute against the HARNESS's cwd: that
+    is where the operator's own process finds the file. A path whose resolution loops cannot
+    be opened by either spelling, so the given one does."""
+    given = str(p.absolute())
+    try:
+        resolved = str(p.resolve())
+    except (OSError, RuntimeError):   # a symlink loop (RuntimeError before Python 3.13)
+        resolved = given
+    return list(dict.fromkeys((given, resolved)))
+
+
+def _spellings_along(p: Path) -> list[str]:
+    """``p`` absolute as given, again each time a symlink along it is resolved, left to right,
+    and as resolved (:func:`_spellings`). Claude Code checks a Read against more than the
+    path as given (2.1.322 walks it link by link and keeps more than one spelling from the
+    walk), so a path kept clear of every rule is kept clear in each spelling met on the way:
+    with ``~`` a link to ``/home/u`` and ``~/.claude/profiles`` a link to ``/data/profiles``,
+    ``~/.claude/profiles/work`` is also ``/home/u/.claude/profiles/work`` and
+    ``/data/profiles/work``."""
+    parts = p.absolute().parts
+    found = [str(Path(*parts))]
+    prefix = Path(parts[0])
+    for i, part in enumerate(parts[1:], start=2):
+        prefix = prefix / part
+        try:
+            if not prefix.is_symlink():
+                continue
+            prefix = prefix.resolve()
+        except (OSError, RuntimeError):   # unreadable, or a loop (RuntimeError before 3.13)
+            break
+        found.append(str(prefix.joinpath(*parts[i:])))
+    return list(dict.fromkeys(found + _spellings(p)))
+
+
+def _at_or_under(path: str, roots: list[str]) -> bool:
+    """Whether ``path`` is one of ``roots`` or lies under one."""
+    return any(path == root or path.startswith(root.rstrip("/") + "/") for root in roots)
+
+
+def _holds(directory: str, paths) -> bool:
+    """Whether ``directory`` is one of ``paths`` or holds one: ``/`` holds every path."""
+    return any(_at_or_under(path, [directory]) for path in paths)
+
+
+def _reaches(written: str, path: str) -> bool:
+    """Whether a Read rule for ``written`` (a path as it goes into a rule) reaches ``path`` —
+    names it, or a directory it lies under — as Claude Code's Read tool matches its rules
+    (2.1.322: gitignore rules, matched case-insensitively): ``?``, the one wildcard
+    :func:`_rule_path` and :func:`_rule_name` write, is any one UTF-16 code unit but ``/``
+    (:func:`_utf16`), and case is not told apart. A rule for ``/`` reaches every path (its
+    trailing ``/`` is dropped first: split whole, ``/`` would be two empty components, and the
+    second matches no name)."""
+    rule, parts = written.rstrip("/").split("/"), path.rstrip("/").split("/")
+    return len(rule) <= len(parts) and all(
+        len(r) == len(p) and all(a == "?" or a.casefold() == b.casefold() for a, b in zip(r, p))
+        for r, p in ((_utf16(r), _utf16(p)) for r, p in zip(rule, parts)))
+
+
+def _physical_twin(path: str, written: str) -> str | None:
+    """The second spelling Claude Code applies a Read rule for ``path`` (``written`` as it goes
+    into the rule) under, its "physical twin" (2.1.322): the part before the first component
+    with a wildcard resolved through symlinks, the rest as written. With ``~`` a link to
+    ``/home/u``, a rule for ``~/.claude/profiles`` is applied to ``/home/u/.claude/profiles``
+    too. A part that resolves to ``/`` (a link to the root on the way) makes the twin ``/``
+    followed by the rest, ``/`` alone when there is no rest — never ``//…``. None when that part
+    is the root as written."""
+    rule = written.split("/")
+    cut = next((i for i, part in enumerate(rule) if "?" in part), len(rule))
+    if cut < 2:
+        return None
+    head = os.path.realpath("/".join(path.split("/")[:cut]))
+    return "/".join([_rule_path(head).rstrip("/"), *rule[cut:]]) or "/"
+
+
+def _linked_out(directory: Path, homes: list[str]) -> list[tuple[str, str, bool]]:
+    """Each entry of ``directory`` that is itself a symlink resolving OUTSIDE it, as ``(name,
+    where it resolves, is a directory)``. Denying the directory covers the link, not what it
+    points at: a key linked into ``~/.ssh`` from a secrets store, or a ``~/.claude/projects``
+    moved to another disk and linked back, stays readable by its own path unless that path is
+    denied too. One level — the entries of ``directory`` itself; a link further down is not
+    followed. Empty when ``directory`` is absent or cannot be listed (no link in it can then
+    be named).
+
+    Except a link to ``/`` or to a directory holding a home (``homes``, each spelling):
+    ``~/.ssh/r`` → ``/``, ``~/.ssh/h`` → ``~``. Denied where it points, it would take every
+    file there from the leaf — its toolchain, the target, the inputs in its cwd — and the
+    credential locations it holds are denied under their own names anyway. Such a link is left
+    out, with a warning. (A config dir is matched only through its home: one that sits under no
+    home — a ``$CLAUDE_CONFIG_DIR`` on another disk — is denied whole to the commands anyway,
+    and denying a directory above it is what hides the profiles beside it, a link like
+    ``~/.claude/p`` → ``/data/profiles`` with ``/data/profiles/work`` the active one.)"""
+    names: list[str] = []
+    try:
+        with os.scandir(directory) as it:
+            for entry in it:
+                if entry.is_symlink():
+                    names.append(entry.name)
+    except OSError:
+        pass
+    roots = _spellings(directory)
+    found: list[tuple[str, str, bool]] = []
+    for name in names:
+        for spelling in _spellings(directory / name):
+            if _at_or_under(spelling, roots):
+                continue
+            if spelling == "/" or _holds(spelling, homes):
+                print(f"leaves: {directory / name} links to {spelling}, which is / or holds a "
+                      "home; it is NOT denied where it points, which would take every file "
+                      "there from the leaf. The credential locations in it stay denied under "
+                      "their own names", file=sys.stderr)
+                continue
+            found.append((name, spelling, os.path.isdir(directory / name)))
+    return found
+
+
+def _credential_homes() -> list[Path]:
+    """Every home the operator's credentials can sit under: ``$HOME``, where the leaf's own
+    tools resolve ``~``, AND this user's home as the system records it — the password
+    database on POSIX (what OpenSSH reads, whatever ``$HOME`` says), ``Path.home()``
+    elsewhere. The two differ when a wrapper points ``$HOME`` elsewhere (or empties it, or sets
+    it to ``/``), and the real home's files must not stay readable by absolute path.
+
+    Only an ABSOLUTE ``$HOME`` counts: an empty one is not ``/``, as ``Path.home()`` would have
+    it, and a relative one names no fixed place. Empty when no home is found at all."""
+    homes = [os.environ.get("HOME", "")]
+    try:
+        import pwd
+    except ImportError:   # not POSIX
+        homes.append(str(Path.home()))
+    else:
+        try:
+            homes.append(pwd.getpwuid(os.getuid()).pw_dir)
+        except KeyError:  # no entry for this uid (an arbitrary container uid)
+            pass
+    return list(dict.fromkeys(Path(h) for h in homes if os.path.isabs(h)))
+
+
+def _as_named(value: str) -> list[Path]:
+    """The path a credential variable's ``value`` names, as written AND with a ``~`` or a
+    ``$VAR`` in it expanded against this process's environment (``$VAR`` first, then ``~``):
+    the leaf inherits that environment, and a tool may read the value either way. Written
+    ``~/work/aws-creds`` — common in a systemd ``Environment=`` line, a ``docker --env-file``
+    or a quoted ``.env`` export, none of which expands it — the AWS tools read
+    ``<home>/work/aws-creds`` (botocore runs ``expandvars`` then ``expanduser`` on its file
+    paths) and npm expands a leading ``~/``, while a tool that takes the value literally reads
+    ``<its cwd>/~/work/aws-creds``. Both are denied."""
+    return list(dict.fromkeys(
+        (Path(value), Path(os.path.expanduser(os.path.expandvars(value))))))
+
+
+def _credential_locations(homes: list[Path]) -> list[tuple[Path, bool]]:
+    """Every credential location to deny, as ``(path, is a directory)``: the named ones under
+    each of ``homes``, those the variables of THIS process's environment name — the one the
+    leaf inherits — each as written and as expanded (:func:`_as_named`), and the per-uid ones
+    under ``/run``."""
+    found = [(home / rel, is_dir) for home in homes for rel, is_dir in _CREDENTIAL_HOME_PATHS]
+    for var, under, is_dir in _CREDENTIAL_ENV_PATHS:
+        if value := os.environ.get(var, ""):
+            found += [(named / under if under else named, is_dir) for named in _as_named(value)]
+    found += [(named, False)
+              for entry in os.environ.get(_KUBECONFIG_VAR, "").split(os.pathsep) if entry
+              for named in _as_named(entry)]
+    if hasattr(os, "getuid"):   # POSIX; denied whatever `$XDG_RUNTIME_DIR` says now
+        found += [(Path(path.format(uid=os.getuid())), False) for path in _CONTAINERS_UID_AUTH]
+    return found
+
+
+def _claude_config_dirs(homes: list[Path]) -> list[Path]:
+    """Every Claude Code config dir to deny: ``.claude`` under each of ``homes``, and
+    ``$CLAUDE_CONFIG_DIR`` when it is set and non-empty."""
+    found = [home / ".claude" for home in homes]
+    if value := os.environ.get("CLAUDE_CONFIG_DIR", ""):
+        found.append(Path(value))
+    return list(dict.fromkeys(found))
+
+
+def _entries(directory: Path | str) -> dict[str, bool] | None:
+    """Each entry of ``directory`` now, as ``{name: is a directory}``: empty when there is no
+    such directory, ``None`` when there is one that cannot be listed."""
+    try:
+        with os.scandir(directory) as it:
+            return {entry.name: entry.is_dir() for entry in it}
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return None
+
+
+def _claude_config_entries(config: Path) -> dict[str, bool]:
+    """The entries of a config dir its Read-tool denies name, as ``{name: is a directory}``:
+    the CLI's own (:data:`_CLAUDE_CONFIG_ENTRIES`) and every one there now — except
+    ``projects``, denied folder by folder instead (:func:`_claude_project_entries`). An
+    absent or unreadable dir has only the CLI's own."""
+    entries = dict(_CLAUDE_CONFIG_ENTRIES)
+    entries.update(_entries(config) or {})
+    entries.pop(_CLAUDE_PROJECTS, None)
+    return entries
+
+
+def _claude_project_entries(config: Path) -> dict[str, bool] | None:
+    """Each entry of a config dir's ``projects`` when the policy is written, as ``{name: is a
+    directory}`` — every one ANOTHER session's, since the leaf's own folder is made only once
+    it runs (:data:`_CLAUDE_CONFIG_ENTRIES`). Empty when there is no ``projects``; ``None``
+    when there is one that cannot be listed: none of it can then be told from the leaf's own,
+    so all of it is denied (:func:`_claude_projects_read_rules`)."""
+    return _entries(config / _CLAUDE_PROJECTS)
+
+
+class _Kept(NamedTuple):
+    """What the Read-tool denies leave to each Claude Code config dir's own rules
+    (:func:`_read_rules_around`), each path in every spelling Claude Code may check a path
+    under (:func:`_spellings_along`) — the resolved one, where a link to it leads, included —
+    and the homes no rule may take whole, each as given and as resolved."""
+    configs: list[str]    # each config dir: no rule for it here, its own rules apply
+    projects: list[str]   # each one's `projects`, where the leaf's outputs are saved
+    homes: list[str]      # each home: an entry met on the way that holds one gets no rule
+
+
+def _read_rules_around(path: str, written: str, is_dir: bool, kept: _Kept,
+                       seen: frozenset[str] = frozenset()) -> list[str]:
+    """The Read-tool denies for ``path`` (``written`` as it goes into a rule) that reach no
+    config dir's ``projects`` in ``kept`` — where the CLI saves the leaf's own oversized
+    outputs (:data:`_CLAUDE_CONFIG_ENTRIES`) — from outside that dir's own rules.
+
+    What is tested is the rule as Claude Code applies it, not the path: ``written`` as a
+    pattern, case aside (:func:`_reaches`), and again as its physical twin
+    (:func:`_physical_twin`). So a ``$CLAUDE_CONFIG_DIR`` of ``~/.claude/profiles/prod-us`` is
+    reached by the rule for ``~/.claude/profiles``, which holds it, and as surely by the rule
+    for a sibling ``prod@us`` (a name read off the disk, written ``prod?us``), for a
+    ``PROD-US``, and for ``<link>/.claude/profiles`` when the dir is given by its real path.
+
+    A path whose rule reaches none is denied whole. A config dir in ``kept`` is not denied
+    here at all: its own entry-by-entry rules apply. Any other path whose rule reaches one is
+    opened up: each of its entries is denied the same way instead, so all of it stays denied
+    but what that one rule would have taken from the leaf — the other profiles beside the
+    active one, the sibling's login and sessions. An entry made in it during the run is not
+    denied to the Read tool (the leaf's commands see none of it: ``denyRead`` holds every
+    config dir whole). A path whose rule reaches one but that cannot be opened up — a file,
+    a directory that cannot be listed, a path that does not exist — is denied whole: fail
+    closed, the leaf's own saved outputs refused with it.
+
+    A config dir is known by where it RESOLVES too, so a link to one found on the way
+    (``~/.claude/alias`` → ``~/.claude``) is that dir again and gets no rule here. On the way
+    down — ``seen`` holds the directories the walk is inside, each where it resolves — so does
+    an entry that resolves to one of those or to a directory above one: a link back
+    (``profiles/up`` → ``profiles``, ``~/.claude/r`` → ``/``). And so does one that resolves to
+    a directory holding a home (``$CLAUDE_CONFIG_DIR/h`` → ``~``). What such an entry leads to
+    is denied under its own names, and Claude Code checks a path it reads in its resolved
+    spelling too (2.1.323: the Read tool tries every spelling of the path, links resolved), so
+    nothing it holds becomes readable through it. Walked instead, a link back is entered again
+    on every visit (two of them, and the policy is never written), and a link to a home gets a
+    rule for each entry of the home, which Claude Code also applies where it resolves: the
+    leaf would lose its toolchain and the target. A path named outright (``seen`` empty: a
+    credential location, ``$GH_CONFIG_DIR`` set to the home say) is still opened up, holding a
+    home or not: which of its files are the credential is not known, so all of them are
+    denied."""
+    twin = _physical_twin(path, written)
+    if not any(_reaches(rule, projects) for rule in (written, twin) if rule
+               for projects in kept.projects):
+        return [_read_rule(written, is_dir)]
+    physical = os.path.realpath(path)
+    if (path in kept.configs or physical in kept.configs
+            or seen and _holds(physical, [*seen, *kept.homes])):
+        return []
+    listing = _entries(path)
+    if listing is None or not os.path.isdir(path):
+        return [_read_rule(written, is_dir)]
+    return _entry_read_rules(path, written, listing, kept, seen | {physical})
+
+
+def _entry_read_rules(directory: str, written: str, entries: dict[str, bool],
+                      kept: _Kept, seen: frozenset[str]) -> list[str]:
+    """The Read-tool denies for each of ``entries`` — names in ``directory``, which goes into a
+    rule as ``written`` — each around what ``kept`` holds, inside the directories ``seen``
+    (:func:`_read_rules_around`)."""
+    return [rule for name, is_dir in entries.items()
+            for rule in _read_rules_around(f"{directory}/{name}", f"{written}/{_rule_name(name)}",
+                                           is_dir, kept, seen)]
+
+
+def _claude_projects_read_rules(under: str, written: str, projects: dict[str, bool] | None,
+                                kept: _Kept, seen: frozenset[str] = frozenset()) -> list[str]:
+    """The Read-tool denies for one spelling of a config dir's ``projects`` (``under``, which
+    goes into a rule as ``written``; see :data:`_CLAUDE_CONFIG_ENTRIES`): the session history
+    in any folder, by pattern, and each folder there now, by name
+    (:func:`_claude_project_entries`) — or the whole of it, when it could not be listed."""
+    rules = [f"Read(/{written}/{pattern})" for pattern in _CLAUDE_PROJECT_DENIES]
+    if projects is None:
+        return rules + [_read_rule(written, False), _read_rule(written, True)]
+    return rules + _entry_read_rules(under, written, projects, kept,
+                                     seen | {os.path.realpath(under)})
+
+
+def _claude_config_read_rules(spelling: str, entries: dict[str, bool],
+                              projects: dict[str, bool] | None, kept: _Kept) -> list[str]:
+    """The Read-tool denies for one spelling of a config dir (see
+    :data:`_CLAUDE_CONFIG_ENTRIES`): each entry, and its ``projects`` as
+    :func:`_claude_projects_read_rules` says, around what ``kept`` holds."""
+    written = _rule_path(spelling)
+    seen = frozenset({os.path.realpath(spelling)})
+    return (_entry_read_rules(spelling, written, entries, kept, seen)
+            + _claude_projects_read_rules(f"{spelling}/{_CLAUDE_PROJECTS}",
+                                          f"{written}/{_CLAUDE_PROJECTS}", projects, kept, seen))
+
+
+def _deny_credentials(policy: dict) -> dict:
+    """Add the credential deny to a seeded sandbox policy, in place (#935). Every seed the
+    harness writes goes through here — the Check seed (:func:`_seed_sandbox_settings`) and the
+    plan seed (:func:`_seed_plan_sandbox_settings`) — so no seeded policy hands a leaf's
+    commands the operator's credentials.
+
+    Three blocks, in the vendor's own shape (Claude Code 2.1.322 settings schema):
+    ``sandbox.filesystem.denyRead`` (paths no sandboxed command can read — a denied file reads
+    ``Permission denied``, a denied directory reads empty), ``sandbox.credentials.envVars``
+    (``{name, mode: "deny"}`` unsets the variable for sandboxed commands), and a ``Read(...)``
+    permission deny per location — ``Read(//abs/**)`` for a directory, ``Read(//abs)`` for a
+    file — because the model's Read tool runs OUTSIDE the sandbox and answers to the permission
+    rules, not to it. Every path absolute, in both spellings (:func:`_spellings`), a path a
+    variable names also with its ``~`` and ``$VAR`` expanded (:func:`_as_named`); an entry of
+    a denied directory that is a symlink out of it is denied where it points too, unless it
+    points at ``/`` or at a directory holding a home (:func:`_linked_out`); every path is
+    written as :func:`_rule_path` says, a name read off the disk as :func:`_rule_name` says.
+    The CLI's own config dir is the one exception: whole to the commands, entry by entry to
+    the Read tool (:data:`_CLAUDE_CONFIG_ENTRIES`). No Read rule from outside a config dir's
+    own reaches its ``projects``, as Claude Code applies the rule — one inside another keeps
+    its own rules, and the walk stops at a link back to a config dir, to a directory it is
+    inside or above one, or to a directory holding a home, so it always ends and never takes a
+    home whole (:func:`_read_rules_around`). The Read tool is denied ``/proc`` too
+    (:data:`_PROC_READ_DENY`). Existing ``permissions.deny`` rules (the plan seed's ``Edit``
+    denies) are kept.
+
+    Deny only: it grants nothing, so it never widens what a leaf may do. And nothing here is
+    MASKED (a sentinel the vendor proxy swaps for the real value on egress), and no
+    ``tlsTerminate`` is written: a masked credential still reaches the network with the leaf's
+    traffic, which is exactly what this exists to stop. Returns ``policy``."""
+    homes = _credential_homes()
+    if not homes:
+        print("leaves: no home directory found ($HOME is empty or relative, and the system "
+              "records none for this user); the seeded sandbox policy denies only the "
+              "credential locations a variable names and those under /run", file=sys.stderr)
+    configs = _claude_config_dirs(homes)
+    # Every spelling of every config dir and of its `projects`: no Read rule from outside a
+    # config dir's own may reach that `projects`, or it would refuse the leaf the outputs it
+    # saves there (:func:`_read_rules_around`). And every spelling of every home: no link is
+    # followed out to one, or above it, and denied there (:func:`_linked_out`).
+    kept = _Kept([spelling for config in configs for spelling in _spellings_along(config)],
+                 [spelling for config in configs
+                  for spelling in _spellings_along(config / _CLAUDE_PROJECTS)],
+                 [spelling for home in homes for spelling in _spellings(home)])
+    deny_read: list[str] = []
+    reads: set[str] = {_PROC_READ_DENY}
+
+    def deny(path: str, is_dir: bool) -> None:     # to the commands AND to the Read tool
+        written = _rule_path(path)
+        deny_read.append(written)
+        reads.update(_read_rules_around(path, written, is_dir, kept))
+
+    for path, is_dir in _credential_locations(homes):
+        for spelling in _spellings(path):
+            deny(spelling, is_dir)
+        if is_dir:
+            for _, target, target_is_dir in _linked_out(path, kept.homes):
+                deny(target, target_is_dir)
+    for config in configs:
+        entries = _claude_config_entries(config)
+        projects = _claude_project_entries(config)
+        for spelling in _spellings(config):
+            deny_read.append(_rule_path(spelling))
+            reads.update(_claude_config_read_rules(spelling, entries, projects, kept))
+        # An entry linked out of the dir is denied where it points, as the entry is. A linked
+        # `projects` keeps its own treatment there: the leaf's session folder, made under it
+        # during the run, must stay readable to the Read tool by either spelling.
+        for name, target, is_dir in _linked_out(config, kept.homes):
+            if name == _CLAUDE_PROJECTS:
+                deny_read.append(_rule_path(target))
+                reads.update(_claude_projects_read_rules(target, _rule_path(target), projects,
+                                                         kept))
+            else:
+                deny(target, is_dir)
+        for _, target, is_dir in _linked_out(config / _CLAUDE_PROJECTS, kept.homes):
+            deny(target, is_dir)                    # another session's folder, linked in
+    sandbox = policy.setdefault("sandbox", {})
+    sandbox["filesystem"] = {"denyRead": list(dict.fromkeys(deny_read))}
+    sandbox["credentials"] = {"envVars": [{"name": name, "mode": "deny"}
+                                          for name in _DENIED_ENV_VARS]}
+    permissions = policy.setdefault("permissions", {})
+    permissions["deny"] = sorted(set(permissions.get("deny", [])) | reads)
+    return policy
+
 
 def _sandbox_argv(cfg: Config, profile: families.FamilyProfile, *,
                   seeded: bool) -> list[str]:
@@ -3096,12 +3689,21 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path,
     is declared once, deliberately, in pdca.toml.
 
     **Seeded through an ALLOW-LIST of individual keys** (:data:`_SEEDED_NETWORK_KEYS`), never
-    by copying the ``sandbox`` block, and never ``permissions``. Each wider copy would hand
-    the leaf a capability its ``tools:`` frontmatter does not grant: ``permissions.allow``
-    carries ``Edit``/``Write``, and ``sandbox.excludedCommands`` — which docs 05 recommends to
-    a project as the workaround for its *gates* — makes the named command bypass the sandbox
-    **entirely**, so a reviewer could run the test runner unconfined (PR #268 review). Widening
-    the seed means adding a key here, deliberately — not loosening the copy.
+    by copying the ``sandbox`` block, and never the project's ``permissions``. Each wider copy
+    would hand the leaf a capability its ``tools:`` frontmatter does not grant:
+    ``permissions.allow`` carries ``Edit``/``Write``, and ``sandbox.excludedCommands`` — which
+    docs 05 recommends to a project as the workaround for its *gates* — makes the named command
+    bypass the sandbox **entirely**, so a reviewer could run the test runner unconfined (PR #268
+    review). Widening the seed means adding a key here, deliberately — not loosening the copy.
+
+    **Every seed also carries the harness's credential deny** (#935, :func:`_deny_credentials`):
+    ``sandbox.filesystem.denyRead``, ``sandbox.credentials.envVars`` and ``permissions.deny``
+    ``Read(...)`` rules. Those ``Read`` rules are the only ``permissions`` the seed writes, and
+    they are deny-only — they narrow the leaf, never widen it — so the allow-list rule above
+    still holds for every grant. The deny rides BESIDE the grants; it changes nothing about
+    WHEN a file is written. Its ``sandbox`` blocks bind wherever the sandbox runs: an
+    exemption seed turns it on (below), while a network-only seed leaves ``enabled`` to the
+    operator's own scope. The ``Read`` rules bind the model's Read tool either way.
 
     Each key is **value-filtered**, so a present-but-empty grant seeds nothing: that is how a
     grant stays OFF by default (the shipped ``allowedDomains: []`` documents the knob without
@@ -3113,7 +3715,8 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path,
     ``pdca.toml``. An absent or unparseable settings file costs the network grant and nothing
     else — it must never suppress a pdca.toml exemption (PR #288 review). Best-effort
     throughout, like the agent seeding: any read/parse/write error degrades to a no-op, never
-    an aborted Check.
+    an aborted Check — and so does any failure while building the credential deny, of
+    whatever kind: the seed is then not written, and the fallback at the end applies.
 
     Scope: this covers the reviewer / advisory **leaves**. Gate commands are plain
     subprocesses of ``pdca`` and inherit the operator's ambient sandbox instead (docs 05).
@@ -3216,12 +3819,20 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path,
 
     if not granted:
         return True   # nothing promised, nothing to seed
+    policy: dict = {"sandbox": granted}
     try:
+        # Whatever was granted, the seed denies the operator's credentials beside it (#935):
+        # the leaf re-runs the bundle's untrusted tests, and a policy that confines writes
+        # but not reads hands those tests every token on the host.
+        _deny_credentials(policy)
         dest = sandbox / ".claude"
         dest.mkdir(parents=True, exist_ok=True)
-        (dest / "settings.json").write_text(
-            json.dumps({"sandbox": granted}, indent=2), encoding="utf-8")
-    except OSError as exc:
+        (dest / "settings.json").write_text(json.dumps(policy, indent=2), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — deliberately broad: any failure is a failed seed
+        # Building the deny walks the operator's home and config dirs, so more than a write
+        # can fail here, and not only with an OSError. Whatever it is, it is a seed that did
+        # not land, and takes the one fallback below — never an aborted Check.
+        #
         # FAIL CLOSED (PR #290 review). This used to warn "the leaf runs under the ambient
         # sandbox policy" and carry on — the exact OPPOSITE of what happened. The caller still
         # passed `--setting-sources project`, so the leaf loaded ONLY project scope … which is
@@ -3233,9 +3844,10 @@ def _seed_sandbox_settings(cfg: Config, sandbox: Path,
         # ambient sandbox. The exemption then simply does not happen and a Docker-backed leg
         # defers to a human, exactly as when none is configured. Degrade the FEATURE, never the
         # BOUNDARY.
-        print(f"leaves: could not seed sandbox settings into {sandbox} ({exc}); the exemption "
-              "did NOT take effect — the leaf keeps the operator's ambient sandbox and a "
-              "Docker-backed leg will defer to a human", file=sys.stderr)
+        print(f"leaves: could not seed sandbox settings into {sandbox} "
+              f"({type(exc).__name__}: {exc}); the exemption did NOT take effect — the leaf "
+              "keeps the operator's ambient sandbox and a Docker-backed leg will defer to a "
+              "human", file=sys.stderr)
         return False
     return True
 
@@ -3270,7 +3882,13 @@ def _seed_plan_sandbox_settings(sandbox: Path, profile: families.FamilyProfile, 
     anywhere in the leaf's working directories, the ``--add-dir`` target included
     (observed: without these rules Write overwrote a file in the pinned target). A deny
     rule only takes away; the three keys above are unchanged. Both the given and the
-    resolved spelling are denied, so a symlinked temp dir cannot slip past."""
+    resolved spelling are denied, so a symlinked temp dir cannot slip past.
+
+    The same credential deny as every Check seed rides beside those rules
+    (:func:`_deny_credentials`, #935): the operator's credential locations denied to the
+    leaf's commands and its Read tool, their variables unset. Deny-only again, and the
+    ``Edit`` rules are kept; a failure while building it — of any kind, not only an OS
+    error — is a failed seed like any other, so it takes the fallback below."""
     if not profile.settings_scope_argv:
         return False
     policy: dict = {"sandbox": {"enabled": True,
@@ -3282,14 +3900,15 @@ def _seed_plan_sandbox_settings(sandbox: Path, profile: families.FamilyProfile, 
     if deny:
         policy["permissions"] = {"deny": deny}
     try:
+        _deny_credentials(policy)
         dest = sandbox / ".claude"
         dest.mkdir(parents=True, exist_ok=True)
         (dest / "settings.json").write_text(json.dumps(policy, indent=2), encoding="utf-8")
         return True
-    except OSError as exc:
-        print(f"leaves: could not seed the plan-review sandbox into {sandbox} ({exc}); "
-              "the confinement flag is withheld — the leaf keeps the operator's ambient "
-              "sandbox", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 — deliberately broad: any failure is a failed seed
+        print(f"leaves: could not seed the plan-review sandbox into {sandbox} "
+              f"({type(exc).__name__}: {exc}); the confinement flag is withheld — the leaf "
+              "keeps the operator's ambient sandbox", file=sys.stderr)
         return False
 
 

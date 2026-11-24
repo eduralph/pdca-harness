@@ -13,6 +13,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -30,6 +31,13 @@ _REVIEWER = {
 }
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def _as_written(path: Path | str) -> str:
+    """``path`` as a #935 credential rule writes it: each glob character (`* ? [ ] { } \\`)
+    as `?`, every other character as it is — the identity on an ordinary temp dir."""
+    return re.sub(r"[][*?{}\\]", "?", str(path))
+
 
 # A stand-in `claude` for issue #526: a Python interpreter in the leaf's own argv that
 # replays PINNED vendor bytes — what the real CLI printed on a host whose sandbox could not
@@ -355,7 +363,9 @@ class PlanAdvisory(unittest.TestCase):
                 mock.patch.object(leaves, "_invoke_leaf_resilient", side_effect=fake), \
                 contextlib.redirect_stderr(io.StringIO()):
             leaves.run_plan_advisory(d, cfg)
-        self.assertEqual(seen["settings"]["sandbox"],
+        boundary = {k: v for k, v in seen["settings"]["sandbox"].items()
+                    if k not in ("filesystem", "credentials")}    # #935's deny, pinned below
+        self.assertEqual(boundary,
                          {"enabled": True, "allowUnsandboxedCommands": False,
                           "failIfUnavailable": True})             # the boundary, unchanged
         permissions = seen["settings"].get("permissions", {})
@@ -363,6 +373,132 @@ class PlanAdvisory(unittest.TestCase):
             self.assertIn(f"Edit(/{read_only.resolve()}/**)", permissions.get("deny", []))
         self.assertEqual(set(permissions), {"deny"})              # a deny grants nothing
         self.assertIn(str(target), seen["extra"])                 # still granted to read
+
+    def _plan_seed(self, iid: str, *, fail_write: bool = False,
+                   fail_build: bool = False) -> dict:
+        """Run a claude plan reviewer against a FAKE host and return its seeded policy and
+        argv. The environment is cleared (PATH kept for `git`): `HOME` is a symlink to the
+        real home dir (two spellings), the password database says the real one, and
+        `CLAUDE_CONFIG_DIR` is a second config dir with another session's folder. Nothing of
+        the CI host's own home or variables reaches the seed. ``fail_write`` fails the seed's
+        write with an OSError; ``fail_build`` fails the deny's walk of a config dir with a
+        RecursionError (`create=True`: the red leg runs it against code with no walk)."""
+        base = self.tmp.resolve() / f"host-{iid}"
+        real = base / "home"
+        (real / ".claude" / "projects" / "-tmp-old-session").mkdir(parents=True)
+        link = base / "home-link"
+        link.symlink_to(real, target_is_directory=True)
+        config = base / "claude-config"
+        config.mkdir()
+        reviewer = {"id": "claude-lens", "mode": "command", "family": "claude",
+                    "argv": ["claude"]}
+        cfg = _cfg(self.tmp, plan_advisory=[reviewer])
+        d = _brief(cfg, iid)
+        target = self.tmp / f"pinned-{iid}"
+        target.mkdir()
+        seen: dict = {"real": real, "link": link, "config": config, "target": target}
+
+        @contextlib.contextmanager
+        def pinned(_d, _cfg):
+            yield target
+
+        def fake(leaf, cwd, prompt, **kw):
+            seen["extra"] = list(kw.get("extra_argv") or [])
+            f = Path(cwd) / ".claude" / "settings.json"
+            seen["settings"] = json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+            return None
+
+        real_write = Path.write_text
+
+        def enospc(path, *a, **k):          # only the SEED's write fails
+            if path.name == "settings.json":
+                raise OSError("ENOSPC")
+            return real_write(path, *a, **k)
+
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"PATH": os.environ.get("PATH", ""),
+                                          "HOME": str(link), "CLAUDE_CONFIG_DIR": str(config),
+                                          "GH_CONFIG_DIR": str(base / "gh")}, clear=True), \
+                mock.patch("pwd.getpwuid", return_value=mock.Mock(pw_dir=str(real))), \
+                mock.patch.object(leaves, "_pinned_plan_target", pinned), \
+                mock.patch.object(leaves, "_invoke_leaf_resilient", side_effect=fake), \
+                (mock.patch.object(Path, "write_text", enospc) if fail_write
+                 else contextlib.nullcontext()), \
+                (mock.patch.object(leaves, "_entries", create=True, side_effect=RecursionError(
+                    "maximum recursion depth exceeded")) if fail_build
+                 else contextlib.nullcontext()), \
+                contextlib.redirect_stderr(err):
+            leaves.run_plan_advisory(d, cfg)
+        seen["stderr"] = err.getvalue()
+        seen["bundle"] = d
+        return seen
+
+    def test_the_plan_seed_denies_the_operators_credentials(self) -> None:
+        # #935 (b)/(c)/(d): the plan seed carries the same credential deny as a Check seed —
+        # each location in `denyRead` and as a Read deny, both spellings; the Claude config
+        # dirs whole to the commands and entry by entry to the Read tool; a `Read(//proc/**)`
+        # rule; the credential variables unset; nothing masked. Its `Edit` denies stay.
+        # Red before #935: the plan seed held only the boundary and the `Edit` denies.
+        seen = self._plan_seed("PLANDENY")
+        policy = seen["settings"]
+        # `.get`, so a seed with no deny fails on the assertion naming the rule, not a KeyError
+        deny_read = policy["sandbox"].get("filesystem", {}).get("denyRead", [])
+        deny = policy.get("permissions", {}).get("deny", [])
+        for home in (seen["link"], seen["real"]):
+            for rel, is_dir in ((".ssh", True), (".config/gh", True), (".claude.json", False),
+                                (".aws", True), (".netrc", False), (".kube", True)):
+                path = _as_written(home / rel)
+                self.assertIn(path, deny_read)
+                self.assertIn(f"Read(/{path}/**)" if is_dir else f"Read(/{path})", deny)
+        gh = _as_written(self.tmp.resolve() / "host-PLANDENY" / "gh")
+        self.assertIn(gh, deny_read)                              # $GH_CONFIG_DIR
+        self.assertIn(f"Read(/{gh}/**)", deny)
+        for given in (seen["link"] / ".claude", seen["real"] / ".claude", seen["config"]):
+            config = _as_written(given)
+            self.assertIn(config, deny_read)
+            self.assertNotIn(f"Read(/{config}/**)", deny)
+            self.assertIn(f"Read(/{config}/.credentials.json)", deny)
+            self.assertNotIn(f"Read(/{config}/projects/**)", deny)
+        self.assertIn(
+            f"Read(/{_as_written(seen['real'] / '.claude')}/projects/-tmp-old-session/**)", deny)
+        self.assertIn("Read(//proc/**)", deny)
+        names = {e["name"] for e in policy["sandbox"].get("credentials", {}).get("envVars", [])
+                 if e.get("mode") == "deny"}
+        for name in ("GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY", "SSH_AUTH_SOCK",
+                     "AWS_SECRET_ACCESS_KEY", "AZURE_PASSWORD"):
+            self.assertIn(name, names)
+        self.assertNotIn('"mask"', json.dumps(policy))
+        self.assertNotIn("tlsTerminate", json.dumps(policy))
+        for read_only in (seen["target"], seen["bundle"]):         # (f) the Edit denies stay
+            self.assertIn(f"Edit(/{read_only.resolve()}/**)", deny)
+        self.assertEqual({k: policy["sandbox"][k] for k in
+                          ("enabled", "allowUnsandboxedCommands", "failIfUnavailable")},
+                         {"enabled": True, "allowUnsandboxedCommands": False,
+                          "failIfUnavailable": True})
+        self.assertIn("--setting-sources", seen["extra"])
+
+    def test_a_failed_plan_seed_still_takes_its_fallback(self) -> None:
+        # (f) A seed that cannot be written withholds the confinement flag, as before: the
+        # leaf keeps the operator's ambient sandbox and the warning says so.
+        seen = self._plan_seed("PLANFAIL", fail_write=True)
+        self.assertIsNone(seen["settings"])
+        self.assertNotIn("--setting-sources", seen["extra"])
+        self.assertIn("could not seed the plan-review sandbox", seen["stderr"])
+
+    def test_a_plan_seed_that_fails_while_building_the_deny_takes_the_same_fallback(
+            self) -> None:
+        # (f) …and so does a failure while BUILDING the deny that is not an OSError — a
+        # RecursionError from a deep walk, say: the docstring's "a failed seed like any other".
+        # The flag is withheld and the Plan beat goes on. Red on round 5's code, which caught
+        # only OSError, so the error ended the plan review.
+        try:
+            seen = self._plan_seed("PLANBUILD", fail_build=True)
+        except RecursionError:
+            self.fail("a failure while building the deny escaped the plan seed")
+        self.assertIsNone(seen["settings"])
+        self.assertNotIn("--setting-sources", seen["extra"])
+        self.assertIn("could not seed the plan-review sandbox", seen["stderr"])
+        self.assertIn("RecursionError", seen["stderr"])
 
     def test_the_bash_fallback_is_in_the_prompt_the_model_reads(self) -> None:
         # #526: the fallback, its trigger and the disclosure are prompt TEXT — a
